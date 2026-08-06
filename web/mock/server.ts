@@ -3921,6 +3921,9 @@ type MockNote = {
   body: string;
   system: boolean;
   created_at: string;
+  /** When it was last REWRITTEN, which is how the page knows to say "edited" (GitLab moves
+   *  this on an edit and on nothing else a reader can see — see `noteWasEdited`). */
+  updated_at?: string;
   resolvable: boolean;
   resolved: boolean;
   mine: boolean;
@@ -7442,6 +7445,62 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       mr.updated_at = note.created_at;
       broadcastMockMergeRequest(mr);
       return withMockTeamsPeople({ note: { ...note, discussion_id: thread?.id } });
+    }
+
+    // EDIT one of the user's OWN comments. The real backend re-reads whose it is before it
+    // writes and refuses a colleague's, so this mock refuses the same way — and it moves
+    // `updated_at`, which is the only thing that makes the "edited" mark real here.
+    case "gitlab_mr_edit_comment": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const noteId = requireNumber(params, "note_id");
+      const body = requireString(params, "body");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      if (body.trim() === "") {
+        throw new Error("an edit cannot empty a comment — delete it instead, which asks first");
+      }
+      const note = mr.discussions.flatMap((d) => d.notes).find((one) => one.id === noteId);
+      if (!note) throw new Error("that comment is no longer on the merge request");
+      if (!note.mine) {
+        throw new Error(
+          "that comment is somebody else's — this app only edits what the user wrote themselves",
+        );
+      }
+      note.body = body.trim();
+      note.updated_at = new Date().toISOString();
+      mr.updated_at = note.updated_at;
+      broadcastMockMergeRequest(mr);
+      const owner = mr.discussions.find((d) => d.notes.some((one) => one.id === noteId));
+      return withMockTeamsPeople({ note: { ...note, discussion_id: owner?.id } });
+    }
+
+    // RESOLVE a thread, or open it again. GitLab marks the NOTES, so this does too — which is
+    // what the page reads back to decide whether a thread is settled. A comment of its own
+    // carries no such state, and the real service answers 400 for one; this mock says the same
+    // thing in the same words, so the rail is exercised rather than assumed.
+    case "gitlab_mr_resolve_thread": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const discussionId = requireString(params, "discussion_id");
+      const resolved = asObject(params).resolved === true;
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabWriteRefusal) throw new Error(mockGitLabWriteRefusal);
+      const thread = mr.discussions.find((d) => d.id === discussionId);
+      if (!thread) throw new Error("that thread is not on this merge request any more");
+      if (!thread.notes.some((note) => note.resolvable)) {
+        throw new Error(
+          "GitLab refused: only a thread can be resolved, and this is a comment of its own",
+        );
+      }
+      for (const note of thread.notes) {
+        if (note.resolvable) note.resolved = resolved;
+      }
+      mr.updated_at = new Date().toISOString();
+      broadcastMockMergeRequest(mr);
+      return { discussion_id: discussionId, resolved };
     }
 
     // DELETE one of the user's OWN comments. The real backend re-reads whose it is before

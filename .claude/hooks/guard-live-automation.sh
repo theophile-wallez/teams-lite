@@ -51,7 +51,8 @@
 #      a chat row — are the only way that may happen;
 #   2g. a WRITE to one of the TRACKERS straight to GitLab or Linear
 #      (`…/merge_requests/<iid>/approve` | `/unapprove` | `/merge` | `/notes`, a
-#      `state_event`, or a GraphQL mutation). Both are read-only here save what the USER
+#      `state_event`, a thread resolution, or a GraphQL mutation). Both are read-only here
+#      save what the USER
 #      clicks in the app — the approval, and the merge-request page's merge, comment,
 #      comment deletion and close, each through its own gated `gitlab_*` RPC — and there
 #      is no sandbox project to aim a test at. The MERGE is the sharpest of them: it
@@ -359,7 +360,16 @@ writes_chat_settings() {
 # matched: only the write endpoints, `state_event`, a GraphQL mutation and this crate's
 # own write functions are.
 writes_to_a_tracker() {
-  grep -qiE 'merge_requests/[^ "'\'']*/((un)?approve|merge|notes)|/(un)?approve"|gitlab_approval::set|gitlab_set_approval|gitlab_mr_write::|gitlab_mr_(merge|comment|delete_comment|set_state)|state_event|"mutation |mutation *\{' "$1"
+  if grep -qiE 'merge_requests/[^ "'\'']*/((un)?approve|merge|notes)|/(un)?approve"|gitlab_approval::set|gitlab_set_approval|gitlab_mr_write::|gitlab_mr_(merge|comment|delete_comment|edit_comment|resolve_thread|set_state)|state_event|"mutation |mutation *\{' "$1"; then
+    return 0
+  fi
+  # RESOLVING a thread is `PUT …/discussions/{id}` with a `resolved` field, and READING one is
+  # the same path with no field — which the preview cards and every recon do. So the two are
+  # told apart by the pair, over the whole file: grep is line-based and a fetch puts its URL
+  # and its body on different lines. A list read (`/discussions?per_page=…`) never matches at
+  # all, because the write names a thread BY ID.
+  grep -qE 'merge_requests/[^ "'\'']*/discussions/' "$1" &&
+    grep -qiE '"?resolved"?[[:space:]]*[:=]' "$1"
 }
 
 # Cargo examples that would post to Teams somewhere other than the sandbox channel,
@@ -710,14 +720,15 @@ fi
 # project and no pre-authorized merge request. An approval is an act by the user's GitLab
 # account, everybody watching the merge request is told, and a project rule may act on it.
 if printf '%s' "$command_line" |
-  grep -qiE '(curl|wget|xh|httpie|http)[^;&|]*(merge_requests/[^ "'\'']*/((un)?approve|merge|notes)|state_event)' ||
+  grep -qiE '(curl|wget|xh|httpie|http)[^;&|]*(merge_requests/[^ "'\'']*/((un)?approve|merge|notes)|state_event|merge_requests/[^ "'\'']*/discussions/[^;&|]*resolved|resolved[^;&|]*merge_requests/[^ "'\'']*/discussions/)' ||
   [ -n "$scripts_writing_to_a_tracker" ] || [ -n "$examples_writing_to_a_tracker" ]; then
   [ -n "$scripts_writing_to_a_tracker" ] &&
     printf 'note: a tracker write was found inside%s\n' "$scripts_writing_to_a_tracker" >&2
   [ -n "$examples_writing_to_a_tracker" ] &&
     printf 'note: a tracker write was found inside%s\n' "$examples_writing_to_a_tracker" >&2
   block "This command would WRITE to one of the user's trackers
-(…/merge_requests/<iid>/approve | /unapprove | /merge | /notes, a state_event, or a
+(…/merge_requests/<iid>/approve | /unapprove | /merge | /notes, a discussion resolved, a
+state_event, or a
 Linear GraphQL mutation).
 
 The trackers are read-only here save what the USER clicks in the app: a merge request's

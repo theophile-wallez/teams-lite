@@ -16,7 +16,7 @@
 //          | gitlab_mr_list | gitlab_mr_detail | gitlab_mr_notes | gitlab_mr_pipeline
 //          | gitlab_mr_diff
 //          | gitlab_mr_merge | gitlab_mr_comment | gitlab_mr_delete_comment
-//          | gitlab_mr_set_state
+//          | gitlab_mr_edit_comment | gitlab_mr_resolve_thread | gitlab_mr_set_state
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
 //          | calendars | calendar_view
@@ -261,11 +261,13 @@ const CLAIM_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// face, because a screen shows whatever else is on it. Nothing calls it but a click, and the
 /// browser asks its own permission on top.
 ///
-/// The four `gitlab_mr_*` entries are the merge-request PAGE's writes (see
+/// The six `gitlab_mr_*` entries are the merge-request PAGE's writes (see
 /// [`teams_lite::gitlab_mr_write`] and AGENTS.md § The GitLab page). Each acts under the
 /// user's own GitLab account and everybody watching the merge request is told, so each is
-/// gated exactly like a send — and three of the four are REVERSIBLE from the same page:
-/// a comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen.
+/// gated exactly like a send — and five of the six are REVERSIBLE from the same page: a
+/// comment is deleted by `gitlab_mr_delete_comment`, a close is undone by a reopen, a
+/// resolution by opening the thread again, and an edit by editing back (which is where a
+/// Teams message edit sits: the words that were there are gone).
 ///
 /// `gitlab_mr_merge` is the ONE entry in this list that no later call takes back, which
 /// puts it beside `delete`. It lands somebody's branch in a shared repository, and a
@@ -281,7 +283,7 @@ const SHARING_GRANT_WAIT: std::time::Duration = std::time::Duration::from_secs(8
 /// long enough that the lock is not held in a spin.
 const SHARING_GRANT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
-const OUTWARD_METHODS: [&str; 21] = [
+const OUTWARD_METHODS: [&str; 23] = [
     "send",
     "edit",
     "delete",
@@ -302,6 +304,8 @@ const OUTWARD_METHODS: [&str; 21] = [
     "gitlab_mr_merge",
     "gitlab_mr_comment",
     "gitlab_mr_delete_comment",
+    "gitlab_mr_edit_comment",
+    "gitlab_mr_resolve_thread",
     "gitlab_mr_set_state",
 ];
 
@@ -5473,28 +5477,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 let store = ctx.store()?;
                 link_preview_settings(&store)?
             };
-            let discussions = gitlab_mr::fetch_discussions(
-                &ctx.http,
-                &settings.gitlab_host,
-                settings.gitlab_token.as_deref(),
-                &project_path,
-                iid,
-            )
-            .await?;
-            let mine = discussions
-                .discussions
-                .iter()
-                .flat_map(|discussion| discussion.notes.iter())
-                .find(|note| note.id == note_id)
-                .map(|note| note.mine);
-            match mine {
-                Some(true) => {}
-                Some(false) => anyhow::bail!(
-                    "that comment is somebody else's — this app only deletes what the user \
-                     wrote themselves"
-                ),
-                None => anyhow::bail!("that comment is no longer on the merge request"),
-            }
+            require_own_gitlab_note(ctx, &settings, &project_path, iid, note_id, "delete")
+                .await?;
             gitlab_mr_write::delete_comment(
                 &ctx.http,
                 &settings.gitlab_host,
@@ -5506,6 +5490,74 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             .await?;
             forget_gitlab_merge_request(ctx, &project_path, iid);
             Ok(json!({ "deleted": note_id }))
+        }
+
+        // EDIT one of the user's OWN comments. Whose comment it is, is read from GitLab
+        // BEFORE the write and matched on the account's own id — the same rail the deletion
+        // above carries, and for its reason: GitLab would refuse a colleague's note anyway,
+        // and this app must not lean on somebody else's refusal to keep a promise of its own.
+        //
+        // It is not fully reversible: an edit can be edited back, but the words that were
+        // there are gone (see `gitlab_mr_write::edit_comment`). That is where a Teams message
+        // edit sits, so it is offered the same way — one press, on the user's own words.
+        "gitlab_mr_edit_comment" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let note_id = params
+                .get("note_id")
+                .and_then(Value::as_u64)
+                .context("`note_id` must be a number")?;
+            let body = param_str(params, "body")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            require_own_gitlab_note(ctx, &settings, &project_path, iid, note_id, "edit").await?;
+            let note = gitlab_mr_write::edit_comment(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+                note_id,
+                &body,
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            let mut answer = json!({ "note": note });
+            with_teams_people(ctx, &mut answer);
+            Ok(answer)
+        }
+
+        // RESOLVE a thread, or open it again. Each direction is the other's undo, which is
+        // what makes this an ordinary gated write — the shape the approval already has.
+        //
+        // Nobody's ownership is in question here: GitLab lets anybody who can comment resolve
+        // a thread, and that is the point of the feature. So there is no read before the
+        // write, and a thread that cannot be resolved at all — a standalone comment — is
+        // refused by GitLab in its own words rather than by a guess made here.
+        "gitlab_mr_resolve_thread" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let discussion_id = param_str(params, "discussion_id")?;
+            let resolved = params
+                .get("resolved")
+                .and_then(Value::as_bool)
+                .context("`resolved` must say which way the thread goes")?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let resolved = gitlab_mr_write::set_thread_resolved(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &project_path,
+                iid,
+                &discussion_id,
+                resolved,
+            )
+            .await?;
+            forget_gitlab_merge_request(ctx, &project_path, iid);
+            Ok(json!({ "discussion_id": discussion_id, "resolved": resolved }))
         }
 
         // CLOSE or REOPEN it. Each direction is the other's undo, which is what makes this
@@ -7073,6 +7125,48 @@ fn gitlab_merge_request_params(params: &Value) -> Result<(String, u64)> {
         .filter(|iid| *iid > 0)
         .context("`iid` must be the merge request's number")?;
     Ok((project_path, iid))
+}
+
+/// Refuse a note that is not the user's OWN, before anything is written to it.
+///
+/// Whose comment it is comes from GITLAB — read now, matched on the account's own id — and
+/// never from what the client claimed. GitLab would let a maintainer delete or edit a
+/// colleague's note; this app never offers that, exactly as it refuses to delete a Teams
+/// message that is not the user's own. `act` is the word the refusal uses, so a reader is told
+/// which act was refused rather than a generic sentence covering two.
+///
+/// One place for two writes: the deletion and the edit make the same promise, and a second
+/// copy of this check is a second chance to get it wrong.
+async fn require_own_gitlab_note(
+    ctx: &Ctx,
+    settings: &link_preview::Settings,
+    project_path: &str,
+    iid: u64,
+    note_id: u64,
+    act: &str,
+) -> Result<()> {
+    let discussions = gitlab_mr::fetch_discussions(
+        &ctx.http,
+        &settings.gitlab_host,
+        settings.gitlab_token.as_deref(),
+        project_path,
+        iid,
+    )
+    .await?;
+    let mine = discussions
+        .discussions
+        .iter()
+        .flat_map(|discussion| discussion.notes.iter())
+        .find(|note| note.id == note_id)
+        .map(|note| note.mine);
+    match mine {
+        Some(true) => Ok(()),
+        Some(false) => anyhow::bail!(
+            "that comment is somebody else's — this app only {act}s what the user wrote \
+             themselves"
+        ),
+        None => anyhow::bail!("that comment is no longer on the merge request"),
+    }
 }
 
 /// WHERE on a diff a comment hangs, out of the `position` a client sent — or `None` when it
@@ -10555,27 +10649,47 @@ mod tests {
         assert!(handler.contains("forget_gitlab_merge_request"), "the merge must invalidate");
     }
 
-    /// A comment is deleted only when it is the USER'S OWN, and that is decided from
-    /// GitLab's answer rather than from what the client claimed. GitLab itself would let a
-    /// maintainer remove a colleague's note; this app never offers that.
+    /// A comment is deleted — and EDITED — only when it is the USER'S OWN, and that is
+    /// decided from GitLab's answer rather than from what the client claimed. GitLab itself
+    /// would let a maintainer rewrite or remove a colleague's note; this app never offers
+    /// that, exactly as it refuses to delete a Teams message that is not the user's own.
+    ///
+    /// Both writes go through ONE check, so this pins the two halves that matter: that the
+    /// check really asks GitLab, and that each handler asks it BEFORE it writes.
     #[test]
-    fn a_comment_is_deleted_only_when_it_is_the_user_s_own() {
+    fn a_comment_is_deleted_or_edited_only_when_it_is_the_user_s_own() {
         let source = include_str!("server.rs");
         let code = source.split("#[cfg(test)]").next().unwrap_or(source);
-        let handler = code
-            .split("\"gitlab_mr_delete_comment\" => {")
+
+        let check = code
+            .split("async fn require_own_gitlab_note(")
             .nth(1)
-            .expect("the gitlab_mr_delete_comment handler")
-            .split("\"gitlab_mr_set_state\" =>")
+            .expect("the shared ownership check")
+            .split("\nasync fn ")
             .next()
-            .expect("the handler ends at the next arm");
-        assert!(handler.contains("fetch_discussions"), "whose note it is must be READ first");
-        assert!(handler.contains("note.mine"), "ownership is GitLab's own answer");
-        assert!(
-            handler.find("fetch_discussions").unwrap()
-                < handler.find("delete_comment").unwrap(),
-            "the ownership check must happen BEFORE the deletion, not after it"
-        );
+            .expect("the function ends at the next one");
+        assert!(check.contains("fetch_discussions"), "whose note it is must be READ from GitLab");
+        assert!(check.contains("note.mine"), "ownership is GitLab's own answer");
+
+        for (method, write) in [
+            ("\"gitlab_mr_delete_comment\" => {", "delete_comment"),
+            ("\"gitlab_mr_edit_comment\" => {", "edit_comment"),
+        ] {
+            let handler = code
+                .split(method)
+                .nth(1)
+                .unwrap_or_else(|| panic!("the {method} handler"))
+                .split("        // ")
+                .next()
+                .expect("the handler ends at the next arm's comment");
+            let checked = handler
+                .find("require_own_gitlab_note")
+                .unwrap_or_else(|| panic!("{method} must check whose comment it is"));
+            let written = handler
+                .find(&format!("gitlab_mr_write::{write}"))
+                .unwrap_or_else(|| panic!("{method} must call {write}"));
+            assert!(checked < written, "{method} must check BEFORE it writes, not after");
+        }
     }
 
     /// Every read of the page has a staleness window, and they are ordered by what a stale

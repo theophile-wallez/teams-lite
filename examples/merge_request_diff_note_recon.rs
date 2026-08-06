@@ -81,6 +81,12 @@ async fn main() -> Result<()> {
     let mut position_keys: BTreeMap<String, usize> = BTreeMap::new();
     let mut position_types: BTreeMap<String, usize> = BTreeMap::new();
     let mut sides: BTreeMap<&str, usize> = BTreeMap::new();
+    // FACT 4: what a thread says about being resolved, which is what the resolve write reads
+    // back and what decides whether the control is drawn at all.
+    let mut resolvable_threads = 0usize;
+    let mut resolved_threads = 0usize;
+    let mut unresolvable = 0usize;
+    let mut half_resolved = 0usize;
     // FACT 3: the range, and our own line code against GitLab's.
     let mut ranges = 0usize;
     let mut end_keys: BTreeMap<String, usize> = BTreeMap::new();
@@ -124,6 +130,36 @@ async fn main() -> Result<()> {
             .json()
             .await
             .unwrap_or(serde_json::Value::Null);
+
+        // FACT 4, per THREAD: GitLab marks the notes rather than the discussion, so a thread is
+        // resolvable when any note is and resolved when every one of those is — which is the
+        // rule `threadResolution` applies on the page and `thread_is_resolved` in the write.
+        for discussion in body.as_array().into_iter().flatten() {
+            let notes: Vec<&serde_json::Value> = discussion
+                .get("notes")
+                .and_then(serde_json::Value::as_array)
+                .map(|notes| notes.iter().collect())
+                .unwrap_or_default();
+            let flagged = |note: &serde_json::Value, key: &str| {
+                note.get(key).and_then(serde_json::Value::as_bool) == Some(true)
+            };
+            let resolvable: Vec<&&serde_json::Value> =
+                notes.iter().filter(|note| flagged(note, "resolvable")).collect();
+            if resolvable.is_empty() {
+                unresolvable += 1;
+                continue;
+            }
+            resolvable_threads += 1;
+            let resolved = resolvable.iter().filter(|note| flagged(note, "resolved")).count();
+            if resolved == resolvable.len() {
+                resolved_threads += 1;
+            } else if resolved > 0 {
+                // A thread whose notes DISAGREE. It is what makes reading `resolved` off the
+                // first note wrong: the thread would read as settled while an objection under
+                // it still stands.
+                half_resolved += 1;
+            }
+        }
 
         for note in body
             .as_array()
@@ -209,6 +245,10 @@ async fn main() -> Result<()> {
     println!("   end keys: {:?}", end_keys.keys().collect::<BTreeSet<_>>());
     println!("   end type: {end_types:?}");
     println!("   line codes · {codes_matched} match ours, {codes_differed} differ");
+    println!(
+        "== 4. threads · {resolvable_threads} resolvable ({resolved_threads} of them resolved, \
+         {half_resolved} with their notes disagreeing), {unresolvable} not resolvable at all"
+    );
     if ranges == 0 {
         println!(
             "   NOTE: nobody on this instance has commented on a RANGE of lines, so the line \

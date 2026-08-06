@@ -588,16 +588,16 @@ The app enriches a tracker link pasted into a chat into a rich preview card
 merge-request page (§ The GitLab page). Either card names its own person — a merge request's
 author, an issue's assignee — as the colleague this app already knows, with their Teams face and
 the name the user gave them: § A tracker user who is also a colleague, applied to the surface
-most merge requests and issues are met on. It reads those trackers. It writes **five** things
+most merge requests and issues are met on. It reads those trackers. It writes **seven** things
 to GitLab and nothing else, ever — a merge request's approval (described at the end of this
-section) plus the page's merge, comment, comment deletion and close — and each one happens
-on a click the user just made, never on its own. A comment is a comment wherever it is written:
-one on a DIFF LINE (§ A comment on a diff LINE) is the same write in another of GitLab's own
-shapes, not a sixth.
+section) plus the page's merge, comment, comment edit, comment deletion, thread resolution and
+close — and each one happens on a click the user just made, never on its own. A comment is a
+comment wherever it is written: one on a DIFF LINE (§ A comment on a diff LINE) is the same
+write in another of GitLab's own shapes, not an eighth.
 
 - **LINEAR IS READ-ONLY, with no exception at all.** Nothing in this app writes to it.
 - **Never create, edit, assign, move or label an issue, a merge request or a project** —
-  in either tracker. What IS written to GitLab is the five actions above and nothing
+  in either tracker. What IS written to GitLab is the seven actions above and nothing
   beyond them: a comment posted from here reaches everyone watching the merge request,
   under the user's name, and looks like they wrote it, which is why it is gated like a
   send and offered only from the page's own composer.
@@ -674,13 +674,13 @@ a machine with no token — a spec MUST clear it afterwards). `cd web && bun run
 `web/e2e/merge-request.spec.ts` pins every rule above. **It has never been run against a
 real GitLab project**: doing that is the user's own click, in their own app.
 
-## The GitLab page (a sidebar of merge requests, and the four writes it offers)
+## The GitLab page (a sidebar of merge requests, and the six writes it offers)
 
 The sidebar's fifth tab is GitLab: the merge requests that are **not merged**, and one of
 them in full — its description, its live pipeline, its approvals, its comments — with the actions
 GitLab's own page offers, and its **diff** on a full-screen page of its own (§ The DIFF is a PAGE).
 One merge request is FOUR pages, named by a sub-header (§ The four PAGES of a merge request).
-`src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs` the four writes,
+`src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs` the six writes,
 `web/src/lib/gitlab-mr.ts` the pure decisions the surface is built from (`gitlab-diff.ts` the
 diff's own, and `gitlab-mr-pages.ts` the page set's), and
 `web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
@@ -688,12 +688,12 @@ diff's own, and `gitlab-mr-pages.ts` the page set's), and
 **The split between the two backend modules is the whole safety story**, and it is the one
 in § The trackers: reading a tracker is what the feature is for, and writing to one is the
 user's own click. The five reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`)
-are open like every other read; the four writes (`gitlab_mr_merge`, `_comment`,
-`_delete_comment`, `_set_state`) are `OUTWARD_METHODS` entries — the write token, refused
-read-only, and the automation hook refuses a command line, a script or a cargo example that
-names their endpoints. `_comment` covers three shapes of ONE act — a comment of its own, a reply
-into a thread, and a thread on a DIFF LINE (§ A comment on a diff LINE) — because they reach the
-same people and the same deletion undoes each.
+are open like every other read; the six writes (`gitlab_mr_merge`, `_comment`,
+`_edit_comment`, `_delete_comment`, `_resolve_thread`, `_set_state`) are `OUTWARD_METHODS`
+entries — the write token, refused read-only, and the automation hook refuses a command line, a
+script or a cargo example that names their endpoints. `_comment` covers three shapes of ONE act
+— a comment of its own, a reply into a thread, and a thread on a DIFF LINE (§ A comment on a
+diff LINE) — because they reach the same people and the same deletion undoes each.
 
 **THE MERGE IS THE ONE ACTION IN THIS APP THAT NO LATER CALL TAKES BACK**, beside a message
 deletion. § The trackers refuses an irreversible write on principle; this one exists because
@@ -716,14 +716,28 @@ of the undo it cannot have. Each is pinned by a test:
   (`gitlab-action-error`). An outward action that failed must never be left looking like it
   worked.
 
-The other three are ordinary gated writes because each is REVERSIBLE from the same page: a
-comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen. Seven
-more rules hold the page together:
+The other five are ordinary gated writes because each has an undo, on the same page: a comment
+is deleted by `gitlab_mr_delete_comment`, a close is undone by a reopen, a resolution by opening
+the thread again. **The EDIT is the one with an asterisk** — `gitlab_mr_edit_comment` can be
+edited back, but the words that were there are gone, since GitLab keeps no history this API can
+read. That is exactly where a Teams message edit sits (§ Sending messages: an edit rewrites, a
+reaction toggles off, a deletion is final), so it is offered the same way: one press, on the
+user's OWN comment only, checked against GitLab before the network like the deletion. Asking
+twice for a rewrite while a message that reaches the same people asks once would teach the
+reader that the dialog means nothing. Eight more rules hold the page together:
 
-- **A comment is deleted only when it is the USER'S OWN**, and whose it is comes from
-  GitLab (`note.mine`, matched on the account's id) read BEFORE the deletion — not from what
-  the client claimed. GitLab would let a maintainer remove a colleague's note; this app never
-  offers that, exactly as it refuses to delete a Teams message that is not the user's own.
+- **A comment is deleted or EDITED only when it is the USER'S OWN**, and whose it is comes
+  from GitLab (`note.mine`, matched on the account's id) read BEFORE the write — not from what
+  the client claimed. GitLab would let a maintainer rewrite or remove a colleague's note; this
+  app never offers that, exactly as it refuses to delete a Teams message that is not the user's
+  own. Both writes go through ONE check (`require_own_gitlab_note`), because a second copy of
+  it is a second chance to get it wrong.
+- **A RESOLUTION is offered only where GitLab would take one.** It marks the NOTES rather than
+  the thread, so a thread is resolvABLE when any note is and RESOLVED when every one of those
+  is (`threadResolution`, and `thread_is_resolved` on the answer) — reading `resolved` off the
+  first note would call a thread settled while an objection under it still stands. A standalone
+  comment carries no such state and GitLab answers `400`, so no control is drawn on one:
+  measured over this instance, 207 threads are resolvable and 573 conversations are not.
 - **A reply lands in the thread it answers.** `discussion_id` decides the endpoint, because
   a reply posted as a new comment lands in the wrong place and nothing reports it.
 - **Nothing on this page is fetched FROM GITLAB by the browser.** Its `avatar_url` travels and
@@ -1208,9 +1222,24 @@ act; what it does need is the rails below, because a position is a claim about W
   holds several at once — a composer and a thread per line — so the sentence carries WHICH one
   it belongs to; a refusal drawn in every card would report a failed reply inside three threads
   that have nothing to do with it.
-- **A comment of the user's OWN is deleted from here**, asked for twice, which is what makes
-  writing one from this page acceptable at all (§ The trackers). Whose comment it is comes from
-  GitLab before the deletion, so a colleague's is refused by the backend and offered by nothing.
+- **A thread is finished from its own card: the user's OWN words are rewritten or taken back,
+  and the thread is RESOLVED.** Those undos are what make writing a comment from this page
+  acceptable at all (§ The trackers), so they live where the comment is rather than a page away:
+  - **The deletion asks twice and the edit asks once.** An edit can be edited back; a deletion
+    cannot. Both are offered on the user's own comment only, and whose it is comes from GitLab
+    before the write — a colleague's is refused by the backend and offered by nothing.
+  - **An edit cannot EMPTY a comment.** That is a deletion with none of a deletion's rails, so
+    it is refused by name and the box says which control to use instead.
+  - **A rewritten comment says `edited`** (`noteWasEdited`, the two timestamps differing). The
+    words on screen are then not the words the thread replied to, which is the honesty a Teams
+    message's own mark carries. An absent timestamp is "not known to be edited", never "edited".
+  - **A RESOLVED thread is drawn FOLDED**, which is what GitLab's own diff does: a settled
+    objection has no claim on two centimetres of somebody's code. The fold is a default and not
+    a rule — the reader's own press wins from then on — and it states how much is behind it,
+    because "resolved" alone does not say whether anybody answered.
+  - **Every one of them is offered on the merge-request page too**, on the same threads, through
+    the same rules (`threadResolution` decides both). One thread must not be two answers to
+    "can I settle this?".
 - **The position is built from PRIMITIVES.** The page sends a file, two line numbers and a side;
   the backend spells GitLab's own `position` and the line codes inside it (`gitlab_diff_anchor`
   in src/bin/server.rs). So no client can hand GitLab a field this app does not know it is
@@ -1223,23 +1252,31 @@ GitLab itself stored on this instance's own comments and checks each rule agains
     cargo run --example merge_request_diff_note_recon
 
 Measured 2026-08-06 on `git.sia.partners`, over the 40 newest open merge requests: all 40 carry
-three whole commits in `diff_refs`; 275 notes carry a position and every one is
-`position_type: "text"`; the anchor names the NEW line alone on 254 (an added line) and both
-lines on 21 (a context line); 16 carry a `line_range`, whose ends are
-`{line_code, old_line, new_line, type}` with `type` in `new` (20), `old` (4) and `expanded`
+three whole commits in `diff_refs`; 276 notes carry a position and every one is
+`position_type: "text"`; the anchor names the NEW line alone on 255 (an added line) and both
+lines on 21 (a context line); 17 carry a `line_range`, whose ends are
+`{line_code, old_line, new_line, type}` with `type` in `new` (22), `old` (4) and `expanded`
 (8) — GitLab's word for a context line inside a region somebody OPENED, which is a line this app
-cannot select and therefore never writes. And **all 32 of those line codes match what this crate
+cannot select and therefore never writes. And **all 34 of those line codes match what this crate
 computes** (`gitlab_mr::line_code`, the SHA-1 of the path with BOTH counters, which is why a
 removed line still carries its place in the new file). That last one is the part nothing else
 could have checked: a line code is a hash, so a wrong rule earns a refusal that names nothing.
 
+The same run measures what the RESOLUTION reads back: 207 threads are resolvable, 89 of them are
+resolved, and 573 conversations are not resolvable at all — which is why the control is drawn
+only where GitLab would take one. **Not one of those 207 had its notes disagreeing**, so the
+all-resolvable-notes rule is not load-bearing today; it is still the right rule, because GitLab's
+API resolves a single note as well as a thread and the numbers say nothing about tomorrow.
+
 `web/mock/server.ts` reproduces the whole flow with no GitLab and no token — it translates the
 position the way the backend does, so what the page reads back is the shape the tenant would
-answer with, and it seeds one thread on a RANGE of a file the page really shows (a colleague's
-comment with the user's own reply under it, so the deletion is on screen too). `cd web && bun
-run preview -- --out /tmp/dc --diff-comment` captures the thread in both themes, the affordance
-in the gutter, the box on one line, the drag's own span in both themes, the words written, the
-thread they became, and the box on a phone; `web/e2e/gitlab.spec.ts` pins every rule above by
+answer with, it moves `updated_at` on an edit so the `edited` mark is real, it refuses a
+resolution on a comment that is not a thread in the service's own words, and it seeds one thread
+on a RANGE of a file the page really shows (a colleague's comment with the user's own reply under
+it, so the edit and the deletion are on screen too). `cd web && bun run preview -- --out /tmp/dc
+--diff-comment` captures the thread in both themes, the affordance in the gutter, the box on one
+line, the drag's own span in both themes, the words written, the thread they became, a comment
+being rewritten, the fold a resolved thread takes in both themes, and the box on a phone; `web/e2e/gitlab.spec.ts` pins every rule above by
 driving the POINTER, because the drag is the feature. **It has never run against a real GitLab
 project**: like every other write here, that is the user's own click, in their own app.
 
@@ -1364,7 +1401,8 @@ user. Two independent mechanisms enforce that split:
   its columns at a phone's width:
   `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` from the same
   file. For a COMMENT on a diff line — the affordance in the gutter, the box on one line, the
-  span a drag covers, and the thread it lands as:
+  span a drag covers, the thread it lands as, a comment being rewritten and the fold a resolved
+  thread takes:
   `bun run preview -- --out /tmp/dc --diff-comment`, or `diffGutterLine` / `dragDiffLines` from
   the same file (the drag is driven with the pointer, because the drag IS the feature).
   For the chat list's sections and the "…"
@@ -2780,7 +2818,7 @@ user's. What changes is only what is asked.
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
   `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its five reads (the DIFF
   among them, whose unified patch this app writes over GitLab's bare hunks) in
-  `src/gitlab_mr.rs` over a durable response cache and its four writes in
+  `src/gitlab_mr.rs` over a durable response cache and its six writes in
   `src/gitlab_mr_write.rs`, plus who a person on EITHER tracker is in the user's own Teams
   (`src/tracker_people.rs`, see § A tracker user who is also a colleague) — plus the approval
   those trackers got first, and its undo (`src/gitlab_approval.rs`, see § The trackers),

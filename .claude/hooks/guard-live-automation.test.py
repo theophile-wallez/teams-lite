@@ -164,7 +164,21 @@ FIXTURES = {
         "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42',\n"
         "  { method: 'PUT', body: JSON.stringify({ state_event: 'close' }) });\n"
     ),
-    # And the same four through the backend's gated RPCs, which are still writes.
+    # Rewriting a comment reaches the same people, and the words that were there are gone.
+    "mr-edit-writer.ts": (
+        "// Rewrites a comment on a real merge request straight through GitLab.\n"
+        "await fetch('https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/notes/7',\n"
+        "  { method: 'PUT', body: JSON.stringify({ body: 'rewritten' }) });\n"
+    ),
+    # Resolving a thread tells everybody watching that the objection is settled — and it is
+    # the PAIR that makes it a write: reading that same thread is a read.
+    "mr-resolve-writer.ts": (
+        "// Resolves a thread on a real merge request straight through GitLab.\n"
+        "const thread = 'projects/x%2Fy/merge_requests/42/discussions/ab12';\n"
+        "await fetch(`https://gitlab.com/api/v4/${thread}`,\n"
+        "  { method: 'PUT', body: JSON.stringify({ resolved: true }) });\n"
+    ),
+    # And the same six through the backend's gated RPCs, which are still writes.
     "mr-merge-rpc-writer.ts": (
         "// Merges a real merge request through the live backend.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -174,6 +188,22 @@ FIXTURES = {
         "// Comments on a real merge request through the live backend.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'gitlab_mr_comment' }));\n"
+    ),
+    "mr-edit-rpc-writer.ts": (
+        "// Rewrites a comment on a real merge request through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_edit_comment' }));\n"
+    ),
+    "mr-resolve-rpc-writer.ts": (
+        "// Resolves a thread on a real merge request through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'gitlab_mr_resolve_thread' }));\n"
+    ),
+    # Reading ONE thread is a read: the address alone is not the write.
+    "mr-thread-reader.ts": (
+        "// Reads one thread of a real merge request.\n"
+        "const thread = 'projects/x%2Fy/merge_requests/42/discussions/ab12';\n"
+        "await fetch(`https://gitlab.com/api/v4/${thread}`);\n"
     ),
     # Reading the PAGE is a read, all four of them: the list, the detail, the comments and
     # the pipeline. A guard that blocked those would make the surface unscreenshotable and
@@ -616,15 +646,19 @@ def cases(tmp: Path):
             "curl -X POST 'https://gitlab.com/api/v4/projects/x%2Fy/"
             "merge_requests/42/approve'",
         ),
-        # The merge-request PAGE's four writes, in every shape: the gated RPCs, GitLab's own
+        # The merge-request PAGE's six writes, in every shape: the gated RPCs, GitLab's own
         # endpoints, and a curl. The MERGE is the sharpest — it lands somebody's branch in a
         # shared repository and no later call takes it back — and there is no sandbox
         # project, so nothing but the user's own click in the app may make any of them.
         ("BLOCK", PROJECT, f"bun run {tmp}/mr-merge-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/mr-comment-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/mr-close-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-edit-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-resolve-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/mr-merge-rpc-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/mr-comment-rpc-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-edit-rpc-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/mr-resolve-rpc-writer.ts"),
         (
             "BLOCK",
             PROJECT,
@@ -642,10 +676,43 @@ def cases(tmp: Path):
             "curl -X PUT 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42' "
             "-d 'state_event=close'",
         ),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42/notes/7' "
+            "-d 'body=rewritten'",
+        ),
+        # A thread RESOLVED is the pair — the thread's own address and the field — in either
+        # order, because a command line puts its body where it likes.
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42"
+            "/discussions/ab12' -d 'resolved=true'",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "curl -X PUT -d 'resolved=false' 'https://gitlab.com/api/v4/projects/x%2Fy"
+            "/merge_requests/42/discussions/ab12'",
+        ),
+        # …and the same address with no field is the read it looks like.
+        (
+            "ALLOW",
+            PROJECT,
+            "curl -s 'https://gitlab.com/api/v4/projects/x%2Fy/merge_requests/42"
+            "/discussions/ab12'",
+        ),
         # But READING the page is ordinary work, all four reads of it — otherwise the
         # surface could not be screenshotted, and a guard that blocks that teaches its next
         # reader to phrase around it.
         ("ALLOW", PROJECT, f"bun run {tmp}/mr-page-reader.ts"),
+        # Reading ONE thread included: what makes a resolution a write is the field beside the
+        # address, never the address on its own.
+        ("ALLOW", PROJECT, f"bun run {tmp}/mr-thread-reader.ts"),
+        # And so is the recon that measures what GitLab stored on those threads, which is how
+        # the diff-comment write was built at all.
+        ("ALLOW", PROJECT, "cargo run --example merge_request_diff_note_recon"),
         (
             "ALLOW",
             PROJECT,

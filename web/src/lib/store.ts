@@ -3649,6 +3649,52 @@ export class TeamsController {
     }
   }
 
+  /** Rewrite one of the user's OWN comments from the diff page.
+   *
+   *  The twin of [[editGitLabComment]], reporting in the thread the words are in rather than on
+   *  the merge-request page — this is a full-screen surface of its own, and it holds several
+   *  boxes at once. It ANSWERS whether the edit landed, so a refusal keeps the rewrite in the
+   *  box the reader is looking at. */
+  async editGitLabDiffComment(
+    noteId: number,
+    body: string,
+    discussionId: string,
+  ): Promise<boolean> {
+    const key = this.get().openMergeRequest;
+    const text = body.trim();
+    if (!key || text === "" || this.get().gitlabDiffCommentBusy) return false;
+    this.set({ gitlabDiffCommentBusy: true, gitlabDiffCommentError: null });
+    try {
+      await this.backend.gitlabEditComment(key, noteId, text);
+      await this.refreshGitLabNotes(key);
+      return true;
+    } catch (e) {
+      this.set({ gitlabDiffCommentError: { thread: discussionId, message: errText(e) } });
+      return false;
+    } finally {
+      this.set({ gitlabDiffCommentBusy: false });
+    }
+  }
+
+  /** Resolve one thread from the diff page, or open it again.
+   *
+   *  Each direction is the other's undo, so it is one press: nothing here needs a rail in place
+   *  of an undo it has. A refusal is reported in the thread it is about — GitLab's own words,
+   *  which on a comment that is not a thread say exactly that. */
+  async setGitLabDiffThreadResolved(discussionId: string, resolved: boolean): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || this.get().gitlabDiffCommentBusy) return;
+    this.set({ gitlabDiffCommentBusy: true, gitlabDiffCommentError: null });
+    try {
+      await this.backend.gitlabResolveThread(key, discussionId, resolved);
+      await this.refreshGitLabNotes(key);
+    } catch (e) {
+      this.set({ gitlabDiffCommentError: { thread: discussionId, message: errText(e) } });
+    } finally {
+      this.set({ gitlabDiffCommentBusy: false });
+    }
+  }
+
   /** Delete one of the user's OWN comments from the diff page — the undo that makes
    *  commenting here acceptable, offered where the comment is (see AGENTS.md § The
    *  trackers). The backend re-reads whose comment it is before it deletes, so this is a
@@ -3861,6 +3907,52 @@ export class TeamsController {
       await this.backend.gitlabDeleteComment(key, noteId);
       await this.refreshGitLabNotes(key);
       this.set({ gitlabActionDone: "Comment deleted." });
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  /** Rewrite one of the user's OWN comments, from the merge-request page.
+   *
+   *  It ANSWERS whether the edit landed, because the box holding the words belongs to the
+   *  component that opened it: without the answer that box would close on a refusal and take
+   *  the rewrite with it. The backend re-reads whose comment it is before it writes. */
+  async editGitLabComment(noteId: number, body: string): Promise<boolean> {
+    const key = this.get().openMergeRequest;
+    const text = body.trim();
+    if (!key || text === "" || this.get().gitlabActing) return false;
+    this.set({ gitlabActing: `edit:${noteId}`, gitlabActionError: null, gitlabActionDone: null });
+    try {
+      await this.backend.gitlabEditComment(key, noteId, text);
+      await this.refreshGitLabNotes(key);
+      this.set({ gitlabActionDone: "Comment rewritten." });
+      return true;
+    } catch (e) {
+      this.set({ gitlabActionError: errText(e) });
+      return false;
+    } finally {
+      this.set({ gitlabActing: null });
+    }
+  }
+
+  /** Resolve one thread, or open it again, from the merge-request page.
+   *
+   *  Each direction is the other's undo, so it is one press and no confirmation — the shape
+   *  the approval already has. What is REPORTED is what GitLab says the thread is now. */
+  async setGitLabThreadResolved(discussionId: string, resolved: boolean): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || this.get().gitlabActing) return;
+    this.set({
+      gitlabActing: `resolve:${discussionId}`,
+      gitlabActionError: null,
+      gitlabActionDone: null,
+    });
+    try {
+      const answer = await this.backend.gitlabResolveThread(key, discussionId, resolved);
+      await this.refreshGitLabNotes(key);
+      this.set({ gitlabActionDone: answer.resolved ? "Thread resolved." : "Thread reopened." });
     } catch (e) {
       this.set({ gitlabActionError: errText(e) });
     } finally {

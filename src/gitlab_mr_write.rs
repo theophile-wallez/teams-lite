@@ -1,4 +1,4 @@
-// The four writes the GitLab page makes, and nothing else.
+// The six writes the GitLab page makes, and nothing else.
 //
 // Everything this app knows about a tracker reads (`src/gitlab.rs` and `src/gitlab_mr.rs`
 // issue GET requests only, and a test on each one's source keeps it that way). Two modules
@@ -12,7 +12,10 @@
 //      same people, they are undone by the same deletion, and they differ only in where
 //      GitLab files the words.
 //   3. **DELETE one of the user's OWN comments** (`DELETE …/notes/{id}`) — the undo of 2.
-//   4. **CLOSE or REOPEN** it (`PUT …` with `state_event`), which are each other's undo.
+//   4. **EDIT one of the user's OWN comments** (`PUT …/notes/{id}`) — rewrite what they posted.
+//   5. **RESOLVE a thread, or open it again** (`PUT …/discussions/{id}` with `resolved`), which
+//      are each other's undo.
+//   6. **CLOSE or REOPEN** it (`PUT …` with `state_event`), which are each other's undo.
 //
 // Every one is an `OUTWARD_METHODS` entry in `src/bin/server.rs`: the write token, refused
 // by a read-only backend, and the automation hook refuses a command line that names the
@@ -37,10 +40,13 @@
 //   - **The outcome is reported where the click was made**, in GitLab's own words on a
 //     failure. An outward action that failed must never be left looking like it worked.
 //
-// The three others are each reversible, which is what makes them ordinary: a comment can
-// be deleted by whoever wrote it, and a close is undone by a reopen. A comment still
-// reaches every person watching the merge request, under the user's name, so it is gated
-// exactly like a send and never written by anything but their own Enter.
+// The five others are ordinary because each has an undo, and each undo is on the same page:
+// a comment is deleted by whoever wrote it, a close is undone by a reopen, a resolution by
+// opening the thread again. The EDIT is the one with an asterisk — it can be edited back, but
+// the words that were there are gone, which is exactly where a Teams message edit sits — and it
+// is offered only on the user's OWN comment, checked before the network like the deletion.
+// Every one of them still reaches every person watching the merge request, under the user's
+// name, so each is gated exactly like a send and never written by anything but their own press.
 //
 // **A comment on a diff LINE names a commit, and that is the second place in this module
 // where a commit is a rail rather than a detail.** A line number means nothing on its own
@@ -508,6 +514,120 @@ fn posted_note(answered: &serde_json::Value, discussion: Option<&str>, typed: &s
     }
 }
 
+/// Edit one of the user's OWN comments — rewrite the words they already posted.
+///
+/// The BACKEND refuses a note that is not the user's own before the network, exactly as
+/// [`delete_comment`] does and for its reason: GitLab itself refuses a colleague's note here,
+/// but this app must not depend on that refusal to keep a promise of its own.
+///
+/// **It is not fully reversible, and that is stated rather than smoothed over.** An edit can be
+/// edited back, but the words that were there are gone — GitLab keeps no history this API can
+/// read. So it sits where a Teams message edit sits (§ Sending messages: an edit rewrites, a
+/// reaction toggles off, a deletion is final): one press, like the chat's own edit, and never a
+/// second confirmation, because asking twice for a rewrite and once for a message that reaches
+/// the same people would teach the reader that the dialog means nothing.
+pub async fn edit_comment(
+    http: &reqwest::Client,
+    gitlab_host: &str,
+    token: Option<&str>,
+    project_path: &str,
+    iid: u64,
+    note_id: u64,
+    body: &str,
+) -> Result<PostedNote> {
+    let token = gitlab_mr::require_token(token)?;
+    let body = body.trim();
+    // An empty edit is a DELETION with none of a deletion's rails — no second press, and the
+    // words gone for good. GitLab refuses it too; refusing here says which act was meant.
+    anyhow::ensure!(
+        !body.is_empty(),
+        "an edit cannot empty a comment — delete it instead, which asks first"
+    );
+    anyhow::ensure!(
+        body.len() <= MAX_COMMENT_BYTES,
+        "that comment is too long for one GitLab note ({} bytes, the cap is {MAX_COMMENT_BYTES})",
+        body.len()
+    );
+
+    let endpoint = format!(
+        "{}/notes/{note_id}",
+        gitlab_mr::merge_request_api(gitlab_host, project_path, iid)
+    );
+    let resp = http
+        .put(&endpoint)
+        .header("Accept", "application/json")
+        .header("PRIVATE-TOKEN", token)
+        .json(&json!({ "body": body }))
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .context("gitlab comment edit")?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("{}", comment_refusal(status, false, &read_gitlab_message(resp).await));
+    }
+    let answered: serde_json::Value = resp.json().await.context("gitlab comment edit body")?;
+    Ok(posted_note(&answered, None, body))
+}
+
+/// Resolve one thread, or open it again.
+///
+/// Each direction is the other's undo, which is what makes this an ordinary gated write —
+/// the shape [`StateChange`] and the approval both have. So it is one press and no
+/// confirmation: nothing here needs a rail in place of an undo it does have.
+///
+/// Only a THREAD can be resolved. A standalone comment carries no such state, and GitLab
+/// refuses one with its own words rather than inventing a state for it.
+pub async fn set_thread_resolved(
+    http: &reqwest::Client,
+    gitlab_host: &str,
+    token: Option<&str>,
+    project_path: &str,
+    iid: u64,
+    discussion_id: &str,
+    resolved: bool,
+) -> Result<bool> {
+    let token = gitlab_mr::require_token(token)?;
+    let discussion = discussion_id.trim();
+    anyhow::ensure!(!discussion.is_empty(), "a thread is resolved by its own id, and none was given");
+    let endpoint = format!(
+        "{}/discussions/{}",
+        gitlab_mr::merge_request_api(gitlab_host, project_path, iid),
+        urlencoding::encode(discussion)
+    );
+    let resp = http
+        .put(&endpoint)
+        .header("Accept", "application/json")
+        .header("PRIVATE-TOKEN", token)
+        .json(&json!({ "resolved": resolved }))
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .context("gitlab thread resolution")?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("{}", resolve_refusal(status, resolved, &read_gitlab_message(resp).await));
+    }
+    // GitLab answers with the whole discussion. What it says about its own notes is the truth
+    // about the outcome, so it is read back rather than echoed from the request: a thread whose
+    // notes are not resolvable can answer 200 and change nothing.
+    let answered: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    Ok(thread_is_resolved(&answered).unwrap_or(resolved))
+}
+
+/// Whether the thread GitLab answered with is resolved: true when every note that CAN be
+/// resolved is. `None` when the body says nothing about any note, which is what makes the
+/// caller fall back to what it asked for rather than reporting a state nobody stated.
+fn thread_is_resolved(discussion: &serde_json::Value) -> Option<bool> {
+    let notes = discussion.get("notes").and_then(serde_json::Value::as_array)?;
+    let mut resolvable = notes
+        .iter()
+        .filter(|note| note.get("resolvable").and_then(serde_json::Value::as_bool) == Some(true))
+        .peekable();
+    resolvable.peek()?;
+    Some(resolvable.all(|note| note.get("resolved").and_then(serde_json::Value::as_bool) == Some(true)))
+}
+
 /// Delete one comment — the undo of [`comment`], and the reason a comment is offered here
 /// at all.
 ///
@@ -653,6 +773,28 @@ fn comment_refusal(status: reqwest::StatusCode, anchored: bool, detail: &str) ->
     with_detail(&format!("GitLab refused: {cause}"), status, detail)
 }
 
+/// One sentence for a refused resolution. The 400 is the one worth naming: GitLab answers it
+/// for a comment that is not a THREAD, which is a state rather than a fault, and "it did not go
+/// through" would send the reader looking for a problem that is not there.
+fn resolve_refusal(status: reqwest::StatusCode, resolved: bool, detail: &str) -> String {
+    let action = if resolved { "resolve" } else { "reopen" };
+    let cause = match status {
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            format!("this account may not {action} that thread")
+        }
+        reqwest::StatusCode::NOT_FOUND => {
+            "that thread is not on this merge request any more".to_string()
+        }
+        reqwest::StatusCode::BAD_REQUEST => {
+            "GitLab does not offer that: only a thread can be resolved, and this is a comment \
+             of its own"
+                .to_string()
+        }
+        _ => format!("the {action} did not go through"),
+    };
+    with_detail(&format!("GitLab refused: {cause}"), status, detail)
+}
+
 /// Append GitLab's own words when it sent any, and the status code when it did not. The
 /// code is a last resort rather than the first thing the user reads.
 fn with_detail(sentence: &str, status: reqwest::StatusCode, detail: &str) -> String {
@@ -724,7 +866,7 @@ mod tests {
         strip_line_comments(source.split("#[cfg(test)]").next().unwrap_or(source))
     }
 
-    /// THE shape of this module: four writes, named once each, and no fifth.
+    /// THE shape of this module: six writes, named once each, and no seventh.
     ///
     /// The neighbours GitLab offers on the same resource are what this test keeps out —
     /// each would be a write the module's own name does not cover, riding a consent gate
@@ -732,22 +874,27 @@ mod tests {
     /// user, a label or an assignee edit changes what other people are told to do, and
     /// `/projects` is a whole tracker rather than one merge request.
     #[test]
-    fn the_module_writes_four_things_and_names_no_others() {
+    fn the_module_writes_six_things_and_names_no_others() {
         let code = code();
         assert!(code.contains("pub async fn merge"), "scanned the wrong text");
-        // The four, and the undo that makes the comment acceptable.
+        // The six, and the undo that makes the comment acceptable.
         assert!(code.contains("/merge\""), "the merge endpoint");
         assert!(code.contains("/notes\""), "the comment endpoint");
         // A comment on a diff line starts a thread, so it is posted as a discussion. It is
         // the same write as the two above — same people, same undo — and the endpoint is
         // named here so its arrival stays a deliberate act rather than a quiet third one.
         assert!(code.contains("/discussions\""), "the diff comment's endpoint");
-        assert!(code.contains("/notes/{note_id}"), "the comment's undo");
+        assert!(code.contains("/notes/{note_id}"), "the comment's undo, and its edit");
+        assert!(code.contains("/discussions/{}"), "the thread's own resolution");
         assert!(code.contains("state_event"), "the close and its reopen");
         // And each write verb appears exactly as often as it has a reason to.
         assert_eq!(code.matches(".post(").count(), 1, "one comment POST");
         assert_eq!(code.matches(".delete(").count(), 1, "one note DELETE");
-        assert_eq!(code.matches(".put(").count(), 2, "the merge and the state change");
+        assert_eq!(
+            code.matches(".put(").count(),
+            4,
+            "the merge, the state change, the comment edit and the thread resolution"
+        );
         assert_eq!(code.matches(".patch(").count(), 0);
         for endpoint in ["/rebase", "/subscribe", "/unsubscribe", "/todo", "/approve", "/award_emoji"] {
             assert!(
@@ -828,6 +975,10 @@ mod tests {
                 .await
                 .expect_err("blank token"),
             delete_comment(&http, "gitlab.com", None, "a/b", 1, 5).await.expect_err("no token"),
+            edit_comment(&http, "gitlab.com", None, "a/b", 1, 5, "hi").await.expect_err("no token"),
+            set_thread_resolved(&http, "gitlab.com", None, "a/b", 1, "d-1", true)
+                .await
+                .expect_err("no token"),
         ] {
             assert!(err.to_string().contains("needs a personal access token"), "{err}");
         }
@@ -868,6 +1019,68 @@ mod tests {
             .await
             .expect_err("a runaway paste is refused here");
         assert!(err.to_string().contains("too long"), "{err}");
+    }
+
+    /// An EDIT may rewrite a comment; it may not empty one. That is a deletion with none of a
+    /// deletion's rails — no second press, and the words gone for good — so it is refused here
+    /// and named as the act it really is.
+    #[tokio::test]
+    async fn an_edit_cannot_empty_a_comment() {
+        let http = reqwest::Client::new();
+        let err = edit_comment(&http, "gitlab.com", Some("tok"), "a/b", 1, 5, "  \n ")
+            .await
+            .expect_err("an empty edit is a deletion in disguise");
+        assert!(err.to_string().contains("delete it instead"), "{err}");
+
+        let huge = "x".repeat(MAX_COMMENT_BYTES + 1);
+        let err = edit_comment(&http, "gitlab.com", Some("tok"), "a/b", 1, 5, &huge)
+            .await
+            .expect_err("a runaway paste is refused here too");
+        assert!(err.to_string().contains("too long"), "{err}");
+    }
+
+    /// A thread is resolved by its own id, and a blank one names nothing — GitLab would answer
+    /// about the whole merge request's discussions instead, which is not what was asked.
+    #[tokio::test]
+    async fn a_resolution_needs_the_thread_it_is_about() {
+        let http = reqwest::Client::new();
+        let err = set_thread_resolved(&http, "gitlab.com", Some("tok"), "a/b", 1, "  ", true)
+            .await
+            .expect_err("a thread with no id is not a thread");
+        assert!(err.to_string().contains("its own id"), "{err}");
+    }
+
+    /// What a resolution ANSWERED is read out of GitLab's own body rather than echoed from the
+    /// request: a thread whose notes cannot be resolved can answer 200 and change nothing.
+    #[test]
+    fn a_thread_is_resolved_when_every_resolvable_note_is() {
+        let resolved = json!({ "notes": [
+            { "resolvable": true, "resolved": true },
+            { "resolvable": false, "resolved": false },
+        ] });
+        assert_eq!(thread_is_resolved(&resolved), Some(true));
+
+        let half = json!({ "notes": [
+            { "resolvable": true, "resolved": true },
+            { "resolvable": true, "resolved": false },
+        ] });
+        assert_eq!(thread_is_resolved(&half), Some(false));
+
+        // A thread with nothing resolvable in it says NOTHING about resolution, so the caller
+        // keeps what it asked for instead of reporting a state GitLab never stated.
+        assert_eq!(thread_is_resolved(&json!({ "notes": [{ "resolvable": false }] })), None);
+        assert_eq!(thread_is_resolved(&json!({ "notes": [] })), None);
+        assert_eq!(thread_is_resolved(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn a_refused_resolution_names_the_state_rather_than_a_fault() {
+        // GitLab answers 400 for a comment that is not a thread. That is a state, and "it did
+        // not go through" would send the reader hunting a problem that is not there.
+        let plain = resolve_refusal(reqwest::StatusCode::BAD_REQUEST, true, "");
+        assert!(plain.contains("only a thread can be resolved"), "{plain}");
+        assert!(resolve_refusal(reqwest::StatusCode::FORBIDDEN, false, "").contains("may not reopen"));
+        assert!(resolve_refusal(reqwest::StatusCode::NOT_FOUND, true, "").contains("not on this merge request"));
     }
 
     // ---- a comment on a diff line -------------------------------------------

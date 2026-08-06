@@ -1371,6 +1371,44 @@ export class Backend {
     });
   }
 
+  /** Rewrite one of the user's OWN comments.
+   *
+   *  The backend re-reads whose note it is before it writes, exactly as the deletion does. It
+   *  is not fully reversible — an edit can be edited back, but the words that were there are
+   *  gone — which is where a Teams message edit sits, so it is offered the same way. */
+  gitlabEditComment(
+    key: MergeRequestKey,
+    noteId: number,
+    body: string,
+  ): Promise<{ note: PostedNote }> {
+    return this.writeRequest<{ note: PostedNote }>("gitlab_mr_edit_comment", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      note_id: noteId,
+      body,
+    });
+  }
+
+  /** Resolve one thread, or open it again — each direction the other's undo.
+   *
+   *  What comes back is what GITLAB says the thread is now, never an echo of the ask: a
+   *  thread whose notes cannot be resolved can answer 200 and change nothing. */
+  gitlabResolveThread(
+    key: MergeRequestKey,
+    discussionId: string,
+    resolved: boolean,
+  ): Promise<{ discussion_id: string; resolved: boolean }> {
+    return this.writeRequest<{ discussion_id: string; resolved: boolean }>(
+      "gitlab_mr_resolve_thread",
+      {
+        project_path: key.projectPath,
+        iid: key.iid,
+        discussion_id: discussionId,
+        resolved,
+      },
+    );
+  }
+
   /** Delete one of the user's OWN comments — the undo that makes the comment above
    *  acceptable. The backend re-reads whose note it is before it deletes, so a colleague's
    *  comment is refused there rather than trusted from here. */

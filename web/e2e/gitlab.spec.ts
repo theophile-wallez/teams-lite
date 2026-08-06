@@ -412,6 +412,41 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(thread.locator('[data-testid="gitlab-note"]')).toHaveCount(before);
   });
 
+  test("rewrites and resolves from the merge request too, so one thread is one answer", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    const thread = page.locator('[data-testid="gitlab-discussion"][data-discussion="d-596-2"]');
+    const mine = thread.locator('[data-testid="gitlab-note"][data-mine="true"]').first();
+
+    // EDIT: the box opens on the words that are there, and the mark follows the rewrite.
+    await mine.locator('[data-testid="gitlab-note-edit"]').click();
+    await thread.locator('[data-testid="gitlab-note-edit-input"]').fill("Quoted it in `2f91ac0` — and pinned it.");
+    await thread.locator('[data-testid="gitlab-note-edit-save"]').click();
+    await expect(mine).toContainText("pinned it");
+    await expect(mine.locator('[data-testid="gitlab-note-edited"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-action-done"]')).toContainText("rewritten");
+
+    // RESOLVE: the same control the diff page's card offers, on the same thread.
+    const resolve = thread.locator('[data-testid="gitlab-thread-resolve"]');
+    await expect(resolve).toHaveText("Resolve");
+    await resolve.click();
+    await expect(page.locator('[data-testid="gitlab-action-done"]')).toContainText("resolved");
+    await expect(resolve).toHaveText("Reopen");
+    await resolve.click();
+    await expect(page.locator('[data-testid="gitlab-action-done"]')).toContainText("reopened");
+
+    // A STANDALONE comment carries neither state, so no resolution is offered on one — GitLab
+    // answers 400 for it, and a control that cannot work must not be drawn.
+    const plain = page.locator('[data-testid="gitlab-discussion"][data-discussion="d-596-1"]');
+    await expect(plain).toBeVisible();
+    await expect(plain.locator('[data-testid="gitlab-thread-resolve"]')).toHaveCount(0);
+    // …and neither an edit nor a deletion on a colleague's words.
+    await expect(plain.locator('[data-testid="gitlab-note-edit"]')).toHaveCount(0);
+    await expect(plain.locator('[data-testid="gitlab-note-delete"]')).toHaveCount(0);
+  });
+
   test("keeps GitLab's own events out of the conversation, behind a count", async ({ page }) => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
@@ -1102,6 +1137,106 @@ test.describe.serial("the GitLab merge-request page", () => {
     // fail every write after this one.
     await setMergeRequestControl(page, { clear: true });
     await page.locator('[data-testid="gitlab-diff-comment-cancel"]').click();
+  });
+
+  test("rewrites one of the user's own comments, and says it was edited", async ({ page }) => {
+    await openHealthFile(page);
+    const thread = page.locator('[data-testid="gitlab-diff-thread"][data-lines="Lines 8–10"]');
+    const mine = thread.locator('[data-testid="gitlab-diff-note"][data-mine="true"]').first();
+
+    // The box opens on the words that are THERE: an edit is a change to them, not a blank page.
+    await mine.locator('[data-testid="gitlab-diff-note-edit"]').click();
+    const box = thread.locator('[data-testid="gitlab-diff-note-edit-input"]');
+    await expect(box).toHaveValue(/Kept them apart on purpose/);
+
+    await box.fill("Kept them apart on purpose: each one is logged differently.");
+    await thread.locator('[data-testid="gitlab-diff-note-edit-save"]').click();
+
+    await expect(box).toHaveCount(0);
+    await expect(mine).toContainText("each one is logged differently");
+    // The words on screen are not the words the thread replied to, so the comment says so.
+    await expect(mine.locator('[data-testid="gitlab-diff-note-edited"]')).toBeVisible();
+    // And an edit is offered on the user's OWN comment only — a colleague's carries neither
+    // control, exactly as it carries no deletion.
+    const theirs = thread.locator('[data-testid="gitlab-diff-note"]').first();
+    await expect(theirs).not.toHaveAttribute("data-mine", "true");
+    await expect(theirs.locator('[data-testid="gitlab-diff-note-edit"]')).toHaveCount(0);
+  });
+
+  test("an edit that GitLab refused keeps the words in the box", async ({ page }) => {
+    await openHealthFile(page);
+    const thread = page.locator('[data-testid="gitlab-diff-thread"][data-lines="Lines 8–10"]');
+    const mine = thread.locator('[data-testid="gitlab-diff-note"][data-mine="true"]').first();
+    await mine.locator('[data-testid="gitlab-diff-note-edit"]').click();
+    await thread.locator('[data-testid="gitlab-diff-note-edit-input"]').fill("Refused rewrite.");
+
+    await setMergeRequestControl(page, {
+      refuse: "GitLab refused: this account may not comment there",
+    });
+    await thread.locator('[data-testid="gitlab-diff-note-edit-save"]').click();
+
+    // The box stays open with the rewrite in it, and the refusal is in the thread it belongs to.
+    await expect(thread.locator('[data-testid="gitlab-diff-note-edit-input"]')).toHaveValue(
+      "Refused rewrite.",
+    );
+    await expect(thread.locator('[data-testid="gitlab-diff-comment-error"]')).toContainText(
+      "may not comment there",
+    );
+    await setMergeRequestControl(page, { clear: true });
+    await thread.locator('[data-testid="gitlab-diff-note-edit-cancel"]').click();
+  });
+
+  test("resolves a thread, folds it, and the reopen undoes both", async ({ page }) => {
+    await openHealthFile(page);
+    const thread = page.locator('[data-testid="gitlab-diff-thread"][data-lines="Lines 8–10"]');
+    await expect(thread).toHaveAttribute("data-open", "true");
+
+    // One press either way: each direction is the other's undo, so nothing asks twice.
+    const resolve = thread.locator('[data-testid="gitlab-diff-thread-resolve"]');
+    await expect(resolve).toHaveText("Resolve");
+    await resolve.click();
+
+    // A settled objection has no claim on the code: the thread says it is resolved and folds,
+    // which is what GitLab's own diff does.
+    await expect(thread).toHaveAttribute("data-resolved", "true");
+    await expect(thread).not.toHaveAttribute("data-open", "true");
+    await expect(thread.locator('[data-testid="gitlab-diff-thread-resolved"]')).toBeVisible();
+    await expect(thread.locator('[data-testid="gitlab-diff-note"]')).toHaveCount(0);
+    // The fold says how much is behind it — "resolved" alone does not say whether anybody
+    // answered — and the reader's own press opens it again.
+    await expect(thread.locator('[data-testid="gitlab-diff-thread-open"]')).toContainText(
+      "comments",
+    );
+    await thread.locator('[data-testid="gitlab-diff-thread-open"]').click();
+    await expect(thread.locator('[data-testid="gitlab-diff-note"]').first()).toBeVisible();
+
+    // And the undo is the same control, the other way round.
+    await expect(resolve).toHaveText("Reopen");
+    await resolve.click();
+    await expect(thread).not.toHaveAttribute("data-resolved", "true");
+    await expect(thread).toHaveAttribute("data-open", "true");
+  });
+
+  test("a comment written on a line is a THREAD, so it can be resolved at once", async ({
+    page,
+  }) => {
+    await openHealthFile(page);
+    // A comment on a diff line is filed as a discussion, which is what makes it resolvable —
+    // unlike a plain comment on the merge request, which GitLab answers 400 for.
+    await gutterLine(page, 5).click();
+    await page.locator('[data-testid="gitlab-diff-comment-input"]').fill("Worth settling.");
+    await page.locator('[data-testid="gitlab-diff-comment-send"]').click();
+
+    const thread = page.locator('[data-testid="gitlab-diff-thread"][data-lines="Line 5"]');
+    await expect(thread).toBeVisible();
+    await expect(thread.locator('[data-testid="gitlab-diff-thread-resolve"]')).toHaveText(
+      "Resolve",
+    );
+
+    // Put the fixture back: one mock process serves the whole run.
+    await thread.locator('[data-testid="gitlab-diff-note-delete"]').first().click();
+    await thread.locator('[data-testid="gitlab-diff-note-delete-confirm"]').first().click();
+    await expect(thread).toHaveCount(0);
   });
 
   test("offers no comment on a file with no line to point at", async ({ page }) => {

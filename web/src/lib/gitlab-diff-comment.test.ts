@@ -7,9 +7,12 @@ import {
   diffCommentsAvailable,
   diffThreadLabel,
   diffThreadsFor,
+  noteWasEdited,
   patchLineAt,
   patchLineIndex,
   patchLines,
+  threadResolution,
+  threadResolveAction,
   type DiffRefs,
 } from "./gitlab-diff-comment";
 import type { GitLabDiffFile } from "./gitlab-diff";
@@ -345,5 +348,96 @@ describe("diffThreadsFor", () => {
   it("is empty with no file and with no comments", () => {
     expect(diffThreadsFor(null, list())).toEqual([]);
     expect(diffThreadsFor(FILE, null)).toEqual([]);
+  });
+
+  it("carries whether GitLab would accept a resolution at all", () => {
+    // A standalone comment has no such state, and GitLab answers 400 for one — so the control
+    // is not drawn rather than drawn dead.
+    const threads = diffThreadsFor(
+      FILE,
+      list({
+        id: "plain",
+        individual_note: true,
+        notes: [note({ new_path: FILE.path, new_line: 9 }, { resolvable: false })],
+      }),
+    );
+    expect(threads[0]?.resolvable).toBe(false);
+    expect(threadResolveAction(threads[0]!)).toBeNull();
+  });
+});
+
+describe("threadResolution", () => {
+  const note = (over: Partial<GitLabNote> = {}): GitLabNote => ({
+    id: 1,
+    author: { name: "Ada Lovelace", username: "ada" },
+    body: "…",
+    system: false,
+    created_at: "2026-08-06T09:00:00.000Z",
+    resolvable: true,
+    resolved: false,
+    mine: false,
+    ...over,
+  });
+
+  it("is resolved only when every note that CAN be is", () => {
+    // GitLab marks the notes rather than the thread, so reading "resolved" off the first would
+    // call a thread settled while an objection under it still stands.
+    expect(threadResolution([note({ resolved: true }), note({ id: 2, resolved: false })])).toEqual({
+      resolvable: true,
+      resolved: false,
+    });
+    expect(threadResolution([note({ resolved: true }), note({ id: 2, resolved: true })])).toEqual({
+      resolvable: true,
+      resolved: true,
+    });
+    // A note that cannot be resolved never keeps a thread open.
+    expect(
+      threadResolution([note({ resolved: true }), note({ id: 2, resolvable: false })]),
+    ).toEqual({ resolvable: true, resolved: true });
+  });
+
+  it("is neither for a conversation GitLab does not resolve", () => {
+    expect(threadResolution([note({ resolvable: false })])).toEqual({
+      resolvable: false,
+      resolved: false,
+    });
+    expect(threadResolution([])).toEqual({ resolvable: false, resolved: false });
+  });
+
+  it("offers the direction the thread is not in, and says what it costs", () => {
+    const open = threadResolveAction({ resolvable: true, resolved: false })!;
+    expect(open.label).toBe("Resolve");
+    expect(open.resolved).toBe(true);
+    expect(open.hint).toContain("everybody watching");
+
+    const settled = threadResolveAction({ resolvable: true, resolved: true })!;
+    expect(settled.label).toBe("Reopen");
+    expect(settled.resolved).toBe(false);
+  });
+});
+
+describe("noteWasEdited", () => {
+  const at = (created: string, updated?: string): GitLabNote => ({
+    id: 1,
+    author: { name: "Ada Lovelace", username: "ada" },
+    body: "…",
+    system: false,
+    created_at: created,
+    updated_at: updated,
+    resolvable: false,
+    resolved: false,
+    mine: true,
+  });
+
+  it("is the two timestamps differing, and nothing else", () => {
+    expect(noteWasEdited(at("2026-08-06T09:00:00Z", "2026-08-06T09:30:00Z"))).toBe(true);
+    expect(noteWasEdited(at("2026-08-06T09:00:00Z", "2026-08-06T09:00:00Z"))).toBe(false);
+  });
+
+  it("says nothing when GitLab said nothing", () => {
+    // A mark nobody can justify is worse than no mark: an absent timestamp is "not known to be
+    // edited", never "edited".
+    expect(noteWasEdited(at("2026-08-06T09:00:00Z"))).toBe(false);
+    expect(noteWasEdited(at("", "2026-08-06T09:30:00Z"))).toBe(false);
   });
 });

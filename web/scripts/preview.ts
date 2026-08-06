@@ -2183,6 +2183,36 @@ if (import.meta.main) {
         await page.waitForTimeout(600);
         await shot(`${out}-posted-light.png`, '[data-testid="gitlab-diff-pane"]');
 
+        // What the reader may do to a thread afterwards: rewrite their own words, and settle it.
+        const thread = page.locator('[data-testid="gitlab-diff-thread"][data-lines="Lines 8–10"]');
+        await thread
+          .locator('[data-testid="gitlab-diff-note"][data-mine="true"]')
+          .first()
+          .locator('[data-testid="gitlab-diff-note-edit"]')
+          .click();
+        await page.waitForSelector('[data-testid="gitlab-diff-note-edit-input"]', {
+          timeout: 10_000,
+        });
+        await shot(`${out}-edit-light.png`, '[data-testid="gitlab-diff-thread"]');
+        await thread.locator('[data-testid="gitlab-diff-note-edit-cancel"]').click();
+
+        // RESOLVED, which folds the thread the way GitLab's own diff does: a settled objection
+        // has no claim on two centimetres of somebody's code.
+        await thread.locator('[data-testid="gitlab-diff-thread-resolve"]').click();
+        await page.waitForSelector(
+          '[data-testid="gitlab-diff-thread"][data-resolved="true"]:not([data-open])',
+          { timeout: 10_000 },
+        );
+        await shot(`${out}-resolved-light.png`, '[data-testid="gitlab-diff-pane"]');
+        await setTheme("dark");
+        await shot(`${out}-resolved-dark.png`, '[data-testid="gitlab-diff-thread"]');
+        await setTheme("light");
+        // …and the reopen is the same control the other way round.
+        await thread.locator('[data-testid="gitlab-diff-thread-resolve"]').click();
+        await page.waitForSelector('[data-testid="gitlab-diff-thread"][data-open="true"]', {
+          timeout: 10_000,
+        });
+
         // And on a PHONE, where the box shares the screen with the code it is about.
         await page.setViewportSize({ width: 390, height: 844 });
         await page.waitForTimeout(600);
@@ -2194,7 +2224,8 @@ if (import.meta.main) {
         console.log(
           `[preview] wrote ${out}-thread-{light,dark}.png, ${out}-affordance-light.png, ` +
             `${out}-line-light.png, ${out}-range-{light,dark}.png, ${out}-written-light.png, ` +
-            `${out}-posted-light.png and ${out}-mobile-light.png`,
+            `${out}-posted-light.png, ${out}-edit-light.png, ` +
+            `${out}-resolved-{light,dark}.png and ${out}-mobile-light.png`,
         );
       },
       { deviceScaleFactor: dpr },

@@ -284,6 +284,10 @@ export type DiffThread = {
   lineNumber: number;
   /** Every note of it, in GitLab's order — the conversation as it happened. */
   notes: GitLabNote[];
+  /** Whether GitLab would accept a resolution at all. A standalone comment carries no such
+   *  state and GitLab answers 400 for one, so the control is drawn only where it works —
+   *  the rule the Merge button already follows. */
+  resolvable: boolean;
   /** Whether a thread that CAN be resolved has been. A standalone comment is neither. */
   resolved: boolean;
   /** The first line, when the thread is about several — for the span it names. */
@@ -333,7 +337,7 @@ function diffThreadOf(file: GitLabDiffFile, discussion: GitLabDiscussion): DiffT
     side,
     lineNumber,
     notes,
-    resolved: notes.some((note) => note.resolvable && note.resolved),
+    ...threadResolution(notes),
     // A span whose start is the anchor is not a span. `??` is not enough here: GitLab sends a
     // range's start on the other side when the reader dragged across a removal.
     fromLine: fromLine != null && fromLine !== lineNumber ? fromLine : undefined,
@@ -357,6 +361,55 @@ export function diffThreadLabel(thread: DiffThread): string {
 export type DiffAnnotationCard =
   | { kind: "thread"; thread: DiffThread }
   | { kind: "composer"; target: DiffCommentTarget };
+
+/** Whether a comment has been rewritten since it was posted.
+ *
+ *  GitLab moves `updated_at` on an edit and on nothing else a reader can see, so the two
+ *  timestamps differing IS the fact. It is stated because the words on screen are then not the
+ *  words the thread replied to — the same honesty a Teams message's own "Edited" mark carries.
+ *  Absent or equal timestamps mean "not known to be edited", never "edited": a mark nobody can
+ *  justify is worse than no mark. */
+export function noteWasEdited(note: GitLabNote): boolean {
+  return !!note.updated_at && !!note.created_at && note.updated_at !== note.created_at;
+}
+
+/** Whether a conversation can be resolved, and whether it is.
+ *
+ *  GitLab marks the NOTES rather than the thread, so this is where the two are turned into one
+ *  answer: resolvABLE when any note is, RESOLVED when every one of those is. Reading "resolved"
+ *  off the first note would call a thread settled while an objection under it still stands.
+ *
+ *  It takes the notes rather than a thread, because the merge-request page's own comment list
+ *  asks the same question about the same discussions — one rule, so a thread cannot be
+ *  resolvable on one surface and not on the other. */
+export function threadResolution(notes: GitLabNote[]): { resolvable: boolean; resolved: boolean } {
+  const resolvable = notes.some((note) => note.resolvable);
+  return {
+    resolvable,
+    resolved: resolvable && notes.every((note) => !note.resolvable || note.resolved),
+  };
+}
+
+/** What the thread's own resolve control says, and what it would do.
+ *
+ *  `null` when GitLab would not accept either direction, which is what keeps the control off a
+ *  standalone comment rather than drawing one that earns a 400. */
+export function threadResolveAction(
+  thread: { resolvable: boolean; resolved: boolean },
+): { label: string; hint: string; resolved: boolean } | null {
+  if (!thread.resolvable) return null;
+  return thread.resolved
+    ? {
+        label: "Reopen",
+        hint: "Open this thread again — everybody watching the merge request is told",
+        resolved: false,
+      }
+    : {
+        label: "Resolve",
+        hint: "Mark this thread settled — everybody watching the merge request is told",
+        resolved: true,
+      };
+}
 
 /** Where an annotation for one PICKED range hangs: the anchor line, in the renderer's own
  *  words. A context line is drawn on the additions side — it has a row there in both layouts,

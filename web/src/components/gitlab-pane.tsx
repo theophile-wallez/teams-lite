@@ -8,6 +8,7 @@ import {
   CheckmarkCircle02Icon,
   ChevronLeftIcon,
   Delete02Icon,
+  Edit02Icon,
   GitMergeIcon,
   Link01Icon,
   Loading02Icon,
@@ -18,6 +19,7 @@ import {
   TimeQuarterIcon,
   XVariableCircleIcon,
 } from "@hugeicons/core-free-icons";
+import { noteWasEdited, threadResolution, threadResolveAction } from "~/lib/gitlab-diff-comment";
 import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
 import {
   DESCRIPTION_COLLAPSED_PX,
@@ -60,8 +62,9 @@ import { RichNodes } from "./rich-content";
 // two-column layout, the mobile full-screen page and the back button behave identically
 // whether the user is reading a chat, a mail or a merge request.
 //
-// Unlike those two, this surface WRITES: it merges, comments, approves and closes. Four
-// rules hold that apart from the read-only surfaces beside it, and each is load-bearing:
+// Unlike those two, this surface WRITES: it merges, comments, rewrites and deletes a comment,
+// resolves a thread, approves and closes. Four rules hold that apart from the read-only
+// surfaces beside it, and each is load-bearing:
 //
 //   - **Every write is one click of the user's, and MERGE asks twice.** The merge is the one
 //     action in this app that no later click takes back, so it arms a confirmation naming
@@ -933,9 +936,13 @@ function DiscussionThread(props: { discussion: GitLabDiscussion }) {
   const discussion = props.discussion;
   const controller = useController();
   const replyTo = useAppState((s) => s.gitlabReplyTo);
+  const acting = useAppState((s) => s.gitlabActing);
   const first = discussion.notes[0];
   const unresolved = discussion.notes.some((note) => note.resolvable && !note.resolved);
   const replying = replyTo === discussion.id;
+  // What the resolve control says here, through the same rule the diff page's card uses — so a
+  // thread cannot be resolvable on one surface and not on the other.
+  const resolve = threadResolveAction(threadResolution(discussion.notes));
 
   return (
     <div
@@ -963,14 +970,35 @@ function DiscussionThread(props: { discussion: GitLabDiscussion }) {
       ))}
 
       {!discussion.individual_note && (
-        <button
-          type="button"
-          data-testid="gitlab-reply"
-          onClick={() => controller.setGitLabReplyTo(replying ? null : discussion.id)}
-          className="self-start text-[11px] text-text-faint underline-offset-2 hover:text-text-dim hover:underline"
-        >
-          {replying ? "Cancel reply" : "Reply in this thread"}
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            data-testid="gitlab-reply"
+            onClick={() => controller.setGitLabReplyTo(replying ? null : discussion.id)}
+            className="text-[11px] text-text-faint underline-offset-2 hover:text-text-dim hover:underline"
+          >
+            {replying ? "Cancel reply" : "Reply in this thread"}
+          </button>
+          {/* The same resolution the diff page's own card offers, on the same thread — one
+              thread must not be two answers to "can I settle this?". One press either way,
+              because each direction is the other's undo. */}
+          {resolve && (
+            <button
+              type="button"
+              data-testid="gitlab-thread-resolve"
+              data-resolves={resolve.resolved ? "true" : "false"}
+              disabled={!!acting}
+              title={resolve.hint}
+              data-cuelume-press=""
+              onClick={() =>
+                void controller.setGitLabThreadResolved(discussion.id, resolve.resolved)
+              }
+              className="ml-auto shrink-0 rounded px-1.5 py-px text-[10px] text-text-faint transition-colors hover:bg-element hover:text-text-dim"
+            >
+              {resolve.label}
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -987,6 +1015,18 @@ function NoteBubble(props: { note: GitLabNote }) {
   const author = useMemo(() => personFace(note.author), [note.author]);
   const deleting = acting === `delete:${note.id}`;
   const [armed, setArmed] = useState(false);
+  // `null` while the comment is read; a string while it is being REWRITTEN, starting from the
+  // words that are there — an edit is a change to them and not a blank page.
+  const [draft, setDraft] = useState<string | null>(null);
+
+  const saveEdit = () => {
+    if (draft === null || draft.trim() === "" || acting) return;
+    // The box closes only when the rewrite LANDED: a refusal keeps the words, which is the
+    // contract every box in this app holds (see lib/send-failure.ts).
+    void controller.editGitLabComment(note.id, draft).then((edited) => {
+      if (edited) setDraft(null);
+    });
+  };
 
   return (
     <div data-testid="gitlab-note" data-note={note.id} data-mine={note.mine ? "true" : undefined}>
@@ -1015,38 +1055,112 @@ function NoteBubble(props: { note: GitLabNote }) {
           </span>
         )}
 
-        {/* A comment of the user's OWN can be deleted, and that undo is why commenting is
-            offered at all. It asks twice, like every other irreversible-looking action —
-            and the backend re-reads whose comment it is before it deletes. */}
-        {note.mine && (
-          <button
-            type="button"
-            data-testid={armed ? "gitlab-note-delete-confirm" : "gitlab-note-delete"}
-            disabled={!!acting}
-            aria-label={armed ? "Confirm deleting this comment" : "Delete this comment"}
-            onClick={() => {
-              if (!armed) {
-                setArmed(true);
-                return;
-              }
-              setArmed(false);
-              void controller.deleteGitLabComment(note.id);
-            }}
-            className={cn(
-              "ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-px text-[10px] transition-colors",
-              armed ? "bg-destructive/12 text-destructive" : "text-text-faint hover:text-text-dim",
-            )}
-          >
-            <HugeiconsIcon
-              icon={deleting ? Loading02Icon : Delete02Icon}
-              className={cn("size-3", deleting && "animate-spin")}
-              strokeWidth={1.8}
-            />
-            {armed ? "Delete for everybody" : "Delete"}
-          </button>
+        {/* The words on screen are not the words the thread replied to, so it says so. */}
+        {noteWasEdited(note) && (
+          <span data-testid="gitlab-note-edited" className="shrink-0 text-[10px] text-text-faint">
+            edited
+          </span>
+        )}
+
+        {/* What the user may do to their OWN comment: rewrite it, or take it back. Those two
+            undos are why commenting is offered at all. The deletion asks twice, like every
+            other irreversible-looking action; the edit asks once, because it can be edited
+            back. The backend re-reads whose comment it is before either. */}
+        {note.mine && draft === null && (
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              data-testid="gitlab-note-edit"
+              disabled={!!acting}
+              aria-label="Edit this comment"
+              title="Rewrite this comment — everybody watching sees the new words"
+              onClick={() => {
+                setArmed(false);
+                setDraft(note.body);
+              }}
+              className="flex items-center gap-1 rounded px-1.5 py-px text-[10px] text-text-faint transition-colors hover:text-text-dim"
+            >
+              <HugeiconsIcon icon={Edit02Icon} className="size-3" strokeWidth={1.8} />
+              Edit
+            </button>
+            <button
+              type="button"
+              data-testid={armed ? "gitlab-note-delete-confirm" : "gitlab-note-delete"}
+              disabled={!!acting}
+              aria-label={armed ? "Confirm deleting this comment" : "Delete this comment"}
+              onClick={() => {
+                if (!armed) {
+                  setArmed(true);
+                  return;
+                }
+                setArmed(false);
+                void controller.deleteGitLabComment(note.id);
+              }}
+              className={cn(
+                "flex items-center gap-1 rounded px-1.5 py-px text-[10px] transition-colors",
+                armed ? "bg-destructive/12 text-destructive" : "text-text-faint hover:text-text-dim",
+              )}
+            >
+              <HugeiconsIcon
+                icon={deleting ? Loading02Icon : Delete02Icon}
+                className={cn("size-3", deleting && "animate-spin")}
+                strokeWidth={1.8}
+              />
+              {armed ? "Delete for everybody" : "Delete"}
+            </button>
+          </div>
         )}
       </div>
-      <RichNodes nodes={nodes} className="pl-7 pt-1 text-[13px] leading-relaxed text-text-dim" />
+
+      {draft === null ? (
+        <RichNodes nodes={nodes} className="pl-7 pt-1 text-[13px] leading-relaxed text-text-dim" />
+      ) : (
+        <div className="flex flex-col gap-2 pl-7 pt-1">
+          <textarea
+            data-testid="gitlab-note-edit-input"
+            value={draft}
+            rows={3}
+            autoFocus
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              // ⌘↵ saves and Escape leaves the words as they were — the composer's own keys.
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                saveEdit();
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setDraft(null);
+              }
+            }}
+            className="w-full resize-y rounded-lg bg-background px-2.5 py-2 text-[13px] text-foreground ring-1 ring-inset ring-border-subtle outline-none focus:ring-primary/50"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="gitlab-note-edit-save"
+              disabled={draft.trim() === "" || !!acting}
+              data-cuelume-press=""
+              onClick={saveEdit}
+              className={cn(
+                "flex items-center gap-1.5 rounded-lg bg-primary px-2.5 py-1 text-[12px] font-medium text-primary-foreground transition-opacity",
+                (draft.trim() === "" || !!acting) && "opacity-50",
+              )}
+            >
+              <HugeiconsIcon icon={Edit02Icon} className="size-3.5" strokeWidth={1.8} />
+              Save
+            </button>
+            <button
+              type="button"
+              data-testid="gitlab-note-edit-cancel"
+              onClick={() => setDraft(null)}
+              className="text-[12px] text-text-faint underline-offset-2 hover:text-text-dim hover:underline"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
