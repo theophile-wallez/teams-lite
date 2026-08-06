@@ -12,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 /**
  * "Join here" — walk into a meeting with audio, in this app.
  *
- * In a calendar event it sits beside the link that opens real Teams, and it does not
+ * In a calendar event it sits beside the "Open in" that reaches real Teams, and it does not
  * replace it: this joins with a microphone and nothing else, so a meeting where the user
  * has to see a shared screen is still a meeting they open in Teams. Offering both is the
  * honest shape.

@@ -1144,12 +1144,37 @@ shows the stage and the tiles with nothing leaving the machine.
 
 ## Joining a meeting (the calendar stays read-only)
 
-A calendar event with a Teams link offers **Join here** beside the link that opens real
+A calendar event with a Teams link offers **Join here** beside the way out to real
 Teams (`web/src/components/meeting-join-button.tsx`) — and the HEADER of the meeting's own
 chat offers the same join, as the icon control every other chat's header carries (see
 § Audio calls for why one shape). A meeting is usually noticed in the chat list, which is
 why both surfaces exist. It joins with a microphone and nothing else, so a meeting whose
 point is a shared screen is still one to open in Teams.
+
+**The event's footer holds TWO controls at every width: this app's join, and "Open in"**
+(`OpenIn` in `web/src/components/calendar-event-details.tsx`). The panel is 320px beside its
+event and a phone's screen in a dialog, and "Join here" + "Open in Teams" + "Open in
+Outlook" is wider than either — on a phone the last of them fell off the panel's own clip,
+so the event offered a join and no way to Outlook at all. Four rules hold it, and
+`web/e2e/calendar.spec.ts` pins each:
+
+- **A menu holds a CHOICE, so it is drawn only where there is one.** An ordinary event
+  carries an Outlook link and no meeting, and it keeps the labelled link it always had: a
+  menu whose single row is already named by its trigger asks for a click to say nothing.
+- **The panel's width is its HOST's decision, never its content's.** What really clipped the
+  footer was one unbreakable word — Graph's `bodyPreview` opens with the 80-character rule of
+  underscores Outlook draws above a Teams block — widening a grid item whose `min-width` was
+  `auto`. `min-w-0` on the panel and `break-words` on the tenant's own text is the fix, and
+  the mock carries a real invitation body so the case cannot hide again.
+- **Escape closes the MENU, and the panel takes the next one.** `@radix-ui/react-popover`
+  ships its own copy of the dismissable-layer module, so on a wide screen the panel keeps a
+  layer stack of its own and cannot know a menu opened above it — its Escape handler closed
+  the whole panel from under the menu. The menu owns the key while it is open.
+- **A click on an EVENT is not a dismissal** (`onInteractOutside` in
+  `calendar-event-popover.tsx`), and the pane's background rule tests its own DOM subtree
+  (`calendar-pane.tsx`). React events bubble out of a portal, so that rule used to see the
+  clicks inside the panel and close it from a control the user had just pressed — and Radix's
+  own dismissal then raced the click that re-opened it.
 
 **Two ADDRESSES, because the user reaches a meeting from two places, and neither covers
 the other** (`meeting_address` in `src/bin/server.rs`, `MeetingAddress` in

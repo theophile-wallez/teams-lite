@@ -276,19 +276,87 @@ test.describe("calendar", () => {
     await expect(details.locator('[data-testid="calendar-event-when"]')).not.toBeEmpty();
     await expect(details.locator('[data-testid="calendar-event-attendees"] li')).toHaveCount(2);
 
+    // Both ways OUT of the app are behind one "Open in": three controls do not fit the
+    // panel at either of its widths, and what fell off the clip was the last of them.
+    await expect(details.locator('[data-testid="calendar-event-join"]')).toHaveCount(0);
+    await details.locator('[data-testid="calendar-event-open-in"]').click();
     // Joining and opening in Outlook are links the USER follows — never actions this
     // app takes on their behalf.
-    const join = details.locator('[data-testid="calendar-event-join"]');
+    const join = page.locator('[data-testid="calendar-event-join"]');
     await expect(join).toHaveAttribute("href", /teams\.microsoft\.com/);
     await expect(join).toHaveAttribute("target", "_blank");
-    await expect(details.locator('[data-testid="calendar-event-outlook"]')).toHaveAttribute(
+    await expect(page.locator('[data-testid="calendar-event-outlook"]')).toHaveAttribute(
       "href",
       /outlook\.office\.com/,
     );
+    // Escape closes the MENU and nothing else: the panel is the layer under it, and it
+    // takes the NEXT one. (It did take both — see the Escape handler in `OpenIn`.)
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[data-testid="calendar-event-join"]')).toHaveCount(0);
+    await expect(details).toBeVisible();
     await expect(details).toContainText("this app never writes");
 
     await page.keyboard.press("Escape");
     await expect(details).toHaveCount(0);
+  });
+
+  test("names the one way out when there is only one, and folds two into a menu", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+
+    // An ordinary event carries an Outlook link and no meeting. A menu holds a choice, so
+    // with one destination there is no menu: the link says where it goes.
+    await calendarEvent(page, "ev-overlap-b").click();
+    const details = page.locator('[data-testid="calendar-event-details"]');
+    await expect(details.locator('[data-testid="calendar-event-open-in"]')).toHaveCount(0);
+    const outlook = details.locator('[data-testid="calendar-event-outlook"]');
+    await expect(outlook).toHaveText("Open in Outlook");
+    await expect(outlook).toHaveAttribute("href", /outlook\.office\.com/);
+
+    // The meeting beside it has two, so it gets the menu instead.
+    await page.keyboard.press("Escape");
+    await calendarEvent(page, "ev-overlap-a").click();
+    await expect(details.locator('[data-testid="calendar-event-open-in"]')).toBeVisible();
+    await expect(details.locator('[data-testid="calendar-event-outlook"]')).toHaveCount(0);
+  });
+
+  test("keeps every control of the details inside the panel on a phone", async ({ page }) => {
+    // The bug this pins, on a real invitation and a real phone: Graph's `bodyPreview`
+    // opens with the 80-underscore rule Outlook draws above a Teams block, that rule is
+    // ONE word, and it widened the panel past the dialog that clips it. The footer's last
+    // control was outside the clip, so the event offered a join and no way to Outlook.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoApp(page);
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+
+    await calendarEvent(page, "ev-overlap-a").click();
+    const details = page.locator('[data-testid="calendar-event-details"]');
+    await expect(details).toBeVisible();
+    const panel = (await details.boundingBox())!;
+    // The panel itself is inside the phone, and every control it offers is inside the
+    // panel — measured, because a clipped control is visible to a locator and to nobody
+    // else.
+    expect(panel.x).toBeGreaterThanOrEqual(0);
+    expect(panel.x + panel.width).toBeLessThanOrEqual(390 + 1);
+    for (const testId of ["meeting-join-here", "calendar-event-open-in"]) {
+      const box = (await details.locator(`[data-testid="${testId}"]`).boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(panel.x - 1);
+      expect(box.x + box.width).toBeLessThanOrEqual(panel.x + panel.width + 1);
+    }
+    // And the invitation's own text wraps rather than scrolling sideways.
+    const overflow = await details.evaluate(
+      (node) => node.scrollWidth - node.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+
+    // The menu still reaches both destinations from there.
+    await details.locator('[data-testid="calendar-event-open-in"]').click();
+    await expect(page.locator('[data-testid="calendar-event-join"]')).toBeVisible();
+    await expect(page.locator('[data-testid="calendar-event-outlook"]')).toBeVisible();
   });
 
   test("adds the weekend, and week numbers, when the view menu says so", async ({ page }) => {

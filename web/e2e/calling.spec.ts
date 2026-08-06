@@ -281,11 +281,14 @@ test.describe("Joining a meeting", () => {
 
     const details = page.locator('[data-testid="calendar-event-details"]');
     await expect(details).toBeVisible();
-    // The link out is still there, and still a link.
-    await expect(details.locator('[data-testid="calendar-event-join"]')).toHaveAttribute(
+    // The link out is still there, and still a link — under the footer's "Open in", which
+    // is where every way out of this app lives now that the panel holds two controls.
+    await details.locator('[data-testid="calendar-event-open-in"]').click();
+    await expect(page.locator('[data-testid="calendar-event-join"]')).toHaveAttribute(
       "target",
       "_blank",
     );
+    await page.keyboard.press("Escape");
     // The in-app join exists, and is refused while calling is off — the one case the
     // user can fix.
     const join = details.locator('[data-testid="meeting-join-here"]');

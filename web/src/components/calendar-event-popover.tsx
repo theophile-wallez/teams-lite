@@ -91,6 +91,15 @@ export function CalendarEventPopover(props: {
         // The grid keeps the keyboard: arrows still page the calendar while a panel is
         // open, and Escape (which Radix handles) closes it.
         onOpenAutoFocus={(event) => event.preventDefault()}
+        // An interaction with an EVENT is not a dismissal. That click's own handler says
+        // which event the panel shows, so letting Radix close the panel in the same
+        // gesture is a race between the two — the dismissal landed after the click and
+        // closed the panel it had just re-opened. Which event is open is the pane's
+        // decision, and putting the panel away is its background rule (calendar-pane.tsx).
+        onInteractOutside={(event) => {
+          const target = event.target as HTMLElement | null;
+          if (target?.closest('[data-testid="calendar-event"]')) event.preventDefault();
+        }}
       >
         {panel}
       </PopoverContent>

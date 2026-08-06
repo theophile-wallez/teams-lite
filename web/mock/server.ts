@@ -6748,7 +6748,17 @@ function seedCalendar(): void {
   addMockEvent({
     id: "ev-overlap-a",
     subject: "Architecture guild",
-    preview: "Agenda: local-first storage, the write lock, and what we do about calling.",
+    // The body an invitation really carries: the organizer's own words, then the block
+    // Outlook writes under them — a rule of 80 underscores and a join link, each ONE
+    // unbreakable word. That is the fixture's whole point. Unbroken, the longest of them
+    // decides how wide the details panel is, which pushed the footer's last control off
+    // the panel's clip on a phone; the mock's short one-liners hid the case entirely.
+    preview:
+      "Agenda: local-first storage, the write lock, and what we do about calling.\n" +
+      "________________________________________________________________________________\n" +
+      "Microsoft Teams Need help? Join the meeting now " +
+      "https://teams.microsoft.com/meet/4155248391045?p=Xk7QvNbLd2RsTfWy " +
+      "Meeting ID: 415 524 839 1045 Passcode: q7Ldn2Rs",
     start: mockAt(0, 14, 0),
     end: mockAt(0, 15, 0),
     join_url: teamsJoin,

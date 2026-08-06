@@ -512,6 +512,18 @@ export async function openFirstEvent(page: Page): Promise<string> {
   return id;
 }
 
+/** Open one NAMED event's details panel, for a capture that needs the fixture's own
+ *  shape — a meeting with a join link and a real invitation body, which `.first()` is a
+ *  coin toss for. Same pane scoping and the same wait as {@link openFirstEvent}. */
+export async function openEvent(page: Page, id: string): Promise<void> {
+  await page
+    .locator(`[data-testid="calendar-pane"] [data-testid="calendar-event"][data-event-id="${id}"]`)
+    .first()
+    .click();
+  await page.waitForSelector('[data-testid="calendar-event-details"]');
+  await page.waitForTimeout(250);
+}
+
 /** Flip one of the view menu's display settings and close the menu again. */
 export async function toggleCalendarSetting(
   page: Page,
@@ -1871,8 +1883,17 @@ if (import.meta.main) {
       await page.setViewportSize({ width: 390, height: 844 });
       await page.waitForTimeout(400);
       await shot(`${out}-mobile-light.png`);
-      await openFirstEvent(page);
+      // A MEETING, by name. It is the event that carries both ways out of the app and a
+      // real invitation body, and it is the width the footer is hardest at — the two are
+      // the same fixture, and `.first()` is a Focus block that shows neither.
+      await openEvent(page, "ev-overlap-a");
       await shot(`${out}-mobile-details-light.png`);
+      // And its "Open in", open: the two destinations that used to be two more buttons.
+      await page.locator('[data-testid="calendar-event-open-in"]').click();
+      await page.waitForSelector('[data-testid="calendar-event-outlook"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-mobile-open-in-light.png`);
+      await page.keyboard.press("Escape");
       await page.keyboard.press("Escape");
       await page.setViewportSize(VIEWPORT);
       await page.waitForTimeout(400);
@@ -1882,7 +1903,7 @@ if (import.meta.main) {
       await shot(`${out}-week-dark.png`);
       console.log(
         `[preview] wrote ${out}-{week,week-all,details,month,day,agenda,weekends,mobile,` +
-          `mobile-details}-light.png and ${out}-{month,week}-dark.png`,
+          `mobile-details,mobile-open-in}-light.png and ${out}-{month,week}-dark.png`,
       );
     });
     process.exit(0);

@@ -1,9 +1,10 @@
-import { useMemo } from "react";
-import { HugeiconsIcon } from "@hugeicons/react";
+import { useEffect, useMemo, useState } from "react";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
   BellIcon,
   CalendarDaysIcon,
   Cancel01Icon,
+  ChevronDownIcon,
   Clock01Icon,
   ExternalLinkIcon,
   MapPinIcon,
@@ -24,6 +25,12 @@ import { formatEventTime, isDeclined } from "~/lib/calendar";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { MeetingJoinButton } from "./meeting-join-button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 
 // One event's details, as a self-contained panel. Its host decides where it appears:
 // a popover pinned to the event on a wide screen, a dialog on a narrow one (see
@@ -82,7 +89,14 @@ export function CalendarEventDetails(props: {
       data-testid="calendar-event-details"
       data-event-id={event.id}
       style={{ ["--event-color" as string]: props.color }}
-      className="calendar-event flex max-h-full flex-col"
+      // `min-w-0`, because the panel's width is its HOST's decision and never its
+      // content's. It is a grid item in the dialog, where `min-width: auto` let one
+      // unbreakable word widen the whole panel past the dialog that clips it — and what
+      // fell off the clip was the last thing in the footer, so the event kept its Join
+      // and lost the way out to Outlook. The word is real and arrives from the tenant on
+      // most invitations: Graph's `bodyPreview` opens with the 80-character rule of
+      // underscores Outlook draws above a Teams block (see `break-words` below).
+      className="calendar-event flex min-w-0 max-h-full flex-col"
     >
       <header className="flex shrink-0 items-start gap-2.5 border-b border-border-subtle p-3.5">
         <span
@@ -133,7 +147,7 @@ export function CalendarEventDetails(props: {
 
         {event.location && (
           <Row icon={<HugeiconsIcon icon={MapPinIcon} className="size-4" strokeWidth={1.6} />}>
-            <span className="text-[13px] text-text-dim">{event.location}</span>
+            <span className="break-words text-[13px] text-text-dim">{event.location}</span>
           </Row>
         )}
 
@@ -173,8 +187,12 @@ export function CalendarEventDetails(props: {
           </ul>
         )}
 
+        {/* `break-words`, because an invitation's body is the tenant's text and not
+            ours: the Teams block Outlook writes into it opens with a rule of 80
+            underscores and carries a join link with no spaces in it, and each is ONE
+            word. Broken, they wrap; unbroken, they decide how wide this panel is. */}
         {event.preview && (
-          <p className="max-h-32 overflow-y-auto whitespace-pre-line pl-7 text-[12px] leading-relaxed text-text-dim">
+          <p className="max-h-32 overflow-y-auto whitespace-pre-line break-words pl-7 text-[12px] leading-relaxed text-text-dim">
             {event.preview}
           </p>
         )}
@@ -182,44 +200,159 @@ export function CalendarEventDetails(props: {
 
       {/* The user's own clicks. Nothing here acts on the calendar. */}
       <footer className="flex shrink-0 flex-col gap-2 border-t border-border-subtle p-3.5">
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Join with audio, HERE. Beside the link that opens real Teams rather than
-              instead of it: this app carries a microphone and nothing else, so a meeting
-              with a shared screen is still one to open there. */}
+        <div className="flex items-center gap-2">
+          {/* Join with audio, HERE. Beside the way out to real Teams rather than instead
+              of it: this app carries a microphone and nothing else, so a meeting with a
+              shared screen is still one to open there. */}
           <MeetingJoinButton
             meeting={{ kind: "link", joinUrl: event.join_url }}
             subject={event.subject}
           />
-          {event.join_url && (
-            <a
-              data-testid="calendar-event-join"
-              href={event.join_url}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="flex items-center gap-1.5 rounded-lg bg-card px-3 py-1.5 text-[13px] text-text-dim shadow-chip transition-colors hover:text-foreground"
-            >
-              <HugeiconsIcon icon={Video01Icon} className="size-3.5" strokeWidth={1.8} />
-              Open in Teams
-            </a>
-          )}
-          {event.web_link && (
-            <a
-              data-testid="calendar-event-outlook"
-              href={event.web_link}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="flex items-center gap-1.5 rounded-lg bg-card px-3 py-1.5 text-[13px] text-text-dim shadow-chip transition-colors hover:text-foreground"
-            >
-              <HugeiconsIcon icon={ExternalLinkIcon} className="size-3.5" strokeWidth={1.8} />
-              Open in Outlook
-            </a>
-          )}
+          <OpenIn event={event} />
         </div>
         <p className="text-[11px] text-text-faint">
           Answering an invitation happens in Outlook — this app never writes.
         </p>
       </footer>
     </div>
+  );
+}
+
+/** One place this event exists OUTSIDE this app. Every one of them is a link the USER
+ *  follows — never something the app opens, prefetches or answers on their behalf. */
+type Destination = {
+  /** What the row says. The trigger above it already said "Open in". */
+  label: string;
+  href: string;
+  icon: IconSvgElement;
+  testId: string;
+};
+
+/** Teams first: it is the meeting, where Outlook is the invitation around it. */
+function destinationsOf(event: CalendarEvent): Destination[] {
+  const destinations: Destination[] = [];
+  if (event.join_url) {
+    destinations.push({
+      label: "Teams",
+      href: event.join_url,
+      icon: Video01Icon,
+      testId: "calendar-event-join",
+    });
+  }
+  if (event.web_link) {
+    destinations.push({
+      label: "Outlook",
+      href: event.web_link,
+      icon: ExternalLinkIcon,
+      testId: "calendar-event-outlook",
+    });
+  }
+  return destinations;
+}
+
+/** The box both shapes below wear — the chip the calendar's own view menu is drawn as,
+ *  so a way out of the app never reads as the primary action beside it. */
+const CHIP =
+  "flex shrink-0 items-center gap-1.5 rounded-lg bg-card px-3 py-1.5 text-[13px] text-text-dim shadow-chip transition-colors hover:text-foreground";
+
+/**
+ * "Open in" — every way out of this app, in ONE control.
+ *
+ * The panel is 320px beside its event, and a phone's screen in a dialog. "Join here" plus
+ * "Open in Teams" plus "Open in Outlook" is wider than either, and on a phone the last of
+ * them fell off the panel's own clip: the event kept the join and lost the way out. So the
+ * ways out collapse into one menu, and the footer holds two controls at every width — what
+ * THIS app does with the meeting, and what another app does with it.
+ *
+ * A menu holds a CHOICE, so it is drawn only where there is one. An ordinary event — an
+ * Outlook link and no meeting — keeps the labelled link it always was, because a menu
+ * whose single row is already named by its trigger asks for a click to say nothing.
+ */
+function OpenIn(props: { event: CalendarEvent }) {
+  const destinations = destinationsOf(props.event);
+  const [open, setOpen] = useState(false);
+
+  // ESCAPE IS OURS WHILE THE MENU IS OPEN, and it has to be. On a wide screen the panel
+  // under this menu is a Radix POPOVER, and `@radix-ui/react-popover` carries its own copy
+  // of the dismissable-layer module — so it keeps a layer stack of its own, cannot know a
+  // menu opened above it, and its document-capture Escape handler (registered first, when
+  // the panel opened) closed the whole PANEL from under the menu. One key, two layers.
+  //
+  // A capture listener on the WINDOW runs before every listener on the document, so this
+  // one closes the menu, stops the key there, and leaves the panel to the next Escape. It
+  // is the same on a phone, where the panel is a dialog that does share the stack: one
+  // spelling for both surfaces beats a behaviour that depends on the width.
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [open]);
+
+  const [first] = destinations;
+  if (!first) return null;
+
+  if (destinations.length === 1) {
+    return (
+      <a
+        data-testid={first.testId}
+        href={first.href}
+        target="_blank"
+        rel="noreferrer noopener"
+        className={CHIP}
+      >
+        <HugeiconsIcon icon={first.icon} className="size-3.5" strokeWidth={1.8} />
+        Open in {first.label}
+      </a>
+    );
+  }
+
+  return (
+    // Non-modal, for the reason `calendar-view-menu` gives: a modal Radix menu parks
+    // `pointer-events: none` on the body until its close animation ends, so the very next
+    // click — the one that puts this panel away — is swallowed.
+    <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
+      <DropdownMenuTrigger
+        data-testid="calendar-event-open-in"
+        aria-label="Open this event in another app"
+        className={cn(CHIP, "data-[state=open]:text-foreground")}
+      >
+        Open in
+        <HugeiconsIcon
+          icon={ChevronDownIcon}
+          className="size-3.5 text-text-faint"
+          strokeWidth={2}
+        />
+      </DropdownMenuTrigger>
+      {/* Upward: the trigger is the last row of the panel, so a menu below it would hang
+          off the panel's own foot. Radix flips it back down where there is no room. */}
+      <DropdownMenuContent side="top" align="start" className="min-w-[10rem]">
+        {destinations.map((destination) => (
+          <DropdownMenuItem key={destination.testId} asChild>
+            {/* The row IS the link, so a middle click and a long press behave the way
+                they do everywhere else, and Radix's own keyboard select follows it. */}
+            <a
+              data-testid={destination.testId}
+              href={destination.href}
+              target="_blank"
+              rel="noreferrer noopener"
+              aria-label={`Open in ${destination.label}`}
+            >
+              <HugeiconsIcon
+                icon={destination.icon}
+                className="size-4 text-text-faint"
+                strokeWidth={1.8}
+              />
+              {destination.label}
+            </a>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
