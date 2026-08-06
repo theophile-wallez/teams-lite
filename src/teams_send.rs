@@ -482,6 +482,12 @@ fn build_ams_create_body(conversation_id: &str, filename: &str) -> Value {
 /// it — the answer is one message edited as it grows, and an answer with paragraphs,
 /// lists and code blocks would otherwise arrive as one run-on line (a newline means
 /// nothing in HTML). `text` is escaped as before when it is `None`.
+///
+/// `mentions` is the same pair a send carries, and an edit needs it for the same reason:
+/// an agent's answer is a message whose body only exists after the edit, so a mention it
+/// writes can be attached nowhere else (see `agent_run_to_completion` in
+/// src/bin/server.rs). The rule that refuses a mention with no span in the body holds
+/// here too.
 pub async fn edit_message(
     http: &reqwest::Client,
     session: &Session,
@@ -489,9 +495,10 @@ pub async fn edit_message(
     message_id: &str,
     text: &str,
     content_html: Option<&str>,
+    mentions: &[Mention],
 ) -> Result<()> {
     let url = message_url(session, conversation_id, message_id)?;
-    let body = build_edit_body(text, content_html, &session.self_name);
+    let body = build_edit_body(text, content_html, &session.self_name, mentions)?;
 
     let resp = http
         .put(&url)
@@ -765,29 +772,41 @@ fn build_body(
     if let Some(image) = image {
         body["amsreferences"] = json!([image.id]);
     }
-    if !mentions.is_empty() {
-        let in_body = mention_span_itemids(&content);
-        for mention in mentions {
-            anyhow::ensure!(
-                in_body.contains(&mention.itemid),
-                "a mention has no span in the message body"
-            );
-        }
-        let list: Vec<Value> = mentions
-            .iter()
-            .map(|mention| {
-                json!({
-                    "@type": "http://schema.skype.com/Mention",
-                    "itemid": mention.itemid,
-                    "mri": mention.mri,
-                    "mentionType": "person",
-                    "displayName": mention.display_name,
-                })
-            })
-            .collect();
-        body["properties"] = json!({ "mentions": Value::Array(list).to_string() });
-    }
+    attach_mentions(&mut body, &content, mentions)?;
     Ok(body)
+}
+
+/// Write `properties.mentions` onto a message body, refusing a mention the body does not
+/// visibly name.
+///
+/// One function for both verbs: a send and an edit write the same message content, so a
+/// mention must mean the same thing on each and a rail that held on only one of them
+/// would be a rail an edit walks around.
+fn attach_mentions(body: &mut Value, content: &str, mentions: &[Mention]) -> Result<()> {
+    if mentions.is_empty() {
+        return Ok(());
+    }
+    let in_body = mention_span_itemids(content);
+    for mention in mentions {
+        anyhow::ensure!(
+            in_body.contains(&mention.itemid),
+            "a mention has no span in the message body"
+        );
+    }
+    let list: Vec<Value> = mentions
+        .iter()
+        .map(|mention| {
+            json!({
+                "@type": "http://schema.skype.com/Mention",
+                "itemid": mention.itemid,
+                "mri": mention.mri,
+                "mentionType": "person",
+                "displayName": mention.display_name,
+            })
+        })
+        .collect();
+    body["properties"] = json!({ "mentions": Value::Array(list).to_string() });
+    Ok(())
 }
 
 /// Build the edit request body (pure, unit-tested). There is no reply markup and —
@@ -798,16 +817,20 @@ fn build_edit_body(
     text: &str,
     content_html: Option<&str>,
     self_name: &str,
-) -> serde_json::Value {
-    json!({
-        "content": match content_html.map(trim_message_html).filter(|html| !html.is_empty()) {
-            Some(html) => html.to_string(),
-            None => escape_html(text.trim()),
-        },
+    mentions: &[Mention],
+) -> Result<serde_json::Value> {
+    let content = match content_html.map(trim_message_html).filter(|html| !html.is_empty()) {
+        Some(html) => html.to_string(),
+        None => escape_html(text.trim()),
+    };
+    let mut body = json!({
+        "content": content,
         "messagetype": "RichText/Html",
         "contenttype": "text",
         "imdisplayname": self_name,
-    })
+    });
+    attach_mentions(&mut body, &content, mentions)?;
+    Ok(body)
 }
 
 /// Current time in milliseconds since the Unix epoch — the timestamp Teams
@@ -1182,7 +1205,7 @@ mod tests {
 
     #[test]
     fn edit_body_has_no_client_message_id_and_escapes_content() {
-        let b = build_edit_body("updated <text> & more", None, "Théophile WALLEZ");
+        let b = build_edit_body("updated <text> & more", None, "Théophile WALLEZ", &[]).unwrap();
         assert!(b.get("clientmessageid").is_none());
         assert_eq!(b["content"], "updated &lt;text&gt; &amp; more");
         assert_eq!(b["messagetype"], "RichText/Html");
@@ -1193,10 +1216,10 @@ mod tests {
     #[test]
     fn edit_body_forwards_rich_content_html_verbatim() {
         // What the streamed agent reply rides on: an edit that keeps its markup.
-        let b = build_edit_body("ignored", Some("<p>an <code>answer</code></p>"), "Me");
+        let b = build_edit_body("ignored", Some("<p>an <code>answer</code></p>"), "Me", &[]).unwrap();
         assert_eq!(b["content"], "<p>an <code>answer</code></p>");
         // An empty html falls back to the escaped text, like a send does.
-        let b = build_edit_body("plain", Some(""), "Me");
+        let b = build_edit_body("plain", Some(""), "Me", &[]).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1208,7 +1231,7 @@ mod tests {
         let b = build_body("1", " \n\t ", "Me", None, None, None, &[]).unwrap();
         assert_eq!(b["content"], "");
         // An edit trims the same way.
-        let b = build_edit_body("\n updated \n", None, "Me");
+        let b = build_edit_body("\n updated \n", None, "Me", &[]).unwrap();
         assert_eq!(b["content"], "updated");
     }
 
@@ -1235,7 +1258,7 @@ mod tests {
     fn html_body_is_trimmed_on_send_and_on_edit() {
         let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), None, &[]).unwrap();
         assert_eq!(b["content"], "<p>hi</p>");
-        let b = build_edit_body("", Some(" <p>answer</p><p></p>"), "Me");
+        let b = build_edit_body("", Some(" <p>answer</p><p></p>"), "Me", &[]).unwrap();
         assert_eq!(b["content"], "<p>answer</p>");
         // An html body of spacers only falls back to the plain text, as an empty
         // one already did.
@@ -1311,6 +1334,27 @@ mod tests {
         let html = mention_html(0, "John");
         assert!(build_body("9", "", "Me", None, Some(&html), None, &mentions).is_err());
         assert!(build_body("9", "plain text", "Me", None, None, None, &mentions).is_err());
+    }
+
+    #[test]
+    fn an_edit_carries_its_mentions_exactly_as_a_send_does() {
+        // The agent's answer needs this: the body only exists after the edit, so a
+        // mention it writes can travel nowhere else.
+        let mentions = vec![Mention {
+            itemid: 0,
+            mri: "8:orgid:abc-123".into(),
+            display_name: "John".into(),
+        }];
+        let html = mention_html(0, "John");
+        let sent = build_body("9", "", "Me", None, Some(&html), None, &mentions).unwrap();
+        let edited = build_edit_body("", Some(&html), "Me", &mentions).unwrap();
+        assert_eq!(edited["properties"], sent["properties"]);
+        assert_eq!(edited["content"], html);
+        // And the same rail holds: an edit cannot notify somebody its body never names.
+        let invisible = vec![Mention { itemid: 7, ..mentions[0].clone() }];
+        assert!(build_edit_body("", Some(&html), "Me", &invisible).is_err());
+        // An edit with no mention carries no `properties`, as before.
+        assert!(build_edit_body("hi", None, "Me", &[]).unwrap().get("properties").is_none());
     }
 
     #[test]

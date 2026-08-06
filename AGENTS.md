@@ -339,6 +339,28 @@ Five more things worth knowing before touching it:
 - **The reply signs itself.** The message is posted under the user's name, so the last
   line says a machine wrote it (`— claude, via teams-lite`). That is honesty about
   authorship, not decoration.
+- **The answer can @mention the people of ITS OWN thread, and it is the one part of a
+  reply that acts on somebody.** A mention notifies the person it names, so the
+  capability is bounded by code and not by the prompt. The candidates are resolved once
+  per run by `thread_mentionable_people` — the same list the composer's "@" offers, so a
+  machine and a person can name exactly the same people — and travel two ways: into the
+  system prompt as the names that may be written (`agent_markdown::mention_note`, because
+  a capability nothing states is a capability nothing uses), and into the renderer as the
+  only names that resolve. Five rules, each pinned by a test in `src/agent_markdown.rs`:
+  - **A name the thread does not hold stays plain text.** `@Alan Turing` in a thread
+    without one is the words it is. A model cannot reach anybody the conversation does
+    not contain, and the roster module it comes from is GET-only by construction.
+  - **An ambiguous name names NOBODY.** Two Adas and a bare `@Ada` resolve to neither:
+    notifying the wrong colleague is worse than notifying none. `@[Ada Byron]` — the
+    explicit form — resolves it.
+  - **The span shows the name the THREAD holds**, never the text the model typed, so a
+    message can never show one person's name over another person's MRI.
+  - **A mention inside a code span is code.** An answer explaining the syntax must not
+    ping anybody while it does so.
+  - **The edit carries the pair.** An agent's body only exists after the edit, so
+    `build_edit_body` writes `properties.mentions` and refuses a mention with no span in
+    the body, exactly as a send does. Before this, an edit dropped `properties` entirely
+    and an answer's mention would have been blue text notifying nobody.
 - **A run is bounded by SILENCE, not by a clock.** A question that needs an hour of tool
   calls gets the hour: the child is killed when the CLI emits nothing at all for
   `agent::RUN_IDLE_TIMEOUT` (30 min), and the deadline moves forward on every event, so
@@ -1803,9 +1825,16 @@ mention whole. The chip is blue on a light blue wash in the composer and in the 
   (`8:…`, never a `19:` thread or a `28:` app), carry visible text, and have a span in
   the body. **A mention with no span is refused**, because `properties` is what
   notifies the person: a mention the reader cannot see is an invisible ping.
-- **The local agent never mentions anybody.** `agent_reply` passes an empty list, and
-  it must stay empty: a machine posting under the user's name must not be able to
-  notify a colleague.
+- **The local agent can mention the people of the thread it answers in, and nobody
+  else.** An answer writes `@[Full Name]` or `@Name`, and `agent_markdown` turns it into
+  the same pair a composer builds (see § The local agent). Four rails, all
+  in code: the candidates come from that conversation's own roster
+  (`thread_mentionable_people`, the very list the `members` RPC offers), a name that
+  resolves to nobody or to two people stays plain text, the span shows the name the
+  THREAD holds rather than the text the model typed, and a mention inside a code span is
+  code. The edit path carries `properties.mentions` for this — an agent's body only
+  exists after the edit, so a mention it writes can travel nowhere else — and
+  `build_edit_body` refuses a mention with no span exactly as a send does.
 - **The candidate list is READ-ONLY, and two sources feed it** (the `members` RPC,
   over `src/teams_members.rs`). `GET {chatService}/v1/threads/{id}?view=msnp24Equivalent`
   gives a chat's roster — verified; a **channel** answers with one member, us, so a

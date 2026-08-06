@@ -106,7 +106,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_models, agent_policy, auth, calendar, calling, mail, push, push_policy, retry,
+    agent, agent_markdown, agent_models, agent_policy, auth, calendar, calling, mail, push,
+    push_policy, retry,
     sender_icon, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
@@ -3263,7 +3264,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 let message_id = edit_id.clone();
                 let text = edit_text.clone();
                 async move {
-                    teams_send::edit_message(&http, &session, &conv, &message_id, &text, None).await
+                    // A plain edit of the user's OWN message carries no mention: the
+                    // RPC takes text, and a mention needs a span the text has no way to
+                    // hold. The composer's mentions travel on the send.
+                    teams_send::edit_message(
+                        &http, &session, &conv, &message_id, &text, None, &[],
+                    )
+                    .await
                 }
             })
             .await?;
@@ -3592,43 +3599,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // no suggestions still sends messages.
         "members" => {
             let conv = param_str(params, "conversation")?;
-            let self_mri = ctx.session().await?.self_mri.to_string();
-            let http = ctx.http.clone();
-            let roster_conv = conv.clone();
-            let roster = ctx
-                .retry_on_auth(move |session, _csa| {
-                    let http = http.clone();
-                    let conv = roster_conv.clone();
-                    async move { teams_members::fetch_thread_members(&http, &session, &conv).await }
-                })
-                .await
-                .unwrap_or_default();
-
-            let (mut people, unnamed) = {
-                let store = ctx.store()?;
-                let senders = store.thread_senders(&conv, MAX_MENTION_MEMBERS as i64)?;
-                mention_candidates(&roster, &senders, &self_mri)
-            };
-            if !unnamed.is_empty() {
-                let session = ctx.session().await?;
-                if let Ok(profile) = ctx.profile().await {
-                    if let Ok(names) =
-                        teams_profiles::fetch_names(&ctx.http, &session, &profile, &unnamed).await
-                    {
-                        for person in people.iter_mut() {
-                            if let Some(name) = names.get(&person.mri) {
-                                person.display_name = name.clone();
-                            }
-                        }
-                    }
-                }
-            }
-            // Somebody we cannot name is somebody the user cannot pick out of a list,
-            // so they are left out rather than offered as an MRI.
-            let members: Vec<Value> = people
+            let members: Vec<Value> = thread_mentionable_people(ctx, &conv)
+                .await?
                 .into_iter()
-                .filter(|person| !person.display_name.is_empty())
-                .map(|person| json!({ "mri": person.mri, "name": person.display_name }))
+                .map(|person| json!({ "mri": person.mri, "name": person.name }))
                 .collect();
             Ok(json!({ "members": members }))
         }
@@ -6485,6 +6459,72 @@ fn mention_candidates(
     (people, unnamed)
 }
 
+/// Everybody a message in one conversation may @mention, named, most relevant first.
+///
+/// A pure READ: the roster GET (src/teams_members.rs) and the short-profile lookup that
+/// names it, both of which this app already does elsewhere.
+///
+/// Two sources, because neither covers both thread kinds: the thread's roster (complete
+/// for a chat, just us for a channel) and everybody who has written in the conversation
+/// (the only source a channel has, and the one that carries the names we already hold).
+/// Whoever is still nameless — a chat member who never wrote — is resolved in one batch
+/// against the directory.
+///
+/// Best-effort by contract: a roster Teams refuses, or a directory that answers nothing,
+/// leaves a shorter list rather than an error, because a composer with no suggestions
+/// still sends messages.
+///
+/// Two callers, one list, and that is the point: it is what the `members` method offers
+/// the composer, and it is the ONLY set of people an agent's answer can mention (see
+/// [`agent_policy::reply_body`]). A machine and a person can name the same people.
+async fn thread_mentionable_people(
+    ctx: &Ctx,
+    conversation_id: &str,
+) -> Result<Vec<agent_markdown::Mentionable>> {
+    let self_mri = ctx.session().await?.self_mri.to_string();
+    let http = ctx.http.clone();
+    let roster_conv = conversation_id.to_string();
+    let roster = ctx
+        .retry_on_auth(move |session, _csa| {
+            let http = http.clone();
+            let conv = roster_conv.clone();
+            async move { teams_members::fetch_thread_members(&http, &session, &conv).await }
+        })
+        .await
+        .unwrap_or_default();
+
+    let (mut people, unnamed) = {
+        let store = ctx.store()?;
+        let senders = store.thread_senders(conversation_id, MAX_MENTION_MEMBERS as i64)?;
+        mention_candidates(&roster, &senders, &self_mri)
+    };
+    if !unnamed.is_empty() {
+        let session = ctx.session().await?;
+        if let Ok(profile) = ctx.profile().await {
+            if let Ok(names) =
+                teams_profiles::fetch_names(&ctx.http, &session, &profile, &unnamed).await
+            {
+                for person in people.iter_mut() {
+                    if let Some(name) = names.get(&person.mri) {
+                        person.display_name = name.clone();
+                    }
+                }
+            }
+        }
+    }
+    // Somebody we cannot name is somebody the user cannot pick out of a list, and
+    // somebody an answer cannot write either, so they are left out rather than offered
+    // as an MRI.
+    Ok(people
+        .into_iter()
+        .filter(|person| !person.display_name.is_empty())
+        .map(|person| agent_markdown::Mentionable {
+            mri: person.mri,
+            name: person.display_name,
+        })
+        .collect())
+}
+
 /// Serialize one message for the wire.
 ///
 /// `message_type` is the Teams `messagetype` verbatim (`Text`, `RichText/Html`,
@@ -7390,9 +7430,24 @@ fn agent_session_key(conversation_id: &str, backend: &str) -> String {
 async fn agent_reply(
     ctx: &Ctx,
     command: &agent_policy::Command,
-    request: agent::Request,
+    mut request: agent::Request,
 ) -> Result<()> {
     let backend = command.backend;
+    // Who the answer may @mention, resolved once for the whole run: the people of THIS
+    // thread and nobody else. The list does two jobs — it tells the model which names it
+    // can write (a capability nothing says is a capability nothing uses), and it is what
+    // every `@…` in the answer is matched against.
+    //
+    // Best-effort, like the composer's own list: a thread whose roster Teams refuses
+    // leaves an answer that mentions nobody, which is what every answer did before.
+    let people = thread_mentionable_people(ctx, &command.conversation_id)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("[agent] no mention list for {}: {e}", command.conversation_id);
+            Vec::new()
+        });
+    request.system_prompt.push_str(&agent_markdown::mention_note(&people));
+
     let placeholder = agent_policy::thinking_html(backend);
     let sent = agent_send(ctx, command, &placeholder).await?;
     if sent.id.is_empty() {
@@ -7429,7 +7484,7 @@ async fn agent_reply(
     }
     publish_agent_run_marker(&run);
 
-    let outcome = agent_run_to_completion(ctx, command, request, &sent.id).await;
+    let outcome = agent_run_to_completion(ctx, command, request, &sent.id, &people).await;
 
     // The run is over, whatever it produced. Clearing the record BEFORE the result is
     // propagated is deliberate: a failed final edit is a finished run whose answer was
@@ -7450,6 +7505,7 @@ async fn agent_run_to_completion(
     command: &agent_policy::Command,
     request: agent::Request,
     message_id: &str,
+    people: &[agent_markdown::Mentionable],
 ) -> Result<()> {
     let backend = command.backend;
 
@@ -7471,7 +7527,7 @@ async fn agent_run_to_completion(
         drop(progress);
         outcome
     };
-    let edits = agent_stream_edits(ctx, command, message_id, &mut watch_edits);
+    let edits = agent_stream_edits(ctx, command, message_id, &mut watch_edits, people);
     let local = agent_stream_local(ctx, command, message_id, &mut watch_local);
     let alive = agent_run_heartbeat(ctx, &command.conversation_id, message_id, &mut watch_alive);
     // All four at once: the child's output drives the watch channel, and the three
@@ -7481,13 +7537,13 @@ async fn agent_run_to_completion(
         eprintln!("[agent] a progress edit failed (the answer still lands): {e}");
     }
 
-    let (final_html, session_id, cost) = match &outcome {
+    let (final_body, session_id, cost) = match &outcome {
         Ok(outcome) => (
-            agent_policy::reply_html(backend, &outcome.text, true),
+            agent_policy::reply_body(backend, &outcome.text, true, people),
             outcome.session_id.clone(),
             outcome.cost_usd,
         ),
-        Err(e) => (agent_policy::failure_html(backend, &e.to_string()), None, None),
+        Err(e) => (agent_policy::failure_body(backend, &e.to_string()), None, None),
     };
     // The answer lands in the thread, and only THEN does the stream say it is over.
     //
@@ -7496,7 +7552,7 @@ async fn agent_run_to_completion(
     // web/src/lib/store.ts). If "done" arrived first, the message it fell back to would
     // still be the second-to-last edit — so the answer would visibly lose its last
     // sentence for as long as it takes Teams to echo the final one back.
-    let edited = agent_edit(ctx, &command.conversation_id, message_id, &final_html).await;
+    let edited = agent_edit(ctx, &command.conversation_id, message_id, &final_body).await;
     // The run's own last state, with the authoritative answer over it. The transcript
     // travels on the terminal frame too: it is an overlay on the message, so this is the
     // last frame that can carry it, and a `done` that dropped it would blank the
@@ -7624,8 +7680,8 @@ async fn repair_abandoned_agent_runs(ctx: &Ctx) {
         }
         let backend =
             agent_policy::backend_named(&run.backend).unwrap_or(&agent_policy::BACKENDS[0]);
-        let html = agent_policy::interrupted_html(backend);
-        if let Err(e) = agent_edit(ctx, &run.conversation_id, &run.message_id, &html).await {
+        let body = agent_policy::interrupted_body(backend);
+        if let Err(e) = agent_edit(ctx, &run.conversation_id, &run.message_id, &body).await {
             // Put it back rather than lose it: a transient 429 or a re-locked broker
             // must not be the reason a message stays "thinking…" for good.
             eprintln!("[agent] could not close the run on {}: {e:#}", run.message_id);
@@ -7668,6 +7724,7 @@ async fn agent_stream_edits(
     command: &agent_policy::Command,
     message_id: &str,
     progress: &mut tokio::sync::watch::Receiver<agent::Progress>,
+    people: &[agent_markdown::Mentionable],
 ) -> Result<()> {
     let mut edits = 0;
     let mut posted = String::new();
@@ -7682,8 +7739,8 @@ async fn agent_stream_edits(
         if text.trim().is_empty() || text == posted {
             continue;
         }
-        let html = agent_policy::reply_html(command.backend, &text, false);
-        agent_edit(ctx, &command.conversation_id, message_id, &html).await?;
+        let body = agent_policy::reply_body(command.backend, &text, false, people);
+        agent_edit(ctx, &command.conversation_id, message_id, &body).await?;
         posted = text;
         edits += 1;
         // Rate limit AFTER the edit, so the first piece of the answer appears as soon
@@ -7865,20 +7922,28 @@ async fn agent_edit(
     ctx: &Ctx,
     conversation_id: &str,
     message_id: &str,
-    html: &str,
+    body: &agent_policy::ReplyBody,
 ) -> Result<()> {
     let http = ctx.http.clone();
     let conversation = conversation_id.to_string();
     let message_id = message_id.to_string();
-    let html = html.to_string();
+    let body = body.clone();
     ctx.retry_on_auth(move |session, _csa| {
         let http = http.clone();
         let conversation = conversation.clone();
         let message_id = message_id.clone();
-        let html = html.clone();
+        let body = body.clone();
         async move {
-            teams_send::edit_message(&http, &session, &conversation, &message_id, "", Some(&html))
-                .await
+            teams_send::edit_message(
+                &http,
+                &session,
+                &conversation,
+                &message_id,
+                "",
+                Some(&body.html),
+                &body.mentions,
+            )
+            .await
         }
     })
     .await

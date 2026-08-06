@@ -594,21 +594,57 @@ pub fn thinking_html(backend: &Backend) -> String {
 /// their colleagues read it, so it says a machine wrote it — while streaming ("is
 /// writing…", which doubles as the progress indicator) and when finished.
 pub fn reply_html(backend: &Backend, answer: &str, done: bool) -> String {
+    reply_body(backend, answer, done, &[]).html
+}
+
+/// One rendered answer: the body, and the people its mention spans name.
+///
+/// The two travel together because the send path needs both and refuses one without the
+/// other — a `properties.mentions` entry with no span in the body is an invisible ping,
+/// and a span with no entry is blue text that notifies nobody (see `build_body` in
+/// src/teams_send.rs).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReplyBody {
+    pub html: String,
+    pub mentions: Vec<crate::teams_send::Mention>,
+}
+
+/// [`reply_html`], with the people this answer is allowed to @mention.
+///
+/// `people` comes from the thread the answer is posted in, so an answer can name a
+/// member of that conversation and nobody else (see [`crate::agent_markdown`]).
+pub fn reply_body(
+    backend: &Backend,
+    answer: &str,
+    done: bool,
+    people: &[crate::agent_markdown::Mentionable],
+) -> ReplyBody {
     let (answer, cut) = truncate_answer(answer);
-    let mut html = crate::agent_markdown::to_html(&answer);
+    let (mut html, mentions) = crate::agent_markdown::to_html_with_mentions(&answer, people);
     if cut {
         html.push_str("<p><em>(cut short — the answer was longer than a chat message)</em></p>");
     }
     // Nothing to show yet: one line, not a "writing…" footer under an empty body.
     if html.is_empty() {
-        return thinking_html(backend);
+        return ReplyBody { html: thinking_html(backend), mentions: Vec::new() };
     }
     let footer = if done {
         format!("<p><em>— {}, via teams-lite</em></p>", backend.name)
     } else {
         format!("<p><em>{} is writing…</em></p>", backend.name)
     };
-    format!("{html}{footer}")
+    ReplyBody { html: format!("{html}{footer}"), mentions }
+}
+
+/// [`failure_html`] as a body an edit can carry. A failure mentions nobody: nothing the
+/// agent wrote survives, so there is no name in it to resolve.
+pub fn failure_body(backend: &Backend, reason: &str) -> ReplyBody {
+    ReplyBody { html: failure_html(backend, reason), mentions: Vec::new() }
+}
+
+/// [`interrupted_html`] as a body an edit can carry. See [`failure_body`].
+pub fn interrupted_body(backend: &Backend) -> ReplyBody {
+    ReplyBody { html: interrupted_html(backend), mentions: Vec::new() }
 }
 
 /// The message body when the run failed. The reason is short and blames the runner,
@@ -1037,6 +1073,36 @@ mod tests {
     #[test]
     fn a_reply_with_no_answer_yet_shows_the_thinking_line() {
         assert_eq!(reply_html(&BACKENDS[0], "", false), thinking_html(&BACKENDS[0]));
+    }
+
+    #[test]
+    fn a_reply_mentions_the_thread_and_the_pair_it_sends_agrees() {
+        let people = vec![crate::agent_markdown::Mentionable {
+            mri: "8:orgid:ada".into(),
+            name: "Ada Lovelace".into(),
+        }];
+        let body = reply_body(&BACKENDS[0], "@Ada it is done", true, &people);
+        assert_eq!(body.mentions.len(), 1);
+        assert_eq!(body.mentions[0].mri, "8:orgid:ada");
+        // The half in the body and the half in `properties` name the same indexes, which
+        // is what the send path refuses to post without.
+        assert_eq!(
+            crate::teams_send::mention_span_itemids(&body.html),
+            vec![body.mentions[0].itemid]
+        );
+        // The footer still says a machine wrote it.
+        assert!(body.html.ends_with("<p><em>— claude, via teams-lite</em></p>"));
+        // Nobody supplied: an answer writing `@Ada` mentions nobody at all.
+        let alone = reply_body(&BACKENDS[0], "@Ada it is done", true, &[]);
+        assert!(alone.mentions.is_empty());
+        assert!(alone.html.contains("@Ada it is done"));
+    }
+
+    #[test]
+    fn a_failed_or_interrupted_run_mentions_nobody() {
+        assert!(failure_body(&BACKENDS[0], "boom").mentions.is_empty());
+        assert!(interrupted_body(&BACKENDS[0]).mentions.is_empty());
+        assert_eq!(interrupted_body(&BACKENDS[0]).html, interrupted_html(&BACKENDS[0]));
     }
 
     #[test]

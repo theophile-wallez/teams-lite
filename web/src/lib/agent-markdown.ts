@@ -20,6 +20,14 @@
  *   emphasis.
  * - Every piece of text is escaped BEFORE any markup is added, so an answer can never
  *   inject markup into the body.
+ *
+ * ONE deliberate divergence: the Rust module also turns `@Name` into a Teams @mention
+ * for the people of the thread, and this port does not. A mention is a PAIR — a span
+ * carrying an index, and a list saying who that index names — and the second half exists
+ * only on the posted message, which the overlay does not have. So `@Ada` reads as the
+ * text it is while the answer streams and becomes a chip the moment the message takes its
+ * body back. Drawing a chip here would mean drawing one this page cannot resolve, which
+ * is the mistake `mergeAdjacentMentions` refuses to make for inbound messages too.
  */
 
 /** Escape the five characters that matter in HTML text. */

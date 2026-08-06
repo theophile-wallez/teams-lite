@@ -122,9 +122,13 @@ async fn main() -> Result<()> {
             if current.text.trim().is_empty() || current.text == posted {
                 continue;
             }
+            // `reply_html` mentions nobody, which is what this probe wants: it posts
+            // to the sandbox channel and a mention notifies a real person.
             let html = agent_policy::reply_html(backend, &current.text, false);
-            teams_send::edit_message(&http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html))
-                .await?;
+            teams_send::edit_message(
+                &http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html), &[],
+            )
+            .await?;
             posted = current.text;
             edits += 1;
             println!("edit {edits}: {} chars", posted.chars().count());
@@ -139,7 +143,7 @@ async fn main() -> Result<()> {
         Ok(outcome) => agent_policy::reply_html(backend, &outcome.text, true),
         Err(e) => agent_policy::failure_html(backend, &e.to_string()),
     };
-    teams_send::edit_message(&http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html))
+    teams_send::edit_message(&http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html), &[])
         .await
         .context("post the final answer")?;
 
