@@ -4250,6 +4250,16 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // the service has done both for other negotiations. Handing back whichever is
             // here lets the page apply it without waiting for a frame that may not come.
             let answer = calling::media_answer_from_frame(&response).map(|m| m.blob);
+            // The answer that came WITH the response, stated the same way as the one that
+            // arrives on a frame: which sections the service took and which it refused. A
+            // rejected one is the difference between a screen the meeting shows and a
+            // capture the page has to release, and it was invisible here.
+            if let Some(answer) = &answer {
+                eprintln!(
+                    "[calling] the offer was answered at once: {}",
+                    calling::media_sections(answer).join(" | ")
+                );
+            }
             Ok(json!({ "call_id": call_id, "answer_sdp": answer }))
         }
 
@@ -8451,6 +8461,14 @@ impl Ctx {
                     None => return,
                 }
             };
+            // What CAME BACK, section by section. The offer's modalities were already
+            // logged and they say what this machine asked for; only the answer says what
+            // the service granted — and a screen share that was rejected mid-call left
+            // nothing on this machine to read (`calling::media_sections`).
+            eprintln!(
+                "[calling] a media answer arrived: {}",
+                calling::media_sections(&answer.blob).join(" | ")
+            );
             self.emit(
                 "call_media",
                 json!({ "call_id": id, "sdp": answer.blob, "kind": "answer" }),

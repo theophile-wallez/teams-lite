@@ -353,6 +353,37 @@ export async function dropCallCapture(page: Page, kind: "camera" | "screen"): Pr
   expect(res.ok()).toBeTruthy();
 }
 
+/**
+ * Have the meeting REFUSE a capture the page just turned on: the answer to our own offer,
+ * with the section rejected.
+ *
+ * It is the state a screen share really met on this tenant, and it is not a drop — nothing
+ * was ever shown. The app used to say it was, so the user was told to share again and met the
+ * same refusal in the same second, which is what this pins.
+ */
+export async function rejectCallCapture(page: Page, kind: "camera" | "screen"): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_media", reject: kind },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Answer an offer of the page's in a way no browser can read — the third way a capture ends
+ * with no click behind it, and the one that used to cost the whole call.
+ *
+ * It arms nothing: the answer goes out on the live call at once. What it exercises is the
+ * reaction that was WRONG — this app hung up, so a user who shared their screen lost the
+ * person they were talking to seconds later — against the rule the surface is built on: a
+ * failure in a renegotiation costs one picture and never the call.
+ */
+export async function answerCallMediaUnreadably(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_media", unreadable: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Arm (or clear) a pending update in the mock, through its gated test hook; the mock
  *  then broadcasts `update_available`, mirroring the Rust backend's own event.
  *

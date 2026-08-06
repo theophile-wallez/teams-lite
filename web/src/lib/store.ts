@@ -104,7 +104,12 @@ import {
   type RemoteVideo,
   type SendKind,
 } from "./call-media";
-import { callFailureMessage, captureDroppedMessage } from "./call-failure";
+import {
+  callFailureMessage,
+  captureDroppedMessage,
+  captureRefusedMessage,
+  renegotiationRefusedMessage,
+} from "./call-failure";
 import {
   isNotMerged,
   mergeRequestId,
@@ -1732,11 +1737,40 @@ export class TeamsController {
     try {
       await media.setRemoteAnswer(signal.sdp);
     } catch (error) {
-      // A rejected answer means this call will never carry audio, so end it rather than
-      // leaving a bar that says "connecting" for good.
       console.error("[call] the answer could not be applied", error);
+      // WHICH answer it was decides everything. THE answer is what makes a call a call: with
+      // it refused nothing will ever be heard, so the call goes rather than leaving a bar
+      // that says "connecting" for good. A LATER one answers a renegotiation of OURS — a
+      // camera, a screen — on a call that is already carrying audio, and ending that call is
+      // exactly what this app did to a real user seconds after they shared their screen.
+      // Losing it costs the picture and nothing else.
+      if (media.negotiated) {
+        await this.abandonCallRenegotiation();
+        return;
+      }
       await this.hangUpCall();
     }
+  }
+
+  /**
+   * Take back an offer of ours the meeting answered in a way this browser cannot read.
+   *
+   * The offer will never be completed, so the connection is rolled back to where it stood
+   * before the attempt and every capture it carried is released — the same shape a capture the
+   * meeting DROPPED takes, and for the same reason: a camera whose light is on while nothing
+   * goes out is the worst state this surface has. The service is told with one offer, and a
+   * failure to tell it changes nothing that can be done here.
+   */
+  private async abandonCallRenegotiation(): Promise<void> {
+    const media = this.callMedia;
+    if (!media) return;
+    const { released, offer } = await media.abandonLocalOffer();
+    // The service is told FIRST, and the sentence is said after it: both speak through one
+    // notice, and this is the one that has to survive — a report that the take-back could not
+    // be posted would replace "you are still in the call" with a fact the user cannot act on.
+    // Swallowed for the same reason: there is nothing left to try.
+    if (offer) await this.publishSending(offer, "take back a media offer").catch(() => {});
+    this.reportCall(renegotiationRefusedMessage(released), "error");
   }
 
   /**
@@ -1852,7 +1886,7 @@ export class TeamsController {
     // mock is where this surface is reviewed, and a bridge the mock path skipped is a rule no
     // spec could ever hold the app to.
     const media = this.get().backendIsMock
-      ? simulatedCallMedia()
+      ? simulatedCallMedia({ answering: options.remoteOffer !== undefined })
       : await startCallMedia({
           iceServers: options.iceServers,
           remoteOffer: options.remoteOffer,
@@ -1884,10 +1918,12 @@ export class TeamsController {
     // section the MEETING dropped. Either way the service has to be told from here, or it
     // keeps a section that carries no picture while the button still says on.
     media.onSendingEnded = (kind, offer, reason) => {
-      // The dropped one is the one the user has to be told about: they turned the capture on,
-      // nothing here took it off, and the picture stopping is all they would otherwise see.
-      // The browser's own bar needs no word — they pressed it themselves.
+      // Both endings the user did not ask for are told, and they are told DIFFERENTLY: a
+      // capture the meeting accepted and then took away is worth turning on again, and one it
+      // never accepted is not — that advice sent a real user straight back into the same
+      // refusal. The browser's own bar needs no word: they pressed it themselves.
       if (reason === "dropped") this.reportCall(captureDroppedMessage(kind), "error");
+      if (reason === "refused") this.reportCall(captureRefusedMessage(kind), "error");
       void this.publishSending(offer, `stop ${kind}`);
     };
     return media;

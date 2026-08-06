@@ -77,7 +77,17 @@ export type SendingEndedReason =
   | "browser"
   /** The far side DROPPED the section. The user turned the capture on, nothing on this page
    *  took it off, and the only thing that can tell them is a sentence. */
-  | "dropped";
+  | "dropped"
+  /**
+   * The far side never accepted the section at all: it was rejected in the very answer to
+   * the offer that added it, so the picture never went anywhere.
+   *
+   * Told apart from a drop because the two need OPPOSITE advice, and this app gave the
+   * wrong one to a real user: a share the meeting refused was reported as one it had
+   * dropped, so they were told to share it again — which failed in exactly the same way,
+   * in the same second. A capture that never worked is not a capture that stopped.
+   */
+  | "refused";
 
 /** What one of those looks like locally, for the preview the sender sees. */
 export type LocalVideo = {
@@ -109,6 +119,32 @@ export type CallMedia = {
   readonly localSdp: string;
   /** Apply the far side's SDP answer (outgoing calls only). */
   setRemoteAnswer(sdp: string): Promise<void>;
+  /**
+   * Whether the first offer/answer exchange has completed, so this connection is carrying
+   * media.
+   *
+   * It is what tells THE answer — the one that makes a call a call — from the answer to a
+   * renegotiation of ours, which is a camera or a screen on a call that is already up. The
+   * two arrive on the same frame and need opposite reactions: without the first, nothing
+   * will ever be heard and the call is over; without a later one, one picture is missing
+   * and the call is untouched. Read off the connection itself rather than counted, because
+   * a count would have to be kept in step with every path that applies a description.
+   */
+  readonly negotiated: boolean;
+  /**
+   * Take back an offer of ours the far side answered in a way this browser cannot read, and
+   * release what that offer was carrying.
+   *
+   * The answer is gone, so the offer will never be completed: the connection is rolled back
+   * to the state it was in before the attempt — otherwise it sits in `have-local-offer` and
+   * every later renegotiation is rolled back under it by the browser instead — and every
+   * capture is released, because a camera whose light is on while nothing is sent is the
+   * failure {@link onSendingEnded} already exists for.
+   *
+   * Returns the kinds it released and the offer that says what this side sends now, for the
+   * caller to post: only the caller can reach the backend.
+   */
+  abandonLocalOffer(): Promise<{ released: SendKind[]; offer: string | null }>;
   /**
    * Answer a media offer the service made mid-call, and return the answer to post back.
    *
@@ -445,6 +481,10 @@ class LocalSenders {
    *  its LABEL survives: the section is still in the SDP, and relabelling it would describe
    *  a different stream on a section the far side already knows. */
   private idle = new Map<SendKind, RTCRtpTransceiver>();
+  /** The kinds whose section the far side has ACCEPTED at least once, so a capture that
+   *  really carried a picture can be told from one that never did. Cleared per kind when it
+   *  is switched off, because the next section is negotiated again from nothing. */
+  private accepted = new Set<SendKind>();
   onChange?: (videos: LocalVideo[]) => void;
   /** Called when the BROWSER ends a capture by itself — the "Stop sharing" bar it draws over
    *  every screen share, which no click of ours passes through. */
@@ -452,6 +492,10 @@ class LocalSenders {
 
   async start(pc: RTCPeerConnection, kind: SendKind): Promise<void> {
     const stream = await openCapture(kind);
+    // A capture that is starting has not been accepted by anybody yet, even when it takes
+    // back a section the far side once agreed to: the direction changed, so the section is
+    // negotiated again and the answer to THAT is what says whether a picture goes out.
+    this.accepted.delete(kind);
     const [track] = stream.getVideoTracks();
     if (!track) throw new CaptureUnavailableError(kind, new Error("the capture had no video"));
     // The browser's own bar stops a share without telling this app anything. Without this the
@@ -488,6 +532,26 @@ class LocalSenders {
     return [...this.live]
       .filter(([, held]) => sectionIsStopped(held.transceiver))
       .map(([kind]) => kind);
+  }
+
+  /**
+   * Write down which sections the far side has ACCEPTED, from the description just applied.
+   *
+   * `currentDirection` is the negotiated direction, so it says `sendonly` on a section the
+   * far side agreed to receive and `stopped` on one it threw out. It has to be read at this
+   * moment: a section rejected LATER is stopped too, and by then the two cannot be told
+   * apart — which is the whole difference between a share that stopped and a share that
+   * never worked.
+   */
+  noteAccepted(): void {
+    for (const [kind, held] of this.live) {
+      if (held.transceiver.currentDirection === "sendonly") this.accepted.add(kind);
+    }
+  }
+
+  /** Whether a section of this kind has ever carried a picture to the far side. */
+  wasAccepted(kind: SendKind): boolean {
+    return this.accepted.has(kind);
   }
 
   /** Stop one, and say whether there was anything to stop. */
@@ -540,6 +604,7 @@ class LocalSenders {
     }
     this.live.clear();
     this.idle.clear();
+    this.accepted.clear();
   }
 }
 
@@ -635,7 +700,37 @@ function liveCallMedia(
       // the answer arrived twice, and applying it again rolls the call back.
       if (pc.signalingState !== "have-local-offer") return;
       await pc.setRemoteDescription({ type: "answer", sdp: fromMsSdp(sdp) });
+      senders.noteAccepted();
       releaseDroppedSections();
+    },
+    get negotiated() {
+      // `currentRemoteDescription` is the last description that was ANSWERED — the offer
+      // this side answered when it took the call, or the answer it applied when it placed
+      // one. It is null until one of those happened and it never goes back to null, which
+      // is exactly the question `negotiated` asks.
+      return pc.currentRemoteDescription !== null;
+    },
+    async abandonLocalOffer(): Promise<{ released: SendKind[]; offer: string | null }> {
+      if (stopped) return { released: [], offer: null };
+      // The rollback is queued with every other description change, because it is one: run
+      // beside a renegotiation being applied it would be the glare the queue exists for.
+      const run = negotiating.then(async () => {
+        // Only an offer of OURS can be taken back, and only while it is still pending. The
+        // answer may have arrived twice, and the second one finds nothing to roll back.
+        if (pc.signalingState === "have-local-offer") {
+          await pc.setLocalDescription({ type: "rollback" });
+        }
+      });
+      negotiating = run.catch(() => {});
+      // A rollback that fails changes nothing about what must happen next: the captures are
+      // released either way, or the user is left with a camera light and no picture going out.
+      await run.catch(() => {});
+      const released = senders.kinds;
+      for (const kind of released) await senders.stop(kind);
+      // An offer carrying nothing of ours is one the far side asked for. There is nothing to
+      // take back from the service and nothing for the caller to post.
+      if (released.length === 0) return { released, offer: null };
+      return { released, offer: await offerLocalMedia() };
     },
     async answerRemoteOffer(sdp: string): Promise<string | null> {
       const run = negotiating.then(async () => {
@@ -657,6 +752,7 @@ function liveCallMedia(
       const answer = await run;
       // Their offer can leave a section of OURS out. It is read once the offer is applied and
       // outside the queue above, because taking a capture down enqueues an offer of its own.
+      senders.noteAccepted();
       releaseDroppedSections();
       return answer;
     },
@@ -737,7 +833,12 @@ function liveCallMedia(
    */
   function releaseDroppedSections(): void {
     for (const kind of senders.stoppedKinds()) {
-      void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer, "dropped"));
+      // WHICH of the two it is, read before the release: a section the far side accepted and
+      // then took away is a picture that stopped, and one it never accepted is a picture that
+      // never went out. Telling the user to share it again is right for the first and sends
+      // them into the same failure for the second.
+      const reason: SendingEndedReason = senders.wasAccepted(kind) ? "dropped" : "refused";
+      void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer, reason));
     }
   }
 
@@ -763,8 +864,14 @@ function liveCallMedia(
  * the machine and no permission prompt. The app only ever picks this when the backend
  * announced itself as the mock (`backend_info`), which no real backend does.
  */
-export function simulatedCallMedia(): CallMedia {
+export function simulatedCallMedia(options: { answering: boolean }): CallMedia {
   let stopped = false;
+  // The same reading the live one takes off its own connection: a call this side ANSWERED
+  // was negotiated the moment it was taken, and a call it placed is negotiated when the
+  // answer arrives. Passed in rather than assumed, because an accepted call sees no answer
+  // frame at all — and a stand-in that reported `false` there would let a spec pass on a
+  // reaction the real thing never has.
+  let negotiated = options.answering;
   // One SILENT voice, made once. It stands in for the microphone so that everything
   // downstream of a call's audio — the recorder's mixer above all — runs against a real
   // `MediaStream` with a real audio track here, exactly as it does live. Silent, because
@@ -773,7 +880,29 @@ export function simulatedCallMedia(): CallMedia {
   const microphone = simulatedAudioStream();
   const media: CallMedia = {
     localSdp: SIMULATED_SDP,
-    async setRemoteAnswer(): Promise<void> {},
+    async setRemoteAnswer(sdp: string): Promise<void> {
+      // The one refusal a browser makes on the BLOB rather than on the state: a description
+      // it cannot parse is thrown out whole. It is reproduced because an answer this side
+      // cannot read is what a screen share really met on this tenant, and the service that
+      // sends one is a real tenant — so this is the only place that reaction is reviewable.
+      if (!sdp.startsWith("v=0")) throw new Error("Failed to parse SessionDescription.");
+      negotiated = true;
+      // A section rejected in the ANSWER to an offer of ours was never accepted at all,
+      // which is what a screen share really met on this tenant. The live path reads that off
+      // its own transceiver; the stand-in has none, so it reads the wire — as it already does
+      // for a section the far side takes away later.
+      releaseRejected(sdp, "refused");
+    },
+    get negotiated() {
+      return negotiated;
+    },
+    async abandonLocalOffer(): Promise<{ released: SendKind[]; offer: string | null }> {
+      // No connection to roll back — what the stand-in owns is what was being sent, and
+      // releasing it is the half the surface shows.
+      const released = media.localVideo.map((video) => video.kind);
+      for (const kind of released) await media.stopSending(kind);
+      return { released, offer: released.length === 0 ? null : SIMULATED_SDP };
+    },
     // A renegotiation IS reproduced, because it is the whole path a shared screen arrives
     // on and the mock is the only place that path can be reviewed. The answer is inert and
     // the video is drawn from a canvas the mock's own offer names, so a tile appears with no
@@ -783,12 +912,8 @@ export function simulatedCallMedia(): CallMedia {
       // A section this side is SENDING can be dropped by the offer too, and against a real
       // tenant the browser reports that by stopping the transceiver. There is none here, so
       // the stand-in reads the same fact off the wire: a rejected section, by its label.
+      releaseRejected(sdp, "dropped");
       const rejected = rejectedLabels(sdp);
-      for (const kind of ["camera", "screen"] as const) {
-        if (!rejected.has(SEND_LABELS[kind])) continue;
-        if (!media.localVideo.some((video) => video.kind === kind)) continue;
-        void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer, "dropped"));
-      }
       for (const [mid, label] of labelsByMid(sdp)) {
         // Only the sections that carry a PICTURE. The offer labels its audio and its data
         // sections too, and a stand-in that made a tile for those drew an empty rectangle
@@ -855,6 +980,24 @@ export function simulatedCallMedia(): CallMedia {
     // of this object is that it needs no peer connection behind it.
     remoteVideo: [],
   };
+
+  /**
+   * Release every capture whose section `sdp` rejects — the section still written down with
+   * its port zeroed, which is how either side says one is gone.
+   *
+   * WHICH signal carried the rejection is what decides the reason, and in the stand-in that
+   * reading is exact: an ANSWER to an offer of ours rejects a section that was never
+   * accepted, and an OFFER of the far side's takes away one it had accepted before.
+   */
+  function releaseRejected(sdp: string, reason: SendingEndedReason): void {
+    const rejected = rejectedLabels(sdp);
+    for (const kind of ["camera", "screen"] as const) {
+      if (!rejected.has(SEND_LABELS[kind])) continue;
+      if (!media.localVideo.some((video) => video.kind === kind)) continue;
+      void media.stopSending(kind).then((offer) => media.onSendingEnded?.(kind, offer, reason));
+    }
+  }
+
   return media;
 }
 

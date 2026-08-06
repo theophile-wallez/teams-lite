@@ -1333,11 +1333,15 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   `web/e2e/calling.spec.ts` pins every rule above. That mock CALLS out of the box, like the
   backend it stands for, and its `{kind:"calling", enabled:false}` test hook is the only
   way to the window that does not — a spec MUST reset it (`call_invite {reset:true}`), since
-  one mock process serves the whole run. A MID-CALL failure is reachable only
-  through that mock's `{kind:"call_media", refuse:true}` test hook, which refuses the NEXT
-  capture and only that one: the page's simulated camera never refuses, and the service that
-  would is a real tenant. A spec must reset afterwards — `call_invite {reset:true}` clears it
-  with the rest.
+  one mock process serves the whole run. A MID-CALL failure is reachable only through that
+  mock's own `call_media` test hooks, because the page's simulated media never refuses anything
+  and the service that does is a real tenant. There are FOUR of them, and each stands for one
+  ending a capture really has: `{refuse:true}` refuses the NEXT offer outright (armed — a spec
+  must reset with `call_invite {reset:true}`), `{drop:"screen"}` takes away a section the
+  meeting had accepted, `{reject:"screen"}` answers the offer that added one by rejecting it —
+  never accepted, which is what the tenant really did — and `{unreadable:true}` answers in a way
+  no browser can read, which is the one that used to cost the whole call. The last three arm
+  nothing: they happen on the live call at once.
 - **A live call has ONE authorized target, and `cd web && bun run call-live` is the only way
   to ring it.** There is no sandbox for a call — the sandbox chat is a group thread, and
   ringing it would ring real people — so the target is not a place a mistake is harmless but
@@ -1434,10 +1438,41 @@ joins alone and waits for an offer. Six rules hold it together, and
   themselves. The mock takes a capture away by REJECTING its section (a zero port, which is
   how the service says one is gone — `rejectedLabels`, read by the stand-in that has no
   transceivers), so the whole reaction is pinned by `web/e2e/calling.spec.ts` with no tenant.
-- **A failure here NEVER ends the call.** Audio is already up and untouched, so a
-  renegotiation that cannot be answered or a subscription the service refuses costs one tile
-  — and the service offers again. Ending a working call because a screen could not be drawn
-  would be much the worse outcome.
+- **A failure here NEVER ends the call, and the ANSWER is where that rule was broken.** Audio
+  is already up and untouched, so a renegotiation that cannot be answered or a subscription the
+  service refuses costs one tile — and the service offers again. Ending a working call because
+  a screen could not be drawn would be much the worse outcome. It happened, on 2026-08-06, the
+  first time a screen was shared against the real tenant: the service answered our offer, the
+  browser threw the answer out, and `onCallMedia` hung up — so the user got an error and then
+  could not hear their coworker, twice in two minutes. `hangUpCall` releases the microphone and
+  the remote `<audio>` elements before any round trip, so the call goes silent at once. Three
+  rules follow, and `web/e2e/calling.spec.ts` pins each:
+  - **WHICH answer it is decides everything** (`CallMedia.negotiated`, read off the connection's
+    own `currentRemoteDescription` rather than counted). THE answer is what makes a call a call:
+    with it refused nothing will ever be heard, so the call goes rather than sitting at
+    "connecting" for good. A LATER one answers a renegotiation of ours, and losing it costs the
+    picture. One reaction for both is the bug.
+  - **An offer whose answer is unreadable is ROLLED BACK** (`abandonLocalOffer`), because a
+    connection left in `have-local-offer` has every later renegotiation rolled back under it by
+    the browser instead — and the captures it carried are released down the path a DROPPED one
+    already takes, since nothing is being sent.
+  - **The sentence says the call is still there** (`renegotiationRefusedMessage`). That half is
+    load-bearing: the share stopping and an error arriving both say the opposite.
+- **A capture the meeting never ACCEPTED is not one it dropped, and the advice is the whole
+  difference.** A section rejected in the answer to the very offer that added it never carried
+  anything, so "Share it again" sends the user into the identical refusal — which is what
+  happened, in the same second. `LocalSenders.noteAccepted` writes down what the far side
+  agreed to at the one moment `currentDirection` still says so, `SendingEndedReason` carries
+  `refused` beside `dropped`, and `captureRefusedMessage` names what is really left, which is
+  real Teams. **Sending is still unverified against the tenant** (NATIVE-CALLING.md § 10.8):
+  the only live attempt was refused, so a fix for the refusal itself waits for a refusal that
+  names what it wants — the rule this whole plane was built under.
+- **What the service GRANTED is in the journal** (`calling::media_sections`, on every answer,
+  in the `call_offer_media` response and on the frame). The modalities were logged and they
+  are a claim about what this machine asked for; only the answer says what came back, so the
+  one live failure left nothing on this machine to read. It prints the SHAPE and never the
+  content — kind, mid, label, accepted or REJECTED — which is the discipline
+  `web/scripts/join-live.ts` already follows: no candidate, no fingerprint, no port.
 - **`call_answer_media` is an `OUTWARD_METHODS` entry and `call_subscribe` is a
   `MACHINE_METHODS` one**, and the split is the point. Subscribing ASKS to receive and
   publishes nothing about the user. Answering carries an SDP — and an SDP is what would offer

@@ -656,6 +656,58 @@ pub fn media_answer_from_frame(frame: &Value) -> Option<MediaContent> {
     .and_then(MediaContent::parse)
 }
 
+/// One line per media SECTION of an SDP: its kind, whether the far side accepted it, its mid
+/// and the label that says what it carries.
+///
+/// **It exists because a screen share failed live and left nothing on this machine to read.**
+/// The user shared their screen, the service answered by REJECTING the section, and the
+/// journal said only that an offer had gone out — so which section was refused, and whether
+/// the answer carried the audio at all, were unanswerable after the fact. The modalities were
+/// logged and they are a claim about what we asked for; this is what came back.
+///
+/// It prints the SHAPE and never the content, which is the rule `web/scripts/join-live.ts`
+/// already follows for the same job: no candidate, no fingerprint, no ICE credential and no
+/// key ever reaches a log line here. A port is stated only as accepted or rejected, because
+/// zero is the whole fact and the number is a relay's address.
+pub fn media_sections(sdp: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut section: Option<(String, bool)> = None;
+    let mut mid: Option<String> = None;
+    let mut label: Option<String> = None;
+    let mut flush = |section: &Option<(String, bool)>, mid: &Option<String>, label: &Option<String>, out: &mut Vec<String>| {
+        let Some((kind, rejected)) = section else {
+            return;
+        };
+        let mut line = kind.clone();
+        if let Some(mid) = mid {
+            line.push_str(&format!(" mid={mid}"));
+        }
+        if let Some(label) = label {
+            line.push_str(&format!(" label={label}"));
+        }
+        line.push_str(if *rejected { " REJECTED" } else { " accepted" });
+        out.push(line);
+    };
+    for line in sdp.lines().map(str::trim_end) {
+        if let Some(rest) = line.strip_prefix("m=") {
+            flush(&section, &mid, &label, &mut out);
+            mid = None;
+            label = None;
+            let mut fields = rest.split(' ');
+            let kind = fields.next().unwrap_or("?").to_string();
+            // `m=<kind> <port> …` — a zero port is how either side says the section is gone.
+            let rejected = fields.next() == Some("0");
+            section = Some((kind, rejected));
+        } else if let Some(rest) = line.strip_prefix("a=mid:") {
+            mid = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("a=label:") {
+            label = Some(rest.trim().to_string());
+        }
+    }
+    flush(&section, &mid, &label, &mut out);
+    out
+}
+
 /// A media OFFER the service made mid-call, and where to answer it.
 ///
 /// **This is how a shared screen arrives, and it arrives unprompted.** Measured: ~9 s into
@@ -2151,6 +2203,48 @@ mod tests {
         .expect("an answer");
         assert_eq!(answer.blob, "v=0 answer");
         assert!(media_answer_from_frame(&json!({ "callEnd": {} })).is_none());
+    }
+
+    /// What an answer GRANTED, stated for a journal — and never anything a journal must
+    /// not hold.
+    ///
+    /// The measurement that asked for it: a screen share was offered live, the service
+    /// answered by rejecting the section, and this machine's own log said only that an
+    /// offer had gone out. Which section came back refused was unanswerable afterwards.
+    #[test]
+    fn an_answers_sections_are_stated_as_accepted_or_rejected() {
+        let answer = [
+            "v=0",
+            "o=- 0 0 IN IP4 127.0.0.1",
+            "a=fingerprint:sha-256 AA:BB:CC",
+            "m=audio 3478 RTP/SAVP 111",
+            "a=mid:0",
+            "a=label:main-audio",
+            "a=candidate:1 1 udp 2130706431 10.1.2.3 51234 typ host",
+            "m=video 0 RTP/SAVP 107",
+            "a=mid:5",
+            "a=label:applicationsharing-video",
+            "",
+        ]
+        .join("\r\n");
+        let sections = media_sections(&answer);
+        assert_eq!(
+            sections,
+            vec![
+                "audio mid=0 label=main-audio accepted",
+                "video mid=5 label=applicationsharing-video REJECTED",
+            ]
+        );
+
+        // The rule that keeps this loggable at all: the shape travels and the content does
+        // not. A candidate is an address of the user's, a fingerprint is a key, and a port
+        // is a relay's — so a zero port is stated as the fact it is and nothing else.
+        let printed = sections.join(" | ");
+        for secret in ["10.1.2.3", "51234", "AA:BB:CC", "3478", "candidate"] {
+            assert!(!printed.contains(secret), "{secret} must never reach a log line");
+        }
+
+        assert!(media_sections("").is_empty());
     }
 
     /// A content type we cannot hand a browser must be refused rather than passed

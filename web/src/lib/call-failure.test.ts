@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { callFailureMessage, captureDroppedMessage } from "./call-failure";
-import { MicrophoneUnavailableError } from "./call-media";
+import {
+  callFailureMessage,
+  captureDroppedMessage,
+  captureRefusedMessage,
+  renegotiationRefusedMessage,
+} from "./call-failure";
+import { MicrophoneUnavailableError, type SendKind } from "./call-media";
 
 // What the user is told when a call, a join or a capture did not happen. The rule is the
 // one ./send-failure.test.ts pins for the other outward action: every sentence says what
@@ -113,6 +118,73 @@ describe("captureDroppedMessage", () => {
     // browser says, and it reached a real user as the outcome of switching a camera off.
     for (const kind of ["camera", "screen"] as const) {
       expect(captureDroppedMessage(kind)).not.toMatch(/transceiver|sdp|section|m-line/i);
+    }
+  });
+});
+
+// A capture the meeting never accepted, which is what a screen share really met on this
+// tenant. It is NOT the drop above and the difference is the advice: this app gave the drop's
+// advice for a refusal, so the user shared again and met the same refusal in the same second.
+
+describe("captureRefusedMessage", () => {
+  it("says nothing was shown, and never to try the same thing again", () => {
+    for (const kind of ["camera", "screen"] as const) {
+      expect(captureRefusedMessage(kind)).toMatch(/would not accept/);
+      expect(captureRefusedMessage(kind)).toMatch(/nothing was shown/);
+      // The drop's own advice, which is the wrong advice here.
+      expect(captureRefusedMessage(kind)).not.toMatch(/again\./);
+    }
+  });
+
+  it("names the one client that can still do it", () => {
+    // Sending is not verified against a real tenant, so the honest thing left to name is
+    // real Teams — which is what § Joining a meeting already says about a shared screen.
+    expect(captureRefusedMessage("screen")).toMatch(/in Teams/);
+    expect(captureRefusedMessage("camera")).toMatch(/in Teams/);
+  });
+
+  it("is not the sentence a DROP gets", () => {
+    // Two endings, two sentences. One text for both is how the wrong advice happened.
+    for (const kind of ["camera", "screen"] as const) {
+      expect(captureRefusedMessage(kind)).not.toBe(captureDroppedMessage(kind));
+    }
+  });
+});
+
+// The third way a capture ends with no click behind it, after a refusal and a drop: the
+// meeting ANSWERED and the browser could not read the answer. It is the one that used to cost
+// the whole call — a user shared their screen and lost the person they were talking to — so
+// the sentence has one job beyond naming what stopped.
+
+describe("renegotiationRefusedMessage", () => {
+  it("says the call is still there, which is the half nothing else says", () => {
+    // Everything the user can SEE at this moment says the opposite: the share stopped and an
+    // error arrived, a second after they pressed share.
+    expect(renegotiationRefusedMessage(["screen"])).toMatch(/still in the call/);
+    expect(renegotiationRefusedMessage([])).toMatch(/still in the call/);
+  });
+
+  it("names what stopped, and both when both did", () => {
+    expect(renegotiationRefusedMessage(["screen"])).toMatch(/your screen share stopped/);
+    expect(renegotiationRefusedMessage(["camera"])).toMatch(/your camera stopped/);
+    // One offer carries a camera and a screen, so both going off at once is a real state.
+    const both = renegotiationRefusedMessage(["camera", "screen"]);
+    expect(both).toMatch(/your camera and your screen share stopped/);
+  });
+
+  it("still answers one sentence when nothing of the user's was in the offer", () => {
+    // A renegotiation of ours can carry nothing but the sections the far side asked for.
+    // There is no capture to name and something still has to be said.
+    const message = renegotiationRefusedMessage([]);
+    expect(message.length).toBeGreaterThan(0);
+    expect(message).not.toMatch(/your camera|your screen/);
+  });
+
+  it("hands the user no word written for whoever reads a console", () => {
+    for (const released of [[], ["camera"], ["screen"], ["camera", "screen"]] as SendKind[][]) {
+      expect(renegotiationRefusedMessage(released)).not.toMatch(
+        /SessionDescription|transceiver|sdp|m-line|rollback/i,
+      );
     }
   });
 });

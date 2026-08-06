@@ -937,8 +937,11 @@ restated on every offer) and the two toggles in the page's header (`call-stage.t
 a `mediaNegotiation` to the `mediaRenegotiation` link the acceptance named, declaring `Video`
 for a camera and `ScreenSharer` for a screen.
 
-**It has never been sent to the tenant.** Everything above is the client's own shape and the
-mock's reproduction of it; § 10.8 says what that leaves open.
+**It HAS now been sent to the tenant, and the service rejected the section** (2026-08-06, a
+real call, twice — § 10.8). The shapes above are still the client's own and the mock's
+reproduction of them; what the one live attempt added is that the POST is accepted and the
+video section is not, with no word about why. § 10.8 says what that leaves open, and what the
+attempt cost.
 
 ### 10.8 What is still open
 
@@ -962,9 +965,41 @@ mock's reproduction of it; § 10.8 says what that leaves open.
   on every one of them and this app posts neither. Whether the service minds being ignored is
   known — it does not, the call runs for its whole length — but what it does with an answer is
   not.
-- **Sending is BUILT but untried against the tenant.** The outgoing renegotiation has never
-  been POSTed, so the service has never had the chance to refuse its shape — and it refuses
-  without explaining more often than not (§ 8). Three specific unknowns:
+- **Sending was TRIED against the tenant on 2026-08-06, and the service REFUSED the
+  section.** Not a probe: the user shared their screen in a real one-to-one call, twice. This
+  is what the journal holds, and it is all of it — which is the second finding.
+
+      offered media: modalities=["audio", "ScreenSharer"] sending=["screen"]   09:21:21
+      offered media: modalities=["audio"] sending=[]                           09:21:37
+      the call is over: CallEndReasonHangup                                    09:21:42
+      offered media: modalities=["audio", "ScreenSharer"] sending=["screen"]   09:22:00
+      offered media: modalities=["audio"] sending=[]                           09:22:00
+      the call is over: CallEndReasonHangup                                    09:22:11
+
+  Four things read out of it, and they are separate:
+
+  - **The offer is ACCEPTED as a request and the SECTION is rejected.** The service answers
+    rather than refusing the POST — no `400`, no subCode — and its answer zeroes the video
+    section's port, which the browser reads by stopping the transceiver. That is why the
+    second line of each pair is this app taking the capture back down
+    (`releaseDroppedSections`), and on the retry it happened in the SAME SECOND, so the
+    answer came in the POST's own response.
+  - **The refusal names NOTHING**, which is § 8's pattern exactly. So the three unknowns
+    below are still unknowns: a rejected m-line does not say which of them it is, and a
+    rewrite earns its place only when a refusal names what it wants (§ 10.3a's own rule, and
+    how the transport profile was found). `calling::media_sections` now prints the answer's
+    sections on every negotiation for that reason — the shape and never the content — because
+    at the time this happened the journal said only that an offer had gone out.
+  - **`CallEndReasonHangup` is THIS MACHINE hanging up** (`end_call_locally` is reached from
+    `call_hangup`; a service ending carries the service's own prose). The app ended a working
+    call because it could not read an answer to a renegotiation, so the user lost the person
+    they were talking to seconds after sharing. That was a bug in the page and it is fixed —
+    see AGENTS.md § Video in a meeting — and it is the reason the two rounds above are all
+    the measurement there is: each attempt cost the user their call.
+  - **The next attempt is worth making, and it is the user's own click.** What it needs is a
+    live call, the journal open, and the `[calling] the offer was answered at once:` line —
+    which now says which section came back REJECTED and whether the audio came back with it.
+- Three specific unknowns remain, and the refusal above narrowed none of them:
   - **Whether a `contentSharing` session is needed at all.** § 10.4 says the client opens one,
     with six links and a presenter. But no participant in the measured roster carried a
     `contentSharing` object *even while sharing* — their share was a `mediaStreams` entry and

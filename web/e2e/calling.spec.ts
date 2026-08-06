@@ -3,6 +3,7 @@ import { CALL_END_UNREACHABLE } from "../src/lib/call";
 import {
   calendarEvent,
   disableCalling,
+  answerCallMediaUnreadably,
   dropCallCapture,
   emitCallInvite,
   endCallWithReason,
@@ -12,6 +13,7 @@ import {
   openCalendarView,
   openConversationNamed,
   refuseNextCallMedia,
+  rejectCallCapture,
   resetCall,
   test,
 } from "./helpers";
@@ -675,6 +677,100 @@ test.describe("Joining a meeting", () => {
     await expect(stage).toHaveAttribute("data-phase", "connected");
     await camera.click();
     await expect(camera).toHaveAttribute("aria-pressed", "true");
+    await page.locator('[data-testid="call-hangup"]').first().click();
+  });
+
+  /**
+   * A capture the meeting never ACCEPTS: the section rejected in the answer to the very offer
+   * that added it. This is what a screen share really met on this tenant.
+   *
+   * It is not the drop above, and the difference is the advice. The app used to call this a
+   * drop, so the user was told to share it again — and the second share met the same refusal
+   * in the same second. Nothing was ever shown, so the sentence has to say that and name what
+   * is really left.
+   */
+  test("says a capture the meeting never accepted was never shown", async ({ page }) => {
+    await page.goto("/");
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+
+    await page.locator('[data-testid="meeting-join-here"]').click();
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    const share = page.locator('[data-testid="call-share"]');
+    await share.click();
+    await expect(share).toHaveAttribute("aria-pressed", "true");
+
+    await rejectCallCapture(page, "screen");
+
+    // Released, like a drop — and SAID differently, which is the whole point of the split.
+    await expect(share).toHaveAttribute("aria-pressed", "false");
+    const notice = page.locator('[data-testid="call-notice"]');
+    await expect(notice).toContainText("would not accept your screen share");
+    await expect(notice).toContainText("nothing was shown");
+    // Never the drop's advice: sharing again meets the same refusal, and it did.
+    await expect(notice).not.toContainText("Share it again");
+    // The call is untouched, exactly as it is for every other failure in a renegotiation.
+    await expect(stage).toHaveAttribute("data-phase", "connected");
+    await page.locator('[data-testid="call-hangup"]').first().click();
+  });
+
+  /**
+   * A mid-call answer this browser CANNOT READ, which is what a screen share really met on
+   * this tenant — and the one that cost a user their call.
+   *
+   * They shared their screen in a real call, the service answered, the browser threw the
+   * answer out, and this app hung up: an error message, and then they could not hear their
+   * coworker. The rule the whole surface is built on says the opposite — audio is already up,
+   * so a renegotiation that fails costs one picture and nothing else — and the reaction to
+   * THE answer is what that rule was written against, not the reaction to a later one.
+   */
+  test("keeps the call when a mid-call answer cannot be read, and releases the picture", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openCalendarTab(page);
+    await openCalendarView(page, "day");
+    await calendarEvent(page, "ev-overlap-a").click();
+    await page.locator('[data-testid="meeting-join-here"]').click();
+
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
+    const share = page.locator('[data-testid="call-share"]');
+    await share.click();
+    await expect(share).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(1);
+
+    await answerCallMediaUnreadably(page);
+
+    // The picture is RELEASED, and the service is told: the offer will never be completed,
+    // so a capture behind a button that says the meeting can see it is a light on for
+    // nothing. The button reads the BACKEND's own `sending`, so this is also the proof that
+    // the take-back offer went out.
+    await expect(share).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator('[data-testid="call-video-local"]')).toHaveCount(0);
+
+    // Said, with the half the user needs most: they are still in the call. Everything they
+    // can see — the share stopping, an error arriving — says otherwise.
+    const notice = page.locator('[data-testid="call-notice"]');
+    await expect(notice).toContainText("your screen share stopped");
+    await expect(notice).toContainText("still in the call");
+
+    // And THE CALL IS STILL UP, which is the rule this test exists for. It is asserted after
+    // the reaction rather than before it: the failure it guards against released nothing and
+    // said nothing, so the assertions above are what a regression trips on first, and this
+    // one is what the whole surface promises.
+    await expect(stage).toHaveAttribute("data-phase", "connected");
+    // In the user's own words. The browser's own sentence about a session description is
+    // written for whoever reads a console.
+    await expect(notice).not.toContainText("SessionDescription");
+
+    // And sharing again works: the connection was rolled back to where it stood, not left
+    // holding an offer nothing will ever answer.
+    await share.click();
+    await expect(share).toHaveAttribute("aria-pressed", "true");
+    await expect(stage).toHaveAttribute("data-phase", "connected");
     await page.locator('[data-testid="call-hangup"]').first().click();
   });
 });

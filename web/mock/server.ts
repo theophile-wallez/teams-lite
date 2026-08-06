@@ -3249,16 +3249,24 @@ const MOCK_RENEGOTIATION_OFFER = [
 ].join("\r\n");
 
 /**
- * An offer that DROPS one of the sections this page is sending, by rejecting it — the
- * section still written down, its port zeroed, which is how the far side says a section is
- * gone. Against a real tenant the browser reads that and stops the transceiver; the
- * simulated media has none and reads the label instead.
+ * A description that REJECTS one of the sections this page is sending — the section still
+ * written down, its port zeroed, which is how the far side says a section is gone. Against a
+ * real tenant the browser reads that and stops the transceiver; the simulated media has none
+ * and reads the label instead.
  *
- * Sent by the `{kind:"call_media", drop:"camera"|"screen"}` test hook. It is the only way to
- * review what the app does when the meeting takes a capture away: the page's own simulated
- * camera is never dropped, and the service that would drop one is a real tenant.
+ * It is sent as either half of a negotiation, because WHICH half it is is the whole
+ * difference between the two endings the app has to tell apart:
+ *
+ * * as an OFFER (`{kind:"call_media", drop:…}`) it takes away a capture the meeting had
+ *   accepted, so the picture stopped and turning it on again is worth doing;
+ * * as an ANSWER to our own offer (`{kind:"call_media", reject:…}`) it says the meeting never
+ *   accepted the capture at all — the state a screen share really met on this tenant, where
+ *   turning it on again meets the same refusal in the same second.
+ *
+ * Both are reachable nowhere else: the page's own simulated camera is never rejected, and the
+ * service that rejects one is a real tenant.
  */
-function mockSectionDropOffer(label: string): string {
+function mockSectionRejection(label: string): string {
   return [
     "v=0",
     "o=- 0 0 IN IP4 127.0.0.1",
@@ -3356,6 +3364,17 @@ const MOCK_ANSWER_SDP = [
   "a=sendrecv",
   "",
 ].join("\r\n");
+
+/**
+ * An answer no browser can read, sent by the `{kind:"call_media", unreadable:true}` hook.
+ *
+ * It reproduces what a screen share really met on this tenant: the offer went out, the service
+ * answered, and the answer was thrown out by the browser — after which this app hung up, so
+ * the user lost the person they were talking to a few seconds after they shared. The blob is
+ * not a session description at all, because WHY the browser refuses one is not the point: what
+ * is pinned is that a mid-call answer it cannot read costs the picture and never the call.
+ */
+const UNREADABLE_ANSWER_SDP = "this is not a session description";
 
 /** Ring this machine, the way an invite on the calling socket does. Used by the gated
  *  test hook and by the preview script. */
@@ -6898,6 +6917,32 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       endMockCall(body.reason);
       return Response.json({ ok: true, reason: body.reason }, { status: 200 });
     }
+    // Answer an offer of the page's in a way no browser can read — the third way a capture
+    // ends without a click, after a refusal and a drop, and the one that used to cost the
+    // whole call. Nothing is armed: the answer goes out now, on the live call.
+    if (body.kind === "call_media" && body.unreadable === true) {
+      if (!mockCall) return Response.json({ ok: false, error: "no call" }, { status: 409 });
+      broadcast("call_media", {
+        call_id: mockCall.id,
+        sdp: UNREADABLE_ANSWER_SDP,
+        kind: "answer",
+      });
+      return Response.json({ ok: true, unreadable: true }, { status: 200 });
+    }
+    // REFUSE a capture the page just turned on, the way the service really did: the answer to
+    // our own offer, with the section rejected. It is the state a screen share met on this
+    // tenant, and the one the app used to describe as a DROP — so the user was told to share
+    // again and met the same refusal. Nothing is armed: it happens now, on the live call.
+    if (body.kind === "call_media" && typeof body.reject === "string") {
+      if (!mockCall) return Response.json({ ok: false, error: "no call" }, { status: 409 });
+      const label = body.reject === "screen" ? "applicationsharing-video" : "main-video";
+      broadcast("call_media", {
+        call_id: mockCall.id,
+        sdp: mockSectionRejection(label),
+        kind: "answer",
+      });
+      return Response.json({ ok: true, reject: body.reject }, { status: 200 });
+    }
     // Take a capture AWAY from the page, the way the service does it: one offer that rejects
     // the section. Nothing is armed — the drop happens now, on the live call — so there is
     // nothing for a later spec to inherit.
@@ -6906,7 +6951,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       const label = body.drop === "screen" ? "applicationsharing-video" : "main-video";
       broadcast("call_media", {
         call_id: mockCall.id,
-        sdp: mockSectionDropOffer(label),
+        sdp: mockSectionRejection(label),
         kind: "offer",
       });
       return Response.json({ ok: true, drop: body.drop }, { status: 200 });

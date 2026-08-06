@@ -68,6 +68,48 @@ export function captureDroppedMessage(kind: SendKind): string {
     : "The meeting dropped your screen share, so it stopped. Share it again.";
 }
 
+/**
+ * What to say when the meeting would not ACCEPT a capture at all.
+ *
+ * The mirror of {@link captureDroppedMessage}, and the reason the two are apart: a section
+ * that was accepted and then taken away is worth turning on again, and a section the meeting
+ * rejected in the very answer to the offer that added it is not. A real user was given the
+ * drop's advice for a refusal, shared their screen a second time, and met the same refusal in
+ * the same second — so this one names what actually remains, which is the client that can do
+ * it. Sending is not yet verified against a real tenant (NATIVE-CALLING.md § 10.8).
+ */
+export function captureRefusedMessage(kind: SendKind): string {
+  return kind === "camera"
+    ? "The meeting would not accept your camera, so nothing was shown. Open this meeting in Teams to use it."
+    : "The meeting would not accept your screen share, so nothing was shown. Open this meeting in Teams to share.";
+}
+
+/**
+ * What to say when the meeting ANSWERED an offer of ours in a way this browser cannot read.
+ *
+ * It is the third way a capture ends without a click, after a refusal and a drop, and it is
+ * the one that used to cost the whole call: the answer to a screen share was thrown out by
+ * the browser and this app hung up, so the user lost the person they were talking to a few
+ * seconds after sharing. So the sentence's second half is the load-bearing one — it says the
+ * call is still there, because everything the user can see says otherwise.
+ */
+export function renegotiationRefusedMessage(released: SendKind[]): string {
+  const what = releasedNames(released);
+  return what
+    ? `The meeting's answer could not be read here, so ${what} stopped. You are still in the call.`
+    : "The meeting's answer could not be read here. You are still in the call, and nothing else changed.";
+}
+
+/** The captures that went off, named the way the user would name them. */
+function releasedNames(released: SendKind[]): string {
+  const names = released.map((kind) =>
+    kind === "camera" ? "your camera" : "your screen share",
+  );
+  // Both at once is a real state — a camera and a screen travel on one offer — and "your
+  // camera, your screen share" reads as a list of things rather than as two that stopped.
+  return names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : (names[0] ?? "");
+}
+
 /** The words an error carries, whatever shape it arrived in. Browser WebSocket and DOM
  *  failures arrive as opaque Events that stringify to a useless "[object Event]". */
 function rawMessage(error: unknown): string {
