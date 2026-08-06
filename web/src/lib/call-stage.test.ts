@@ -15,6 +15,7 @@ import {
   callStageTitle,
   callStartClockLabel,
   clampMiniPosition,
+  initialCallStagePanel,
   miniHomePosition,
   miniSize,
 } from "./call-stage";
@@ -285,6 +286,24 @@ describe("the chat the stage may show", () => {
    *  in a column, so a conversation the sidebar never synced has nothing behind it. */
   it("is nothing when the app does not hold that conversation", () => {
     expect(callStageChatConversation(call({ conversation_id: "19:other@thread.v2" }), holds)).toBeNull();
+  });
+});
+
+describe("the panel a new call opens with", () => {
+  const holds = (id: string) => id === "19:meeting_abc@thread.v2";
+
+  /** A call in a conversation is half a conversation, so the chat is open from the start
+   *  rather than behind a click nobody would think to make. */
+  it("is the CHAT wherever the call has one", () => {
+    expect(initialCallStagePanel(call(), holds)).toBe("chat");
+    expect(initialCallStagePanel(call({ kind: "group" }), holds)).toBe("chat");
+  });
+
+  /** The one call that opens closed is the one with nothing to show: a meeting joined from a
+   *  calendar link names no thread, and a thread this app does not hold has no history here. */
+  it("is nothing when there is no chat behind it", () => {
+    expect(initialCallStagePanel(call({ conversation_id: null }), holds)).toBeNull();
+    expect(initialCallStagePanel(call({ conversation_id: "19:other@thread.v2" }), holds)).toBeNull();
   });
 });
 

@@ -1232,18 +1232,26 @@ What the page itself decides:
   holds one person. What each person is sending is read from the ROSTER's own streams, never
   from the sections this page happens to have subscribed to: a camera is on for the meeting
   whether or not this machine asked to see it.
-- **The CHAT panel is the app's own thread, in a column.** Opening it navigates the app
-  underneath to that conversation, so the history, the drafts, the live feed and the read
-  state are the ones the conversation already has — there is no second history loader, and a
-  message sent from the panel goes out through the same composer under the same consent.
-  Two things follow:
-  - **It is offered only where there IS a thread** (`callStageChatConversation`): a meeting
+- **The CHAT panel is the app's own thread, in a column, and it is OPEN by default**
+  (`initialCallStagePanel`). A call in a conversation is half a conversation — what is being
+  said in the thread while people are talking is the other half — so the sidebar starts open
+  rather than behind a click nobody would think to make. There is no second condition on
+  that: every call with a thread behind it opens with it, on every screen. Three things
+  follow:
+  - **An open panel OPENS that conversation underneath**, so the history, the drafts, the live
+    feed and the read state are the ones the conversation already has — there is no second
+    history loader, and a message sent from the panel goes out through the same composer under
+    the same consent. It runs from the panel being OPEN rather than from the click that opened
+    it, so the default and the toggle take one path.
+  - **It is drawn only where there IS a thread** (`callStageChatConversation`): a meeting
     joined from a calendar LINK names none — the service resolves one from the code and never
-    tells us — and a conversation this app does not hold has nothing behind a tab.
-  - **Opening it MARKS THAT THREAD READ**, because it opens the conversation exactly as
-    clicking its row in the sidebar does (see § Sending messages on `mark_read`). That is why
-    it is behind the user's own click and no panel is open by default — nothing on this page
-    opens a conversation on its own.
+    tells us — and a conversation this app does not hold has nothing behind a tab. That is the
+    one call that opens with no panel.
+  - **So a call MARKS ITS OWN THREAD READ**, because opening a conversation does (see
+    § Sending messages on `mark_read`). For every call the user starts that thread is already
+    the open one and nothing changes; a call they ANSWER in a thread they were not looking at
+    publishes that read when the page opens with its chat. That is the price of the default,
+    it was asked for deliberately, and Ghost mode still decides whether Teams is told.
 - **There is ONE composer in this app, and the panel TAKES it rather than adding a second**
   (`useCallOwnsComposer`). It carries the live sentinel `sandbox-live.ts` proves its target
   with (`data-conversation-id`), so two of them would give that question two answers — the

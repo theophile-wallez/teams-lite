@@ -1440,9 +1440,9 @@ if (import.meta.main) {
       await page.waitForTimeout(600);
       await shot(`${out}-meeting-chat-stage-light.png`);
 
-      // 5d. The two panels. People is the roster the service reports; Chat is the meeting
-      //     thread's own conversation, which is why opening it opens that conversation in
-      //     the app underneath.
+      // 5d. The two panels. The CHAT is already open — a call in a conversation opens with
+      //     it (`initialCallStagePanel`), which is what the shot above shows — so this walks
+      //     to People, the roster the service reports, and back.
       await page.locator('[data-testid="call-stage-people"]').click();
       await page.waitForSelector('[data-testid="call-stage-people-panel"]');
       await page.waitForTimeout(500);

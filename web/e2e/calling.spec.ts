@@ -671,14 +671,22 @@ test.describe("The call's own page", () => {
    * live sentinel a sanctioned driver proves its target with. Two of them would give that
    * question two answers, so the count is the assertion.
    */
-  test("puts the meeting's chat beside the picture, and keeps one composer", async ({ page }) => {
+  test("opens the meeting's chat beside the picture by default, and keeps one composer", async ({
+    page,
+  }) => {
     await joinTheMeetingChat(page);
     const composer = page.locator('[data-testid="composer-shell"]');
     const thread = await composer.getAttribute("data-conversation-id");
     expect(thread).toMatch(/^19:meeting_/);
 
-    await page.locator('[data-testid="call-stage-chat-toggle"]').click();
+    // No click: a call in a conversation opens with that conversation beside it
+    // (`initialCallStagePanel`).
+    await expect(page.locator('[data-testid="call-stage-panel"]')).toBeVisible();
     await expect(page.locator('[data-testid="call-stage-transcript"]')).toBeVisible();
+    await expect(page.locator('[data-testid="call-stage-chat-toggle"]')).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     // One composer, and it is the MEETING's: the panel renders the app's own thread, so the
     // sentinel still names exactly the conversation the words would go to.
     await expect(composer).toHaveCount(1);
@@ -686,11 +694,16 @@ test.describe("The call's own page", () => {
     // The words really can be written here — the send itself stays the user's own Enter.
     await expect(page.locator('[data-testid="composer-send"]')).toBeVisible();
 
-    // Closing the panel hands the composer straight back to the conversation behind it.
+    // And the toggle still closes it, which hands the composer straight back to the
+    // conversation behind the page.
     await page.locator('[data-testid="call-stage-chat-toggle"]').click();
     await expect(page.locator('[data-testid="call-stage-transcript"]')).toHaveCount(0);
     await expect(composer).toHaveCount(1);
     await expect(composer).toHaveAttribute("data-conversation-id", thread!);
+
+    // Then open again, from the click this time.
+    await page.locator('[data-testid="call-stage-chat-toggle"]').click();
+    await expect(page.locator('[data-testid="call-stage-transcript"]')).toBeVisible();
   });
 });
 

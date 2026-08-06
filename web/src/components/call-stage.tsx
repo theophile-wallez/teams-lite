@@ -19,6 +19,7 @@ import {
 import { callDurationLabel, callNamesAConversation, isMeeting, type ActiveCall } from "~/lib/call";
 import {
   MINI_MARGIN,
+  PANEL_BESIDE_PX,
   callMiniPicture,
   callStageChatConversation,
   callStageIsUp,
@@ -93,10 +94,6 @@ const STAGE_FADE_SECONDS = 0.18;
 
 /** The radius the mini window wears. Zero in full: a page has no corners. */
 const MINI_RADIUS = 20;
-
-/** How wide the viewport has to be for the side panel to sit BESIDE the picture rather
- *  than over it. Below it, 336px of text beside a video leaves neither readable. */
-const PANEL_BESIDE_PX = 640;
 
 function Stage(props: { call: ActiveCall }) {
   const { call } = props;
@@ -286,17 +283,17 @@ function FullStage(props: {
     [call, conversations],
   );
 
-  /** Open the chat, which means opening that conversation in the app underneath: this
-   *  panel renders the app's OWN thread, and a thread nobody opened has no history, no
-   *  draft and no live feed here. It is the user's own click, so it marks the thread read
-   *  exactly as clicking that row in the sidebar does — and nothing on this page opens a
-   *  conversation the user did not ask for. */
-  const openChat = () => {
-    props.onTogglePanel("chat");
-    if (chatConversation) {
-      void navigate({ to: "/c/$conversationId", params: { conversationId: chatConversation } });
-    }
-  };
+  // An open chat panel OPENS that conversation in the app underneath, because the panel
+  // renders the app's own thread: one nobody opened has no history, no draft and no live feed
+  // here. It runs from the panel being open rather than from the click that opened it, so the
+  // default (`initialCallStagePanel`) and the toggle take the same one path — and opening a
+  // conversation marks it read, exactly as clicking its row in the sidebar does.
+  const openId = useAppState((s) => s.openId);
+  const chatPanelOpen = panel === "chat" && !!chatConversation;
+  useEffect(() => {
+    if (!chatPanelOpen || openId === chatConversation) return;
+    void navigate({ to: "/c/$conversationId", params: { conversationId: chatConversation! } });
+  }, [chatPanelOpen, chatConversation, openId, navigate]);
 
   return (
     <>
@@ -364,7 +361,7 @@ function FullStage(props: {
               pressed={panel === "chat"}
               label={panel === "chat" ? "Hide the chat" : "Show the chat"}
               icon={BubbleChatIcon}
-              onClick={openChat}
+              onClick={() => props.onTogglePanel("chat")}
             />
           )}
           <StageControl

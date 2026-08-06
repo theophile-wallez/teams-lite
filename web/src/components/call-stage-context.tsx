@@ -10,6 +10,7 @@ import {
 import {
   callStageChatConversation,
   callStageIsUp,
+  initialCallStagePanel,
   type CallStageMode,
   type CallStagePanel,
   type StagePoint,
@@ -42,21 +43,34 @@ const CallStageContext = createContext<CallStageValue | null>(null);
 
 export function CallStageProvider(props: { children: ReactNode }) {
   const call = useAppState((s) => s.callStatus.call);
-  // The call this state belongs to. A new call is a new window: full, no panel, and back
-  // in its home corner.
+  const conversations = useAppState((s) => s.conversations);
+  // The call this state belongs to. A new call is a new window: full, its chat open where
+  // there is one to open, and back in its home corner.
   const callId = callStageIsUp(call) ? call.id : null;
   const [mode, setMode] = useState<CallStageMode>("full");
   const [panel, setPanel] = useState<CallStagePanel | null>(null);
   const [position, setPosition] = useState<StagePoint | null>(null);
 
-  // A new call opens as a page, with no panel, in the home corner. The END of a call is
-  // deliberately NOT a reset: the surface is still on screen for the length of its own fade,
-  // and unfolding it there would draw a full-screen page nobody asked for as the call goes.
+  // A new call opens as a page, with the panel `initialCallStagePanel` decides, in the home
+  // corner. The END of a call is deliberately NOT a reset: the surface is still on screen for
+  // the length of its own fade, and unfolding it there would draw a full-screen page nobody
+  // asked for as the call goes.
+  //
+  // The panel is decided ONCE, here, from the state at the moment the call arrived — never
+  // re-derived while it runs. A rule that kept re-reading would re-open a panel the user had
+  // just closed, every time a `call_state` frame landed.
   useEffect(() => {
-    if (!callId) return;
+    if (!callId || !call) return;
     setMode("full");
-    setPanel(null);
+    setPanel(
+      initialCallStagePanel(call, (id) =>
+        conversations.some((conversation) => conversation.id === id),
+      ),
+    );
     setPosition(null);
+    // `call` and the conversation list are read at the moment the CALL changes and never
+    // followed after that, which is the whole point of the rule above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [callId]);
 
   const togglePanel = useCallback((next: CallStagePanel) => {

@@ -31,6 +31,28 @@ export type CallStageMode = "full" | "mini";
 export type CallStagePanel = "people" | "chat";
 
 /**
+ * The panel a NEW call opens with: its CHAT, wherever there is one.
+ *
+ * A call in a conversation is half a conversation — what is being said in the thread while
+ * people are talking is the other half — so the sidebar starts open rather than waiting for
+ * a click nobody would think to make. There is no second condition: the panel is open by
+ * default in every call that has a thread behind it, on every screen.
+ *
+ * The one call it opens closed is the one with nothing to show: a meeting joined from a
+ * calendar LINK names no thread at all (`callStageChatConversation`).
+ */
+export function initialCallStagePanel(
+  call: ActiveCall,
+  hasConversation: (id: string) => boolean,
+): CallStagePanel | null {
+  return callStageChatConversation(call, hasConversation) ? "chat" : null;
+}
+
+/** How wide the viewport has to be for the side panel to sit BESIDE the picture rather than
+ *  over it. Below it, 21rem of text beside a video leaves neither readable. */
+export const PANEL_BESIDE_PX = 640;
+
+/**
  * Whether this call is one the STAGE draws.
  *
  * A ringing call is not. It is an offer, not a call: nothing is connected, no microphone
