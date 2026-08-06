@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseArgs } from "./launch";
+import { parseArgs, viteDevEnv } from "./launch";
 
 describe("parseArgs", () => {
   test("defaults to the web app on 19440, loopback, browser opened", () => {
@@ -79,5 +79,35 @@ describe("parseArgs", () => {
     // answer to "you passed an argument I do not have".
     expect(entry).toMatch(/try\s*\{\s*options\s*=\s*parseArgs\(/);
     expect(entry).toContain("console.error(USAGE)");
+  });
+
+  // `teams --dev` starts BOTH halves, so it is the one command that has to introduce
+  // them to each other. It did not: it passed Vite its own port and host and left the
+  // socket to `web/package.json`'s default, which is the hands-on DEV pair's 19421 —
+  // while the backend it had just spawned was on 19420. Vite came up fine and the
+  // browser reported the backend unreachable, which reads as a broken app rather than
+  // as a missing environment variable.
+  test("--dev tells Vite which backend it just started, not a hardcoded port", () => {
+    const previous = process.env.TEAMS_LITE_PORT;
+    try {
+      process.env.TEAMS_LITE_PORT = "19499";
+      const env = viteDevEnv({ port: 19440, host: "127.0.0.1" }, {});
+      // The socket follows the backend this launcher owns, wherever it was moved to.
+      expect(env.VITE_TEAMS_WS_URL).toBe("ws://127.0.0.1:19499");
+      // And the web server's own listener is still its own business.
+      expect(env.PORT).toBe("19440");
+      expect(env.HOST).toBe("127.0.0.1");
+    } finally {
+      if (previous === undefined) delete process.env.TEAMS_LITE_PORT;
+      else process.env.TEAMS_LITE_PORT = previous;
+    }
+  });
+
+  test("--dev never leaves the socket to the dev pair's default", () => {
+    // The regression this guards is silent: 19421 is a real port with a real backend
+    // on a developer's machine, so the wrong value looks plausible in a log.
+    const env = viteDevEnv({ port: 19440, host: "127.0.0.1" }, {});
+    expect(env.VITE_TEAMS_WS_URL).toBeDefined();
+    expect(env.VITE_TEAMS_WS_URL).not.toContain("19421");
   });
 });

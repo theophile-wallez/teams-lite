@@ -205,6 +205,22 @@ function openBrowser(url: string): void {
 /// but swaps the built SSR bundle for a live-reloading Vite process. Only works
 /// from a source checkout: a compiled `teams` binary embeds the built bundle, not
 /// the sources Vite needs. Runs until the Vite process exits, then exits with it.
+/// The environment `teams --dev` hands Vite: where to listen, and which backend to
+/// talk to. Pure, and exported, so a test can hold it to the second one — the socket
+/// is the half that is invisible when it is wrong, because Vite starts happily and
+/// only the browser finds out.
+export function viteDevEnv(
+  options: Pick<LaunchOptions, "port" | "host">,
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  return {
+    ...base,
+    PORT: String(options.port),
+    HOST: options.host,
+    VITE_TEAMS_WS_URL: backendUrl(),
+  };
+}
+
 async function runViteDev(options: LaunchOptions): Promise<never> {
   if (isCompiledBinary()) {
     throw new Error(
@@ -217,9 +233,16 @@ async function runViteDev(options: LaunchOptions): Promise<never> {
 
   // Vite reads PORT/HOST from the environment (see web/vite.config.ts). `bun run
   // dev` also regenerates the theme first, matching a hand-run dev session.
+  //
+  // The SOCKET has to be named too, and forgetting it made `teams --dev` unable to
+  // reach its own backend: `web/package.json`'s `dev` script defaults to the DEV
+  // pair's 19421, while `ensureBackend` above brought the backend up on
+  // `backendPort()` — 19420 unless the environment moved it. The app then dialled a
+  // port nothing was listening on and reported the backend as unreachable, in the one
+  // command whose whole point is that it starts both halves.
   const proc = spawn(["bun", "run", "dev"], {
     cwd: webDir,
-    env: { ...process.env, PORT: String(options.port), HOST: options.host },
+    env: viteDevEnv(options),
     stdout: "inherit",
     stderr: "inherit",
     stdin: "inherit",
