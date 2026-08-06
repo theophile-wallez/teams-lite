@@ -3281,11 +3281,11 @@ function mockSectionDropOffer(label: string): string {
   ].join("\r\n");
 }
 
-/** ON, exactly like the Rust backend the user launches: it registers as a device their
+/** ON, exactly like every Rust backend the user launches: each registers as a device their
  *  calls ring on at startup, and there is no switch to find. The
  *  `{kind:"calling", enabled:false}` test hook is the only way back, and it reproduces the
- *  two backends that really answer `false` — a read-only one, and the second install that
- *  carries `TEAMS_LITE_CALLING=0`. */
+ *  ONE backend that really answers `false` — a read-only one, which is the install the user
+ *  never opened. */
 let mockCallingEnabled = true;
 let mockCall: MockCall | null = null;
 /** Timers of a simulated call, cleared on every ending so a reused mock cannot let an
@@ -6911,8 +6911,8 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       });
       return Response.json({ ok: true, drop: body.drop }, { status: 200 });
     }
-    // A backend that does not take calls at all: a read-only one, or the second install
-    // that carries `TEAMS_LITE_CALLING=0`. The app itself has no switch, so this hook is
+    // A backend that does not take calls at all, which is a read-only one and nothing
+    // else. The app itself has no switch, so this hook is
     // the only way to reach that state — and it is the state the disabled call button and
     // the disabled Join button say their reason in. A spec MUST reset afterwards
     // (`call_invite {reset:true}` puts it back), since one mock process serves the run.

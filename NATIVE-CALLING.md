@@ -375,7 +375,7 @@ Six RPCs, and the split between them IS the consent design (see § 7). There is 
 that turns calling on: the backend registers as a device the user's calls ring on at
 startup, the way every Teams client they are signed in on does (`calling_available` in
 `src/bin/server.rs`), so no client can ask for the registration and none can take it
-away. A read-only backend and one carrying `TEAMS_LITE_CALLING=0` never register.
+away. A read-only backend is the only one that never registers.
 
 | Method | Gate | What it does |
 | --- | --- | --- |
@@ -442,7 +442,8 @@ that hold `send` hold here, and one is stricter:
   and the app does it at startup, because that is what a Teams client is: their calls are
   offered here as well as on their other clients. It reaches nobody by itself — every
   action that does is gated one by one above — and it is taken back as the app shuts down.
-  A read-only backend and the second install (`TEAMS_LITE_CALLING=0`) never register.
+  A read-only backend is the only one that never registers; a second install on the same
+  machine DOES, as a device of its own, so every window the user opens can call.
 - **The live target is the sandbox chat and its one consenting counterpart**, exactly as
   § Sending messages says. A test call goes there and nowhere else.
 - Answering a call the user was already being offered is the one action that starts

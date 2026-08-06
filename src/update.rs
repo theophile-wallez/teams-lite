@@ -946,13 +946,20 @@ mod tests {
              orphaned backend holding its port"
         );
 
-        // No calling, which is the other opposite: every other backend registers as a
-        // device the user's calls ring on, and two registrations on one machine ring
-        // BOTH. The staged pair is the app they read their Teams on, so it keeps the
-        // calls and this install exercises the released artifact in silence.
+        // And it says NOTHING about calling, which is how this install calls at all. It
+        // used to silence its own registration to spare the second ring, and every call
+        // and Join control in this window was disabled for it — a whole feature missing,
+        // named nowhere the user could read. Two registrations are safe because each
+        // backend holds a calling endpoint id of its own, keyed by its port.
+        // The directive, not the word: the unit's own comment explains the absence.
+        let silences_calling = unit.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("Environment=") && line.contains(concat!("TEAMS_LITE", "_CALLING"))
+        });
         assert!(
-            unit.contains("Environment=TEAMS_LITE_CALLING=0"),
-            "the released build must not be a second device the user's calls ring on"
+            !silences_calling,
+            "the released build must be a device the user can call FROM — every window \
+             they open is one they may want to call from"
         );
 
         // Not part of the staged pair's target: restarting or enabling that target must

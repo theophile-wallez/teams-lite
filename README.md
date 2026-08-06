@@ -240,9 +240,10 @@ Worth knowing:
   start and systemd backs off from 5 s to 5 min rather than giving up — so a laptop
   that comes back, or an Intune container that restarts, heals itself.
 - **Local overrides** go in `~/.config/teams-lite/backend.env` and `web.env`; an
-  update leaves both alone. Audio calling is one of them: the app registers this machine
-  with Teams as a device your calls ring on, like every other client you are signed in
-  on, and `TEAMS_LITE_CALLING=0` in `backend.env` takes that back.
+  update leaves both alone. Audio calling is not one of them: every install registers this
+  machine with Teams as a device your calls ring on, like every other client you are
+  signed in on, and no setting anywhere turns that off — a window that could not call
+  would offer you a disabled handset and no way to mend it.
 - **The dev stack has ports of its own** — backend 19421, Vite 19441 — so
   `bun run dev:server` + `bun run dev` work while the service keeps running on
   19420/19440. Both are send-capable backends over one SQLite store, so they get

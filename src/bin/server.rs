@@ -7854,39 +7854,31 @@ fn agent_status_json(store: &Store) -> Result<Value> {
 // an answer in — and this side never handles RTP.
 // ---------------------------------------------------------------------------
 
-/// Does this backend take and place calls? Yes, on the user's own app.
+/// Does this backend take and place calls? EVERY install does, save a read-only one.
 ///
 /// The app IS a Teams client, so it registers as a device their calls ring on the way
 /// every other client they are signed in on does — there is no switch, because a
-/// messaging client that cannot be called is half a client, and the one this machine
-/// runs is the one they are sitting in front of. Registering is reversible in both
-/// directions and by itself reaches nobody: what rings a person is `call_place`, which
-/// is gated as the outward action it is.
+/// messaging client that cannot be called is half a client, and every window the user
+/// opens is one they may want to call from. Registering is reversible in both directions
+/// and by itself reaches nobody: what rings a person is `call_place`, which is gated as
+/// the outward action it is.
 ///
-/// Two backends say no, and each is a SECOND install rather than the user's app:
+/// A READ-ONLY backend is the single exception, and it is the one install the user never
+/// opened: a screenshot backend must not become a device their calls ring on.
 ///
-///   * a READ-ONLY backend, whatever else it is told — a screenshot backend must not
-///     become a device the user's calls ring on;
-///   * a backend carrying `TEAMS_LITE_CALLING=0`, which is how the released build runs
-///     beside the staged one (`packaging/systemd/teams-lite-app.service`). Two calling
-///     registrations on one machine ring both, and the user asked to be called once.
+/// SEVERAL installs on one machine therefore all register, and that is deliberate. Each
+/// holds a calling endpoint id of its own (`endpoint_id_path`, keyed by the port), so the
+/// service sees as many DEVICES — a call rings all of them, exactly as it rings the
+/// user's phone beside their laptop, and answering on one ends the ring on the rest.
+/// That second ring is the whole cost, and it used to be paid the other way round: the
+/// released build running beside the staged pair carried an environment value that
+/// silenced its registration, so every call and Join control in that window was drawn
+/// disabled — and the window a phone had open was the silenced one, which reads as an app
+/// that cannot call at all. No environment value silences a device now
+/// (`no_environment_value_silences_calling` scans this module), because a call the user
+/// cannot place is far the worse failure.
 fn calling_available() -> bool {
-    if read_only() {
-        return false;
-    }
-    static CALLING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CALLING.get_or_init(|| {
-        !calling_disabled_by(std::env::var("TEAMS_LITE_CALLING").ok().as_deref())
-    })
-}
-
-/// Does this environment value turn calling off? Only an explicit `0` does.
-///
-/// Pure (the value is injected) so the precedence is unit-tested. Unset is ON, because
-/// the common case is the app the user launched and nothing sets this; a value nobody
-/// recognises is ON too, since a typo must not quietly stop their calls from ringing.
-fn calling_disabled_by(configured: Option<&str>) -> bool {
-    matches!(configured.map(str::trim), Some("0"))
+    !read_only()
 }
 
 impl Ctx {
@@ -8830,8 +8822,8 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
 /// Bring the calling connection up at boot, on every backend that calls at all.
 ///
 /// This is the whole of "calling is on": the app registers as a device the user's calls
-/// ring on, once, at startup (see {@link calling_available} for the two backends that
-/// do not). A failure is one journal line and nothing else: the rest of the app does not
+/// ring on, once, at startup (see {@link calling_available} for the one backend that does
+/// not). A failure is one journal line and nothing else: the rest of the app does not
 /// depend on it, and `trouter::run` reconnects on its own.
 fn spawn_calling(ctx: Ctx) {
     tokio::spawn(async move {
@@ -9530,26 +9522,32 @@ mod tests {
         assert_eq!(write_class("call_status"), None);
     }
 
-    /// Calling is on unless this backend is told otherwise, and only an explicit `0`
-    /// tells it: the app is a Teams client, and a client the user cannot be called on is
-    /// half a client. The one thing this must never do is stop their calls ringing
-    /// because a value was misspelled.
+    /// NO environment value silences a device, and this scans for the one that used to.
+    ///
+    /// The released build beside the staged pair carried `TEAMS_LITE_CALLING=0`, so the
+    /// front a phone had open drew every call and Join control disabled — a whole feature
+    /// missing, with the cause in a unit file. What that switch bought was one less ring
+    /// on a second registration; what it cost was the user's ability to call at all from
+    /// that window. It reads as a sensible optimisation, which is exactly why a test has
+    /// to keep it out: the spelling is split so this needle is not its own match.
     #[test]
-    fn calling_is_on_unless_this_backend_is_told_otherwise() {
-        assert!(!calling_disabled_by(None), "the app the user launched calls");
-        assert!(!calling_disabled_by(Some("1")), "the spelling that means on");
-        assert!(calling_disabled_by(Some("0")), "the second install says 0");
-        assert!(calling_disabled_by(Some(" 0 ")), "a unit file's padding is not a value");
-        // A typo is ON, deliberately: the cost of guessing wrong here is a call the user
-        // never hears about, and nothing about it looks broken.
-        for on in ["", "no", "false", "off", "00"] {
-            assert!(!calling_disabled_by(Some(on)), "{on:?} is not the off switch");
+    fn no_environment_value_silences_calling() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let switch = concat!("TEAMS_LITE", "_CALLING");
+        for (number, line) in code.lines().enumerate() {
+            assert!(
+                line.trim_start().starts_with("//") || !line.contains(switch),
+                "line {}: calling has no environment switch — every install but a \
+                 read-only one registers, and each holds an endpoint id of its own",
+                number + 1
+            );
         }
     }
 
-    /// A read-only backend never registers, whatever the environment says: a screenshot
-    /// backend must not become a device the user's calls ring on. Read-only is decided
-    /// before the environment is even read, so the two can never disagree.
+    /// A read-only backend never registers: a screenshot backend must not become a device
+    /// the user's calls ring on. It is the ONLY backend that says no, so this equality is
+    /// the whole rule rather than one clause of it.
     #[test]
     fn a_read_only_backend_is_never_a_device_calls_ring_on() {
         assert_eq!(calling_available(), !read_only());

@@ -113,10 +113,10 @@ export type PublishedStream = {
 
 /** Everything `call_status` reports, and the payload of every `call_state` event. */
 export type CallStatus = {
-  /** Whether this window's backend takes calls at all. True on the app the user
-   *  launched — it registers as a device their calls ring on, like every other Teams
-   *  client they are signed in on. False on the two backends that are a SECOND install:
-   *  a read-only one, and one carrying `TEAMS_LITE_CALLING=0`. There is no switch. */
+  /** Whether this window's backend takes calls at all. True on every install the user
+   *  can open — each registers as a device their calls ring on, like every other Teams
+   *  client they are signed in on, and two on one machine are two devices. False on the
+   *  ONE backend they never opened: a read-only one. There is no switch. */
   enabled: boolean;
   /** Whether a call could start right now: the calling connection is up and
    *  registered. A backend that calls while this is false is honest about a connection

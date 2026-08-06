@@ -263,11 +263,11 @@ export async function emitCallInvite(page: Page, conversation: string): Promise<
 /**
  * Make this window's backend one that does not take calls at all.
  *
- * There is no switch in the app — the backend the user launches registers as a device
+ * There is no switch in the app — every backend the user launches registers as a device
  * their calls ring on at startup — so this hook is the only way to that state, and it is
- * the state two real backends report: a read-only one, and the second install that runs
- * beside the user's app with `TEAMS_LITE_CALLING=0`. What it exercises is that the call
- * and Join controls stay, disabled, saying so. Always finish with `resetCall`.
+ * the state ONE real backend reports: a read-only one, which is the install they never
+ * opened. What it exercises is that the call and Join controls stay, disabled, saying so.
+ * Always finish with `resetCall`.
  */
 export async function disableCalling(page: Page): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {

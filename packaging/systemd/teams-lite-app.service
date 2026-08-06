@@ -83,12 +83,14 @@ Environment=TEAMS_LITE_PORT=@APP_BACKEND_PORT@
 # neither ~/.local/bin nor ~/.bun/bin (the same gap the staged units work around).
 Environment=PATH=@AGENT_PATH@
 
-# NO CALLING in this unit, and this is the one place that says so. Every other backend
-# registers as a device the user's calls ring on, because that is what a Teams client is
-# — but two registrations on one machine ring BOTH, and this install exists to exercise
-# the released artifact, not to answer the user's phone calls twice. The staged pair on
-# @BACKEND_PORT@ is the app they actually use, so it keeps the calls.
-Environment=TEAMS_LITE_CALLING=0
+# CALLING IS ON HERE TOO, and this unit deliberately says nothing about it. It used to
+# carry an environment value that silenced the registration, so this install would not ring
+# beside the staged pair — and the price was every call and Join control in this window
+# drawn disabled, with the cause in a unit file nobody reading the app can see. A phone
+# opening this front found an app that could not call at all. Registering twice on one
+# machine is safe: each backend holds a calling endpoint id of its own (`endpoint_id_path`,
+# keyed by the port), so the service sees two DEVICES and rings both, exactly as it rings a
+# phone beside a laptop, and answering on one ends the ring on the other.
 
 # Local overrides. The "-" makes a missing file harmless. Deliberately NOT set here,
 # exactly as for the staged backend: TEAMS_LITE_CALL_DEBUG and TEAMS_LITE_CALL_CAPTURE

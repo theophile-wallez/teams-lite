@@ -1127,13 +1127,17 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   was the wrong shape for the one thing it gated — registering reaches nobody by itself,
   and the actions that reach a person are gated one by one below. Four things hold the
   new shape, and each is pinned by a test:
-  - **A SECOND install says no, and only a second install.** A read-only backend never
-    registers (a screenshot backend must not become a device the user's calls ring on),
-    and `TEAMS_LITE_CALLING=0` is what `packaging/systemd/teams-lite-app.service` carries
-    so the released build runs beside the staged one in silence — two registrations on one
-    machine ring BOTH. Only an explicit `0` turns it off: a misspelled value is ON,
-    because the cost of guessing wrong is a call the user never hears about and nothing
-    that looks broken.
+  - **A READ-ONLY backend says no, and nothing else does.** A screenshot backend must not
+    become a device the user's calls ring on; every install they can open registers, and
+    no environment value takes that back (`no_environment_value_silences_calling` scans
+    for the one that used to). **Two installs on one machine both register, deliberately**
+    — each holds a calling endpoint id of its own (`endpoint_id_path`, keyed by the port),
+    so the service sees two DEVICES and rings both, exactly as it rings a phone beside a
+    laptop. The released build beside the staged pair used to be silenced with
+    `TEAMS_LITE_CALLING=0`, to spare that second ring; what it really cost was every call
+    and Join control in that window, drawn disabled — and the front a phone had open was
+    the silenced one, so the app read as one that cannot call at all. A second ring is
+    cheap; a call the user cannot place is not. Never trade one for the other again.
   - **The registration is TAKEN BACK as the app goes away.** `stop_calling` runs on the
     idle shutdown, because a registration Teams still believes in keeps routing their
     calls to a process that is gone, and a call offered to a device that never rings is a
@@ -2388,11 +2392,17 @@ What the two DO share is the SQLite store, deliberately — that is a shape this
 has, and every duplication hazard is handled where it belongs: a live notification is
 claimed in `push_deliveries` before it is pushed, an `@claude` trigger is claimed before it
 is answered, and the presence endpoint id lives in the store so both backends refresh ONE
-registration. Two things are deliberately NOT shared: the tailnet mapping (give the
-released one its own port if the phone should reach it) and calling, which the app unit
-turns off with `TEAMS_LITE_CALLING=0` — every other backend registers as a device the
-user's calls ring on, and two registrations on one machine would ring both. The staged
-pair is the app they read their Teams on, so it keeps the calls.
+registration. One thing is deliberately NOT shared: the tailnet mapping (give the released
+one its own port if the phone should reach it — this machine serves 8443 → 19440 and
+8444 → 19442).
+
+**CALLING runs in BOTH, and that is the one rule here that was reversed on purpose.** The
+app unit used to carry `TEAMS_LITE_CALLING=0` so only the staged pair rang; the cost was
+that every call and Join control on 19442 was drawn disabled, and a phone whose bookmark
+pointed there found an app that could not call. Both register now — a calling endpoint id
+is keyed by the PORT, so they are two devices to the service and a call rings both, exactly
+as it rings a phone beside a laptop. That second ring is the deliberate price of every
+window being able to place a call.
 
 **The REAL-TIME endpoint id is the sharpest thing they must not share, and it was the one
 bug this arrangement really cost.** The live feed follows the endpoint id, and a second
