@@ -2,10 +2,10 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ClipboardEve
 import type { Editor } from "@tiptap/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  ArrowUp01Icon,
   Cancel01Icon,
   ImageAdd01Icon,
   Loading02Icon,
+  SentIcon,
   TextFontIcon,
 } from "@hugeicons/core-free-icons";
 import type { AgentAnswer } from "~/lib/agent-answer";
@@ -475,7 +475,7 @@ export function Composer(props: {
                   strokeWidth={1.8}
                 />
               ) : (
-                <HugeiconsIcon icon={ArrowUp01Icon} className="size-4" strokeWidth={2} />
+                <HugeiconsIcon icon={SentIcon} className="size-4" strokeWidth={1.8} />
               )}
             </button>
           </div>

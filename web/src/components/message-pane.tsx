@@ -490,6 +490,9 @@ export function MessagePane(props: { onBack?: () => void }) {
     return () => cancelAnimationFrame(frame);
   }, [streaming]);
 
+  // Every path that starts a draft on a message asks for the caret, because the next thing
+  // the reader does is type: the banner says which message they answer, and the composer
+  // is where the answer goes.
   const doReply = useCallback((m: ChatMessage) => {
     controller.startReply(m);
     setFocusToken((t) => t + 1);
@@ -504,6 +507,7 @@ export function MessagePane(props: { onBack?: () => void }) {
     (m: ChatMessage, agent: AgentCandidate) => {
       if (!openId) return;
       controller.startReply(m);
+      setFocusToken((t) => t + 1);
       setAgentAnswer((prev) => ({
         token: (prev?.token ?? 0) + 1,
         conversation: openId,
@@ -521,6 +525,7 @@ export function MessagePane(props: { onBack?: () => void }) {
     (m: ChatMessage, agent: AgentCandidate, mergeRequest: MergeRequestLink) => {
       if (!openId) return;
       controller.startReply(m);
+      setFocusToken((t) => t + 1);
       setAgentAnswer((prev) => ({
         token: (prev?.token ?? 0) + 1,
         conversation: openId,

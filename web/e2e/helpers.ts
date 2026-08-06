@@ -65,6 +65,21 @@ export async function fillComposer(page: Page, text: string): Promise<void> {
   await field.fill(text);
 }
 
+/** Empty the composer, and leave nothing focused.
+ *
+ *  `fill("")` does not clear a contenteditable — it inserts nothing — and a draft is
+ *  persisted per conversation, so one spec's leftovers are the next spec's opening state,
+ *  across a reload and across a new page. The blur is what lets a spec assert who takes
+ *  the caret next. */
+export async function clearComposer(page: Page): Promise<void> {
+  const field = composerField(page);
+  await field.click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.press("Backspace");
+  await expect(field).toHaveText("");
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+}
+
 /** Write `text` in the composer and send it with Enter. */
 export async function sendFromComposer(page: Page, text: string): Promise<void> {
   await fillComposer(page, text);

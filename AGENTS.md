@@ -78,6 +78,23 @@
   all — so the whole event was an error chime. The status line still carries the RAW
   failure for whoever reads a screenshot; the composer carries the half the user acts on.
   Never trade one for the other, and never swallow a send failure into a cue.
+- **A send that WORKS takes back the words that left, and only those.** The network takes
+  as long as it takes, and the reader keeps writing meanwhile — or their phone's keyboard
+  commits a correction as Enter is pressed — so the box can hold more than the message did.
+  The sent range is followed through every change the document takes while it travels
+  (`removeSentWords` in `web/src/components/rich-editor.tsx`, over ProseMirror's own
+  `Mapping`) and exactly that range goes — and only while it still holds exactly the words
+  that left, so a draft the reader REWROTE meanwhile is left whole. The two shortcuts are
+  both wrong and both happened: clearing the whole box erases words nobody sent, and
+  clearing nothing leaves the message that just left sitting there, so the next Enter posts
+  it twice.
+- **A reply puts the caret in the box, in the same task as the click that asked.** Every
+  path that drafts on a message asks for it (`doReply`, and the two "… with <agent>" rows),
+  and `focusEditor` focuses the field itself before it places the caret: TipTap finishes
+  its own focus in a `requestAnimationFrame`, and a frame is long enough to type into — on
+  a phone it is worse, because a keyboard is raised only for a focus inside the gesture
+  that asked for one. `web/e2e/messaging.spec.ts` pins both rules by typing with no wait
+  at all.
 - Outside the sandbox chat, consent is per-message and never standing: approval
   to send one message is not permission to send others. When in doubt, draft it and
   ask first.

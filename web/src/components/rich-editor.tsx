@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ClipboardEvent as ReactClipboardEvent,
@@ -10,6 +11,9 @@ import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/r
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Selection } from "@tiptap/pm/state";
+import { Mapping } from "@tiptap/pm/transform";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   BoldIcon,
@@ -66,9 +70,72 @@ const EXTENSIONS = [
   AgentTagNode,
 ];
 
+/** `useLayoutEffect` in the browser, `useEffect` on the server (where there is no
+ *  layout and React warns about the former). */
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
 /** An "@…" being typed: what was typed, the document range it occupies (so picking
  *  somebody replaces exactly that text), and whether it opens the message. */
 type MentionQueryState = { query: string; from: number; to: number; atStart: boolean };
+
+/** A message on its way out: the words it took, the range of the document they came from,
+ *  and every change the document has taken since — so the words that LEFT can be taken out
+ *  of the field without touching the ones typed while it was in flight (see
+ *  {@link removeSentWords}). */
+type SentWords = { words: string; from: number; to: number; mapping: Mapping };
+
+/** The words of a document range, an atom (a mention chip, an agent tag) counted as the one
+ *  character it occupies — the reading `mentionQueryInEditor` already works in, and the one
+ *  thing that stays comparable while the document changes around the range. */
+function wordsBetween(doc: ProseMirrorNode, from: number, to: number): string {
+  return doc.textBetween(from, to, "\n", "\ufffc");
+}
+
+/**
+ * Put the caret in the field, in the caller's own task.
+ *
+ * TipTap finishes its own focus inside a `requestAnimationFrame`, and a frame is long
+ * enough for the reader to have started typing — those keystrokes land nowhere. A phone
+ * is stricter still: it raises its keyboard only for a focus that happens in the gesture
+ * that asked for one, which a deferred focus is not. So the element is focused first and
+ * the command only places the caret.
+ */
+function focusEditor(editor: Editor): void {
+  // The command scrolls the field into view itself, so this half must not do it too.
+  editor.view.dom.focus({ preventScroll: true });
+  editor.commands.focus("end");
+}
+
+/**
+ * Take the words that were just sent back out of the field, and leave everything else.
+ *
+ * A send is not instant, so the field can hold more than it did when the message left —
+ * the next word the reader started typing, or the correction a phone's keyboard commits
+ * as Enter is pressed. Clearing the whole field then erases words nobody sent, and
+ * leaving the whole field reads as a message that never went: the box still shows what
+ * just left, and the next Enter posts it a second time. Both happened, so neither is the
+ * rule: the sent range is followed through every change the document took and only that
+ * range goes.
+ *
+ * Nothing is removed unless the range still holds exactly the words that left. A reader who
+ * rewrote the draft while it travelled — selected it all and typed something else — keeps
+ * every word of what they wrote, because a guess at where the sent words went would take
+ * their message instead of ours.
+ */
+function removeSentWords(editor: Editor, sent: SentWords): void {
+  if (sent.mapping.maps.length === 0) {
+    // The common case: the field is untouched, so it goes back to a clean empty
+    // document rather than to an emptied one (no leftover marks, no leftover blocks).
+    editor.commands.clearContent();
+    return;
+  }
+  // A word typed AT either edge belongs to the reader, not to the message: the biases keep
+  // an insertion at `from` in front of the range and one at `to` behind it.
+  const from = sent.mapping.map(sent.from, 1);
+  const to = sent.mapping.map(sent.to, -1);
+  if (from >= to || wordsBetween(editor.state.doc, from, to) !== sent.words) return;
+  editor.commands.deleteRange({ from, to });
+}
 
 /** The `@…` the caret sits in, in document coordinates, or null when it sits in
  *  ordinary text. The text is read from the caret's own block, so a mention can only
@@ -167,6 +234,9 @@ export function RichEditor(props: {
   // The exact query the user dismissed with Escape. Typing on reopens the list; the
   // same query does not, so Escape means "not this one" rather than "not ever".
   const dismissedRef = useRef<string | null>(null);
+  // The message currently on its way out, and where its words sit in the document as the
+  // reader keeps typing into it (see `submit` and `removeSentWords`).
+  const sentRef = useRef<SentWords | null>(null);
 
   const setMentionState = (next: MentionQueryState | null) => {
     mentionRef.current = next;
@@ -211,6 +281,11 @@ export function RichEditor(props: {
       syncMentions(editor);
     },
     onSelectionUpdate: ({ editor }) => syncMentions(editor),
+    // Follow the words of a message that is in flight through every change the document
+    // takes while it travels, so the send that lands takes exactly those words out.
+    onTransaction: ({ transaction }) => {
+      if (transaction.docChanged) sentRef.current?.mapping.appendMapping(transaction.mapping);
+    },
     onBlur: () => closeMentions(),
     editorProps: {
       attributes: {
@@ -297,16 +372,37 @@ export function RichEditor(props: {
     if (!editor) return;
     closeMentions();
     const { html, mentions } = serializeTeamsMessage(editor.getHTML());
-    const submittedHtml = html;
-    void props.onSubmit(html, mentions).then((sent) => {
-      if (!sent || !editor || serializeTeamsMessage(editor.getHTML()).html !== submittedHtml)
-        return;
-      editor.commands.clearContent();
+    // A send while one is already out is refused by the composer, so what it answers says
+    // nothing about the words in the field: the message in flight still owns them.
+    if (sentRef.current) {
+      void props.onSubmit(html, mentions);
+      return;
+    }
+    const doc = editor.state.doc;
+    const from = Selection.atStart(doc).from;
+    const to = Selection.atEnd(doc).to;
+    const sent: SentWords = {
+      words: wordsBetween(doc, from, to),
+      from,
+      to,
+      mapping: new Mapping(),
+    };
+    sentRef.current = sent;
+    void props.onSubmit(html, mentions).then((accepted) => {
+      if (sentRef.current !== sent) return;
+      sentRef.current = null;
+      // A refused send keeps every word where it is, beside the sentence saying why it
+      // did not leave (see the composer's `sendError`).
+      if (!accepted || editor.isDestroyed) return;
+      removeSentWords(editor, sent);
     });
   };
 
-  useEffect(() => {
-    editor?.commands.focus("end");
+  // The caret belongs in the field the moment somebody asks for it — a reply, a fresh
+  // thread, a click on the box's dead space. A layout effect keeps it in the same task as
+  // the click that asked, which is what a phone's keyboard waits for.
+  useIsomorphicLayoutEffect(() => {
+    if (editor) focusEditor(editor);
   }, [editor, props.focusToken]);
 
   // "Answer with <agent>", from a message's ⋯ menu: lead the draft with that agent's tag
@@ -342,7 +438,9 @@ export function RichEditor(props: {
   useEffect(() => {
     const ref = props.focusRef;
     if (!ref) return;
-    ref.current = () => editor?.commands.focus("end");
+    ref.current = () => {
+      if (editor) focusEditor(editor);
+    };
     return () => {
       ref.current = null;
     };
