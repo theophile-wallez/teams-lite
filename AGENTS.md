@@ -2494,6 +2494,17 @@ button says what it costs before it is pressed.
     reader hunting a network fault that was never there. The response's own `Content-Length`
     is checked before the bytes, so a replaced asset costs a page rather than 130 MB — but it
     is never taken as the expected size, since a captive portal states a length too.
+- **A failed SWAP says why, on this machine and to every page.** The swap is the one step that
+  touches something outside this process, so it is the step that fails for reasons nobody in
+  the app can guess at — and it used to fail silently: the page that had clicked drew a
+  failure out of its rejected RPC, the journal held nothing, a second page kept drawing
+  `Restarting…`, and the sentence the user got named the install path with the CAUSE stripped
+  off it (`e.to_string()` on an `anyhow::Error` is the outermost context alone). All three
+  halves are pinned by a test: the slot goes `Failed` with the whole chain so every page
+  agrees, one journal line keeps the record after that page is closed, and **an RPC refusal
+  reaches its client as `{e:#}`** — which is every surface that states a refusal, the composer
+  and the approval menu included. The retry is a fresh download, which is what heals the
+  commonest cause.
 - **The RESTART is the launcher's, and only the launcher's** (`launcher/src/update.ts`).
   The web server runs inside that process and the backend is its child, so it is the one
   process that can free both ports and bring both back: the backend asks with an
@@ -2759,6 +2770,18 @@ is answered, and the presence endpoint id lives in the store so both backends re
 registration. One thing is deliberately NOT shared: the tailnet mapping (give the released
 one its own port if the phone should reach it — this machine serves 8443 → 19440 and
 8444 → 19442).
+
+**They also share the DOWNLOAD CACHE, and that one bit them.** `~/.cache/teams-lite/updates`
+is per MACHINE while an update's phase is per PROCESS, so the staged service's own cleanup
+reached the released build's 130 MB: the staged pair IS the newest release within minutes of
+every push, its two-minute poll therefore found itself current, and it cleared that directory
+wholesale — including the build the released one had just downloaded and was one click from
+installing. The second click failed, and the reader was shown the install path with no reason
+under it. So a cleanup **prunes by rev and spares whatever `latest` names**
+(`update::prune_downloads`, and there is deliberately no way to spell "remove everything"):
+every install fetches exactly what `latest` names, which is what makes one process's cleanup
+safe for another's transfer. The kept build is a bounded 130 MB that the next release clears.
+A phase check cannot stand in for it — this backend's phase says nothing about the other's.
 
 **CALLING runs in BOTH, and that is the one rule here that was reversed on purpose.** The
 app unit used to carry `TEAMS_LITE_CALLING=0` so only the staged pair rang; the cost was

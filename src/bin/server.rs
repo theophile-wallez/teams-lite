@@ -1630,14 +1630,18 @@ impl Ctx {
     ///
     /// Reached from a download that re-read the release and found nothing newer — the user
     /// updated on another install, or CI moved the tag back onto this commit. It empties
-    /// the row rather than reporting a failure, because nothing failed, and it drops the
-    /// cached build for the same reason the check does: being current is what makes a
-    /// downloaded one worthless.
-    fn forget_release(&self) {
+    /// the row rather than reporting a failure, because nothing failed, and it prunes the
+    /// cache for the same reason the check does: a build the release moved PAST is one
+    /// nobody will run again.
+    ///
+    /// `latest` names this build, and the download for it is SPARED even so: another
+    /// install on this machine may be a commit behind and about to install exactly that
+    /// file (see [`teams_lite::update::prune_downloads`]).
+    fn forget_release(&self, latest: &str) {
         let _ = self.with_update(|slot| {
             *slot = UpdateSlot::default();
         });
-        teams_lite::update::discard_downloads();
+        teams_lite::update::prune_downloads(latest);
         self.emit("update_available", Value::Null);
     }
 
@@ -1742,7 +1746,9 @@ impl Ctx {
                 // empties itself, and `forget_release` has already said so.
                 Ok(None) => {
                     eprintln!("[update] the release is no longer newer than this build");
-                    ctx.forget_release();
+                    // The re-read found this build CURRENT, so `latest` names this build's
+                    // own commit — which is the one download the prune has to spare.
+                    ctx.forget_release(teams_lite::update::build_rev().unwrap_or_default());
                 }
                 Err(e) => {
                     eprintln!("[update] download failed: {e:#}");
@@ -1859,9 +1865,25 @@ impl Ctx {
             })?
             .context("nothing is downloaded yet — download the update before applying it")?;
 
-        teams_lite::update::install_binary(&downloaded, &target).with_context(|| {
-            format!("install the new build over {}", target.display())
-        })?;
+        // A failure here is REPORTED, on this machine and to every open page — it used to be
+        // neither. The swap is the one step of an update that touches something outside this
+        // process, so it is the step that fails for reasons nobody in the app can guess at
+        // (the download deleted under it, a full disk, a directory that stopped being
+        // writable): the journal keeps the whole chain for whoever reads it later, and the
+        // slot carries it so the phone that pressed the button and the laptop beside it
+        // agree. Before this, the page that clicked drew a failure of its own and the rest
+        // of the app — and this machine — held no record of it at all.
+        if let Err(e) = teams_lite::update::install_binary(&downloaded, &target) {
+            let e = e.context(format!("install the new build over {}", target.display()));
+            eprintln!("[update] the swap failed: {e:#}");
+            let failed = self.with_update(|slot| {
+                slot.phase = UpdatePhase::Failed;
+                slot.error = format!("{e:#}");
+                slot.progress_json()
+            })?;
+            self.emit("update_progress", failed);
+            return Err(e);
+        }
         eprintln!("[update] installed over {} — restarting", target.display());
 
         // The launcher listens for this on the keepalive socket it already holds
@@ -2619,7 +2641,18 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTrac
                         requests.push(async move {
                             let reply = match dispatch(&request_ctx, &method, &params).await {
                                 Ok(result) => json!({ "id": id, "result": result }),
-                                Err(e) => json!({ "id": id, "error": e.to_string() }),
+                                // `{e:#}` — the WHOLE chain, cause included, which is what
+                                // the journal prints everywhere else in this backend.
+                                // `to_string()` gives the outermost context alone, and the
+                                // outermost context is the part the caller already knew: a
+                                // failed update said "install the new build over
+                                // /home/…/teams-bin" and threw away the reason it could not,
+                                // so the one sentence the user was shown named the target
+                                // and nothing they could act on. Every surface that reports
+                                // a refusal — the composer, the approval menu, the update row
+                                // — reads this string, and each of them is the only place
+                                // that failure is ever stated.
+                                Err(e) => json!({ "id": id, "error": format!("{e:#}") }),
                             };
                             WsMessage::Text(reply.to_string().into())
                         }.boxed());
@@ -7246,15 +7279,20 @@ impl Ctx {
             // stay SILENT when it was not, or an up-to-date app would be sent a null every
             // two minutes.
             //
-            // The discard is unconditional even so, and deliberately: being current is
-            // exactly what makes a downloaded build worthless, and the one left in the cache
-            // may have been downloaded by an EARLIER process, which this slot knows nothing
-            // about. Removing a directory that is not there costs one failed syscall.
+            // The PRUNE runs either way, and deliberately: a build the release moved past
+            // is worthless, and the one left in the cache may have been downloaded by an
+            // EARLIER process, which this slot knows nothing about.
+            //
+            // It spares the download for `latest` — which here is this build's own commit —
+            // because the process that put it there may be ANOTHER install on this machine,
+            // a commit behind and one click from installing it. This backend's own phase
+            // guards nothing on its behalf: a phase is per process and this cache is per
+            // machine (see `update::prune_downloads`).
             None => {
                 if self.with_update(|slot| slot.available.is_some()).unwrap_or(false) {
-                    self.forget_release();
+                    self.forget_release(&release.rev);
                 } else {
-                    teams_lite::update::discard_downloads();
+                    teams_lite::update::prune_downloads(&release.rev);
                 }
                 ReleaseOutcome::Current
             }
@@ -10723,6 +10761,79 @@ mod tests {
         let claim = pass.find("claim_release_read(ask)").expect("the claim");
         let fetch = pass.find("update::fetch_release(").expect("the fetch");
         assert!(claim < fetch, "the request must happen under the claim, not beside it");
+
+        // And its cleanup NAMES what it spares. The pass's own phase check above guards
+        // this process's download and nothing else: the cache is per machine, so a pass
+        // that cleared it wholesale took the download another install was about to install
+        // (see `update::prune_downloads`).
+        assert!(
+            pass.contains("prune_downloads(&release.rev)"),
+            "the pass must spare the download for the release it just read — a clear-all \
+             here is the 2026-08-06 failure, where the staged service deleted the 130 MB \
+             the released build was one click from installing"
+        );
+    }
+
+    /// **A failed swap is REPORTED — on this machine, and to every open page.**
+    ///
+    /// This is what the 2026-08-06 failure cost its reader. The install threw, the page
+    /// that had clicked drew a failure out of the rejected RPC, and nothing else knew: no
+    /// journal line on the machine the app runs on, no phase for the phone beside it, and —
+    /// because the reply carried `to_string()` — a sentence naming the install path with the
+    /// reason stripped off it. The user was shown "install the new build over
+    /// /home/…/teams-bin" and had nothing to act on.
+    ///
+    /// Scanned, because the failure is a filesystem one and reaching it for real means
+    /// making a directory unwritable under a live `Ctx`; what has to hold is that all three
+    /// halves are spelled at all.
+    #[test]
+    fn a_failed_swap_says_why_to_the_journal_and_to_every_page() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let apply = code
+            .split("    async fn apply_update(")
+            .nth(1)
+            .expect("the apply")
+            .split("\n    /// Restart this backend")
+            .next()
+            .expect("the apply ends before the restart");
+
+        for (needle, why) in [
+            (
+                "UpdatePhase::Failed",
+                "a swap that failed must leave the slot FAILED, or the row on a second page \
+                 keeps drawing `Restarting…` for a restart that never happens",
+            ),
+            (
+                "slot.error = format!(\"{e:#}\")",
+                "the slot must carry the WHOLE chain: the outermost context names the \
+                 target, and the cause is the half the reader can act on",
+            ),
+            (
+                "eprintln!(\"[update] the swap failed",
+                "this machine must keep a record — a failure nobody wrote down cannot be \
+                 diagnosed after the page that saw it was closed",
+            ),
+        ] {
+            assert!(apply.contains(needle), "{why} (looked for `{needle}`)");
+        }
+
+        // And the reply a client reads carries the cause too. `to_string()` on an
+        // `anyhow::Error` is the outermost context ALONE, which is the part the caller
+        // already knew; every surface that states a refusal — the composer, the approval
+        // menu, the update row — is reading this one string.
+        let reply = code
+            .split("match dispatch(&request_ctx, &method, &params).await {")
+            .nth(1)
+            .expect("the dispatch reply")
+            .split("};")
+            .next()
+            .expect("the match ends");
+        assert!(
+            reply.contains("format!(\"{e:#}\")") && !reply.contains("e.to_string()"),
+            "an RPC refusal must reach the client with its cause, not with the context \
+             sentence alone"
+        );
     }
 
     #[test]

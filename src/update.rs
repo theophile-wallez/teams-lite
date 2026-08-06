@@ -366,7 +366,14 @@ fn is_writable_dir(dir: &Path) -> bool {
 pub fn download_path(latest_rev: &str) -> Result<PathBuf> {
     let dir = updates_dir(&cache_base()?);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    Ok(dir.join(format!("teams-{}", short_rev(latest_rev))))
+    Ok(dir.join(download_name(latest_rev)))
+}
+
+/// What a build's download is CALLED, in one place — because [`prune_downloads`] decides
+/// what to keep by that name, and two spellings of it would mean a cleanup that spares
+/// nothing.
+fn download_name(rev: &str) -> String {
+    format!("teams-{}", short_rev(rev))
 }
 
 /// This machine's cache root, XDG first.
@@ -389,25 +396,65 @@ fn updates_dir(base: &Path) -> PathBuf {
     base.join("teams-lite").join("updates")
 }
 
-/// Throw away every downloaded build.
+/// Throw away every downloaded build EXCEPT the one `keep_rev` names.
 ///
-/// Called when the check finds this build CURRENT, which is the moment a download becomes
-/// worthless: either it was installed and we are now running it, or the release moved on
-/// past it. Without this, 130 MB of a build nobody will ever run again would sit in the
-/// cache for good — and a successful update is precisely the case that leaves one there.
+/// Called on every pass of the release watch, because a build the release has moved past
+/// is worthless: 130 MB nobody will ever run again would otherwise sit in the cache for
+/// good, and a successful update is precisely the case that leaves one there.
+///
+/// **What is kept is the download for whatever `latest` names, and that is the whole rail.**
+/// This cache is per MACHINE while a phase is per PROCESS, and this machine deliberately
+/// runs two installs on two different commits (see § Running the released build beside the
+/// staged one): the staged service IS the newest release within minutes of every push,
+/// while the released build — the only shape that can update itself — is an older commit
+/// sitting on a download it is about to install. Clearing the whole directory therefore
+/// deleted that download from under it, and the second click failed with a message naming
+/// the install path and no reason. It happened on 2026-08-06. Every install agrees on what
+/// `latest` is and every download fetches exactly that, so keeping that one rev is what
+/// makes one process's cleanup safe for another's transfer. There is deliberately no way to
+/// ask for "remove everything".
 ///
 /// Best-effort and quiet: the cache is the one place a machine may clean up behind us, so
 /// a failure here is not worth a word to anybody.
-pub fn discard_downloads() {
+pub fn prune_downloads(keep_rev: &str) {
     if let Ok(base) = cache_base() {
-        discard_downloads_in(&base);
+        prune_downloads_in(&base, keep_rev);
     }
 }
 
-/// [`discard_downloads`] with the cache root injected, so what it removes — and what it
+/// Did the caller fail to name a rev at all?
+///
+/// A build made from source has no `TEAMS_BUILD_REV` to compare with, and "I do not know
+/// what `latest` is" must never resolve to "so remove everything": that is the rule
+/// [`prune_downloads`] exists to hold, spelled for the one caller that reads its own rev.
+/// A prune that knows nothing removes nothing.
+fn names_no_build(keep_rev: &str) -> bool {
+    keep_rev.trim().is_empty()
+}
+
+/// [`prune_downloads`] with the cache root injected, so what it removes — and what it
 /// leaves alone — is unit-tested.
-fn discard_downloads_in(base: &Path) {
-    let _ = std::fs::remove_dir_all(updates_dir(base));
+fn prune_downloads_in(base: &Path, keep_rev: &str) {
+    if names_no_build(keep_rev) {
+        return;
+    }
+    let dir = updates_dir(base);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    // Both spellings of the kept build: the finished file, and the `.part` a transfer that
+    // is still running writes into. Removing the second one is removing a download in
+    // flight.
+    let keep = download_name(keep_rev);
+    let keep_part = format!("{keep}.part");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == keep || name == keep_part {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
 }
 
 /// Stream `asset` to `dest`, reporting progress as it goes.
@@ -922,11 +969,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Clearing downloads drops the 130 MB nobody will run again — and NOTHING else in
+    /// Pruning downloads drops the 130 MB nobody will run again — and NOTHING else in
     /// that cache. Its siblings are the backend and the web bundle the `teams` command
     /// unpacked and is running from; reaching those would break the app it just updated.
     #[test]
-    fn discarding_downloads_spares_the_app_it_runs_from() {
+    fn pruning_downloads_spares_the_app_it_runs_from() {
         let base = std::env::temp_dir().join(format!("teams-lite-cache-{}", std::process::id()));
         let updates = updates_dir(&base);
         std::fs::create_dir_all(&updates).unwrap();
@@ -934,13 +981,72 @@ mod tests {
         let extracted = base.join("teams-lite").join("server");
         std::fs::write(&extracted, b"the backend this process is running").unwrap();
 
-        discard_downloads_in(&base);
+        prune_downloads_in(&base, SHA_A);
 
-        assert!(!updates.exists(), "the downloads must be gone");
+        assert!(
+            !updates.join("teams-def5678").exists(),
+            "a build the release moved past must be gone"
+        );
         assert!(extracted.is_file(), "the unpacked backend must survive");
         // Idempotent: a machine with nothing cached is the common case.
-        discard_downloads_in(&base);
+        prune_downloads_in(&base, SHA_A);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **A prune must never take the download for the build `latest` names.**
+    ///
+    /// This is the 2026-08-06 failure. The cache is per MACHINE and a phase is per
+    /// PROCESS, and this machine runs two installs on two different commits on purpose:
+    /// the staged service becomes the newest release within minutes of every push, so its
+    /// two-minute poll found itself CURRENT — and cleared the whole directory, including
+    /// the 130 MB the RELEASED build (an older commit, and the only shape that can update
+    /// itself) had just downloaded and was waiting to install. The second click then
+    /// failed, and the user was shown the install path with no reason behind it.
+    ///
+    /// Every install fetches exactly what `latest` names, so sparing that one rev is what
+    /// makes one process's cleanup safe for another process's transfer.
+    #[test]
+    fn a_prune_never_takes_the_build_another_install_is_about_to_run() {
+        let base = std::env::temp_dir().join(format!("teams-lite-keep-{}", std::process::id()));
+        let updates = updates_dir(&base);
+        std::fs::create_dir_all(&updates).unwrap();
+        let live = updates.join(download_name(SHA_A));
+        let in_flight = updates.join(format!("{}.part", download_name(SHA_A)));
+        let stale = updates.join(download_name(SHA_B));
+        std::fs::write(&live, b"the build the other install is about to run").unwrap();
+        std::fs::write(&in_flight, b"a transfer that is still running").unwrap();
+        std::fs::write(&stale, b"a build the release moved past").unwrap();
+
+        // The pass that used to be destructive: this backend IS the release, and another
+        // one is sitting on that very download.
+        prune_downloads_in(&base, SHA_A);
+
+        assert!(live.is_file(), "the download for `latest` must survive a prune");
+        assert!(in_flight.is_file(), "a transfer in flight must survive a prune");
+        assert!(!stale.exists(), "a build nobody will run again must go");
+
+        // And a prune that knows NOTHING removes nothing: a build made from source names no
+        // commit, and "I cannot compare" must never resolve to "so remove everything".
+        std::fs::write(&stale, b"a build the release moved past").unwrap();
+        prune_downloads_in(&base, "");
+        assert!(stale.is_file(), "a prune with no rev to spare must remove nothing");
+        assert!(live.is_file(), "a prune with no rev to spare must remove nothing");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// There must be no way to spell "clear the whole directory": that is the shape of the
+    /// bug above, and it reads as sensible cleanup every time somebody writes it.
+    #[test]
+    fn nothing_in_this_module_clears_the_download_directory_wholesale() {
+        let source = include_str!("update.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first part");
+        assert!(
+            !source.contains("remove_dir_all"),
+            "a download directory removed wholesale takes another install's transfer with \
+             it — prune by the rev `latest` names instead"
+        );
     }
 
     #[test]
