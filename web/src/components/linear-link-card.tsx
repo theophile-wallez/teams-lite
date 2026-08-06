@@ -23,6 +23,7 @@ import {
 } from "~/lib/linear";
 import type { LinearLinkKind, LinearLinkMetadata } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
+import { CardPerson } from "./card-person";
 import { LinearLogo } from "./linear-logo";
 
 /** The icon each state category is drawn with, following Linear's own set: an
@@ -104,9 +105,11 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
   const extraLabels = labels.length - MAX_LABELS;
   const percent = progressPercent(meta.progress);
   const due = formatDueDate(meta.due_date ?? meta.target_date);
-  // One faint line of context under the title: who owns this, and where it lives.
-  const owner = meta.assignee_name ?? meta.lead_name ?? meta.creator_name;
-  const context = [meta.identifier, meta.team, meta.project, owner].filter(Boolean) as string[];
+  // One faint line of context under the title: where this lives, and who owns it. WHICH
+  // person that is depends on the resource — an issue is assigned, a project is led, a
+  // document is written — and the card says the one it has, last, where a face fits.
+  const owner = meta.assignee ?? meta.lead ?? meta.creator;
+  const context = [meta.identifier, meta.team, meta.project].filter(Boolean) as string[];
 
   return (
     <a
@@ -199,6 +202,18 @@ export function LinearLinkCard(props: { metadata: LinearLinkMetadata }) {
                 </span>
               </span>
             ))}
+            {owner && (
+              <span className="flex min-w-0 items-center gap-1.5">
+                {context.length > 0 && (
+                  <span aria-hidden className="shrink-0">
+                    ·
+                  </span>
+                )}
+                {/* The same chip the GitLab card wears: a colleague the user's own Teams knows
+                    is drawn as that colleague, and nothing is ever fetched from Linear. */}
+                <CardPerson person={owner} testId="linear-card-person" />
+              </span>
+            )}
           </div>
 
           {meta.parent && (

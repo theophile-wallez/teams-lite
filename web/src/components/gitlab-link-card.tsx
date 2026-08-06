@@ -12,41 +12,9 @@ import {
   Loading02Icon,
   PlayCircleIcon,
 } from "@hugeicons/core-free-icons";
-import { personFace } from "~/lib/gitlab-mr";
 import type { GitLabLinkKind, GitLabLinkMetadata } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
-import { Avatar } from "./avatar";
-
-/** Who opened this, on the card's own faint meta line.
- *
- *  A colleague the user's own Teams knows is drawn AS that colleague — their real face and
- *  the name this app calls them — which is the rule the merge-request page follows, in the
- *  one place a card has room for it (see `personFace`). Somebody only GitLab knows keeps
- *  GitLab's name over tinted initials, and GitLab's own `avatar_url` is never requested:
- *  drawing a card must make no request to the instance. */
-function CardAuthor(props: { author: NonNullable<GitLabLinkMetadata["author"]> }) {
-  const face = personFace(props.author);
-  return (
-    <>
-      <span aria-hidden>·</span>
-      <span
-        data-testid="gitlab-card-author"
-        data-author={face.label}
-        className="flex min-w-0 items-center gap-1"
-      >
-        <Avatar
-          seed={face.seed}
-          label={face.label}
-          photo={face.photo}
-          initials={face.label.slice(0, 1).toUpperCase()}
-          fallback="person"
-          className="size-3.5 text-[8px]"
-        />
-        <span className="min-w-0 truncate">{face.label}</span>
-      </span>
-    </>
-  );
-}
+import { CardPerson } from "./card-person";
 
 const KIND_ICON: Record<GitLabLinkKind, IconSvgElement> = {
   merge_request: GitPullRequestArrowIcon,
@@ -256,7 +224,12 @@ export function GitLabLinkCard(props: { metadata: GitLabLinkMetadata }) {
                 <span className="shrink-0 font-medium text-text-dim">{meta.reference}</span>
               </>
             )}
-            {meta.author && <CardAuthor author={meta.author} />}
+            {meta.author && (
+              <>
+                <span aria-hidden>·</span>
+                <CardPerson person={meta.author} testId="gitlab-card-author" />
+              </>
+            )}
           </div>
 
           {meta.source_branch && meta.target_branch && (

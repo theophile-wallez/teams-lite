@@ -3,10 +3,11 @@
 // These mirror the Rust backend's WebSocket protocol (see src/bin/server.rs).
 // Nothing here touches the DOM, the network, or any runtime-specific API.
 
-// The one type this file borrows rather than restates. A GitLab person has one spelling in
-// this app — `gitlab_mr::Person` plus the identity the backend resolves onto it — and an
-// approval names people, so it takes that spelling instead of a second copy that would drift.
-import type { GitLabPerson } from "./gitlab-mr";
+// The one type this file borrows rather than restates. A person a TRACKER names has one
+// spelling in this app — `tracker_people::Person` plus the identity the backend resolves onto
+// it — and a card and an approval both name people, so they take that spelling instead of a
+// second copy that would drift.
+import type { TrackerPerson } from "./tracker-people";
 
 // Mirrors the Rust `ConversationKind` (src/store.rs).
 export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
@@ -821,7 +822,7 @@ export type GitLabLinkMetadata = {
   /** Who opened it — a person the backend may have matched to a colleague in the user's own
    *  Teams, so the card draws them the way the merge-request page does (`personFace`).
    *  Absent on a project, which has no author. */
-  author?: GitLabPerson;
+  author?: TrackerPerson;
   source_branch?: string;
   target_branch?: string;
   labels?: string[];
@@ -864,11 +865,15 @@ export type LinearLinkMetadata = {
   state_type?: string;
   /** The state's colour in Linear, as a CSS hex string ("#5e6ad2"). */
   state_color?: string;
-  assignee_name?: string;
+  /** Who owns this, and which of the three it is depends on the resource: an issue is
+   *  assigned, a project is led, a document is written. Each is a person the backend may have
+   *  matched to a colleague in the user's own Teams, so the card draws them the way every
+   *  other surface in this app does (`personFace`). */
+  assignee?: TrackerPerson;
   /** Project lead. */
-  lead_name?: string;
+  lead?: TrackerPerson;
   /** Document author. */
-  creator_name?: string;
+  creator?: TrackerPerson;
   /** Linear's numeric priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
   priority?: number;
   /** The priority's own label ("Urgent", "High", …). */
@@ -918,7 +923,7 @@ export type GitLabApproval = {
   /** Who has approved, in GitLab's own order — each one a person the backend may have
    *  matched to a colleague, so the sentence names them the way the rest of this app does
    *  (`personFace`). An older backend answered bare names; nothing reads it as one. */
-  approved_by?: GitLabPerson[];
+  approved_by?: TrackerPerson[];
   /** Whether the user's OWN account is among them, matched on GitLab's user id. This
    *  is what decides whether the menu offers "Approve" or "Revoke approval": the two
    *  are opposite actions, and offering the wrong one is a mistake the reader cannot

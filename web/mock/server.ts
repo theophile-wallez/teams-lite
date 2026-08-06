@@ -3728,14 +3728,14 @@ const MOCK_GITLAB_LUCAS: MockGitLabPerson = { name: "Lucas Silva", username: "lu
 
 // ---- who a GitLab user is in TEAMS -----------------------------------------
 //
-// The mock's half of `src/gitlab_people.rs`: a merge request's people are matched to the
-// people this app knows by their REAL NAME, and the answer travels as one more field on each
-// person. It is done at the answer boundary, exactly where the backend does it — never baked
-// into the fixtures — because that is what makes a rename show up here at once, and what
-// keeps GitLab's own words the thing the fixtures hold.
+// The mock's half of `src/tracker_people.rs`: the people on a merge request — or on a Linear
+// issue — are matched to the people this app knows by their REAL NAME, and the answer travels
+// as one more field on each person. It is done at the answer boundary, exactly where the
+// backend does it — never baked into the fixtures — because that is what makes a rename show up
+// here at once, and what keeps the tracker's own words the thing the fixtures hold.
 
 /** The comparison key two systems' record of one person has to agree on: case folded and
- *  whitespace collapsed. A port of `gitlab_people::name_key`, whose own doc says why accents
+ *  whitespace collapsed. A port of `tracker_people::name_key`, whose own doc says why accents
  *  are NOT folded (it was measured, and it changes nothing). */
 function mockNameKey(name: string): string {
   return name.trim().toLowerCase().split(/\s+/).join(" ");
@@ -3759,10 +3759,10 @@ function mockTeamsPersonFor(name: string): { mri: string; name: string } | undef
   return { mri: person.mri, name: nickname(person.mri) || person.name };
 }
 
-/** Name every person in one GitLab payload — the walk `gitlab_people::annotate` does, under
+/** Name every person in one tracker payload — the walk `tracker_people::annotate` does, under
  *  the same rule: a person is an object carrying both a `name` and a `username`, so one pass
- *  reaches a row's author, a merge request's reviewers and every comment's author, and never
- *  a CI job (which has a name and no handle).
+ *  reaches a row's author, a merge request's reviewers, every comment's author and a Linear
+ *  issue's assignee, and never a CI job (which has a name and no handle).
  *
  *  It answers a COPY. The fixtures above are shared by every read — a row hands out the very
  *  object a detail and a note hand out — so writing an identity into them would be this mock
@@ -4242,7 +4242,12 @@ function mockLinearMetadata(url: string): Record<string, unknown> | null {
       state: state.name,
       state_type: state.type,
       state_color: state.color,
-      assignee_name: long ? "Clément DELBARRE" : "Ada Lovelace",
+      // People, not bare names, exactly as the Rust `LinkMetadata` carries them — and one of
+      // them is somebody this mock's own Teams knows, so a Linear card is reviewable with a
+      // real face on it (see `withMockTeamsPeople`).
+      assignee: long
+        ? { name: "Charlotte Dubois", username: "charlotte.dubois" }
+        : { name: "Mia Chen", username: "mia.chen" },
       // ENG-1 is urgent, ENG-2 high, the rest unbadged — see `badgedPriority`.
       priority: number % 5,
       priority_label: ["No priority", "Urgent", "High", "Medium", "Low"][number % 5],
@@ -4268,7 +4273,8 @@ function mockLinearMetadata(url: string): Record<string, unknown> | null {
       state: "In Progress",
       state_type: "started",
       state_color: "#f2c94c",
-      lead_name: "Grace Hopper",
+      // Somebody only Linear knows: the other shape, on the card beside it.
+      lead: { name: "Grace Hopper", username: "grace" },
       progress: 0.42,
       target_date: "2026-10-02",
       description: "Bring the trackers the team lives in into the chat itself.",
@@ -4280,7 +4286,7 @@ function mockLinearMetadata(url: string): Record<string, unknown> | null {
     url,
     identifier: "",
     title: "Link previews — system design",
-    creator_name: "Ada Lovelace",
+    creator: { name: "Ada Lovelace", username: "ada" },
     project: "Chat integrations",
     description: "How a link in a message becomes a card, and what each provider knows.",
   };
@@ -6231,7 +6237,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     // Each provider claims its own host, exactly as `link_preview::enrich` does.
     case "enrich_link": {
       const url = requireString(params, "url");
-      // A card names people too, so it goes through the same walk the page's answers do.
+      // EITHER card names people, so both go through the same walk the page's answers do.
       return withMockTeamsPeople({
         metadata: mockGitLabMetadata(url) ?? mockLinearMetadata(url),
       });

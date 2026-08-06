@@ -544,10 +544,10 @@ The app reads the user's Teams/Outlook calendar over Microsoft Graph
 
 The app enriches a tracker link pasted into a chat into a rich preview card
 (`src/link_preview.rs`, over `src/gitlab.rs` and `src/linear.rs`), and it holds a whole
-merge-request page (§ The GitLab page). A GitLab card names its author as the colleague this
-app already knows — their Teams face and the name the user gave them — which is
-§ A GitLab user who is also a colleague, applied to the surface most merge requests are met
-on. It reads those trackers. It writes **five** things
+merge-request page (§ The GitLab page). Either card names its own person — a merge request's
+author, an issue's assignee — as the colleague this app already knows, with their Teams face and
+the name the user gave them: § A tracker user who is also a colleague, applied to the surface
+most merge requests and issues are met on. It reads those trackers. It writes **five** things
 to GitLab and nothing else, ever — a merge request's approval (described at the end of this
 section) plus the page's merge, comment, comment deletion and close — and each one happens
 on a click the user just made, never on its own.
@@ -705,23 +705,22 @@ more rules hold the page together:
   The two boxes are one size in one place, so the swap changes the ink and never the target.
   `web/e2e/gitlab.spec.ts` measures that.
 
-### A GitLab user who is also a colleague is drawn as the colleague
+### A tracker user who is also a colleague is drawn as the colleague
 
-Most people on a merge request are the user's own colleagues, and this app already knows them:
-their Teams face, and the name the user themselves gave them (§ Renaming a person). So a
-GitLab user is matched to a Teams person **by their real name**, and the page then draws that
-person — `src/gitlab_people.rs` decides who somebody is, `with_teams_people` in
-`src/bin/server.rs` puts the answer on every payload the page gets, and `personFace` in
-`web/src/lib/gitlab-mr.ts` is the one place the surface reads it.
+Most people on a merge request or a Linear issue are the user's own colleagues, and this app
+already knows them: their Teams face, and the name the user themselves gave them (§ Renaming a
+person). So a tracker's user is matched to a Teams person **by their real name**, and the
+surface then draws that person — `src/tracker_people.rs` decides who somebody is,
+`with_teams_people` in `src/bin/server.rs` puts the answer on every payload that carries
+people, and `personFace` in `web/src/lib/tracker-people.ts` is the one place a surface reads it.
 
-**It covers the preview CARD in a chat too**, not only the page: a merge request pasted into a
-thread names its author, and that author is the same colleague. The card is where most people
-meet a merge request in this app, so a face there is the point rather than a decoration — one
-`gitlab::Person` is what makes it one rule (see `CardAuthor` in
-`web/src/components/gitlab-link-card.tsx`, and the shared type below). **The LINEAR card is
-not covered**: its people (`assignee_name`, `lead_name`, `creator_name`) are still bare names
-joined into one context line, so giving them a face is a layout decision nobody has made. The
-match itself would work — Linear's `assignee { name displayName }` is the same real-name pair.
+**Three surfaces, one rule.** The merge-request PAGE and its sidebar (a row's author, the
+reviewers, every comment's author, whoever approved), the GitLab CARD in a chat, and the LINEAR
+CARD — whose owner is whichever of `assignee` / `lead` / `creator` the resource has. Both cards
+wear the same chip (`CardPerson` in `web/src/components/card-person.tsx`), because a GitLab card
+naming its author one way and a Linear card naming its assignee another would be two answers to
+"who is this?" in one thread. A card is where most people MEET a merge request or an issue in
+this app, so a face there is the point rather than a decoration.
 
 **The match is MEASURED, by `examples/gitlab_teams_people_recon.rs`** — READ-ONLY, over the
 merge requests the token can see and the store's own people. Measured 2026-08-06 on
@@ -731,14 +730,23 @@ import's `Placeholder <name>` account. All 18 are spelled identically on both si
 this instance is provisioned from the same directory Teams is. Run it again rather than
 widening the key on a hunch; what the numbers already refused is accent folding.
 
+**LINEAR's half is not measured the same way, and it cannot be.** There is no "list every
+issue" read in this app — `linear` enriches one link at a time — so nothing here can count a
+workspace's people. What is known: Linear's `assignee { name displayName }` is the same
+real-name/handle pair GitLab gives (its `name` on this workspace is the tenant's own spelling,
+because Linear signs in through the same directory), and
+`examples/linear_live_check.rs` now prints the verdict for any real issue URL it is passed —
+READ-ONLY, the handle and the verdict, never a colleague's name. That is the honest check
+available; do not write a number into this file that nothing measured.
+
 Seven rules hold it, and each is pinned by a test:
 
-- **The identity is only ever ADDED to what GitLab said.** GitLab's `name` and `username`
-  travel untouched beside it, the handle stays in the chip's title (it is how a colleague is
-  found on the instance), and a person the store cannot name keeps GitLab's own words over
-  tinted initials.
+- **The identity is only ever ADDED to what the tracker said.** Its own `name` and `username`
+  travel untouched beside it, the handle stays in the chip's title on the page (it is how a
+  colleague is found over there), and a person the store cannot name keeps the tracker's own
+  words over tinted initials.
 - **An AMBIGUOUS name names nobody**, and **only a PERSON is ever matched** (`8:…`, so a Teams
-  app can never lend its face to a GitLab account). The wrong face on a name is worse than no
+  app can never lend its face to a tracker account). The wrong face on a name is worse than no
   face — the rule § @mentions already applies to a mention.
 - **What is compared is TEAMS' own name; what is DRAWN is the user's.** The roster is built
   from `Store::named_people` with no nickname applied, because what is being matched is two
@@ -749,12 +757,14 @@ Seven rules hold it, and each is pinned by a test:
   words (§ Performance); the identity is local and current, so freezing it on disk would
   outlive a rename. That is also why a rename re-reads the page from the backend's cache and
   asks GitLab nothing (`rereadGitLabPeople`).
-- **One walk reaches every person, because there is ONE person type.** `gitlab::Person` lives
-  in the base module — the card's, the page's and an approval's people are all it — and the
-  walk keys on its shape: an object carrying both a `name` and a `username`. So a row's author,
-  a merge request's reviewers, every comment's author, whoever APPROVED and a card's author are
-  covered by one rule, and a field added later is covered too. A CI job has a name and no
-  handle, and is left alone. That is why `Approval.approved_by` and `LinkMetadata.author` carry
+- **One walk reaches every person, because there is ONE person type.**
+  `tracker_people::Person` is it — `gitlab::Person` and `gitlab_mr::Person` are re-exports of
+  that one struct, and `linear` fills the same shape from `name` / `displayName` — and the walk
+  keys on the shape: an object carrying both a `name` and a `username`. So a row's author, a
+  merge request's reviewers, every comment's author, whoever APPROVED, a GitLab card's author
+  and a Linear card's owner are covered by one rule, and a field added later is covered too. A
+  CI job has a name and no handle, and a Linear label has neither, so both are left alone. That
+  is why `Approval.approved_by`, `gitlab::LinkMetadata.author` and Linear's three people carry
   people rather than the bare names they used to: one shape means one rule, and the sentence
   "Approved by …" would otherwise be the one place on this page that still names a renamed
   colleague by their old name.
@@ -766,11 +776,12 @@ Seven rules hold it, and each is pinned by a test:
   is a stranger for up to a minute; it costs nothing about a rename, since only the matching
   keys are cached.
 
-`web/mock/server.ts` reproduces it with no tenant and no GitLab (`withMockTeamsPeople`, over
-the mock's own people): one colleague with a Teams photo, one without, the user themselves, and
-Ada, Grace and a bot who are on GitLab only — so all four shapes are on screen at once.
-`web/e2e/gitlab.spec.ts` pins them, and `web/e2e/person-override.spec.ts` pins that a rename
-reaches this page with no reload.
+`web/mock/server.ts` reproduces it with no tenant, no GitLab and no Linear
+(`withMockTeamsPeople`, over the mock's own people): one colleague with a Teams photo, one
+without, the user themselves, and Ada, Grace and a bot who are on the tracker only — so all four
+shapes are on screen at once. `web/e2e/gitlab.spec.ts`, `gitlab-links.spec.ts` and
+`linear-links.spec.ts` pin them, and `web/e2e/person-override.spec.ts` pins that a rename
+reaches the page with no reload.
 
 **The markdown is real GFM, and its subset is MEASURED rather than guessed**
 (`web/src/lib/gitlab-markdown.ts`, over the shared inline scanner in `markdown-inline.ts`).
@@ -2121,7 +2132,7 @@ a fold, a pin or a local read position.
   title in `conversation_context` — which is why that one takes `self_mri`, so a
   nickname the user gave THEMSELVES can never retitle their own chat — and a person on the
   GitLab page, whose name arrives from GITLAB and is matched to a colleague by it
-  (`with_teams_people`, see § A GitLab user who is also a colleague). Each of the four ends
+  (`with_teams_people`, see § A tracker user who is also a colleague). Each of the four ends
   in the same `display_name_for_mri`, so there is one answer about a name in this app. The
   phone is the sharpest case: it is the one surface the user cannot correct by looking again.
 - **The override never rewrites a message.** An @mention chip inside a body, the author
@@ -2255,10 +2266,10 @@ user's. What changes is only what is asked.
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
   `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its reads in
-  `src/gitlab_mr.rs` over a durable response cache, its four writes in
-  `src/gitlab_mr_write.rs`, and who each of its people is in Teams in
-  `src/gitlab_people.rs` (see § The GitLab page) — plus the approval those trackers got
-  first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
+  `src/gitlab_mr.rs` over a durable response cache and its four writes in
+  `src/gitlab_mr_write.rs`, plus who a person on EITHER tracker is in the user's own Teams
+  (`src/tracker_people.rs`, see § A tracker user who is also a colleague) — plus the approval
+  those trackers got first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
   § The local agent) and the app's own update — the check, the download and the swap

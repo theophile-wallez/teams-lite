@@ -2,7 +2,7 @@
 //
 // The merge-request page draws a colleague as the colleague this app already knows: their
 // Teams face, and the name the user gave them. The whole feature rests on matching two
-// systems' record of one person by their REAL NAME (`gitlab_people`), and a rule like that is
+// systems' record of one person by their REAL NAME (`tracker_people`), and a rule like that is
 // worth exactly what it measures — so this counts it against the user's own merge requests
 // and the user's own store.
 //
@@ -13,7 +13,7 @@
 //   2. **Does the key's FOLDING carry any of it?** A byte-for-byte comparison is counted
 //      beside the real one, so the answer is a number rather than a belief. On this instance
 //      it is none of it — the accounts come from the same directory Teams does — which is
-//      exactly what `gitlab_people` says about its own rule.
+//      exactly what `tracker_people` says about its own rule.
 //   3. **Does anything become AMBIGUOUS?** Two colleagues under one name resolve to neither,
 //      and the count of those is what says whether the refusal is a real state.
 //
@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use teams_lite::gitlab_mr::{self, ListQuery, ListScope, ListState, Person};
-use teams_lite::gitlab_people::{name_key, Roster};
+use teams_lite::tracker_people::{name_key, Roster};
 
 /// How many open merge requests are read in FULL, to see the people reviewing them. Bounded
 /// because each one is a request: enough for a count, and nowhere near the token's limit.

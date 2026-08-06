@@ -12,13 +12,13 @@ import {
   SCOPE_HINTS,
   SCOPE_LABELS,
   mergeRequestId,
-  personFace,
   rowStateLabel,
   sameMergeRequest,
   type MergeRequestRow,
   type MergeRequestScope,
   type MergeRequestState,
 } from "~/lib/gitlab-mr";
+import { personFace } from "~/lib/tracker-people";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";

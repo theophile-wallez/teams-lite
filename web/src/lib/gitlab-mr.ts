@@ -10,55 +10,17 @@
 // button that lands somebody's branch, and what it may say is decided by unit-tested rules
 // over GitLab's own `detailed_merge_status`, never by a component reading a status string
 // and guessing.
+//
+// A PERSON is not here: `lib/tracker-people.ts` owns that type and the one decision about how
+// somebody is drawn, because the preview cards name people too and one colleague must not be
+// drawn two ways.
 
-/** One person GitLab names. Mirrors `gitlab_mr::Person`, plus the one field the BACKEND
- *  adds on the way out (`with_teams_people` in src/bin/server.rs). */
-export type GitLabPerson = {
-  name: string;
-  username: string;
-  avatar_url?: string;
-  /** Who this GitLab user is in the user's own Teams, when the backend could prove it by
-   *  their real name (`gitlab_people::TeamsPerson`). `undefined` for a bot, for a colleague
-   *  this machine has never been told about, and on a backend too old to say — all three
-   *  read the same way, which is that GitLab's own words are what the page has. */
-  teams?: { mri: string; name: string };
-};
+import type { TrackerPerson } from "./tracker-people";
 
-/** What one person on this page is DRAWN as: the tint's seed, the name, and the picture to
- *  load — one decision, in one place, for the sidebar row, the people on a merge request and
- *  the author of every comment.
- *
- *  Its whole job is that a colleague looks the same here as in a chat:
- *
- *  - **A resolved person is drawn as that person.** Their Teams name — which is the nickname
- *    the user gave them when they gave one, resolved server-side like every other name in
- *    this app — and their Teams photo, which `fetch_avatar` serves from the user's own custom
- *    picture first. No photo simply leaves the tinted initials, exactly as everywhere else.
- *  - **The seed is their MRI**, which is what every other avatar in this app seeds on
- *    (a read receipt, the typing line, an @mention row), so one person is one colour across
- *    the whole app rather than one colour per surface.
- *  - **Somebody GitLab alone knows keeps GitLab's words**, and asks for no picture:
- *    `avatar_url` is never fetched (see `gitlab_mr::Person`). */
-export type GitLabFace = {
-  seed: string;
-  label: string;
-  photo?: { kind: "user"; id: string };
-};
-
-export function personFace(person: GitLabPerson): GitLabFace {
-  const teams = person.teams?.mri ? person.teams : undefined;
-  if (teams) {
-    return {
-      seed: teams.mri,
-      label: teams.name || person.name || person.username,
-      photo: { kind: "user", id: teams.mri },
-    };
-  }
-  return {
-    seed: person.username || person.name,
-    label: person.name || person.username,
-  };
-}
+/** A GitLab person is a tracker person: one shape, one match rule, one way of drawing them
+ *  (`personFace`). Kept as a name of its own because this file mirrors `gitlab_mr.rs`, whose
+ *  own `Person` is the same re-export. */
+export type GitLabPerson = TrackerPerson;
 
 /** One row of the sidebar. Mirrors `gitlab_mr::MergeRequestRow`. */
 export type MergeRequestRow = {

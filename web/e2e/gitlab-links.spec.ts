@@ -96,7 +96,7 @@ test.describe("GitLab rich link previews", () => {
       '[data-testid="gitlab-link-card"][href="https://gitlab.com/acme/webapp/-/merge_requests/42"]',
     );
     const author = mr.locator('[data-testid="gitlab-card-author"]');
-    await expect(author).toHaveAttribute("data-author", "Mia Chen");
+    await expect(author).toHaveAttribute("data-person", "Mia Chen");
     await expect(author.locator("img[data-picture='face']")).toBeVisible();
 
     // And an author only GitLab knows keeps GitLab's own name, over initials: nothing is ever
@@ -104,7 +104,7 @@ test.describe("GitLab rich link previews", () => {
     const issue = page
       .locator('[data-testid="gitlab-link-card"][href*="/-/issues/7"]')
       .locator('[data-testid="gitlab-card-author"]');
-    await expect(issue).toHaveAttribute("data-author", "Grace Hopper");
+    await expect(issue).toHaveAttribute("data-person", "Grace Hopper");
     await expect(issue.locator("img")).toHaveCount(0);
 
     expect(realErrors(consoleErrors)).toEqual([]);

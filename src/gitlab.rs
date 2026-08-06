@@ -42,28 +42,11 @@ pub enum Resource {
     Project { project_path: String },
 }
 
-/// One person GitLab names — the author of a merge request, a reviewer, whoever wrote a
-/// comment or approved one.
+/// One person GitLab names, as it travels to the UI.
 ///
-/// **It lives here because every GitLab surface in this app names people**: the preview CARD
-/// (this module), the merge-request PAGE ([`crate::gitlab_mr`], which re-exports this type)
-/// and an approval ([`crate::gitlab_approval`]). One shape is what lets one rule name them
-/// all — a person is an object carrying a `name` and a `username`, which is what
-/// [`crate::gitlab_people::annotate`] matches to the user's own Teams on the way out.
-///
-/// `avatar_url` is GitLab's own and **nothing fetches it**: no request is ever made to the
-/// instance for a picture, so displaying a card or a page costs the GitLab host nothing — the
-/// same guarantee `mail_html` gives a mail body. It travels because it is what GitLab said; a
-/// bare `<img src>` would not do, since an avatar on a private instance answers 401 without a
-/// session and a broken picture is worse than initials. The face the app really draws is the
-/// TEAMS one, when this person is somebody the user's own Teams knows.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Person {
-    pub name: String,
-    pub username: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub avatar_url: Option<String>,
-}
+/// Re-exported from [`crate::tracker_people`], which owns the shape BOTH trackers spell a
+/// person in — one shape is what lets one rule name them all (see that module).
+pub use crate::tracker_people::Person;
 
 /// One person from a GitLab user object. A missing display name falls back to the handle,
 /// never to a blank: a row showing nobody is a row nobody can read.
@@ -98,7 +81,7 @@ pub struct LinkMetadata {
     pub draft: Option<bool>,
     /// Who opened this merge request or issue. A PERSON rather than a bare name, so the card
     /// draws the colleague the user knows — their Teams face and the name this app calls them
-    /// — exactly as the merge-request page does (see [`crate::gitlab_people`]). `None` for a
+    /// — exactly as the merge-request page does (see [`crate::tracker_people`]). `None` for a
     /// project, which has no author.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<Person>,

@@ -4103,7 +4103,7 @@ impl Store {
     ///
     /// It is the local answer to "who does this app know?", and its one caller is the
     /// GitLab page, which matches a merge request's people against it by real name (see
-    /// [`crate::gitlab_people`]). Three things about the shape are deliberate:
+    /// [`crate::tracker_people`]). Three things about the shape are deliberate:
     ///
     /// - **The name is TEAMS' own**, never the user's nickname for them. What is being
     ///   compared is two systems' record of one person, and a nickname is neither system's;
@@ -4113,7 +4113,7 @@ impl Store {
     ///   renames people — a marriage, a corrected spelling — and a GitLab account carrying
     ///   the old one is still that colleague.
     /// - **Only a person**: `8:…` MRIs, so a Teams app that posts (`28:…`) is never in the
-    ///   roster at all. [`crate::gitlab_people::Roster::from_people`] re-checks that, since
+    ///   roster at all. [`crate::tracker_people::Roster::from_people`] re-checks that, since
     ///   the rule belongs with the matching rather than with one query.
     pub fn named_people(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare_cached(

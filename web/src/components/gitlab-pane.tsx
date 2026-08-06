@@ -21,7 +21,6 @@ import {
   conversationDiscussions,
   formatJobDuration,
   mergeVerdict,
-  personFace,
   pipelineIsLive,
   pipelineStages,
   pipelineTone,
@@ -36,6 +35,7 @@ import {
   type MergeRequestDetail,
   type PipelineTone,
 } from "~/lib/gitlab-mr";
+import { personFace } from "~/lib/tracker-people";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";

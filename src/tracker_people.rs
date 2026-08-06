@@ -1,14 +1,15 @@
-// Who a GitLab user IS in Teams.
+// Who a tracker's user IS in Teams.
 //
 // A merge request names its author, its reviewers and every commenter the way GITLAB knows
-// them: a handle, and whatever display name that instance holds. Most of those people are
-// the user's own colleagues, who are already in this app — with the face Teams holds for
-// them, and with the name the user themselves gave them (see § Renaming a person in
-// CLAUDE.md). So `clement.bosle` under tinted initials on the GitLab page, beside the same
-// person's photo in every chat, is one colleague drawn as two.
+// them; a Linear issue names whoever it is assigned to the way LINEAR does — a handle, and
+// whatever display name that workspace holds. Most of those people are the user's own
+// colleagues, who are already in this app: with the face Teams holds for them, and with the
+// name the user themselves gave them (see § Renaming a person in CLAUDE.md). So
+// `clement.bosle` under tinted initials on a card, beside the same person's photo in every
+// chat, is one colleague drawn as two.
 //
-// This module answers one question — "which Teams person is this GitLab user?" — and the
-// page then draws that person the way the rest of the app does. It is READ-ONLY in the
+// This module answers one question — "which Teams person is this tracker user?" — and the
+// surface then draws that person the way the rest of the app does. It is READ-ONLY in the
 // strongest sense: it holds no store and no network, and the identity it hands back is a
 // pair the caller resolved out of the local store.
 //
@@ -34,18 +35,26 @@
 //     names that are genuinely different start to collide. Run the recon again rather than
 //     widening on a hunch.
 //
+// **LINEAR rides the same rule, and its numbers are not measured the same way.** There is no
+// "list every issue" read in this app — `linear` enriches one link at a time — so nothing here
+// can count a workspace's people the way the GitLab recon counts an instance's. What IS known:
+// Linear's `assignee { name displayName }` is the same real-name/handle pair GitLab gives, and
+// on this workspace that `name` is the tenant's own spelling ("Clément DELBARRE"), because
+// Linear signs in through the same directory. `examples/linear_live_check.rs` prints the
+// resolution for any real issue URL the user passes it, which is the honest check available.
+//
 // Four rails hold the resolution itself, and each is pinned by a test below:
 //
-//   - **An AMBIGUOUS name names nobody.** Two colleagues called "Alex Martin" and a GitLab
-//     "Alex Martin" resolve to neither, exactly as an agent's `@mention` refuses an
+//   - **An AMBIGUOUS name names nobody.** Two colleagues called "Alex Martin" and a tracker
+//     user "Alex Martin" resolve to neither, exactly as an agent's `@mention` refuses an
 //     ambiguous name: notifying — or here, portraying — the wrong colleague is worse than
 //     doing neither.
 //   - **Only a PERSON is ever matched.** A roster entry whose MRI is not `8:…` is dropped,
-//     so a Teams app or bot ("Workflows", `28:…`) can never lend its face to a GitLab
+//     so a Teams app or bot ("Workflows", `28:…`) can never lend its face to a tracker
 //     account, and a `review-bot` on a merge request stays what GitLab called it.
-//   - **The identity is only ever ADDED to what GitLab said.** GitLab's own `name` and
-//     `username` travel untouched beside it, so the page can always say who this is on the
-//     instance — and a person the store cannot name is not diminished by a missing field.
+//   - **The identity is only ever ADDED to what the tracker said.** Its own `name` and
+//     `username` travel untouched beside it, so a surface can always say who this is over
+//     there — and a person the store cannot name is not diminished by a missing field.
 //   - **A stale identity is REPLACED, never kept.** [`annotate`] removes the field when a
 //     name no longer resolves, so a payload that carried one from an earlier pass (a
 //     response cache, a re-annotation) can never show a colleague who has since been
@@ -56,7 +65,30 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-/// The Teams person one GitLab user IS, as it travels to the page.
+/// One person a TRACKER names, as it travels to the UI.
+///
+/// The shape both trackers spell a person in, and the one the walk below looks for: an object
+/// carrying a `name` and a `username`. Each tracker parses its own words into it —
+/// [`crate::gitlab::person`] reads `name` / `username`, [`crate::linear::person`] reads
+/// `name` / `displayName` — and every GitLab surface re-exports this type
+/// (`gitlab::Person`, `gitlab_mr::Person`) so there is one spelling of a person in this app
+/// and not four.
+///
+/// `avatar_url` is the tracker's own and **nothing fetches it**: no request is ever made to
+/// the instance for a picture, so displaying a card or a page costs that host nothing — the
+/// same guarantee `mail_html` gives a mail body. It travels because it is what the tracker
+/// said; a bare `<img src>` would not do, since an avatar on a private instance answers 401
+/// without a session and a broken picture is worse than initials. The face the app really
+/// draws is the TEAMS one, when this person is somebody the user's own Teams knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Person {
+    pub name: String,
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+/// The Teams person one tracker user IS, as it travels to the UI.
 ///
 /// `name` is what this app calls them — the user's own nickname when they set one, else the
 /// name Teams holds — so the two halves of § Renaming a person are already applied by the
@@ -154,13 +186,13 @@ impl Roster {
     }
 }
 
-/// Add the Teams identity to every person in one GitLab payload, in place.
+/// Add the Teams identity to every person in one tracker payload, in place.
 ///
 /// It walks the whole answer rather than naming the fields that hold people (`author`,
-/// `reviewers`, `assignees`, a note's own author, …). One rule covers all of them and
-/// covers a field added later: a person is an object carrying both a `name` and a
-/// `username`, which is exactly [`crate::gitlab_mr::Person`] and nothing else in these
-/// payloads — a CI job has a `name` and no handle, a pipeline has neither.
+/// `reviewers`, `assignees`, a note's own author, an issue's `assignee`, …). One rule covers
+/// all of them, covers both trackers, and covers a field added later: a person is an object
+/// carrying both a `name` and a `username`, which is exactly [`Person`] and nothing else in
+/// these payloads — a CI job has a `name` and no handle, a Linear label has neither.
 ///
 /// `resolve` is handed GitLab's own display name and answers with the Teams person it is.
 /// It is a closure because the answer needs the store — the roster to match on, and the

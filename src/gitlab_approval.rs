@@ -20,7 +20,7 @@
 //     the network.
 //   - **It says who approved, so the UI never guesses.** The approval state names the
 //     people on it — as PEOPLE, so the GitLab page can name a colleague the way the rest
-//     of the app does (see [`crate::gitlab_people`]) — and whether the user themselves is
+//     of the app does (see [`crate::tracker_people`]) — and whether the user themselves is
 //     among them is answered by comparing GitLab's own ids ([`fetch_user`]), never by
 //     matching a display name. "Approve" and "Revoke approval" are opposite actions and
 //     offering the wrong one is the one mistake a reader cannot see coming.
@@ -62,8 +62,8 @@ pub struct Approval {
     ///
     /// [`gitlab::Person`] rather than a bare name, because this page names a colleague the
     /// way the whole app names them: a person carrying a `name` and a `username` is what
-    /// [`crate::gitlab_people::annotate`] matches to the user's own Teams, and one shape here
-    /// means one rule there (see AGENTS.md § A GitLab user who is also a colleague). Which of
+    /// [`crate::tracker_people::annotate`] matches to the user's own Teams, and one shape here
+    /// means one rule there (see AGENTS.md § A tracker user who is also a colleague). Which of
     /// the two words a reader sees is the surface's decision (`personFace`), never this one's.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub approved_by: Vec<gitlab::Person>,

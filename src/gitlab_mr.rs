@@ -216,7 +216,7 @@ pub struct MergeRequestList {
 /// Re-exported from [`crate::gitlab`], where it lives because the preview CARD names people
 /// too: one shape across every GitLab surface is what lets one rule name them all. The `teams`
 /// field the page reads is added to the ANSWER rather than parsed here — see
-/// [`crate::gitlab_people`] and `with_teams_people` in src/bin/server.rs — because it is
+/// [`crate::tracker_people`] and `with_teams_people` in src/bin/server.rs — because it is
 /// local, current, and must never be frozen into the response cache these reads are stored in.
 pub use crate::gitlab::Person;
 

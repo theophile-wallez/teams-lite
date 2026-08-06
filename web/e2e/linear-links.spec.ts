@@ -64,6 +64,34 @@ test.describe("Linear rich link previews", () => {
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
+  test("names whoever owns it as the colleague the app knows, with their face", async ({
+    page,
+    consoleErrors,
+  }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Linear Links");
+
+    // An issue is ASSIGNED, a project is LED and a document is WRITTEN: whichever person the
+    // resource has is who the card names, and a colleague this app's own Teams knows is drawn
+    // as that colleague — their real face, through the backend like every other avatar here
+    // (see § A tracker user who is also a colleague in AGENTS.md).
+    const issueOwner = page
+      .locator(`[data-testid="linear-link-card"][href="${ISSUE_HREF}"]`)
+      .locator('[data-testid="linear-card-person"]');
+    await expect(issueOwner).toHaveAttribute("data-person", "Mia Chen");
+    await expect(issueOwner.locator("img[data-picture='face']")).toBeVisible();
+
+    // And somebody only Linear knows keeps Linear's own name over initials: nothing is ever
+    // fetched from the workspace for a picture.
+    const projectOwner = page
+      .locator(`[data-testid="linear-link-card"][href="${PROJECT_HREF}"]`)
+      .locator('[data-testid="linear-card-person"]');
+    await expect(projectOwner).toHaveAttribute("data-person", "Grace Hopper");
+    await expect(projectOwner.locator("img")).toHaveCount(0);
+
+    expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
   test("shows the workflow state, the priority, and a project's progress", async ({
     page,
     consoleErrors,

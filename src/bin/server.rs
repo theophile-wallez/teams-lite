@@ -113,7 +113,7 @@ use teams_lite::{
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::{
-    gitlab, gitlab_approval, gitlab_mr, gitlab_mr_write, gitlab_people, link_preview,
+    gitlab, gitlab_approval, gitlab_mr, gitlab_mr_write, link_preview, tracker_people,
 };
 
 /// The port the user's own backend owns: what the `teams` command and the web app
@@ -1151,7 +1151,7 @@ struct Ctx {
     /// answer it hands out, pipeline poll included. What it holds is only the MATCHING keys,
     /// Teams' own names, so a rename needs no invalidation at all: the name a page DRAWS is
     /// read per answer through `Store::display_name_for_mri`. See [`teams_people_of`].
-    gitlab_people: Arc<Mutex<Option<(i64, Arc<gitlab_people::Roster>)>>>,
+    tracker_people: Arc<Mutex<Option<(i64, Arc<tracker_people::Roster>)>>>,
 }
 
 /// Everything this machine knows about audio calling right now.
@@ -2442,7 +2442,7 @@ async fn main() -> Result<()> {
         last_repair: Arc::new(Mutex::new(None)),
         calling: Arc::new(Mutex::new(CallingPlane::default())),
         gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
-        gitlab_people: Arc::new(Mutex::new(None)),
+        tracker_people: Arc::new(Mutex::new(None)),
     };
 
     // Watch the broker, and react once per CHANGE of state (see `observe_broker`).
@@ -6292,7 +6292,7 @@ const TEAMS_PEOPLE_TTL: Duration = Duration::from_secs(60);
 ///
 /// Called on every payload the page is handed — the four reads above, and the note a comment
 /// write hands back — so a colleague wears one face and one name everywhere in this app. The
-/// resolution itself is `gitlab_people`; what lives here is where its two halves come from:
+/// resolution itself is `tracker_people`; what lives here is where its two halves come from:
 /// the roster to match a real name against, and each matched person's CURRENT display name,
 /// which is [`store::Store::display_name_for_mri`] — the same read every other name in this
 /// app goes through, so the user's own nickname wins here exactly as it does in a chat.
@@ -6306,13 +6306,13 @@ const TEAMS_PEOPLE_TTL: Duration = Duration::from_secs(60);
 /// resolves. A pipeline — THE live read, polled every few seconds while CI runs — names
 /// nobody at all, so it costs nothing here.
 fn with_teams_people(ctx: &Ctx, value: &mut Value) {
-    let mut roster: Option<Arc<gitlab_people::Roster>> = None;
+    let mut roster: Option<Arc<tracker_people::Roster>> = None;
     let mut store: Option<Store> = None;
     // One lookup per distinct name, not per row: a hundred merge requests are written by a
     // couple of dozen people, and a comment thread by fewer.
-    let mut resolved: std::collections::HashMap<String, Option<gitlab_people::TeamsPerson>> =
+    let mut resolved: std::collections::HashMap<String, Option<tracker_people::TeamsPerson>> =
         std::collections::HashMap::new();
-    gitlab_people::annotate(value, &mut |name| {
+    tracker_people::annotate(value, &mut |name| {
         if let Some(known) = resolved.get(name) {
             return known.clone();
         }
@@ -6325,7 +6325,7 @@ fn with_teams_people(ctx: &Ctx, value: &mut Value) {
                 store = ctx.store().ok();
             }
             let display = store.as_ref()?.display_name_for_mri(mri).ok().flatten()?;
-            Some(gitlab_people::TeamsPerson { mri: mri.to_string(), name: display })
+            Some(tracker_people::TeamsPerson { mri: mri.to_string(), name: display })
         })();
         resolved.insert(name.to_string(), person.clone());
         person
@@ -6335,9 +6335,9 @@ fn with_teams_people(ctx: &Ctx, value: &mut Value) {
 /// The folded roster of Teams people, from the cache when it is fresh enough.
 ///
 /// `None` when the store cannot be read, which costs the identities and nothing else.
-fn teams_people_of(ctx: &Ctx) -> Option<Arc<gitlab_people::Roster>> {
+fn teams_people_of(ctx: &Ctx) -> Option<Arc<tracker_people::Roster>> {
     {
-        let cached = ctx.gitlab_people.lock().unwrap();
+        let cached = ctx.tracker_people.lock().unwrap();
         if let Some((built, roster)) = cached.as_ref() {
             if now_ms().saturating_sub(*built) < TEAMS_PEOPLE_TTL.as_millis() as i64 {
                 return Some(roster.clone());
@@ -6345,8 +6345,8 @@ fn teams_people_of(ctx: &Ctx) -> Option<Arc<gitlab_people::Roster>> {
         }
     }
     let people = ctx.store().ok()?.named_people().ok()?;
-    let roster = Arc::new(gitlab_people::Roster::from_people(people));
-    *ctx.gitlab_people.lock().unwrap() = Some((now_ms(), roster.clone()));
+    let roster = Arc::new(tracker_people::Roster::from_people(people));
+    *ctx.tracker_people.lock().unwrap() = Some((now_ms(), roster.clone()));
     Some(roster)
 }
 
