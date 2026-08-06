@@ -31,6 +31,37 @@ test.describe.serial("the GitLab merge-request page", () => {
     await setMergeRequestControl(page, { clear: true });
   });
 
+  test("wears GitLab's line in the tab strip, and GitLab's colours once it is current", async ({
+    page,
+  }) => {
+    // The tab strip is a row of the app's OWN glyphs, and a strip says which section is
+    // current: a brand mark lit in every state read as the selected tab. So the tanuki has
+    // two spellings — the outline at rest, one weight with its four neighbours, and GitLab's
+    // three fills where every other tab takes the accent (see `GitLabLogoOutline`).
+    await gotoApp(page);
+    const tab = page.locator('[data-testid="tab-gitlab"]');
+    const outline = tab.locator('[data-testid="gitlab-logo-outline"]');
+    const brand = tab.locator('[data-testid="gitlab-logo"]');
+    await expect(tab).toHaveAttribute("data-state", "inactive");
+    await expect(outline).toBeVisible();
+    await expect(brand).toBeHidden();
+    const atRest = await outline.boundingBox();
+
+    await tab.click();
+    await expect(tab).toHaveAttribute("data-state", "active");
+    await expect(brand).toBeVisible();
+    await expect(outline).toBeHidden();
+
+    // And the swap never moves the target the user aims at: the two marks are one size, in
+    // one place, so only the ink changes.
+    const asCurrent = await brand.boundingBox();
+    expect(atRest).not.toBeNull();
+    expect(asCurrent).not.toBeNull();
+    expect(Math.abs(asCurrent!.x - atRest!.x)).toBeLessThan(1);
+    expect(Math.abs(asCurrent!.y - atRest!.y)).toBeLessThan(1);
+    expect(Math.abs(asCurrent!.width - atRest!.width)).toBeLessThan(1);
+  });
+
   test("lists what is not merged, and never a merged merge request", async ({ page }) => {
     await openGitLab(page);
 

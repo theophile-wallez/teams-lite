@@ -666,7 +666,7 @@ of the undo it cannot have. Each is pinned by a test:
   worked.
 
 The other three are ordinary gated writes because each is REVERSIBLE from the same page: a
-comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen. Four
+comment is deleted by `gitlab_mr_delete_comment`, and a close is undone by a reopen. Five
 more rules hold the page together:
 
 - **A comment is deleted only when it is the USER'S OWN**, and whose it is comes from
@@ -685,6 +685,17 @@ more rules hold the page together:
 - **The list can never ask for merged merge requests.** `ListScope` and `ListState` are
   closed Rust sets and `merged` is not among them, so the page's whole promise is enforced by
   the type rather than by a filter somebody could widen.
+- **The TAB wears the tanuki in two spellings, and the section's own state picks.** A section
+  that merges under the user's GitLab account has to say GitLab (see `GitLabLogo`) — but this
+  is the one place that mark stands in a row of the app's own glyphs, and a strip of tabs says
+  which section is current. Full-colour at all times made GitLab the only lit tab of the five,
+  which reads as the selected one. So the tanuki is GitLab's LINE at rest —
+  `GitLabLogoOutline`, one `currentColor` stroke at the weight hugeicons draws, so it dims and
+  hovers with its four neighbours — and GitLab's three fills once the section IS current,
+  where every other tab takes the accent. Nothing is recoloured: the mark is either GitLab's
+  or it is the app's own line, and there is no third, half-tinted spelling of it. The geometry
+  is theirs in both, the creases included, and the two boxes are one size in one place, so the
+  swap changes the ink and never the target. `web/e2e/gitlab.spec.ts` measures that.
 
 **The markdown is real GFM, and its subset is MEASURED rather than guessed**
 (`web/src/lib/gitlab-markdown.ts`, over the shared inline scanner in `markdown-inline.ts`).
@@ -766,7 +777,8 @@ above rather than trusting this paragraph.
 pipeline that advances one step per read, which is what makes "the panel follows the run"
 watchable — and the `{kind:"gitlab_mr"}` test hook arms a refusal, a machine with no token,
 and the reset a spec MUST call afterwards. `cd web && bun run preview -- --out /tmp/mr
---gitlab` captures the list, the page, the merge armed, the comments, the description at a
+--gitlab` captures the tab strip in both of its states (pass `--dpr 4`: the tanuki is 17px),
+the list, the page, the merge armed, the comments, the description at a
 phone's width and a blocked merge in both themes; `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
 is the user's own click, in their own app.
@@ -878,7 +890,8 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/cal --calendar`, or `openCalendarTab` /
   `openCalendarView` / `openFirstEvent`. For the team → channel tree:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
-  `toggleTeamSection` from the same file. For the merge-request page — the list, the page,
+  `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
+  and current, the list, the page,
   the merge armed, the comments, the description at a phone's width and a blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt`
   from the same file. For the chat list's sections and the "…"

@@ -1787,55 +1787,73 @@ if (import.meta.main) {
   // step per read and answers the four writes in memory (see the `gitlab_mr_*` fixtures in
   // web/mock/server.ts), which is what makes an irreversible action reviewable at all.
   if (args.includes("--gitlab")) {
-    await withPreview(async ({ page, shot, setTheme }) => {
-      await openGitLabTab(page);
-      await shot(`${out}-list-light.png`, element);
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        // The tab STRIP first, in both of its states: the tanuki is GitLab's line while the
+        // section is at rest — one weight across five icons — and GitLab's own colours once it
+        // is the current one. Pass `--dpr 4`: the mark is 17px, so the two spellings are only
+        // really readable enlarged (see `GitLabLogoOutline`).
+        const strip = '[role="tablist"]';
+        await shot(`${out}-tabs-rest-light.png`, strip);
+        await setTheme("dark");
+        await shot(`${out}-tabs-rest-dark.png`, strip);
+        await setTheme("light");
 
-      // The first fixture is the interesting one: it can merge, its pipeline is running,
-      // and it carries a thread with a code comment on it.
-      await openMergeRequestAt(page, 0);
-      await shot(`${out}-light.png`);
+        await openGitLabTab(page);
+        await shot(`${out}-tabs-current-light.png`, strip);
+        await setTheme("dark");
+        await shot(`${out}-tabs-current-dark.png`, strip);
+        await setTheme("light");
+        await shot(`${out}-list-light.png`, element);
 
-      // The merge ARMED — the second click is the one that lands the branch, and the
-      // sentence under it is what says so before anybody presses it.
-      await page.locator('[data-testid="gitlab-merge"]').click();
-      await page.locator('[data-testid="gitlab-merge-confirm"]').waitFor();
-      await shot(`${out}-merge-armed-light.png`);
-      await page.locator('[data-testid="gitlab-merge-cancel"]').click();
+        // The first fixture is the interesting one: it can merge, its pipeline is running,
+        // and it carries a thread with a code comment on it.
+        await openMergeRequestAt(page, 0);
+        await shot(`${out}-light.png`);
 
-      // The conversation: a standalone comment, a thread with a code comment on it and the
-      // user's own reply in it, and the box that posts under their name.
-      await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
-      await shot(`${out}-comments-light.png`);
+        // The merge ARMED — the second click is the one that lands the branch, and the
+        // sentence under it is what says so before anybody presses it.
+        await page.locator('[data-testid="gitlab-merge"]').click();
+        await page.locator('[data-testid="gitlab-merge-confirm"]').waitFor();
+        await shot(`${out}-merge-armed-light.png`);
+        await page.locator('[data-testid="gitlab-merge-cancel"]').click();
 
-      // The DESCRIPTION on a phone, which is the width its markdown has to survive: the
-      // fixture's 3-column table and its fenced command lines are both wider than 390px, so
-      // this says whether they scroll inside the description or widen the page and take the
-      // Merge button off screen (see `gitlab-markdown.ts`, and the renderer's own `table`
-      // and `pre` cases).
-      await page.locator('[data-testid="gitlab-description"]').scrollIntoViewIfNeeded();
-      await page.setViewportSize({ width: 390, height: 844 });
-      await page.waitForTimeout(400);
-      await shot(`${out}-description-mobile-light.png`);
-      await page.setViewportSize(VIEWPORT);
-      await page.waitForTimeout(400);
+        // The conversation: a standalone comment, a thread with a code comment on it and the
+        // user's own reply in it, and the box that posts under their name.
+        await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
+        await shot(`${out}-comments-light.png`);
 
-      // A merge request GitLab will not merge: the button is disabled and the reason is on
-      // it, rather than a refusal arriving after the click.
-      await openMergeRequestAt(page, 1);
-      await shot(`${out}-blocked-light.png`);
+        // The DESCRIPTION on a phone, which is the width its markdown has to survive: the
+        // fixture's 3-column table and its fenced command lines are both wider than 390px, so
+        // this says whether they scroll inside the description or widen the page and take the
+        // Merge button off screen (see `gitlab-markdown.ts`, and the renderer's own `table`
+        // and `pre` cases).
+        await page.locator('[data-testid="gitlab-description"]').scrollIntoViewIfNeeded();
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(400);
+        await shot(`${out}-description-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+        await page.waitForTimeout(400);
 
-      await setTheme("dark");
-      await shot(`${out}-blocked-dark.png`);
-      await openMergeRequestAt(page, 0);
-      await shot(`${out}-dark.png`);
-      console.log(
-        `[preview] wrote ${out}-list-light.png, ${out}-light.png, ` +
-          `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
-          `${out}-description-mobile-light.png, ${out}-blocked-{light,dark}.png and ` +
-          `${out}-dark.png`,
-      );
-    });
+        // A merge request GitLab will not merge: the button is disabled and the reason is on
+        // it, rather than a refusal arriving after the click.
+        await openMergeRequestAt(page, 1);
+        await shot(`${out}-blocked-light.png`);
+
+        await setTheme("dark");
+        await shot(`${out}-blocked-dark.png`);
+        await openMergeRequestAt(page, 0);
+        await shot(`${out}-dark.png`);
+        console.log(
+          `[preview] wrote ${out}-tabs-{rest,current}-{light,dark}.png, ` +
+            `${out}-list-light.png, ${out}-light.png, ` +
+            `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
+            `${out}-description-mobile-light.png, ${out}-blocked-{light,dark}.png and ` +
+            `${out}-dark.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
     process.exit(0);
   }
 

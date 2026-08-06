@@ -231,14 +231,18 @@ export function ConversationList(props: {
             {/* The one tab that wears a VENDOR's mark rather than a hugeicons glyph, for
                 the reason every other GitLab affordance does (see `GitLabLogo`): a section
                 that merges and comments under the user's GitLab account has to say GitLab.
-                The tanuki is full-colour at all times, so unlike its neighbours it does not
-                dim when the tab is inactive — a brand mark is not this app's ink to tint. */}
+                It says it in TWO spellings, because this is also the one place the mark
+                stands in a row of the app's own glyphs: GitLab's line while the tab is at
+                rest, so the strip reads as five icons of one weight, and GitLab's colours
+                once the section is current — the tint every other tab takes from the accent.
+                Full-colour at all times made it the only lit tab of the five, which reads as
+                the selected one. `group` is what lets the mark follow `data-state`. */}
             <TabsTrigger
               value="gitlab"
               data-testid="tab-gitlab"
               aria-label="Merge requests"
               title="Merge requests"
-              className={TAB_ICON}
+              className={cn(TAB_ICON, "group")}
             >
               <GitLabTabIcon />
             </TabsTrigger>

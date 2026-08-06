@@ -21,7 +21,7 @@ import {
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";
-import { GitLabLogo } from "./gitlab-logo";
+import { GitLabLogo, GitLabLogoOutline } from "./gitlab-logo";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -440,7 +440,18 @@ function GitLabListSkeleton() {
 }
 
 /** The mark the sidebar's own tab wears. Kept here so the tab strip imports one thing per
- *  section, like the others. */
+ *  section, like the others.
+ *
+ *  Two spellings of one mark, and the tab's own state picks: GitLab's line at rest, so the
+ *  tanuki sits in the strip the way its four neighbours do, and GitLab's colours once the
+ *  section is the current one — which is where every other tab takes the accent. The swap is
+ *  CSS over the trigger's `data-state` (hence `group` on it), so nothing here has to be told
+ *  which tab is open. */
 export function GitLabTabIcon() {
-  return <GitLabLogo className="size-[17px]" />;
+  return (
+    <>
+      <GitLabLogoOutline className="size-[17px] group-data-[state=active]:hidden" />
+      <GitLabLogo className="hidden size-[17px] group-data-[state=active]:block" />
+    </>
+  );
 }
