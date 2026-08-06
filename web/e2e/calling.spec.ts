@@ -5,6 +5,7 @@ import {
   dropCallCapture,
   emitCallInvite,
   gotoApp,
+  holdCallStart,
   openCalendarTab,
   openCalendarView,
   openConversationNamed,
@@ -178,6 +179,60 @@ test.describe("Audio calling", () => {
     await page.locator('[data-testid="call-hangup"]').first().click();
     await expect(stage).toHaveCount(0);
     // An ending the user caused says nothing back at them: they were there.
+    await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
+  });
+
+  /** A call stopped a second after it was placed. The user is inside one of the waits a
+   *  start is made of, and what they did is the ordinary mis-click — so the app owes them
+   *  silence, and owes the person they nearly rang a call that never rings.
+   *
+   *  Both halves used to fail: the start ran on to the end, the backend refused the offer
+   *  for a call it had already let go, and that refusal was floated at the user as a fault
+   *  ("no such call — call_prepare first") for a call they stopped themselves. */
+  test("says nothing when the user stops a call while it is still starting", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationNamed(page, "Ava Thompson");
+
+    // The reservation answers late: the stage is up and dialling, and the offer has not
+    // gone out yet — the window a microphone and an ICE gather really take.
+    await holdCallStart(page, "prepare", 900);
+    await page.locator('[data-testid="call-button"]').click();
+
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toBeVisible();
+    await expect(stage).toHaveAttribute("data-phase", "dialing");
+    await page.locator('[data-testid="call-hangup"]').first().click();
+    await expect(stage).toHaveCount(0);
+
+    // The wait IS the assertion: the refusal arrived when the held step came back, which
+    // is after the click that caused it. Long enough to cover the hold and the two frames
+    // a placed call would have answered with.
+    await page.waitForTimeout(1_600);
+    await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
+    await expect(stage).toHaveCount(0);
+    // And the slot is free: a machine still holding a reservation refuses the next call.
+    await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
+  });
+
+  /** The other half of the same click, one step later: the invite is already on the wire.
+   *  Nothing here can prove what the service was told — that is `hang_up_orphan` in
+   *  src/bin/server.rs, which ends the placed call on the links its answer carried — but
+   *  the page must not connect a call the user stopped, and must still say nothing. */
+  test("does not connect a call the user stopped while the invite went out", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationNamed(page, "Ava Thompson");
+
+    await holdCallStart(page, "place", 900);
+    await page.locator('[data-testid="call-button"]').click();
+
+    const stage = page.locator('[data-testid="call-stage"]');
+    await expect(stage).toHaveAttribute("data-phase", "dialing");
+    await page.locator('[data-testid="call-hangup"]').first().click();
+    await expect(stage).toHaveCount(0);
+
+    await page.waitForTimeout(1_600);
+    await expect(stage).toHaveCount(0);
     await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
   });

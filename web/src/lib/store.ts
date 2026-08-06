@@ -1419,6 +1419,39 @@ export class TeamsController {
    *  it. Its observable half is `callStatus`. */
   private callMedia: CallMedia | null = null;
 
+  /** Which start the page is on. A hang-up moves it, so a start still in flight learns
+   *  that the user changed their mind.
+   *
+   *  A start is three awaits long — reserve, open the microphone, post the offer — and
+   *  the microphone alone takes up to `GATHER_TIMEOUT_MS`, so a call stopped a second
+   *  after it was placed lands INSIDE one of them. Without this the start ran on to the
+   *  end, the backend refused the offer for a call it had already let go, and the app
+   *  reported that refusal to the user as a fault ("no such call — call_prepare first")
+   *  — for a call they stopped themselves. The counter is the user's own intention, and
+   *  that is why it is not read off a `call_state` frame: a frame says the call is over
+   *  whoever ended it, the failure included, and a failure must still be said. */
+  private callAttempt = 0;
+
+  /** True while `attempt` is still the start the user wants. */
+  private callAttemptStands(attempt: number): boolean {
+    return attempt === this.callAttempt;
+  }
+
+  /** Take the media a start opened — or release it, because the user hung up while it
+   *  was opening.
+   *
+   *  `this.callMedia` is the only handle on a microphone, and it is assigned here: a
+   *  capture adopted after the hang-up would be one nothing could find to stop, and the
+   *  browser's recording indicator would stay on for a call that does not exist. */
+  private adoptCallMedia(media: CallMedia, attempt: number): boolean {
+    if (!this.callAttemptStands(attempt)) {
+      media.stop();
+      return false;
+    }
+    this.callMedia = media;
+    return true;
+  }
+
   /** Fold one `call_state` frame in, and stop the microphone when the call is over.
    *
    *  This is the ONE place media is torn down, whichever side ended the call: our own
@@ -1688,13 +1721,20 @@ export class TeamsController {
   async startCall(conversationId: string): Promise<void> {
     if (isLive(this.get().callStatus.call)) return;
     dismissNotice(CALL_NOTICE);
+    const attempt = ++this.callAttempt;
     let callId: string | null = null;
     try {
       const prepared = await this.backend.callPrepare({ conversation: conversationId });
       callId = prepared.call_id;
-      this.callMedia = await this.openCallMedia({ iceServers: prepared.ice_servers });
-      await this.backend.callPlace(prepared.call_id, this.callMedia.localSdp);
+      const media = await this.openCallMedia({ iceServers: prepared.ice_servers });
+      // The user hung up while the microphone was opening: the reservation went back with
+      // their click, so the offer must not go out and nothing is said.
+      if (!this.adoptCallMedia(media, attempt)) return;
+      await this.backend.callPlace(prepared.call_id, media.localSdp);
     } catch (error) {
+      // A start the user stopped is not a failure to report: they were there, and the
+      // hang-up already released the microphone and the reservation.
+      if (!this.callAttemptStands(attempt)) return;
       this.reportCall(callFailureMessage(error), "error");
       this.stopCallMedia();
       // The backend reserved the call before the failure, so release it: a machine that
@@ -1716,13 +1756,16 @@ export class TeamsController {
   async joinMeeting(meeting: MeetingAddress, subject?: string): Promise<void> {
     if (isLive(this.get().callStatus.call)) return;
     dismissNotice(CALL_NOTICE);
+    const attempt = ++this.callAttempt;
     let callId: string | null = null;
     try {
       const prepared = await this.backend.callPrepare({ meeting, subject });
       callId = prepared.call_id;
-      this.callMedia = await this.openCallMedia({ iceServers: prepared.ice_servers });
-      await this.backend.callJoin(prepared.call_id, meeting, this.callMedia.localSdp);
+      const media = await this.openCallMedia({ iceServers: prepared.ice_servers });
+      if (!this.adoptCallMedia(media, attempt)) return;
+      await this.backend.callJoin(prepared.call_id, meeting, media.localSdp);
     } catch (error) {
+      if (!this.callAttemptStands(attempt)) return;
       this.reportCall(callFailureMessage(error), "error");
       this.stopCallMedia();
       if (callId) await this.hangUpCall();
@@ -1735,15 +1778,18 @@ export class TeamsController {
     const call = this.get().callStatus.call;
     if (!call || !call.can_accept) return;
     dismissNotice(CALL_NOTICE);
+    const attempt = ++this.callAttempt;
     try {
       const prepared = await this.backend.callPrepare({ callId: call.id });
       if (!prepared.offer_sdp) throw new Error("that call carried nothing to answer");
-      this.callMedia = await this.openCallMedia({
+      const media = await this.openCallMedia({
         iceServers: prepared.ice_servers,
         remoteOffer: prepared.offer_sdp,
       });
-      await this.backend.callAccept(call.id, this.callMedia.localSdp);
+      if (!this.adoptCallMedia(media, attempt)) return;
+      await this.backend.callAccept(call.id, media.localSdp);
     } catch (error) {
+      if (!this.callAttemptStands(attempt)) return;
       this.reportCall(callFailureMessage(error), "error");
       this.stopCallMedia();
       await this.hangUpCall();
@@ -1754,6 +1800,9 @@ export class TeamsController {
    *  here as well as on the backend's own frame, because the user asked for it now. */
   async hangUpCall(): Promise<void> {
     const call = this.get().callStatus.call;
+    // Whatever start is in flight is over: this click is the user saying so, and it is the
+    // one thing an await inside that start cannot see (see {@link callAttempt}).
+    this.callAttempt += 1;
     this.stopCallMedia();
     if (!call) return;
     try {

@@ -261,9 +261,29 @@ export async function disableCalling(page: Page): Promise<void> {
   expect(res.ok()).toBeTruthy();
 }
 
+/**
+ * Make ONE step of the next start answer late, so a spec can hang up inside it.
+ *
+ * A real start waits on a microphone and on ICE gathering, then on the POST that rings the
+ * far side; the mock's own media is instant, so without this the window a user cancels in
+ * does not exist here at all. `"prepare"` holds the reservation — the stage is up, the
+ * offer has not gone out — and `"place"` holds the invite on the wire, which is the half
+ * the backend has to take back. Always finish with `resetCall`.
+ */
+export async function holdCallStart(
+  page: Page,
+  hold: "prepare" | "place",
+  holdMs = 1500,
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "call_start", hold, hold_ms: holdMs },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** End any mock call and put calling back to what a real backend reports — it calls. It
- *  also clears an armed media refusal and an armed `disableCalling`, so neither needs a
- *  separate undo. */
+ *  also clears an armed media refusal, an armed `disableCalling` and an armed start hold,
+ *  so none of them needs a separate undo. */
 export async function resetCall(page: Page): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "call_invite", reset: true },

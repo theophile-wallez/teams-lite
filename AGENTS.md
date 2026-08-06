@@ -1031,6 +1031,31 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   and the store's handler is the only place that stops the media. A path that released it
   somewhere else would eventually miss a case and leave the browser's recording indicator
   on for a call that does not exist.
+- **A start the user STOPS is not a failure, and the call it half-made is taken back.** A
+  start is three awaits long — reserve, open the microphone, post the offer — and the
+  microphone alone takes up to `GATHER_TIMEOUT_MS`, so a call stopped a second after it was
+  placed lands inside one of them. Both halves used to be wrong, and each is now pinned by a
+  test:
+  - **The page holds the user's own intention** (`callAttempt` in `web/src/lib/store.ts`,
+    moved by every start and every hang-up). A start whose attempt no longer stands says
+    nothing, sends no offer, and RELEASES the media it had just opened — `adoptCallMedia` is
+    the only place `callMedia` is assigned, because a capture adopted after the hang-up is
+    one nothing can find to stop. It is read off the counter and never off a `call_state`
+    frame: a frame says the call is over whoever ended it, a real failure included, and a
+    failure must still be said. Before this the start ran on to the end and the backend's
+    refusal of an offer for a call it had already let go was floated at the user as a fault
+    — `no such call — call_prepare first`, for a call they stopped themselves.
+  - **The backend hangs up what the service accepted meanwhile** (`hang_up_orphan`, in
+    `call_place`, `call_join` and `call_accept`). The hangup finds no link to post on while
+    that POST is still on the wire, so it drops the call here — and a moment later the
+    service has a device buzzing in somebody's pocket, or a caller talking into a machine
+    that holds nothing. The answer's own links are that call's only address and this is the
+    only moment they exist, so each handler re-reads the reservation after its answer and
+    ends the call when it has gone. `a_call_answered_for_a_cancelled_start_is_hung_up` scans
+    all three.
+  - **The mock can hold ONE step of a start** (`{kind:"call_start", hold:"prepare"|"place"}`,
+    over `holdCallStart`), which is what makes the window reachable from a spec at all: the
+    mock's own media is instant, so the window a user cancels in did not exist there.
 - **What a call has to SAY is a transient notice, and this app's only one**
   (`web/src/lib/notice.ts`, drawn by `app-toaster.tsx` over `sonner`). Why a call ended for a
   reason the user did not choose, why one never went out, why a capture was refused: by the

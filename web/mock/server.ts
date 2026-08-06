@@ -3295,6 +3295,24 @@ let mockCallTimers: ReturnType<typeof setTimeout>[] = [];
  *  is refused, and only that one. It is what makes a mid-call failure reviewable — the
  *  page's simulated camera never refuses, and the service that would is a real tenant. */
 let mockRefusesNextMedia = false;
+/** Armed by the `{kind:"call_start", hold:"prepare"|"place"}` test hook: that ONE step of
+ *  the next start answers late, and only that one.
+ *
+ *  It is what makes a CANCELLED start reviewable. A real start waits on a microphone and
+ *  on ICE gathering (up to `GATHER_TIMEOUT_MS`), then on a POST to Teams, so a call the
+ *  user stops a second after placing it lands inside one of those waits — while the mock's
+ *  own media is instant, which left the whole case unreachable from a spec. Which step is
+ *  held decides which half is exercised: the offer that must never go out, or the invite
+ *  that went out and has to be taken back. */
+let mockCallStartHold: { at: "prepare" | "place"; ms: number } | null = null;
+
+/** Wait out the hold armed for `step`, once. */
+async function holdMockCallStart(step: "prepare" | "place"): Promise<void> {
+  const hold = mockCallStartHold;
+  if (!hold || hold.at !== step) return;
+  mockCallStartHold = null;
+  await new Promise((resolve) => setTimeout(resolve, hold.ms));
+}
 
 function mockCallStatus(): { enabled: boolean; ready: boolean; call: MockCall | null } {
   return {
@@ -4728,7 +4746,7 @@ function injectMail(input: {
   return mail;
 }
 
-function dispatch(method: string, params: unknown): unknown {
+async function dispatch(method: string, params: unknown): Promise<unknown> {
   switch (method) {
     case "ping":
       return "pong";
@@ -5286,8 +5304,12 @@ function dispatch(method: string, params: unknown): unknown {
         can_send_media: false,
       };
       broadcastMockCall();
+      const reserved = mockCall.id;
+      // The frame above is out, so the page is already dialling: a hold here is the wait a
+      // real start spends on the microphone, with the stage — and its Hang up — on screen.
+      await holdMockCallStart("prepare");
       return {
-        call_id: mockCall.id,
+        call_id: reserved,
         ice_servers: [{ urls: ["stun:mock.invalid:3478"] }],
       };
     }
@@ -5296,6 +5318,15 @@ function dispatch(method: string, params: unknown): unknown {
       const callId = requireString(params, "call_id");
       requireString(params, "sdp");
       if (!mockCall || mockCall.id !== callId) throw new Error("call_place: no such call");
+      // A hold here is the POST itself: the invite is on the wire, and a hang-up in this
+      // window is the one the Rust backend has to take back (`hang_up_orphan`).
+      await holdMockCallStart("place");
+      if (!mockCall || mockCall.id !== callId) {
+        // The user hung up while the invite was going out. The real backend hangs the
+        // placed call up on the links the answer carried; there is nothing to hang up
+        // here, and the page must be told this call is not going to connect.
+        return { call_id: callId, cancelled: true };
+      }
       // The far side picks up, then their SDP arrives — the two frames the real
       // service sends, in the real order.
       mockCallTimers.push(
@@ -6242,6 +6273,16 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       broadcastMockCall();
       return Response.json({ ok: true, enabled: false }, { status: 200 });
     }
+    // Hold ONE step of the next start, so a spec can hang up inside it — the window a real
+    // call spends on a microphone, and the one it spends posting the invite. Nothing is
+    // armed for later than that next step (`holdMockCallStart` disarms as it fires), and
+    // `call_invite {reset:true}` clears it with the rest.
+    if (body.kind === "call_start") {
+      const at = body.hold === "place" ? "place" : "prepare";
+      const ms = typeof body.hold_ms === "number" ? body.hold_ms : 1500;
+      mockCallStartHold = { at, ms };
+      return Response.json({ ok: true, hold: at, hold_ms: ms }, { status: 200 });
+    }
     if (body.kind === "call_invite") {
       if (body.reset === true) {
         endMockCall("CallEndReasonHangup");
@@ -6249,6 +6290,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         // out of that, and it must not leak into the next spec.
         mockCallingEnabled = true;
         mockRefusesNextMedia = false;
+        mockCallStartHold = null;
         broadcastMockCall();
         return Response.json({ ok: true, reset: true }, { status: 200 });
       }

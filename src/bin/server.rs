@@ -1231,6 +1231,13 @@ impl CallSession {
         self.roster.iter().filter(|member| member.mri != self.local.id).collect()
     }
 
+    /// True once this call is over. `end_call_locally` marks the session before it drops
+    /// it, so a request that comes back from the network reads the same answer whichever
+    /// side of that emit it lands on.
+    fn ended(&self) -> bool {
+        self.phase == CallPhase::Ended
+    }
+
     /// The view of this call every client gets. It carries no SDP and no
     /// credentials: those only ever leave through a token-gated method.
     fn json(&self) -> Value {
@@ -3930,11 +3937,23 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             .await;
             match placed {
                 Ok(placed) => {
-                    {
+                    let held = {
                         let mut plane = ctx.calling.lock().unwrap();
-                        if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
-                            call.links.merge(&placed.links);
+                        match plane.call.as_mut().filter(|c| c.id == call_id && !c.ended()) {
+                            Some(call) => {
+                                call.links.merge(&placed.links);
+                                true
+                            }
+                            None => false,
                         }
+                    };
+                    if !held {
+                        // The user hung up while this POST was in flight, so the invite is
+                        // out and the reservation is gone: a device is buzzing for a call
+                        // nothing here holds, and the answer's own links are the only way
+                        // to take it back.
+                        ctx.hang_up_orphan("call_place", &local, &placed.links).await;
+                        return Ok(json!({ "call_id": call_id, "cancelled": true }));
                     }
                     ctx.emit_call_state();
                     Ok(json!({ "call_id": call_id, "links": placed.links.names() }))
@@ -3994,16 +4013,27 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // The meeting is joined. Its links are held before anything else, so an
             // ending always has somewhere to post — and the lobby is a state of its own,
             // because the one thing the user has to know is that nobody has let them in.
-            {
+            let held = {
                 let mut plane = ctx.calling.lock().unwrap();
-                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
-                    call.links.merge(&joined.links);
-                    if calling::lobby_state_in_frame(&joined.raw)
-                        == Some(calling::LobbyState::Waiting)
-                    {
-                        call.in_lobby = true;
+                match plane.call.as_mut().filter(|c| c.id == call_id && !c.ended()) {
+                    Some(call) => {
+                        call.links.merge(&joined.links);
+                        if calling::lobby_state_in_frame(&joined.raw)
+                            == Some(calling::LobbyState::Waiting)
+                        {
+                            call.in_lobby = true;
+                        }
+                        true
                     }
+                    None => false,
                 }
+            };
+            if !held {
+                // The user left while this POST was in flight, so the meeting holds a
+                // participant this machine no longer has: leave it, on the links the answer
+                // carried (see `call_place`).
+                ctx.hang_up_orphan("call_join", &local, &joined.links).await;
+                return Ok(json!({ "call_id": call_id, "cancelled": true }));
             }
             ctx.emit_call_state();
             // What the answer granted. `activeModalities.call` is the audio leg, and it
@@ -4057,13 +4087,24 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             match ctx.post_call_signal(&url, &payload).await {
                 Ok(response) => {
                     let links = calling::Links::collect(&response);
-                    {
+                    let held = {
                         let mut plane = ctx.calling.lock().unwrap();
-                        if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
-                            call.links.merge(&links);
-                            call.phase = CallPhase::Connected;
-                            call.connected_at_ms = Some(now_ms());
+                        match plane.call.as_mut().filter(|c| c.id == call_id && !c.ended()) {
+                            Some(call) => {
+                                call.links.merge(&links);
+                                call.phase = CallPhase::Connected;
+                                call.connected_at_ms = Some(now_ms());
+                                true
+                            }
+                            None => false,
                         }
+                    };
+                    if !held {
+                        // The user hung up while the acceptance was in flight, so the caller
+                        // is now in a call with a machine that holds nothing: end it on the
+                        // links the acceptance answered with (see `call_place`).
+                        ctx.hang_up_orphan("call_accept", &local, &links).await;
+                        return Ok(json!({ "call_id": call_id, "cancelled": true }));
                     }
                     ctx.emit_call_state();
                     Ok(json!({ "call_id": call_id }))
@@ -7812,6 +7853,34 @@ impl Ctx {
         self.calling.lock().unwrap().call = None;
     }
 
+    /// End a call the service accepted for a reservation this machine no longer holds.
+    ///
+    /// It is the one thing a cancelled start cannot leave alone. The user hangs up while
+    /// the POST that places, joins or accepts is still on the wire: the hangup finds no
+    /// link to post on — the answer carrying it has not come back yet — so it drops the
+    /// call here, and a moment later the service reports a call somebody is ringing for,
+    /// or is already talking into. That answer's own links are the only address that call
+    /// ever has, and this is the only moment they exist.
+    ///
+    /// Nothing is retried and nothing is reported to the page: the user ended this call
+    /// before it existed, and there is no surface left to say anything on.
+    async fn hang_up_orphan(
+        &self,
+        method: &str,
+        local: &calling::LocalParticipant,
+        links: &calling::Links,
+    ) {
+        let Some(url) = links.hangup() else {
+            eprintln!("[calling] {method}: the call was cancelled and answered no hangup link");
+            return;
+        };
+        let url = url.to_string();
+        match self.post_call_signal(&url, &calling::hangup_payload(local)).await {
+            Ok(_) => eprintln!("[calling] {method}: the call was cancelled — hung it up"),
+            Err(e) => eprintln!("[calling] {method}: the cancelled call did not hang up: {e:#}"),
+        }
+    }
+
     /// POST one signaling frame for the live call, with its correlation id.
     async fn post_call_signal(&self, url: &str, payload: &Value) -> Result<Value> {
         let correlation = self
@@ -8897,6 +8966,41 @@ mod tests {
         call.offer = Some(calling::MediaContent::sdp("v=0"));
         assert_eq!(call.json()["can_accept"], false);
         assert_eq!(call.json()["can_hangup"], false);
+    }
+
+    /// Every POST that puts this machine INTO a call re-reads the reservation when its
+    /// answer comes back, and hangs the call up when the reservation has gone.
+    ///
+    /// That window is one click wide and the user hits it often: they stop a call a second
+    /// after starting it. The hangup then finds no link to post on — the answer carrying it
+    /// is still on the wire — so it drops the call here, and a moment later the service has
+    /// somebody's phone ringing, or a caller talking into a machine that holds nothing. The
+    /// answer's own links are that call's only address, and this is the only moment they
+    /// exist, so a handler that merely skipped its merge would leave the call standing.
+    #[test]
+    fn a_call_answered_for_a_cancelled_start_is_hung_up() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        for (method, next) in [
+            ("\"call_place\" => {", "\"call_join\" => {"),
+            ("\"call_join\" => {", "\"call_accept\" => {"),
+            ("\"call_accept\" => {", "\"call_answer_media\" => {"),
+        ] {
+            let handler = code.split(method).nth(1).expect(method);
+            let handler = handler.split(next).next().expect("the handler ends at the next arm");
+            assert!(
+                handler.contains("hang_up_orphan"),
+                "{method} keeps a call the user cancelled while its POST was in flight. \
+                 Re-read the reservation after the answer and hang the call up on the links \
+                 that answer carried."
+            );
+            assert!(
+                handler.contains("!c.ended()"),
+                "{method} reads the reservation without checking whether it ENDED. \
+                 `end_call_locally` marks the session before it drops it, so a request \
+                 landing on that side of the emit would look like a live call."
+            );
+        }
     }
 
     /// "Ready" must mean a call could start RIGHT NOW: registered, and the socket up.
