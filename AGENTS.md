@@ -1713,6 +1713,32 @@ an outward action, so it is gated on purpose:
   and its cue (`shouldNotify`, over `chatIsMuted`) — but NOT Web Push: the mute may be
   a local override that only the browser holds, so the backend never sees it and the
   phone still buzzes. The menu that offers the switch says so (see § The chat list).
+- **THE PAGE'S OWN SOUND RIDES THAT SAME POLICY**, and it is one function, in one
+  spelling, on each side: `shouldNotify` (`web/src/lib/protocol.ts`) mirrors
+  `push_policy::notification_for` rule for rule — never our own message, never a system
+  line, never a deletion, never a frame older than `MAX_AGE_MS`, and a channel post only
+  as loud as the user asked Teams to make it. The backend broadcasts EVERY live frame to
+  every page (§ Running the released build beside the staged one says why), so a
+  reaction, an edit and a deletion each arrive as the whole stored message again and a
+  reconnect replays what it missed. The page used to answer "is this news?" with three of
+  those seven rules, so the app chimed at things the user's own phone deliberately stayed
+  quiet about — and they opened it to find nothing new. Measured over one week of this
+  tenant's own store: **226 posts in `mentions_only` channels, mentioning them in none of
+  them, plus 26 system lines** — some 36 sounds a day with nothing behind any of them.
+  Three things hold it, and each is pinned by a test:
+  - **The page adds ONE rule the backend cannot have**: a frame carrying a message this
+    page already holds (`alreadyKnown`, read BEFORE the merge, since after it every frame
+    looks known). It is the client's own better answer to what the delivery path decides
+    with its insert — a reaction on a message already drawn is not news.
+  - **`mentions_me` is resolved by the BACKEND and rides on the message**
+    (`message_json`, over `push_policy::mentions_user`). The page never learns the user's
+    MRI, and a mention's span carries a display name two colleagues may share, so this is
+    the one fact about "is this for me?" it cannot work out. ABSENT — a backend older than
+    the field — reads as a mention, because silence on a real summons is the worse of the
+    two failures.
+  - **Two policies for one question is the bug.** A rule added to either side belongs on
+    both; if it cannot be (an identity, a claimed delivery), the other side is TOLD, as
+    `mentions_me` is.
 
 ## The channel sidebar mirrors Teams, and mirrors it READ-ONLY
 

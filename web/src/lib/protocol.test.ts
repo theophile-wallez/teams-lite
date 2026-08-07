@@ -39,6 +39,11 @@ import {
   NO_CHAT_PREFS,
   type ChatPrefs,
   shouldNotify,
+  MAX_NOTIFY_AGE_MS,
+  type ChannelAlerts,
+  type NotifiableMessage,
+  type NotifyPlacement,
+  type SystemEvent,
   replyToPayload,
   copyableMessageText,
   mentionsByItemId,
@@ -1331,23 +1336,97 @@ describe("chatSectionCollapsedHint", () => {
 });
 
 describe("shouldNotify", () => {
-  it("never notifies for our own messages", () => {
-    expect(shouldNotify({ conversation_id: "c1", is_self: true }, null)).toBe(false);
+  // One fixed clock for the whole block: a live frame is news only while it is fresh,
+  // so every message here carries a compose time relative to NOW.
+  const NOW = 1_770_000_000_000;
+  const fresh = (over: Partial<NotifiableMessage> = {}): NotifiableMessage => ({
+    id: "m1",
+    conversation_id: "c1",
+    compose_time: NOW - 1_000,
+    is_self: false,
+    ...over,
+  });
+  const notify = (
+    msg: NotifiableMessage,
+    openId: string | null = null,
+    placement: NotifyPlacement = { kind: "chat", muted: false },
+    alreadyKnown = false,
+  ) => shouldNotify(msg, openId, placement, { alreadyKnown, now: NOW });
+
+  it("notifies for a fresh message in another conversation, or with nothing open", () => {
+    expect(notify(fresh(), "c2")).toBe(true);
+    expect(notify(fresh(), null)).toBe(true);
   });
 
-  it("stays quiet for a muted thread", () => {
-    // A mute that dimmed the row and still chimed would not be a mute.
-    expect(shouldNotify({ conversation_id: "c1", is_self: false }, null, true)).toBe(false);
-    expect(shouldNotify({ conversation_id: "c1", is_self: false }, null, false)).toBe(true);
+  it("never notifies for our own messages", () => {
+    expect(notify(fresh({ is_self: true }))).toBe(false);
   });
 
   it("does not notify for the conversation that is currently open", () => {
-    expect(shouldNotify({ conversation_id: "c1", is_self: false }, "c1")).toBe(false);
+    expect(notify(fresh(), "c1")).toBe(false);
   });
 
-  it("notifies for another conversation or when nothing is open", () => {
-    expect(shouldNotify({ conversation_id: "c2", is_self: false }, "c1")).toBe(true);
-    expect(shouldNotify({ conversation_id: "c1", is_self: false }, null)).toBe(true);
+  it("stays quiet for a muted chat", () => {
+    // A mute that dimmed the row and still chimed would not be a mute.
+    expect(notify(fresh(), null, { kind: "chat", muted: true })).toBe(false);
+  });
+
+  it("stays quiet for a system line", () => {
+    // "Call ended" and "Member added" are context, not news — `push_policy` refuses to
+    // buzz a phone for them, so the page must not chime either.
+    expect(notify(fresh({ system_event: { kind: "call" } as SystemEvent }))).toBe(false);
+  });
+
+  it("stays quiet for a deletion", () => {
+    expect(notify(fresh({ deleted: true }))).toBe(false);
+  });
+
+  it("stays quiet for a frame carrying a message the page already holds", () => {
+    // A reaction, an edit or a deletion arrives as the whole stored message again. It
+    // was already drawn, so there is nothing new to be told about.
+    expect(notify(fresh(), null, { kind: "chat", muted: false }, true)).toBe(false);
+  });
+
+  it("stays quiet for a replayed frame, and for one from the future", () => {
+    // A trouter reconnect replays what it missed; a phone buzzing about this morning's
+    // message is worse than silence, and so is a sound.
+    expect(notify(fresh({ compose_time: NOW - MAX_NOTIFY_AGE_MS - 1 }))).toBe(false);
+    expect(notify(fresh({ compose_time: NOW + MAX_NOTIFY_AGE_MS + 1 }))).toBe(false);
+    expect(notify(fresh({ compose_time: 0 }))).toBe(false);
+  });
+
+  describe("a channel post follows the user's own Teams setting", () => {
+    const post = (over: Partial<NotifiableMessage> = {}) => fresh({ id: "p1", ...over });
+    const inChannel = (msg: NotifiableMessage, alerts: ChannelAlerts) =>
+      notify(msg, null, { kind: "channel", alerts });
+
+    it("says nothing about a post that mentions nobody, at Teams' default", () => {
+      // The reason this whole gate exists: measured over one week of the real tenant,
+      // 226 posts in `mentions_only` channels mentioned the user in none of them.
+      expect(inChannel(post({ mentions_me: false }), "mentions_only")).toBe(false);
+      expect(inChannel(post({ mentions_me: true }), "mentions_only")).toBe(true);
+    });
+
+    it("is silent when the channel is muted, mention or not", () => {
+      expect(inChannel(post({ mentions_me: true }), "muted")).toBe(false);
+    });
+
+    it("carries every new post, and a reply only when asked for replies too", () => {
+      const reply = post({ mentions_me: false, thread_root_id: "root" });
+      const opening = post({ mentions_me: false, thread_root_id: "p1" });
+      expect(inChannel(opening, "all_new_posts")).toBe(true);
+      expect(inChannel(reply, "all_new_posts")).toBe(false);
+      expect(inChannel(post({ mentions_me: true, thread_root_id: "root" }), "all_new_posts")).toBe(
+        true,
+      );
+      expect(inChannel(reply, "all_new_posts_and_replies")).toBe(true);
+    });
+
+    it("treats an ABSENT mention flag as a mention", () => {
+      // A backend older than the field says nothing rather than "mentions nobody":
+      // staying silent on a real summons is the worse failure of the two.
+      expect(inChannel(post(), "mentions_only")).toBe(true);
+    });
   });
 });
 

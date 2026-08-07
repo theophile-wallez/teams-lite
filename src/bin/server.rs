@@ -7686,6 +7686,16 @@ async fn thread_mentionable_people(
 /// than parsed as HTML (otherwise `Vec<String>` renders as `Vec`). Empty for legacy
 /// rows stored before the column existed — treat empty as "unknown", i.e. keep the
 /// previous HTML behaviour.
+///
+/// `mentions_me` is the one fact about a message that only this side can answer: the
+/// page never learns the user's own MRI, so it cannot read the resolved mention list
+/// for itself. It is resolved by [`push_policy::mentions_user`], the same function the
+/// delivery policy reads, so a mention means one thing in this app — and it is what
+/// lets the page apply the user's own per-channel notification setting rather than
+/// chiming at every post in every channel (see `shouldNotify` in
+/// web/src/lib/protocol.ts). Absent from an older backend, and the reader then treats
+/// it as "not known" and notifies, because a mention nobody is told about is the worse
+/// failure.
 fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
     json!({
         "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
@@ -7697,6 +7707,7 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
         "reactions": reactions_value(m, self_mri),
         "system_event": system_event_value(m),
         "is_self": is_self(m, self_name, self_mri),
+        "mentions_me": push_policy::mentions_user(&m.mentions, self_mri),
         "thread_root_id": m.thread_root_id,
         "thread_subject": m.thread_subject,
         "deleted": m.deleted
@@ -12449,6 +12460,31 @@ mod tests {
         let mut broken = message(3);
         broken.mentions = "{not json".into();
         assert_eq!(message_json(&broken, "Alice", "8:me")["mentions"], json!([]));
+    }
+
+    #[test]
+    fn whether_a_message_mentions_the_user_rides_the_wire() {
+        // The page applies the user's own per-channel notification setting, and
+        // "mentions only" is Teams' default — so it has to know whether a post named
+        // them. It cannot work that out: it never learns their MRI, and the body's span
+        // carries a display name two colleagues may share. This is the answer, resolved
+        // by the same function the push policy reads.
+        let mut m = message(1);
+        m.mentions =
+            r#"[{"itemid":0,"mri":"8:me","kind":"person","display_name":"Alice"}]"#.into();
+        assert_eq!(message_json(&m, "Alice", "8:me")["mentions_me"], true);
+        assert_eq!(
+            message_json(&m, "Bob", "8:someone_else")["mentions_me"],
+            false,
+            "a mention of somebody else is not one of ours"
+        );
+
+        // A message that mentions nobody, and a row whose list is unusable, both say
+        // false rather than nothing — the page reads an ABSENT field as "not known".
+        assert_eq!(message_json(&message(2), "Alice", "8:me")["mentions_me"], false);
+        let mut broken = message(3);
+        broken.mentions = "{not json".into();
+        assert_eq!(message_json(&broken, "Alice", "8:me")["mentions_me"], false);
     }
 
     #[test]

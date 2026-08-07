@@ -156,6 +156,7 @@ type ChatMessage = {
   mentions?: MessageMention[]; // who the body's @mention spans point at, by itemid
   system_event?: SystemEvent; // when set, rendered as a centered system line
   is_self?: boolean;
+  mentions_me?: boolean; // whether the mention spans point at US (backend-resolved)
   thread_root_id?: string; // channel only: id of the thread's root post
   thread_subject?: string; // channel only: thread title, present on the root
   deleted?: boolean; // sender deleted it; content (if kept) is revealable
@@ -2529,10 +2530,17 @@ function nickname(mri: string | undefined): string {
   return personOverrides.get(mri)?.display_name ?? "";
 }
 
-/** One message with its author renamed, when the user renamed them. */
+/** One message on its way to a page: its author renamed when the user renamed them,
+ *  and the two facts only a backend can state about it.
+ *
+ *  `mentions_me` is one of them (see `message_json` in src/bin/server.rs): the page
+ *  never learns the user's own MRI, so it cannot read the mention list for itself — and
+ *  it needs the answer to apply the user's per-channel notification setting rather than
+ *  chiming at every post in every channel. */
 function nicknamed(m: ChatMessage): ChatMessage {
   const own = nickname(m.sender_mri);
-  return own ? { ...m, sender: own } : m;
+  const mentions_me = (m.mentions ?? []).some((mention) => mention.mri === SELF_MRI);
+  return { ...m, sender: own || m.sender, mentions_me };
 }
 
 /** Drop an override entry that no longer overrides anything, so "no override" is
