@@ -12,9 +12,11 @@ import { SettingsDialog } from "./settings-dialog";
 import { CallBar } from "./call-bar";
 import { CallStageProvider, useCallStage } from "./call-stage-context";
 import { GitLabDiffPage } from "./gitlab-diff-page";
+import { GitLabJobLogPage } from "./gitlab-job-log-page";
 import { IncomingCallBanner } from "./incoming-call-banner";
 import { AppToaster } from "./app-toaster";
 import { Splash } from "./splash";
+import { TrackerRefsProvider } from "./tracker-refs-context";
 import { useChatSections } from "./use-chat-sections";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
@@ -37,7 +39,13 @@ export function App() {
             pane — which gives up its composer while the call's chat panel holds it (see
             `useCallOwnsComposer`). */}
         <CallStageProvider>
-          <AppInner />
+          {/* What this machine can read a tracker reference with — the GitLab host and the
+              Linear workspace. Above the whole shell because every surface that draws words
+              draws a reference: a message, a card, an agent's answer, a merge request's own
+              description (see components/tracker-refs-context.tsx). */}
+          <TrackerRefsProvider>
+            <AppInner />
+          </TrackerRefsProvider>
         </CallStageProvider>
       </TooltipProvider>
     </ControllerProvider>
@@ -59,6 +67,7 @@ function AppInner() {
   const openMailId = useAppState((s) => s.openMailId);
   const gitlabList = useAppState((s) => s.gitlabList);
   const openMergeRequest = useAppState((s) => s.openMergeRequest);
+  const openJobId = useAppState((s) => s.gitlabJobId);
   const { chats: visibleChats } = useChatSections();
   // Whether a live call is drawn over the whole app right now (see call-stage.tsx).
   const callStage = useCallStage();
@@ -68,7 +77,7 @@ function AppInner() {
   // The URL is the source of truth for what is open. `/` means nothing; `/c/<id>` a
   // conversation; `/m/<id>` a mail; `/mr/<project>!<iid>` a merge request. `strict: false`
   // lets this shell read any of those params whether or not its route is the matched one.
-  const { conversationId, mailId, mergeRequestId } = useParams({ strict: false });
+  const { conversationId, mailId, mergeRequestId, jobId } = useParams({ strict: false });
   const routeConversationId = conversationId ?? null;
   const routeMailId = mailId ?? null;
   // A malformed id resolves to null, which reads as "nothing open" — the page then shows
@@ -90,6 +99,17 @@ function AppInner() {
   // of them — so it takes the whole screen rather than the detail pane: a third column of chat
   // rows beside it would leave neither of its own two enough room (see gitlab-diff-page.tsx).
   const onDiffRoute = !!matchRoute({ to: "/mr/$mergeRequestId/diff" });
+  // ONE job's LOG takes the whole screen for the diff's own reason: it is 4 000 lines of
+  // monospace, one of which measured 22 KB, and a column of chat rows beside it would leave it
+  // none of the width it needs. A malformed id resolves to null, which reads as "no job open" —
+  // the page then says it is reading nothing rather than asking the backend about a job that
+  // names nothing.
+  const routeJobId = useMemo(() => {
+    if (jobId === undefined) return null;
+    const parsed = Number(jobId);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }, [jobId]);
+  const onJobRoute = !!matchRoute({ to: "/mr/$mergeRequestId/jobs/$jobId" });
 
   // Below the `md` breakpoint the UI is single-pane: the conversation list is the
   // home screen and a conversation (or Settings) takes the screen over it as a
@@ -191,6 +211,19 @@ function AppInner() {
     }
     if (openMergeRequest) controller.closeMergeRequestPage();
   }, [ready, routeMergeRequest, openMergeRequest, controller]);
+
+  // The same reconciliation for ONE JOB's log: `/mr/<id>/jobs/<jobId>` opens it through the
+  // controller, and leaving the route closes it — which stops its poll, so a log nobody is looking
+  // at asks GitLab nothing. It waits for the merge request itself to be open, because the log is
+  // read under that merge request's own cache prefix.
+  useEffect(() => {
+    if (!ready) return;
+    if (routeMergeRequest && routeJobId !== null) {
+      if (openJobId !== routeJobId) void controller.openJobLog(routeMergeRequest, routeJobId);
+      return;
+    }
+    if (openJobId !== null) controller.closeJobLog();
+  }, [ready, routeMergeRequest, routeJobId, openJobId, controller]);
 
   // The keyboard-navigable list is whichever the active tab shows: chats or mail.
   // (The channel tree is a tree, not a flat list, and the calendar is a grid — both
@@ -324,7 +357,18 @@ function AppInner() {
           third column of chat rows beside them would leave neither enough room. Everything
           else stays mounted below it in the tree, so leaving the diff costs no re-read: the
           merge request the reader came from is still open in the controller. */}
-      {onDiffRoute ? (
+      {onJobRoute ? (
+        <div className="flex min-h-0 flex-1">
+          {/* Back leaves the log for the PIPELINE the reader pressed a card on, not for the
+              merge request: that is where they were, and the strip above is how they go
+              anywhere else. */}
+          <GitLabJobLogPage
+            onBack={() =>
+              mergeRequestId ? goToMergeRequestPipeline(mergeRequestId) : goToList()
+            }
+          />
+        </div>
+      ) : onDiffRoute ? (
         <div className="flex min-h-0 flex-1">
           <GitLabDiffPage
             onBack={() => (mergeRequestId ? goToMergeRequest(mergeRequestId) : goToList())}

@@ -1,24 +1,56 @@
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
-import { PatchDiff } from "@pierre/diffs/react";
-import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
+import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
+import {
+  processFile,
+  type ChangeTypes,
+  type CodeView as CodeViewInstance,
+  type CodeViewDiffItem,
+  type DiffLineAnnotation,
+  type FileDiffMetadata,
+  type SelectedLineRange,
+} from "@pierre/diffs";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { PlusSignIcon } from "@hugeicons/core-free-icons";
 import {
+  activeDiffFeedFile,
+  DIFF_FEED_METRICS,
   DIFF_THEMES,
+  diffFeedVersions,
+  diffFileNotice,
   diffFilePaths,
+  diffFileState,
   diffTreeGitStatus,
   formatDiffStat,
+  type DiffFeedTop,
+  type DiffFeedVersion,
   type DiffLayout,
   type GitLabDiff,
+  type GitLabDiffFile,
 } from "~/lib/gitlab-diff";
-import { DIFF_COMMENT_HINT, type DiffAnnotationCard } from "~/lib/gitlab-diff-comment";
+import {
+  diffAnnotationKey,
+  DIFF_COMMENT_HINT,
+  type DiffAnnotationCard,
+  type DiffLineSelection,
+  type PierreLineRange,
+  type PierreSide,
+} from "~/lib/gitlab-diff-comment";
 import type { ResolvedTheme } from "~/lib/appearance";
 import { FILE_TREE_ICONS } from "~/lib/tree-icons";
 
-// The two halves of the diff page that need a renderer: the file TREE, and one file's PATCH.
-// This module is the whole of this app's contact with `@pierre/trees` and `@pierre/diffs`, and
-// it is reached only through `lazy(() => import(…))` from `gitlab-diff-page.tsx`.
+// The two halves of the diff page that need a renderer: the file TREE, and the FEED of every
+// changed file. This module is the whole of this app's contact with `@pierre/trees` and
+// `@pierre/diffs`, and it is reached only through `lazy(() => import(…))` from
+// `gitlab-diff-page.tsx`.
 //
 // **The lazy boundary is load-bearing.** `@pierre/diffs` is built on Shiki, which resolves a
 // TextMate grammar per language as a dynamic import — so the chunk behind this file is 728 KB
@@ -28,10 +60,22 @@ import { FILE_TREE_ICONS } from "~/lib/tree-icons";
 // `web/src/lib/gitlab-diff.ts` so it is testable and renderable without any of this.
 //
 // **The two halves are exported apart, and neither knows where the other is.** The PAGE owns
-// the layout — a full-height column of files beside a full-height patch on a wide screen, one
+// the layout — a full-height column of files beside a full-height feed on a wide screen, one
 // then the other on a phone — because that is a decision about the page and not about a
 // renderer. A component here that wrapped both in a flex row would own a layout it cannot see
 // the constraints of, which is exactly what it did while the diff was a panel.
+//
+// **The FEED is the vendor's own `CodeView`, and choosing it over a virtualizer of this app's
+// was the whole design decision.** A review is read by scrolling, so every changed file is in
+// one scroller — and the room a file needs cannot be known before that file is highlighted,
+// which is what makes a hand-rolled virtual list wrong here: it would reserve a guessed height,
+// mount the file, measure it, and correct the scroll position under the reader, once per file,
+// for 149 files. `CodeView` was built for exactly this list: it reserves room from the line
+// COUNTS its own parser already read, mounts only what the viewport can hold, pools the
+// elements it unmounts, anchors the scroll while a measurement corrects a row above, and
+// pre-warms the highlighter of a file somebody just jumped to (`primeHighlightCache`). What this
+// app keeps is the meaning: which file the reader is AT ([[activeDiffFeedFile]]), and when an
+// item has really changed ([[diffFeedVersions]]).
 //
 // Four things about the pair are worth knowing before touching either:
 //
@@ -56,16 +100,59 @@ import { FILE_TREE_ICONS } from "~/lib/tree-icons";
 //     is a mutation of it rather than a new tree — which is what keeps the reader's folds and
 //     their scroll position across the expanded read.
 
-/** The one thing this app adds to pierre's file header. Hoisted out of the component so the
- *  slot it is handed to is a stable function across renders. */
-const renderGeneratedChip = () => (
-  <span
-    data-testid="gitlab-diff-generated"
-    className="rounded bg-element px-1.5 py-px text-[10px] text-text-faint"
-  >
-    generated
-  </span>
-);
+/** What this app adds to pierre's own file header, beside the file's name: WHICH file this is,
+ *  what their parser cannot know, and why there is nothing under the header at all.
+ *
+ *  All three belong in the header rather than in a row of this app's own, because in a feed a row
+ *  between two files would read as a file. `generated` is GitLab's `generated_file` and is never
+ *  used to HIDE a file — a surprising change hides in one.
+ *
+ *  **It names the file for the same reason the pane does**, and it is the only place that can: the
+ *  renderer's own item element carries no path, and these slots are rendered as light-DOM children
+ *  OF that element — so this is what lets a test, a capture and a reader's own eye tell which of
+ *  the feed's files a row of code belongs to. */
+function FileHeaderNote(props: { file: GitLabDiffFile | undefined }) {
+  const file = props.file;
+  if (!file) return null;
+  const notice = diffFileNotice(file);
+  return (
+    <span
+      data-testid="gitlab-diff-file"
+      data-path={file.path}
+      data-change={file.change}
+      data-state={diffFileState(file)}
+      className="flex min-w-0 flex-wrap items-center gap-1.5"
+    >
+      {file.generated && (
+        <span
+          data-testid="gitlab-diff-generated"
+          data-path={file.path}
+          className="rounded bg-element px-1.5 py-px text-[10px] text-text-faint"
+        >
+          generated
+        </span>
+      )}
+      {notice && (
+        <span
+          data-testid="gitlab-diff-file-notice"
+          data-path={file.path}
+          data-state={diffFileState(file)}
+          className="min-w-0 text-[11px] text-text-faint"
+        >
+          {notice}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** The hovered line, as pierre's gutter slot reports one.
+ *
+ *  The side is optional because the same slot serves a whole-FILE view, where a line has no
+ *  side to be on. This feed holds only diffs, so that shape cannot really arrive — and a press
+ *  on one is skipped rather than guessed at, because the side decides which of GitLab's two line
+ *  numbers the comment is filed under. */
+type FeedGutterGetter = () => { lineNumber: number; side?: PierreSide } | undefined;
 
 /** One card hanging under a line of a diff, addressed in the renderer's own vocabulary.
  *
@@ -73,79 +160,173 @@ const renderGeneratedChip = () => (
  *  WHERE, and the metadata says WHAT — which the page's own slot then draws. */
 export type DiffAnnotation = DiffLineAnnotation<DiffAnnotationCard>;
 
-/** One file's patch, highlighted, filling whatever box the page gives it.
+/** What the renderer hands back with a callback: the item it is about.
  *
- *  The patch is COMPLETE — the backend writes the `diff --git` header GitLab never sends (see
- *  `gitlab_mr::unified_patch`) — so the renderer learns the file, its language and what
- *  happened to it from the patch itself and needs nothing told to it.
+ *  Narrowed to the one field this app reads — the item's id, which IS the file's path — because
+ *  pierre's own context type is an overloaded pair (a file item and a diff item) and a callback
+ *  has to satisfy both. */
+type FeedItemContext = { item: { id: string } };
+
+/** What the page can ASK the feed to do. One thing: show a file.
+ *
+ *  It is a handle rather than a prop, and that is deliberate. A "which file to scroll to" prop
+ *  re-asks on every mount of the effect that reads it — a resize, a remount, any change of the
+ *  object — and an ask the renderer cannot carry out at once is HELD until it can, which spends
+ *  the reader's next wheel notch on it (measured, on this seam). A press is an event, so it is
+ *  spelled as one. */
+export type DiffFeedHandle = { showFile: (path: string) => void };
+
+type DiffFeedProps = {
+  diff: GitLabDiff;
+  layout: DiffLayout;
+  theme: ResolvedTheme;
+  /** Which files can carry a comment, by path (`diffCommentableFiles`). A file that cannot is
+   *  offered no control at all rather than one drawn dead — and an EMPTY set arms the gesture
+   *  nowhere, which is a diff whose three commits this page never read. */
+  commentable: Set<string>;
+  /** The lines lit right now, and the file they are in. */
+  selection: DiffLineSelection | null;
+  /** The gesture is still going: the pointer is down, or a line number was just pressed. */
+  onSelectionChange: (path: string, range: PierreLineRange | null) => void;
+  /** The gesture ENDED on these lines, which is when a comment box may open under them. */
+  onSelectionEnd: (path: string, range: PierreLineRange | null) => void;
+  /** The cards hanging under a line, per file — the threads already there, and the one being
+   *  written. */
+  annotations: Map<string, DiffAnnotation[]>;
+  renderAnnotation: (annotation: DiffAnnotation, path: string) => ReactNode;
+  /** The file the reader is AT, whenever it changes — which is what the tree lights. */
+  onActiveFile: (path: string) => void;
+  /** Which file the feed OPENS at — the one the reader was last at on this merge request. It is
+   *  read ONCE, when the items are first there: from then on where the feed sits is the reader's
+   *  own business, and a press comes through {@link DiffFeedHandle}. */
+  openAt: string | null;
+};
+
+/** The changed files, one after another, in one scroller the renderer virtualizes.
+ *
+ *  The patches are COMPLETE — the backend writes the `diff --git` header GitLab never sends (see
+ *  `gitlab_mr::unified_patch`) — so each item learns its file, its language and what happened to
+ *  it from its own patch and needs nothing told to it.
+ *
+ *  **A file with NO patch is still in the feed.** A binary file, one GitLab collapsed: the tree
+ *  lists it, so a feed that skipped it would make the tree lie about where the reader is — and
+ *  scrolling would jump over a name that is in the list. It becomes an item with no hunks, which
+ *  is exactly the shape pierre's own parser returns for a pure rename, and the page's header slot
+ *  states why there is nothing under it.
  *
  *  **The COMMENT gesture is pierre's own, and that is why it is a gesture at all.** Its
  *  interaction manager starts a selection only from the line-NUMBER gutter and follows the
  *  pointer to another number, so a click is one line and a drag is a span — which is what
  *  GitLab's own diff does and what a reviewer already knows how to do. Nothing here reimplements
  *  it; what this app adds is the meaning of the answer (`lib/gitlab-diff-comment.ts`) and the
- *  card that hangs under the line (`gitlab-diff-comments.tsx`). Three things about the seam:
+ *  card that hangs under the line (`gitlab-diff-comments.tsx`). Four things about the seam:
  *
-
+ *    - **Every gesture names its FILE.** In a feed a line number means nothing on its own — line
+ *      42 exists in most of these files — so the item's id travels with the selection, with the
+ *      end of it, and with the gutter's own press. That is the shape pierre's
+ *      `CodeViewLineSelection` takes too, for the same reason.
  *    - **The selection is CONTROLLED**: passing `selectedLines` at all is what turns pierre's
  *      own rendering of it off, so what is lit is this app's own state. The live gesture and the
- *      finished one arrive apart (`onLineSelectionChange` and `onLineSelected`) because they mean
- *      different things — the first lights lines, the second is the only one that may open a
+ *      finished one arrive apart (`onLineSelectionChange` and `onLineSelectionEnd`) because they
+ *      mean different things — the first lights lines, the second is the only one that may open a
  *      comment box.
  *    - **The gutter's own PLACEMENT is pierre's** (`enableGutterUtility`), and it is the half
  *      that makes the gesture discoverable: the control follows the hovered line, and on a touch
  *      screen — where there is no hover — a press on the gutter reveals it. The control itself is
  *      this app's, because its glyph has to be hugeicons' like every other in this app.
  *    - **Every callback is read through a ref.** They are handed to the renderer inside an
- *      options object it keeps, so a new closure per render would either be ignored or force a
- *      re-render of the whole patch. It is the rule `DiffFileTree` below already follows.
+ *      options object it keeps, so a new closure per render would either be ignored or rebuild
+ *      every mounted file. It is the rule `DiffFileTree` below already follows.
  */
-export function DiffFilePatch(props: {
-  patch: string;
-  layout: DiffLayout;
-  theme: ResolvedTheme;
-  /** GitLab's own `generated_file`. Drawn in pierre's header slot — never used to HIDE a
-   *  file, because a generated file is where a surprising change hides. */
-  generated: boolean;
-  /** Whether a comment can be put on this file at all — a patch to point at, and the commits
-   *  to place it against (`diffCommentsAvailable`). With `false` the gutter offers nothing and
-   *  a line cannot be picked, rather than collecting a comment that has nowhere to go. */
-  commentable: boolean;
-  /** The lines lit right now — wherever the gesture has reached, or null. */
-  selection: SelectedLineRange | null;
-  /** The gesture is still going: the pointer is down, or a line number was just pressed. */
-  onSelectionChange: (range: SelectedLineRange | null) => void;
-  /** The gesture ENDED on these lines, which is when a comment box may open under them. */
-  onSelectionEnd: (range: SelectedLineRange | null) => void;
-  /** The lines that carry a card — the threads already there, and the one being written. */
-  annotations: DiffAnnotation[];
-  renderAnnotation: (annotation: DiffAnnotation) => ReactNode;
-}) {
+export const DiffFeed = forwardRef<DiffFeedHandle, DiffFeedProps>(function DiffFeed(props, ref) {
   // The callbacks the renderer keeps. See the note about refs in the doc comment above.
   const onChange = useRef(props.onSelectionChange);
   onChange.current = props.onSelectionChange;
   const onCommit = useRef(props.onSelectionEnd);
   onCommit.current = props.onSelectionEnd;
+  const onActiveFile = useRef(props.onActiveFile);
+  onActiveFile.current = props.onActiveFile;
+  const draw = useRef(props.renderAnnotation);
+  draw.current = props.renderAnnotation;
 
-  // The gutter's own control. Stable across renders — the ref above is what carries the
-  // current handler into it — so the slot pierre places at the hovered line is not rebuilt
-  // every time the reader moves the pointer.
+  const view = useRef<CodeViewHandle<DiffAnnotationCard> | null>(null);
+
+  const items = useDiffFeedItems(props.diff, props.annotations);
+
+  // The gutter's own control, and the header slot beside a file's name. Both are stable across
+  // renders — the refs above carry the current handlers into them — so the slots pierre moves
+  // between rows are not rebuilt every time the reader moves the pointer.
+  const commentable = useRef(props.commentable);
+  commentable.current = props.commentable;
   const renderGutter = useCallback(
-    (getHoveredLine: () => { lineNumber: number; side: "additions" | "deletions" } | undefined) => (
-      <GutterCommentButton
-        getHoveredLine={getHoveredLine}
-        onPick={(line) =>
-          onCommit.current({
-            start: line.lineNumber,
-            side: line.side,
-            end: line.lineNumber,
-            endSide: line.side,
-          })
-        }
-      />
-    ),
+    (getHoveredLine: FeedGutterGetter, item: { id: string }) =>
+      // A file that cannot carry a comment is offered NO control, rather than one drawn dead: the
+      // renderer arms the slot for the whole feed, and this is where one file's answer is given.
+      commentable.current.has(item.id) ? (
+        <GutterCommentButton
+          getHoveredLine={getHoveredLine}
+          onPick={(line) =>
+            onCommit.current(item.id, {
+              start: line.lineNumber,
+              side: line.side,
+              end: line.lineNumber,
+              endSide: line.side,
+            })
+          }
+        />
+      ) : null,
     [],
   );
+  const filesByPath = useMemo(() => {
+    const byPath = new Map<string, GitLabDiffFile>();
+    for (const file of props.diff.files) byPath.set(file.path, file);
+    return byPath;
+  }, [props.diff]);
+  const headerFiles = useRef(filesByPath);
+  headerFiles.current = filesByPath;
+  const renderHeaderMetadata = useCallback(
+    (item: { id: string }) => <FileHeaderNote file={headerFiles.current.get(item.id)} />,
+    [],
+  );
+  const renderAnnotation = useCallback(
+    (annotation: DiffAnnotation, item: { id: string }) => draw.current(annotation, item.id),
+    [],
+  );
+
+  // Bring one file to the top. `instant` because the press already said where to be: a spring
+  // across 149 files would be a second of scenery, and the reader asked to be somewhere else.
+  //
+  // The path is remembered as the file the reader ASKED for, which is what keeps a press honest at
+  // the end of the feed, where no file can reach the top of the screen (`activeDiffFeedFile`).
+  const asked = useRef<string | null>(null);
+  const showFile = useCallback((path: string) => {
+    asked.current = path;
+    view.current?.scrollTo({ type: "item", id: path, align: "start", behavior: "instant" });
+  }, []);
+  useImperativeHandle(ref, () => ({ showFile }), [showFile]);
+
+  // Where the feed OPENS. Three things about it, and each was measured on this seam:
+  //
+  //   - the file is the one the page named at the FIRST render (`useRef` keeps that value), never
+  //     the current one: `openAt` follows the reader from then on, so reading it later would open
+  //     the feed at wherever it had already got to;
+  //   - a feed already opens at its first file, so asking for THAT one asks for nothing — and a
+  //     scroll that goes nowhere is not free, because the renderer holds a programmatic target
+  //     until it carries it out and a wheel notch can be spent on it instead of on the scroll;
+  //   - and it is asked for once the renderer has really DRAWN something (`onPostRender`, below),
+  //     not when the items are handed over. A scroll asked for before the first paint is applied
+  //     against a layout nothing has measured, and the correction that follows puts the reader
+  //     back at the top — which is a press in the tree that looks like it did nothing.
+  const openingFile = useRef(props.openAt);
+  const firstFile = useRef<string | undefined>(undefined);
+  firstFile.current = items[0]?.id;
+  const opened = useRef(false);
+  const openFeed = useCallback(() => {
+    if (opened.current) return;
+    opened.current = true;
+    const wanted = openingFile.current;
+    if (wanted && wanted !== firstFile.current) showFile(wanted);
+  }, [showFile]);
 
   const options = useMemo(
     () => ({
@@ -153,6 +334,9 @@ export function DiffFilePatch(props: {
       theme: DIFF_THEMES,
       // The app's own appearance, never the OS's. See the module header.
       themeType: props.theme,
+      // What a row and a header MEASURE, which is what the feed reserves room with before a file
+      // is mounted. app.css owns those numbers — see `DIFF_FEED_METRICS`.
+      itemMetrics: DIFF_FEED_METRICS,
       // Bars rather than `+`/`-` glyphs: the gutter already carries the line numbers, and a
       // column of signs beside a column of numbers is two things saying one thing.
       diffIndicators: "bars" as const,
@@ -167,12 +351,12 @@ export function DiffFilePatch(props: {
       // layout is for, and this app is read on a phone where nearly every line would wrap.
       overflow: "scroll" as const,
       // A click on a line number, and a drag from one to another: the comment gesture, and
-      // pierre's own. It is off on a file that cannot carry a comment, so a reader is never
-      // given a selection with nothing to do.
-      enableLineSelection: props.commentable,
+      // pierre's own. It is off on a diff whose commits this page never read, so a reader is
+      // never given a selection with nothing to do.
+      enableLineSelection: props.commentable.size > 0,
       // The affordance that says the gesture EXISTS: pierre moves the gutter's own slot to the
       // hovered line — and to the pressed one on a touch screen, where there is no hover.
-      enableGutterUtility: props.commentable,
+      enableGutterUtility: props.commentable.size > 0,
       // Where the gestures arrive, and the SPLIT between these two is what keeps a drag usable.
       // `onLineSelectionChange` is the live one — it lights the lines under a pointer that is
       // still moving, since a controlled selection draws nothing of its own — and
@@ -181,63 +365,200 @@ export function DiffFilePatch(props: {
       // out from under the reader's own pointer (measured — it cut a drag from line 3 to line 6
       // short at line 4).
       //
-      // **`onLineSelected` is deliberately NOT the commit signal.** It is what pierre calls
-      // whenever the selection is SET, the app's own `selectedLines` prop included — the React
-      // wrapper writes that prop back into the instance on every render, and every write
-      // announces itself as a commit. So the live highlight this app draws would come back as
-      // "the reader finished here" a frame later, which is exactly the mid-drag card above. The
-      // END of a pointer session is reported by nothing but a real pointer session.
+      // **`onLineSelected` is deliberately NOT the commit signal**, and neither is
+      // `onSelectedLinesChange`. Both are what pierre calls whenever the selection is SET, the
+      // app's own `selectedLines` prop included — the React wrapper writes that prop back into
+      // the instance on every render, and every write announces itself. So the live highlight
+      // this app draws would come back as "the reader finished here" a frame later, which is
+      // exactly the mid-drag card above. The END of a pointer session is reported by nothing but
+      // a real pointer session.
       //
       // `onGutterUtilityClick` is not here either: pierre refuses it beside a custom
       // `renderGutterUtility` ("use only one gutter utility API"), and the custom one is what
       // keeps the glyph this app's own. So the control's press is handled where the control is
       // (see `GutterCommentButton`), and pierre keeps the two gestures that are really its own.
-      onLineSelectionChange: (range: SelectedLineRange | null) => onChange.current(range),
-      onLineSelectionEnd: (range: SelectedLineRange | null) => onCommit.current(range),
-      // Pierre's own file header is KEPT, and this app draws none of its own over a patch: it
+      onLineSelectionChange: (range: SelectedLineRange | null, context: FeedItemContext) =>
+        onChange.current(context.item.id, range),
+      onLineSelectionEnd: (range: SelectedLineRange | null, context: FeedItemContext) =>
+        onCommit.current(context.item.id, range),
+      // The renderer has drawn a file: the feed can be put where it opens (see `openFeed`). It is
+      // the one signal that says the layout is real rather than reserved.
+      onPostRender: (_node: HTMLElement, _instance: unknown, phase: string) => {
+        if (phase === "mount") openFeed();
+      },
+      // Pierre's own file header is KEPT, and this app draws none of its own over a file: it
       // already names the file, states the stat, shows both names of a renamed one, and it is
-      // sticky inside the scroller. Two headers naming one file three centimetres apart is
-      // what the first capture of this page showed. `disableFileHeader: true` was the other
-      // way round and it collapses the container to nothing, so this is the one that works.
-      stickyHeader: true,
+      // sticky inside the scroller — which in a feed is what says which file the code under the
+      // reader's eye belongs to. Two headers naming one file three centimetres apart is what
+      // the first capture of this page showed. `disableFileHeader: true` was the other way
+      // round and it collapses the container to nothing, so this is the one that works.
+      stickyHeaders: true,
     }),
-    [props.layout, props.theme, props.commentable],
+    [props.layout, props.theme, props.commentable.size, openFeed],
   );
+
+  // Which file the reader is at, on every scroll. The tops are the renderer's own measured
+  // layout, so this follows a file whose real height was only learned once it was mounted.
+  const onScroll = useCallback(
+    (scrollTop: number, viewer: CodeViewInstance<DiffAnnotationCard>) => {
+      const tops: DiffFeedTop[] = [];
+      for (const item of items) {
+        const top = viewer.getTopForItem(item.id);
+        if (top != null) tops.push({ path: item.id, top });
+      }
+      const active = activeDiffFeedFile(
+        tops,
+        scrollTop,
+        viewer.getHeight(),
+        viewer.getScrollHeight(),
+        asked.current,
+      );
+      if (active) onActiveFile.current(active);
+    },
+    [items],
+  );
+
   return (
-    <div data-testid="gitlab-diff-patch" className="min-w-0">
-      {/* The generic is PINNED rather than inferred: this app's annotation metadata is a
-          union of two cards, and inference from the first array element would settle on one
-          of them and refuse the other. */}
-      <PatchDiff<DiffAnnotationCard>
-        patch={props.patch}
+    // The sentinel is on a wrapper of this app's own, because the renderer's element is the
+    // SCROLLER — it listens for `scroll` on the div it is handed — and the props it passes
+    // through are the class and the style alone.
+    <div data-testid="gitlab-diff-feed" className="flex h-full min-h-0 min-w-0 flex-col">
+      {/* The generic is PINNED rather than inferred: this app's annotation metadata is a union
+          of two cards, and inference from the first array element would settle on one of them
+          and refuse the other. */}
+      <CodeView<DiffAnnotationCard>
+        ref={view}
+        items={items}
         options={options}
+        onScroll={onScroll}
         // Passing this at all is what makes the selection CONTROLLED — pierre stops drawing one
         // of its own — so these lines and the composer under them are one fact.
-        selectedLines={props.selection}
-        lineAnnotations={props.annotations}
-        renderAnnotation={props.renderAnnotation}
+        selectedLines={
+          props.selection ? { id: props.selection.path, range: props.selection.range } : null
+        }
+        renderAnnotation={renderAnnotation}
         // What the gutter's own control looks like. It is a plain button of this app's, drawn
         // into the slot pierre moves to the hovered line — so the glyph is hugeicons' like
         // every other in this app, and the placement is theirs.
-        renderGutterUtility={props.commentable ? renderGutter : undefined}
-        // What pierre's header cannot know: GitLab's own `generated_file`. It goes in the slot
-        // their header publishes for exactly this, rather than becoming a second header. It is
-        // the REACT prop rather than an `options` key — the options object's own callback
-        // returns a DOM node, and this app has React ones.
-        renderHeaderMetadata={props.generated ? renderGeneratedChip : undefined}
+        renderGutterUtility={props.commentable.size > 0 ? renderGutter : undefined}
+        // What pierre's header cannot know: which file this item IS as far as this app is
+        // concerned, GitLab's own `generated_file`, and why a file has no code under it. It goes
+        // in the slot their header publishes for exactly this, rather than becoming a second
+        // header.
+        renderHeaderMetadata={renderHeaderMetadata}
+        className="min-h-0 flex-1 overflow-auto"
       />
     </div>
   );
+});
+
+/**
+ * The feed's items, and the SAME objects whenever nothing about a file changed.
+ *
+ * Identity is what the renderer decides on: an items array whose elements are the ones it already
+ * holds is a no-op, while a rebuilt array reconciles the whole list — and a reconcile CAPTURES a
+ * scroll anchor and re-applies it, so a rebuild for no reason pulls the page back under a reader
+ * who was scrolling. A read of this diff arrives as fresh JSON several times a minute (a poll, a
+ * write's own re-read), and almost every file in it is unchanged.
+ *
+ * So a file's item — its parsed patch included, which is the expensive half — is held until that
+ * file or its cards really move ([[diffFeedVersions]]), and the ARRAY is held until at least one
+ * item does.
+ */
+function useDiffFeedItems(
+  diff: GitLabDiff,
+  annotations: Map<string, DiffAnnotation[]>,
+): CodeViewDiffItem<DiffAnnotationCard>[] {
+  const versions = useRef<Map<string, DiffFeedVersion>>(new Map());
+  const held = useRef<Map<string, CodeViewDiffItem<DiffAnnotationCard>>>(new Map());
+  const list = useRef<CodeViewDiffItem<DiffAnnotationCard>[]>([]);
+  return useMemo(() => {
+    versions.current = diffFeedVersions(
+      versions.current,
+      diff.files.map((file) => ({
+        file,
+        cards: (annotations.get(file.path) ?? []).map(annotationSignature).join("|"),
+      })),
+    );
+    const next = new Map<string, CodeViewDiffItem<DiffAnnotationCard>>();
+    let moved = list.current.length !== diff.files.length;
+    const rows = diff.files.map((file, index) => {
+      const version = versions.current.get(file.path)!.version;
+      const previous = held.current.get(file.path);
+      // The version is what says whether anything about this file changed, so it is also what
+      // says whether its patch has to be parsed again — see the note above.
+      const item =
+        previous && previous.version === version
+          ? previous
+          : {
+              id: file.path,
+              type: "diff" as const,
+              fileDiff: diffFeedMetadata(file),
+              annotations: annotations.get(file.path),
+              version,
+            };
+      if (list.current[index] !== item) moved = true;
+      next.set(file.path, item);
+      return item;
+    });
+    held.current = next;
+    if (moved) list.current = rows;
+    return list.current;
+  }, [diff, annotations]);
+}
+
+/** What pierre's parser calls a change, for the files it never parses.
+ *
+ *  Only a file with NO patch is mapped here: one with a patch is read out of the patch itself,
+ *  where a renamed file that also changed says so. */
+const FEED_CHANGE_TYPES: Record<GitLabDiffFile["change"], ChangeTypes> = {
+  new: "new",
+  deleted: "deleted",
+  renamed: "rename-pure",
+  changed: "change",
+};
+
+/** One file as the renderer's own data.
+ *
+ *  A file with a patch is PARSED — the header this app's backend wrote is what names it. A file
+ *  with none is stated: its name, what happened to it, and no hunks, which is the same shape
+ *  `processFile` itself returns for a pure rename. Nothing here invents a patch: writing one
+ *  would be a second place in this app that spells git's own header. */
+function diffFeedMetadata(file: GitLabDiffFile): FileDiffMetadata {
+  if (file.patch) {
+    const parsed = processFile(file.patch, { isGitDiff: true });
+    if (parsed) return parsed;
+  }
+  return {
+    name: file.path,
+    ...(file.old_path ? { prevName: file.old_path } : {}),
+    type: FEED_CHANGE_TYPES[file.change],
+    hunks: [],
+    splitLineCount: 0,
+    unifiedLineCount: 0,
+    isPartial: true,
+    deletionLines: [],
+    additionLines: [],
+  };
+}
+
+/** What one file's cards ARE, in one string — the whole of what a version bump is decided on.
+ *
+ *  Kept beside the renderer rather than inside `diffAnnotationKey` because the SIDE and the LINE
+ *  are the renderer's half of an annotation and the card is this app's. */
+function annotationSignature(annotation: DiffAnnotation): string {
+  const card = annotation.metadata;
+  return `${annotation.side}:${annotation.lineNumber}:${card ? diffAnnotationKey(card) : ""}`;
 }
 
 /** The control the gutter offers on the line under the pointer.
  *
  *  WHICH line that is comes from pierre — `getHoveredLine` is handed to the slot for exactly
- *  this — so the control never has to work out where it has been placed. It names one line:
- *  a span is the drag down the line numbers, and this is the press. */
+ *  this — so the control never has to work out where it has been placed, in which file. It names
+ *  one line: a span is the drag down the line numbers, and this is the press. */
 function GutterCommentButton(props: {
-  getHoveredLine: () => { lineNumber: number; side: "additions" | "deletions" } | undefined;
-  onPick: (line: { lineNumber: number; side: "additions" | "deletions" }) => void;
+  getHoveredLine: FeedGutterGetter;
+  onPick: (line: { lineNumber: number; side: PierreSide }) => void;
 }) {
   return (
     <button
@@ -247,7 +568,9 @@ function GutterCommentButton(props: {
       aria-label={DIFF_COMMENT_HINT}
       onClick={() => {
         const line = props.getHoveredLine();
-        if (line) props.onPick(line);
+        // A line with no side is a whole-FILE view's, and this feed holds none — see
+        // `FeedGutterGetter`. Never guessed at: the side decides which line GitLab files it under.
+        if (line?.side) props.onPick({ lineNumber: line.lineNumber, side: line.side });
       }}
       className="grid size-4 place-items-center rounded bg-primary text-primary-foreground"
     >
@@ -285,16 +608,10 @@ export function DiffFileTree(props: {
   const statsRef = useRef(stats);
   statsRef.current = stats;
 
-  // The one path this component selected ITSELF, waiting to be recognised when it comes back
-  // out as a change. Lighting the current row is a UI reflection; a reader pressing a row is a
-  // navigation — and pierre reports both through the same callback, off a store subscription
-  // that can fire a tick later, so a synchronous "we are reflecting" flag would miss it.
-  //
-  // Without this the page could not be left on a narrow screen: Back showed the files, mounting
-  // the tree reflected the selection, the reflection came back as a pick, and the patch took the
-  // screen again in the same frame. It is consumed ONCE, so a reader really pressing the row of
-  // the file already open is still a press.
-  const reflected = useRef<string | null>(null);
+  // What the PAGE says the current file is, read at the moment a report arrives rather than
+  // closed over — it is how a reflection is told from a press below.
+  const current = useRef(props.selected);
+  current.current = props.selected;
 
   const { model } = useFileTree({
     paths,
@@ -313,14 +630,25 @@ export function DiffFileTree(props: {
     // tree's editing affordances would offer actions that write to nothing.
     dragAndDrop: false,
     renaming: false,
+    // Lighting the current row is a UI REFLECTION; a reader pressing a row is a NAVIGATION — and
+    // the tree reports both through this one callback, off a store subscription that can fire a
+    // tick later. So the two are told apart by what the report SAYS, which needs no bookkeeping
+    // and cannot be got wrong by a report arriving later than expected:
+    //
+    //   - a press selects exactly ONE row, so a report of any other size is a step of the
+    //     reflection below (it deselects, then selects);
+    //   - and a report naming the row the page ALREADY says is current is that reflection
+    //     arriving. A press on that row changes nothing, and the tree reports nothing for it.
+    //
+    // Getting this wrong is not cosmetic. It made the page unreachable on a phone once — Back
+    // showed the files, mounting the tree reflected the selection, the reflection came back as a
+    // press, and the patch took the screen again in the same frame — and it threw a reader
+    // scrolling the FEED back to the top of the diff every few files, because the row lighting
+    // itself under them was read as a press.
     onSelectionChange: (selected) => {
-      const path = selected[0];
-      if (!path) return;
-      // Our own reflection coming back — see `reflected`. Consumed once.
-      if (path === reflected.current) {
-        reflected.current = null;
-        return;
-      }
+      if (selected.length !== 1) return;
+      const path = selected[0]!;
+      if (path === current.current) return;
       // A DIRECTORY row is a fold, not a file: picking one must not clear the diff under it.
       if (statsRef.current.has(path)) onPick.current(path);
     },
@@ -338,15 +666,27 @@ export function DiffFileTree(props: {
     model.setGitStatus(gitStatus);
   }, [model, paths, gitStatus]);
 
-  // The selection the PAGE decided, reflected into the tree. It is not always the reader's own
-  // press: with nothing picked, `selectDiffFile` chooses the first file that has something to
+  // The selection the PAGE decided, reflected into the tree. It is rarely the reader's own press:
+  // it is the file at the top of the FEED, so it moves every time they scroll past a file — and
+  // with nothing picked at all, `selectDiffFile` chooses the first file that has something to
   // read, and the row for it has to be the lit one.
+  //
+  // **Exactly ONE row is lit, so the old one is deselected first.** The item's own `select` ADDS
+  // to the selection: without the deselect, a feed being scrolled left every file the reader had
+  // passed lit, and the tree then reported a selection whose first path was the oldest of them —
+  // which this component read as a press and answered by scrolling the feed back to that file. A
+  // reader was thrown to the top of the diff every few files.
   useEffect(() => {
     if (!props.selected) return;
-    // Already lit — nothing to reflect, and nothing that would come back as a change.
-    if (model.getSelectedPaths().includes(props.selected)) return;
-    reflected.current = props.selected;
+    const lit = model.getSelectedPaths();
+    // Already the one lit row — nothing to reflect, and nothing that would come back as a change.
+    if (lit.length === 1 && lit[0] === props.selected) return;
+    for (const path of lit) if (path !== props.selected) model.getItem(path)?.deselect();
     model.getItem(props.selected)?.select();
+    // And it is brought into view, because the tree is a column of its own with its own scroll:
+    // a lit row the reader cannot see answers "where am I" for nobody. `focus: false` — the
+    // keyboard belongs to whatever the reader is using, not to a row that lit itself.
+    model.scrollToPath(props.selected, { focus: false });
   }, [model, props.selected]);
 
   return <FileTree model={model} data-testid="gitlab-diff-tree" className="h-full w-full" />;

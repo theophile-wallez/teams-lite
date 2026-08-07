@@ -2,6 +2,7 @@ import { useNavigate, useMatchRoute, useParams } from "@tanstack/react-router";
 import {
   gitlabPageLinkLabel,
   gitlabPageUrl,
+  jobLogPath,
   MERGE_REQUEST_PAGES,
   MERGE_REQUEST_PAGES_ID,
   mergeRequestPagePanel,
@@ -53,8 +54,45 @@ export function useMergeRequestPage(): MergeRequestPage {
   const matchRoute = useMatchRoute();
   if (matchRoute({ to: "/mr/$mergeRequestId/diff" })) return "diffs";
   if (matchRoute({ to: "/mr/$mergeRequestId/commits" })) return "commits";
+  // A JOB's log hangs under the Pipelines page, so the strip keeps Pipelines current there: a
+  // reader inside a job is inside that run.
   if (matchRoute({ to: "/mr/$mergeRequestId/pipelines" })) return "pipelines";
+  if (matchRoute({ to: "/mr/$mergeRequestId/jobs/$jobId" })) return "pipelines";
   return "overview";
+}
+
+/**
+ * How a JOB is opened: the anchor props one job card wears.
+ *
+ * A card stays an `<a>` with a real address, and the click is intercepted so the router takes it
+ * — three things follow, and the first is the one that matters here: the graph holds no BUTTON,
+ * which is the rule that says nothing on it writes (see `gitlab-pipeline-graph.tsx`, whose spec
+ * counts them). The other two are a reader's own: the address is copyable, and a modified click
+ * still opens a second window.
+ *
+ * `null` when the URL names no merge request, which is a graph with nothing to hang a job off.
+ */
+export function useJobLogLink(): ((jobId: number) => {
+  href: string;
+  onClick: (event: React.MouseEvent) => void;
+}) | null {
+  const navigate = useNavigate();
+  const { mergeRequestId } = useParams({ strict: false });
+  if (!mergeRequestId) return null;
+  return (jobId: number) => ({
+    href: jobLogPath(mergeRequestId, jobId),
+    onClick: (event: React.MouseEvent) => {
+      // A modified click is the reader asking their browser for a second window, and this app
+      // never takes one of those off them.
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      void navigate({
+        to: "/mr/$mergeRequestId/jobs/$jobId",
+        params: { mergeRequestId, jobId: String(jobId) },
+      });
+    },
+  });
 }
 
 export function MergeRequestPageStrip(props: { current: MergeRequestPage; className?: string }) {

@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  diffAnnotationKey,
   diffCommentAnchor,
   diffCommentPosition,
   diffCommentTarget,
   diffCommentTargetLabel,
   diffCommentsAvailable,
+  diffCommentableFiles,
   diffThreadLabel,
   diffThreadsFor,
   noteWasEdited,
+  type DiffThread,
   patchLineAt,
   patchLineIndex,
   patchLines,
@@ -439,5 +442,78 @@ describe("noteWasEdited", () => {
     // edited", never "edited".
     expect(noteWasEdited(at("2026-08-06T09:00:00Z"))).toBe(false);
     expect(noteWasEdited(at("", "2026-08-06T09:30:00Z"))).toBe(false);
+  });
+});
+
+describe("which files of the FEED can carry a comment", () => {
+  const bare: GitLabDiffFile = { ...FILE, path: "rollout.png", patch: undefined, binary: true };
+
+  it("names the files with a patch, and only those", () => {
+    // The feed draws them all at once, so a file with no line to point at is offered no control
+    // rather than one drawn dead.
+    expect(diffCommentableFiles([bare, FILE], REFS)).toEqual(new Set([FILE.path]));
+  });
+
+  it("names none when the three commits are unknown", () => {
+    // A line number means nothing without the diff GitLab resolves it against.
+    expect(diffCommentableFiles([FILE], null).size).toBe(0);
+    expect(diffCommentableFiles(null, REFS).size).toBe(0);
+  });
+});
+
+describe("what one card IS, in one string", () => {
+  const thread: DiffThread = {
+    discussionId: "d-1",
+    side: "additions",
+    lineNumber: 8,
+    resolvable: true,
+    notes: [
+      {
+        id: 1,
+        body: "Three returns for one question.",
+        created_at: "2026-08-06T09:00:00Z",
+        author: { name: "Mia Chen", username: "mia" },
+        system: false,
+        resolvable: true,
+        resolved: false,
+        mine: false,
+      },
+    ],
+    resolved: false,
+  };
+
+  it("names the line it hangs on and the conversation in it", () => {
+    const key = diffAnnotationKey({ kind: "thread", thread });
+    expect(key).toContain("d-1");
+    expect(key).toContain("additions");
+    expect(key).toContain("8");
+  });
+
+  it("moves when a reply LANDS in the thread", () => {
+    const answered = { ...thread, notes: [...thread.notes, { ...thread.notes[0]!, id: 2 }] };
+    expect(diffAnnotationKey({ kind: "thread", thread: answered })).not.toBe(
+      diffAnnotationKey({ kind: "thread", thread }),
+    );
+  });
+
+  it("moves when a thread is RESOLVED, which is what its chip says", () => {
+    expect(diffAnnotationKey({ kind: "thread", thread: { ...thread, resolved: true } })).not.toBe(
+      diffAnnotationKey({ kind: "thread", thread }),
+    );
+  });
+
+  it("tells a composer from a thread on the same line", () => {
+    const target = diffCommentTarget(FILE, { start: 8, side: "additions", end: 8 })!;
+    const box = diffAnnotationKey({ kind: "composer", target });
+    expect(box).toContain("composer");
+    expect(box).not.toBe(diffAnnotationKey({ kind: "thread", thread }));
+  });
+
+  it("moves when the composer covers other lines", () => {
+    const one = diffCommentTarget(FILE, { start: 8, side: "additions", end: 8 })!;
+    const span = diffCommentTarget(FILE, { start: 8, side: "additions", end: 9 })!;
+    expect(diffAnnotationKey({ kind: "composer", target: one })).not.toBe(
+      diffAnnotationKey({ kind: "composer", target: span }),
+    );
   });
 });

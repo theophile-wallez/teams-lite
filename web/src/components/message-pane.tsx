@@ -18,6 +18,7 @@ import {
   type ChatMessage,
   type Conversation,
   type ReactionPick,
+  type RichQuote,
 } from "~/lib/protocol";
 import type { AgentAnswer } from "~/lib/agent-answer";
 import { agentAuthorship } from "~/lib/agent-message";
@@ -596,6 +597,27 @@ export function MessagePane(props: { onBack?: () => void }) {
 
   const doCancelEdit = useCallback(() => setEditingId(null), []);
 
+  // Clicking a reply's quote goes to the message it quotes.
+  //
+  // The quote names its target by TIME, and a Teams message's id IS its ms-epoch compose
+  // time — so the two are the same number, and the loaded history is asked first anyway:
+  // a message already on screen answers with its own id rather than with one derived from
+  // a coincidence. Only when it is not loaded does the time become the id, which is
+  // exactly what the deep-link effect then pages older toward.
+  //
+  // Nothing else is needed to make the jump work: `requestScrollToMessage` is the same
+  // path a notification takes, so an off-screen target is paged to, centered and
+  // highlighted, a reply inside a collapsed channel thread expands it, and a target that
+  // never appears is given up on silently after a bounded number of pages.
+  const doQuoteJump = useCallback(
+    (quote: RichQuote) => {
+      if (!openId || quote.time === undefined) return;
+      const loaded = messages.find((m) => m.compose_time === quote.time);
+      controller.requestScrollToMessage(openId, loaded?.id ?? String(quote.time));
+    },
+    [controller, openId, messages],
+  );
+
   // A finished run whose last word is now on screen: let it go, and the posted message
   // renders on its own from here (which is what it does for every reply this app never
   // watched being written).
@@ -649,6 +671,7 @@ export function MessagePane(props: { onBack?: () => void }) {
             agentTranscriptOpen={agentTranscriptsOpen[m.id] ?? null}
             onAgentTranscriptToggle={doAgentTranscriptToggle}
             onReply={doReply}
+            onQuoteJump={doQuoteJump}
             onCopy={doCopy}
             answerAgents={answerAgents}
             onAnswerWith={doAnswerWith}

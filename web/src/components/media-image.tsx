@@ -63,7 +63,10 @@ export function MediaImage(props: {
     // byte budget can't revoke it from under us (see `evictMedia`). The key is the
     // caller's when it fetches the bytes, so retain and load name one entry.
     const key = source ? source.key : props.src;
-    const load = source ? source.load : () => controller.loadMedia(props.src);
+    // `loadPicture` rather than `loadMedia`: a picture is drawn at the resolution its object
+    // store really holds, not at the reduced view a Teams client wrote on the <img> (see
+    // `fullSizeMediaUrl`). It keys on this URL either way, so the key above is unchanged.
+    const load = source ? source.load : () => controller.loadPicture(props.src);
     controller.retainMedia(key);
     load()
       .then((url) => {

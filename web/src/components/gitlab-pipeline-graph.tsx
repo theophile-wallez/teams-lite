@@ -15,6 +15,7 @@ import {
   type GraphNode,
   type PipelineGraph,
 } from "~/lib/gitlab-pipeline-graph";
+import { useJobLogLink } from "./gitlab-mr-pages";
 import { cn } from "~/lib/utils";
 
 // The pipeline drawn as a GRAPH: columns of job cards, with a curve from each job to the ones
@@ -42,9 +43,15 @@ import { cn } from "~/lib/utils";
 //   - **Pointing at a card answers "what is this waiting for, and what waits for it"**
 //     (`relatedNodes`, followed the whole way through), by drawing everything else faint. It is
 //     an enhancement and never the only way to read the graph: there is no hover on a phone.
+//   - **A card OPENS THAT JOB'S LOG**, on a page of its own (`useJobLogLink`, drawn by
+//     `gitlab-job-log-page.tsx`). A red card says a job failed, and the only thing anybody wants
+//     next is why — which used to be a trip out to GitLab. It stays an `<a>` with a real address,
+//     so the rule below still holds and a modified click still opens a second window; GitLab's own
+//     job page is one press further, in the log's own header.
 //   - **Nothing here writes.** GitLab's own graph puts a RETRY on every card; this app reads
 //     trackers and the four writes it offers are elsewhere, each behind its own consent gate
-//     (AGENTS.md § The trackers). A card links to the job in GitLab and does nothing else.
+//     (AGENTS.md § The trackers). So a card is a LINK and never a control — the spec counts the
+//     buttons inside the graph and expects none.
 
 /** How much room the graph has: the merge-request panel's column, or its own page. Cards and
  *  gaps shrink together, so the curves keep their shape either way. */
@@ -190,8 +197,9 @@ export function PipelineGraphView(props: {
   );
 }
 
-/** One job. A link to the job in GitLab when it has a page, plain otherwise — and never a
- *  control, because everything this card could otherwise offer is a write (see the header). */
+/** One job: a link to its LOG on this app's own page, and plain when the URL names no merge
+ *  request to hang one off. Never a control, because everything else this card could offer is a
+ *  write (see the header) — and an `<a>` is also what keeps a modified click working. */
 function JobCard(props: {
   node: GraphNode;
   density: GraphDensity;
@@ -209,7 +217,9 @@ function JobCard(props: {
   // What the card SAYS, which is never the colour: the time it took once it has one, and the
   // state it is in until then.
   const words = duration || job.status || "unknown";
-  const Element = job.web_url ? "a" : "div";
+  const link = useJobLogLink();
+  const to = link ? link(job.id) : null;
+  const Element = to ? "a" : "div";
   return (
     <Element
       ref={(element: HTMLElement | null) => props.onRef(node.key, element)}
@@ -219,10 +229,8 @@ function JobCard(props: {
       data-status={job.status}
       data-tone={node.tone}
       data-related={props.dimmed ? "false" : "true"}
-      {...(job.web_url
-        ? { href: job.web_url, target: "_blank", rel: "noreferrer" }
-        : {})}
-      title={`${job.name} — ${job.stage} · ${words}`}
+      {...(to ? { href: to.href, onClick: to.onClick } : {})}
+      title={`${job.name} — ${job.stage} · ${words}${to ? " · open its log" : ""}`}
       aria-label={`${job.name}, ${job.stage}, ${words}`}
       onPointerEnter={props.onFocus}
       onFocus={props.onFocus}
@@ -237,7 +245,7 @@ function JobCard(props: {
         density === "compact" ? "w-44 px-2 py-1.5" : "w-56 px-2.5 py-2",
         // A dimmed card's ring goes neutral rather than translucent, for the same reason.
         props.dimmed ? "border-border-subtle" : toneBorder(node.tone),
-        job.web_url && !props.dimmed && "hover:border-border hover:shadow-sm",
+        to && !props.dimmed && "cursor-pointer hover:border-border hover:shadow-sm",
       )}
     >
       <span

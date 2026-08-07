@@ -166,6 +166,90 @@ screenshots carry the last one.
   the deep-link scroll in `notifications.spec.ts` time out, which is a fragility of the
   virtualized history worth its own look and NOT something a test should hide.
 
+## A picture somebody SENT is drawn WHOLE (the view is a display decision)
+
+An inline picture travels as an AMS object, and one object serves several VIEWS of itself.
+The view a Teams client writes on the `<img>` is not the picture: measured on this tenant by
+`examples/inline_image_recon.rs` — READ-ONLY, over the store's own 857 inline pictures, and
+it prints byte counts and pixel shapes rather than anybody's screenshot:
+
+    . bin/broker-env.sh && teams_lite_export_broker_bus && \
+      cargo run --example inline_image_recon
+
+Measured 2026-08-07 in region `fr`: `views/imgo` is a **JPEG whose long side is capped at
+800 px**, and `views/imgpsh_fullsize_anim` carries the pixels the sender uploaded, in the
+format they uploaded. Of 24 pictures, **10 arrived between 1.49x and 2.83x smaller** than the
+object holds — and the 14 that fitted still came re-encoded, so a screenshot's text carried
+JPEG ringing every single time. The whole picture costs **3.90x the bytes** over that sample
+(475 KB → 1.85 MB for 24), which is what the rules below are weighed against. `imgpsh_mthumb`,
+`original` and `thumbnail` answer **400** here, so the view table is not a guess either.
+
+- **The choice is a DISPLAY decision, and the body keeps what Teams wrote.**
+  `fullSizeMediaUrl` (`web/src/lib/protocol.ts`) names the whole view; the stored frame is
+  untouched, which is the rule § Renaming a person states for a name — this app never rewrites
+  the record of a Teams frame.
+- **One place asks, and it keys on the MESSAGE's own URL.** `TeamsController.loadPicture` is
+  it, so the picture's identity in the media cache is the URL the message carries and never
+  the view that answered — which is what lets `MediaImage` retain and release it without
+  knowing. The LIGHTBOX is the same blob, so opening a picture magnifies real pixels: it grows
+  one up to `MAX_UPSCALE`, and 3x of an 800px JPEG is the mush that rule exists to avoid.
+- **The reduced view is the FALLBACK, so this can never cost a PICTURE.** An object whose full
+  view the store refuses — too large for `MAX_MEDIA_BYTES`, or a shape this tenant does not
+  publish — draws exactly as it did before, one request later.
+- **Only the media proxy's own hosts are ever touched** (`mediaNeedsProxy`), and only a view
+  measured to be a reduction (`imgo`, `imgt1`, `imgt1_anim`, `imgpsh_mthumb`,
+  `imgpsh_mobile_save_anim`). An attachment's `views/original`, an avatar's
+  `views/avatar_fullsize` and a picture on a stranger's server are left alone: asking somebody
+  else's server for a "view" would be this app inventing a URL for their file.
+- **A custom EMOJI keeps the cheap view.** It is a 20px glyph, so it goes through
+  `loadMedia` — the full PNG of an emoji is bytes nobody can see.
+- **The picture holds its own ROOM, out of the size the sender's client stated.** The parse
+  keeps `width`/`height` (`pixelAttr` in `web/src/lib/rich-text.ts`, which ROUNDS the fraction
+  Teams writes on a picture the sender resized: `width="521.5654952076677"`), and drops both
+  when it cannot use both — an aspect ratio needs the pair. Before this the words around a
+  picture re-flowed when its bytes landed, which is the defect a GitLab upload's own
+  `{width=… height=…}` was already fixed for.
+
+`web/mock/server.ts` reproduces the object store's two resolutions with no tenant
+(`mockInlinePicture`: 160px for a reduced view, 640px for the whole one) and REFUSES the full
+view of its second inline fixture (`MOCK_NO_FULL_VIEW`), so both rules are numbers a spec can
+measure — `web/e2e/media.spec.ts` reads `naturalWidth` rather than trusting either. That
+refusal rides an existing fixture on purpose: one mock process serves the whole run, and a
+picture added to the seeded history moves every row a later spec counts on.
+
+## A quote is a POINTER to a message (click it, and three lines of it)
+
+The recessed block above a reply is not a copy of what somebody said — it is the address of
+it. Clicking it takes the reader to that message, centred and briefly highlighted, and the
+block itself shows at most three lines. `message-bubble.tsx` draws the block and decides
+whether it is a control; `message-pane.tsx` owns the scroll and resolves the target;
+`web/e2e/quote-jump.spec.ts` and `web/src/components/message-bubble.test.tsx` pin both.
+
+- **Jumpability is a property of the PAYLOAD, not of the UI.** Teams composes a reply with
+  the quoted message's id in the blockquote's `itemid` and again in `itemprop="time"`, and
+  that id IS the message's ms-epoch compose time — measured on the real history, `itemid`
+  equals the `itemprop="time"` id in 1174 of 1174 replies, and no stored message has an id
+  that differs from its compose time. A **FORWARD** carries no author, no time and no id
+  (see `seedForwardedMessages` in the mock): the message it holds was said somewhere else,
+  so a forward is never offered as a control and stays the recessed block it always was.
+- **The pane is the only surface that offers it**, because it is the only one with a history
+  to move. `onQuoteJump` is a prop, absent everywhere else, and a bubble without it draws the
+  plain block — no `role`, no focus ring, no pointer.
+- **The loaded id comes first, the compose time second.** `doQuoteJump` looks the quoted
+  message up among the loaded ones by `compose_time` and asks for its real id; only when the
+  message is not loaded does it pass `String(quote.time)`, which the existing deep-link
+  effect then pages older toward (bounded by `MAX_SCROLL_PAGES`). One machine, `requestScrollToMessage`,
+  serves the notification bell and this alike.
+- **A click that already means something keeps meaning it.** A link, a tracker chip, the
+  quoted author's own hover trigger: the guard walks up from the clicked node and stops at
+  the block itself, which the block must exclude — it is a `role="button"` now, so a guard
+  that did not would read every click as somebody else's.
+- **The clamp is CSS only.** `line-clamp-3` shortens what is DRAWN; the whole quoted text
+  stays in the DOM, so copying and find-in-page still see all of it, and the jump is how a
+  reader gets the rest. **A quote that is a PICTURE is not clamped** — cropping would cut a
+  forwarded screenshot rather than shorten it, and the screenshot is often the whole quoted
+  message.
+
 ## The local agent (`@claude` in a thread)
 
 The user can summon a coding agent that runs on this machine from any Teams client —
@@ -701,16 +785,18 @@ real GitLab project**: doing that is the user's own click, in their own app.
 The sidebar's fifth tab is GitLab: the merge requests that are **not merged**, and one of
 them in full — its description, its live pipeline, its approvals, its comments — with the actions
 GitLab's own page offers, and its **diff** on a full-screen page of its own (§ The DIFF is a PAGE).
-One merge request is FOUR pages, named by a sub-header (§ The four PAGES of a merge request).
+One merge request is FOUR pages, named by a sub-header (§ The four PAGES of a merge request), and
+one JOB of its pipeline is a fifth surface under them (§ A job's LOG is a page of its own).
 `src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs` the six writes,
 `web/src/lib/gitlab-mr.ts` the pure decisions the surface is built from (`gitlab-diff.ts` the
-diff's own, `gitlab-mr-pages.ts` the page set's, and `gitlab-pipeline-graph.ts` the pipeline
-graph's), and `web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
+diff's own, `gitlab-mr-pages.ts` the page set's, `gitlab-pipeline-graph.ts` the pipeline graph's,
+and `gitlab-job-log.ts` a job log's), and `web/src/components/gitlab-sidebar.tsx` /
+`gitlab-pane.tsx` draw it.
 
 **The split between the two backend modules is the whole safety story**, and it is the one
 in § The trackers: reading a tracker is what the feature is for, and writing to one is the
-user's own click. The six reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`,
-`_upload`) are open like every other read; the six writes (`gitlab_mr_merge`, `_comment`,
+user's own click. The seven reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`,
+`_upload`, `_job_log`) are open like every other read; the six writes (`gitlab_mr_merge`, `_comment`,
 `_edit_comment`, `_delete_comment`, `_resolve_thread`, `_set_state`) are `OUTWARD_METHODS`
 entries — the write token, refused read-only, and the automation hook refuses a command line, a
 script or a cargo example that names their endpoints. `_comment` covers three shapes of ONE act
@@ -1110,9 +1196,10 @@ one page at a time without moving anything the reader has learned. Six rules hol
   to a `useState`: a page survives a reload, it can be sent to a colleague, and the browser's
   own Back leaves it. That is the rule the diff already earned its own route with, applied to
   all four — so `/mr/<id>` IS the Overview, and the other three hang off it.
-- **The strip is on ALL FOUR, the full-screen diff included.** A sub-header that named the
+- **The strip is on ALL FOUR, the full-screen diff included** — and on a JOB's log, which hangs
+  under Pipelines and keeps it current (§ A job's LOG is a page). A sub-header that named the
   pages of a merge request and then vanished on one of them would leave the reader with a Back
-  button where they wanted a Commits tab. It is one component drawn twice, so there is one
+  button where they wanted a Commits tab. It is one component drawn everywhere, so there is one
   spelling of the four routes.
 - **It is drawn as soon as a merge request is OPEN, before its detail arrives.** The URL
   already says which merge request the pages belong to, and a strip that waited on a read
@@ -1154,14 +1241,69 @@ helper); the Pipelines one has its own capture under § The pipeline is a GRAPH.
 
 ### The DIFF is a PAGE of its own (`/mr/<id>/diff`)
 
-The diff takes the WHOLE screen: the changed files down an inner left sidebar, one of them read
-on the right. It is the one part of this app drawn by somebody else's renderer —
-**`@pierre/trees`** for the tree ([trees.software](https://trees.software)) and
-**`@pierre/diffs`** for the patch ([diffs.com](https://diffs.com), Shiki underneath) — and the
+The diff takes the WHOLE screen: the changed files down an inner left sidebar, and every one of
+them read on the right as one FEED. It is the one part of this app drawn by somebody else's
+renderer — **`@pierre/trees`** for the tree ([trees.software](https://trees.software)) and
+**`@pierre/diffs`** for the patches ([diffs.com](https://diffs.com), Shiki underneath) — and the
 seam is where all the care is. `src/gitlab_mr.rs` holds the read and WRITES the patch,
 `web/src/lib/gitlab-diff.ts` every pure decision, `web/src/components/gitlab-diff-page.tsx` the
 page, `gitlab-changes.tsx` the one-line summary and the way in on the merge request above it,
 and `gitlab-diff-view.tsx` the whole of this app's contact with either package.
+
+**A review is READ BY SCROLLING, and the tree says where the reader is.** The right column holds
+every changed file one after another — GitLab's own shape — because a reviewer's question is "what
+does this branch do", which is answered by reading the files in order rather than by pressing a
+row for each. The two columns are a PAIR, and the two directions between them are what make it
+one: the row of the file at the top of the feed is lit (`activeDiffFeedFile`, over the renderer's
+own measured layout), and a press on a row brings that file to the top at once. Neither fetches
+anything — the whole diff arrives with the merge request, so a press is a scroll. The one
+exception to "the file at the top" is the file the reader ASKED for while the feed is pinned at
+its END: the last screenful holds several files and the scroll runs out before any of them
+reaches the top, so without it a press on any but one of them would light a row nobody pressed.
+Six rules hold the pair, and `web/e2e/gitlab.spec.ts` pins each:
+
+- **The FEED is the vendor's own `CodeView`, and choosing it over a virtualizer of this app's is
+  the whole design decision.** The room a file needs cannot be known before that file is
+  highlighted, which is what makes a hand-rolled virtual list wrong here: it would reserve a
+  guessed height, mount the file, measure it, and correct the scroll under the reader, once per
+  file, for 149 files. `CodeView` was built for this list — it reserves room from the line counts
+  its own parser read, mounts only what the viewport can hold, pools the elements it unmounts,
+  anchors the scroll while a measurement corrects a row above, and pre-warms the highlighter of a
+  file somebody jumped to. What stays this app's is the MEANING: which file the reader is at, and
+  when an item has really changed. The metrics it reserves room WITH are app.css's own
+  (`DIFF_FEED_METRICS`, measured against the rendered rows) — a stylesheet that changed the type
+  and left them behind would have every file measure differently from its estimate, and the
+  scrollbar would jump under the reader.
+- **A file with NO patch is still IN the feed** — a binary file, one GitLab collapsed. The tree
+  lists it, so a feed that skipped it would make the tree lie about where the reader is. It
+  becomes an item with no hunks, which is exactly what pierre's own parser returns for a pure
+  rename, and its header states why there is nothing under it (`FileHeaderNote`, in the
+  `renderHeaderMetadata` slot). Nothing here invents a patch to draw one with: writing git's own
+  header is the backend's job and happens in exactly one place.
+- **A REFLECTION is not a press, and in a feed that rule earns its keep every few seconds.** The
+  tree reports the row lighting itself and the row a reader pressed through one callback, so the
+  two are told apart by what the report SAYS: a press names exactly one row, and never the row
+  the page already says is current. Read wrong, the row lighting itself as the reader scrolled
+  came back as a press and threw them to the top of the diff every few files — and before that it
+  made the page unreachable on a phone (Back showed the files, mounting the tree reflected the
+  selection, and the patch took the screen again in the same frame). Exactly ONE row is lit, which
+  is why the old one is deselected first: the item's own `select()` ADDS, and an accumulating
+  selection is what reported that stale first path.
+- **An item is handed to the renderer again only when that file really CHANGED**
+  (`diffFeedVersions`, over `sameDiffFile`). Both halves of that bargain were got wrong once: a
+  version that does not move when the file did left the expanded read drawing the sentence that
+  stood in for the code, and a version that moves for nothing hands the renderer all 149 files
+  again — for one comment box, or for a background read that changed nothing. Every read is fresh
+  JSON several times a minute, so the comparison is by CONTENT.
+- **The feed is put where it opens once the renderer has DRAWN something** (`onPostRender`), at
+  the file the reader was last at on this merge request — and never at the first file, because a
+  feed already opens there. A programmatic scroll is HELD by the renderer until it can carry it
+  out, so one asked for too early is applied against a layout nothing has measured, and the
+  correction that follows puts the reader back at the top: a press that looks like it did nothing.
+- **A comment being written STAYS where its code is.** The reader never leaves a file in a feed,
+  so pressing another row moves the feed and leaves the box under the line it is about, with the
+  words still in it. It used to be thrown away, which was right while the page drew one file at a
+  time and would now cost a half-written comment to a scroll.
 
 **It is a page rather than a panel, and that shape is the point.** The diff was a section inside
 the merge request's scrolling article first, and that was wrong twice over: a 149-file tree and a
@@ -1177,33 +1319,28 @@ each:
   (`onDiffRoute` in `components/app.tsx`) rather than over them, so there is no overlay to
   dismiss and no third column competing with its own two.
 - **Each column scrolls ITSELF, and the page never scrolls.** The header stays, the tree keeps
-  its place while a patch is read, and a file picked after ten minutes of scrolling does not put
+  its place while the feed is read, and a file picked after ten minutes of scrolling does not put
   the reader back at the top of anything. That is what the `h-full` / `min-h-0` chain down both
   columns is for.
 - **A narrow screen is ONE column at a time** (`diffPageColumns`, at the app's own `md`
-  breakpoint): the files, then the file, with the header's own Back between them — the
+  breakpoint): the files, then the feed, with the header's own Back between them — the
   list-then-detail shape every other surface in this app takes below `md`. It OPENS on the files,
-  because that is the question a diff asks first. Narrowing a window mid-read keeps the PATCH,
+  because that is the question a diff asks first. Narrowing a window mid-read keeps the FEED,
   because taking away what somebody is reading is the one thing a resize must not do.
-- **ONE header names the file, and it is pierre's over a patch.** Theirs is inside the scroller,
-  sticky, and it already shows both names of a renamed file — the first capture of this page had
-  two headers three centimetres apart saying the same thing. What theirs cannot know, GitLab's
-  own `generated_file`, goes into the `renderHeaderMetadata` slot they publish for it (the REACT
-  prop — the `options` key of that name returns a DOM node). A file with NO patch has no header
-  of theirs at all, so the page draws its own over the sentence that stands in for the code.
-  `disableFileHeader: true` was tried the other way round and collapses their container to
-  nothing.
-- **The PANE states which file it holds** (`data-path` on `gitlab-diff-pane`), whatever draws
-  that file's name. One place to read "what is on screen" from — the sentinel discipline the
-  composer already follows for its conversation, and what every test and capture waits on.
-
-**A reflection is not a press, and that is what made the page reachable on a phone.** Lighting
-the row of the file already shown is a UI reflection; a reader pressing a row is a navigation —
-and pierre reports both through one `onSelectionChange`, off a store subscription that can fire a
-tick later. So the tree remembers the one path it selected itself and consumes it once
-(`reflected` in `gitlab-diff-view.tsx`); a synchronous flag would miss it. Without that guard
-Back showed the files, mounting the tree reflected the selection, the reflection came back as a
-press, and the patch took the screen again in the same frame — the files were unreachable.
+- **ONE header names each file, and it is pierre's.** Theirs is inside the scroller and STICKY,
+  which in a feed is what says whose code is under the reader's eye — and it already shows both
+  names of a renamed file. The first capture of this page had two headers three centimetres apart
+  saying the same thing, so this app draws none of its own: what theirs cannot know goes into the
+  `renderHeaderMetadata` slot they publish for it (the REACT prop — the `options` key of that name
+  returns a DOM node), which is GitLab's own `generated_file`, why a file has no code under it,
+  and WHICH file the item is (the element carries no path, and these slots are its own light-DOM
+  children, so it is the only place that can say). `disableFileHeader: true` was tried the other
+  way round and collapses their container to nothing.
+- **The PANE states which file the reader is AT** (`data-path` on `gitlab-diff-pane`) — the one
+  at the top of the feed, whose row the tree has lit. One place to read "where am I" from — the
+  sentinel discipline the composer already follows for its conversation, and what every test and
+  capture waits on. Each file's own header carries the same answer for itself
+  (`gitlab-diff-file[data-path]`), which is what scopes a line number to one file.
 
 **Every fact below was measured against the real instance** by
 `examples/merge_request_diff_recon.rs` — READ-ONLY, over 508 files on the 25 newest open merge
@@ -1298,8 +1435,9 @@ page names that file — so a comment on a line the diff does not show is never 
 which holds a patch, a pure rename, a binary file, a file GitLab collapsed and a generated one
 over several languages, plus `refuse_diff` on the `{kind:"gitlab_mr"}` hook — a spec MUST clear
 it). `cd web && bun run preview -- --out /tmp/diff --diff` captures the way in on the merge
-request, the page in both themes, the split layout, all three files with no patch, the expand
-control and what it hands over, and both of its columns at a phone's width. **No diff has been rendered from the real instance yet**:
+request, the page in both themes, the split layout, the feed SCROLLED with the tree's lit row
+following it, all three files with no patch, the expand control and what it hands over, and both
+of its columns at a phone's width. **No diff has been rendered from the real instance yet**:
 the reads are measured (above) and the surface is pinned against the mock, so what is untested
 is the pairing — one open of a real merge request in the user's own app.
 
@@ -1430,10 +1568,14 @@ Eight rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
   dependency layout on one answers a STAGE layout — a single column holding every job is not a
   graph, and the reader asked to see structure. `canGroupByNeeds` resolves the names for that
   reason: a `needs` naming a bridge is a dependency nothing can be drawn for.
+- **A card OPENS THAT JOB'S LOG** (§ A job's LOG is a page), which is the one thing anybody wants
+  after a red card. It stays an `<a>` with a real address, so the rule below holds and a modified
+  click still opens a second window; GitLab's own job page is one press further, in the log's own
+  header.
 - **NOTHING here writes.** GitLab's own graph puts a RETRY on every card; this app reads
   trackers, and the writes it offers are elsewhere behind their own consent gates
-  (§ The trackers). A card is a link to the job in GitLab and holds no control at all — the spec
-  counts the buttons inside the graph and expects none.
+  (§ The trackers). So a card is a LINK and holds no control at all — the spec counts the buttons
+  inside the graph and expects none.
 - **JOBS are a second view of one read, not a second surface.** The graph answers "what is the
   shape of this run"; the list answers "what took four minutes", down one column with no
   sideways scroll — which is the better one on a phone. The old stage list therefore still
@@ -1496,6 +1638,105 @@ run in both themes. **The graph has never been drawn from the real instance**: t
 measured above and the surface is pinned against the mock, so what is untested is the pairing —
 one open of a real merge request in the user's own app.
 
+### A job's LOG is a page of its own (`/mr/<id>/jobs/<jobId>`)
+
+Pressing a job card on the Pipelines page opens **that job's log**, full screen: the sections the
+runner wrote, the colours it wrote them in, and what each part cost. A red card says a job failed,
+and the only thing anybody wants next is why — which used to be a trip out to GitLab.
+`src/gitlab_mr.rs` holds the read (`fetch_job_log`), `web/src/lib/gitlab-job-log.ts` every pure
+decision, and `web/src/components/gitlab-job-log-page.tsx` draws it.
+
+**It is a page for the diff's own reasons.** A log measured 4 238 lines and 510 KB here, with one
+line 22 129 bytes wide: that has no room in a column which also carries a description, a pipeline,
+the actions and a conversation — and reading a red job is somewhere a reader STAYS. So it is a
+ROUTE, and the three things that come with one are not available to a piece of state: it survives a
+reload, it can be sent to whoever is asking why CI is red, and the browser's own Back leaves it. It
+hangs UNDER the Pipelines page rather than joining the strip of four — a job is a detail of a run,
+so the sub-header keeps Pipelines current and Back leaves the log for the run.
+
+**Every fact this rests on is MEASURED** by `examples/job_trace_recon.rs` — READ-ONLY, over 58 jobs
+of the 12 newest open merge requests, printing counts, field names and byte sizes and never
+anybody's log:
+
+    cargo run --example job_trace_recon
+
+Measured 2026-08-07 on `git.sia.partners`, and each number decides something:
+
+- **The trace is `text/plain` with a length on every answer** (58/58), so it is the one read here
+  that is not JSON and has a reader of its own (`read_text`).
+- **A RANGE READ IS REFUSED**: no `accept-ranges` anywhere, and a `Range` request was answered
+  `200` with the whole log 48 times out of 48. So a log too big to travel cannot be asked for in
+  pieces — the only choice is WHICH end travels, and it is the **TAIL** (`tail_of`, cut on a line
+  boundary because half a line is half an escape sequence). `MAX_TRACE_BYTES` is 1 MiB, twice the
+  largest measured, and a cut log SAYS it is showing its end with GitLab's own page one press away.
+- **It is small until it is not**: median 11 KB, p90 148 KB, largest 510 KB; median 192 lines,
+  largest 4 238. That is why the rows are virtualized — over `@tanstack/react-virtual`, the one the
+  chat history, the mail list and the merge-request sidebar already use, because a second
+  virtualization library for the fifth list in this app is the icon-set mistake in another
+  vocabulary.
+- **A job with NO log answers 200 with an empty body** (10 of 58, all `manual` or `created`), never
+  a 404 — so an empty log is a STATE, and the page says which one (`emptyJobLogReason`): a job that
+  has not started will have a log later, an ERASED one never will, and one that ran and printed
+  nothing is a third thing again. **A log this app could not READ is none of those**: the job and
+  the trace are two requests and only the second can fail on its own (GitLab answers 404 for a
+  trace file it has dropped), so the reason travels beside the job (`trace_error`,
+  `jobLogUnreadable`) and is stated instead. "This job printed nothing" is a claim about the job,
+  and this app must not make it on the strength of a read that failed.
+- **`failure_reason` is present only on a job that failed** (2 of 58), and `runner`, `started_at`,
+  `finished_at` and `queued_duration` only once a job has run (48 of 58). Every one is optional, and
+  a `manual` job is drawn without them rather than with a zero.
+
+Nine rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
+
+- **The window is decided by the ANSWER, not by the caller.** The same read is the liveliest on this
+  page while a job runs and final the moment it stops, so `GitLabTtl::JobLog` reads `complete` off
+  the payload: 5 s (the pipeline's own window) while the job is unfinished, 24 h once it is — a
+  retry is a new job with a new id, so a settled log can never be stale. An answer that does not say
+  is read as UNFINISHED, because an older build's payload must not be cached for a day on the
+  strength of a field it never carried.
+- **The page polls exactly while the job has not finished** (`jobLogIsLive`), and it FOLLOWS the
+  newest line only while the reader is at the bottom — the rule the agent transcript already holds.
+  Leaving the page stops the poll, so a log nobody is looking at asks GitLab nothing.
+- **A MARKER IS READ BEFORE THE CARRIAGE RETURN THAT FOLLOWS IT.** The runner writes
+  `section_start:<ts>:<name>`, then `\r`, then an erase, then the section's own heading — so a parse
+  that resolved the rewrite first erases the marker with it and finds no sections at all. Order is
+  the whole of that bug, and a test pins it.
+- **Sections NEST, and a fold takes the whole subtree.** 48 of 58 logs carry 5 to 9 sections, and
+  `step_script` holds sections a project's own `.gitlab-ci.yml` emitted — so the parse keeps a
+  STACK, and `visibleLogLines` climbs to the OUTERMOST folded ancestor: a child left visible under a
+  folded parent is a row with nothing above it to place it. A folded section keeps its opening line
+  and states what it COST, from the two markers' own timestamps.
+- **A bare carriage return means the runner rewrote the line in place** (48 of 48 logs), so a line
+  shows its last segment and the progress bar before it is gone. Only two escape kinds exist here —
+  35 856 SGR and 1 444 erase-line, and no cursor move at all — so nothing here models a screen.
+- **The ANSI is `anser`'s** (MIT, no dependencies), asked for `use_classes`: WHAT a colour means
+  belongs to `app.css`, so each theme keeps a palette a reader can read and a terminal's own
+  `#000000` never lands on a white page. Only the 256-colour cube and truecolor resolve to a value
+  in the component, because neither can be a class. It is parsed per VISIBLE row: sixty rows on
+  screen against four thousand in the log.
+- **It never WRAPS, and the line numbers never leave.** A 22 KB line wrapped is 200 rows of one
+  line, which makes every row's height a measurement and the scrollbar a guess — so the page scrolls
+  SIDEWAYS like a terminal and the gutter is sticky against it.
+- **A search FILTERS.** "Which lines say `error`" is the question in 4 000 lines, and scrolling to a
+  tinted word is not an answer to it. Every kept row carries the log's OWN line number, the count is
+  stated (a filter that found nothing looks exactly like a log that arrived empty), and pressing a
+  row's number clears the filter and takes the reader to that line in place.
+- **Nothing here writes.** GitLab's own job page offers Retry, Cancel and Erase; this app reads
+  trackers, and the writes it offers are elsewhere behind their own consent gates (§ The trackers).
+  So the card that opens this page stays an `<a>` — the graph holds no button at all, and its spec
+  counts them — and GitLab's own job page is one press further, in this page's header.
+
+`web/mock/server.ts` reproduces the whole surface with no GitLab and no token: its trace is written
+the way the runner writes one (nested sections, a progress line rewritten in place, 16-colour and
+256-colour SGR), the RUNNING job's log grows by a line on every read — which is what makes
+"following" reviewable with no CI anywhere — a `manual` job answers an empty one, and the
+`{kind:"gitlab_mr"}` hook arms `truncate_job_log` and `refuse_job_log` (a spec MUST clear it, since
+one mock process serves the whole run). `cd web && bun run preview -- --out /tmp/log --job-log`
+captures the card, the page in both themes, every section folded, the filter in both themes, a
+phone's width, a cut log, a job that has not run, a live one and a refused read. **No real log has
+been drawn from the instance yet**: the reads are measured above and the surface is pinned against
+the mock, so what is untested is the pairing — one press on a job card in the user's own app.
+
 ### A comment on a diff LINE (a press on a line number, or a drag over several)
 
 The diff page comments on code the way GitLab's own does: press a line NUMBER and a box opens
@@ -1515,6 +1756,12 @@ act; what it does need is the rails below, because a position is a claim about W
   starts a selection only from the line-number gutter and follows the pointer to another number,
   so a press is one line and a drag is a span. Nothing here reimplements it. What this app adds
   is the MEANING of the answer, which is the one thing a diff renderer cannot know (below).
+- **Every gesture names its FILE**, because the diff is a feed of all of them: line 42 exists in
+  most of these files, so a range with no file would light one line in each and file the comment
+  against whichever the reader happened to be at. The item's id travels with the live selection
+  (`DiffLineSelection`), with the end of the gesture, and with the gutter's own press — which is
+  the shape the renderer's own `CodeViewLineSelection` takes, for that same reason — and the box
+  keeps that file until it is sent or cancelled, however far the reader has scrolled meanwhile.
 - **The box opens when the gesture ENDS, never during it.** A card drawn mid-drag inserts a row
   into the patch and moves the line numbers out from under the reader's own pointer — measured:
   it cut a drag from line 3 to line 6 short at line 4. So `onLineSelectionChange` only lights
@@ -1609,6 +1856,100 @@ line, the drag's own span in both themes, the words written, the thread they bec
 being rewritten, the fold a resolved thread takes in both themes, and the box on a phone; `web/e2e/gitlab.spec.ts` pins every rule above by
 driving the POINTER, because the drag is the feature. **It has never run against a real GitLab
 project**: like every other write here, that is the user's own click, in their own app.
+
+## A tracker REFERENCE in the words (`ENG-123`, `!42`)
+
+The trackers the user works in turn up in everything written here — an agent's answer ("!42 is
+ready, it closes STMN-3439"), a colleague's message, a merge request's own description. Written
+out it is a word; read as a reference it is one press away from the thing it names, and where
+that press goes is the whole feature:
+
+- a **LINEAR issue** goes to Linear, wearing Linear's own mark, because this app holds no issue
+  page — the card a link earns is as far as it goes;
+- a **GitLab MERGE REQUEST** goes to THIS APP's own merge-request page (§ The GitLab page),
+  wearing the tanuki, because that page is where the reader is going anyway: the diff, the
+  pipeline, the conversation and the merge are all on it.
+
+`web/src/lib/tracker-ref.ts` holds every pure decision, `tracker-ref-chip.tsx` draws the chip,
+`tracker-refs-context.tsx` carries what a surface reads references WITH, and the one read the
+feature needs is `linear_workspace` (`linear::fetch_workspace` in src/linear.rs).
+
+**It is read from the WORDS, never from markup**, which is the choice `agent-tag.ts` makes for a
+`@claude` prefix and `agent-message.ts` for a reply's signature. A reference carries no markup
+anywhere: an agent writes `!42` because that is what a person writes, a colleague types
+`STMN-3439` from their phone, and GitLab hands us the author's own text. So there is nothing to
+restore, and every message ever written renders as one. Nothing is added to the wire either — the
+posted body is the words the agent wrote, so a colleague's own client shows exactly them.
+
+**It is drawn EVERYWHERE, from one place.** `RichNodes` is the seam every surface in this app
+draws words through, so the transform lives there and covers a message body, a reply quote, an
+app card, an agent's streamed answer, a merge request's description and a comment on a diff line
+at once. What the words are read WITH comes from a CONTEXT rather than a prop, because the answer
+belongs to the app — it is two settings — and threading it through eight callers would be eight
+chances to forget one, on the surface where a reference then silently stayed a word.
+
+**A bare identifier needs the WORKSPACE, and that is the one thing this app had to read.**
+GitLab's host is configured, so `!42` is addressed from a setting the page already holds; Linear
+is SaaS and the KEY names the workspace, so `linear_workspace` reads it — the url key that
+addresses an issue, and every team key the workspace holds. It is an ordinary open READ (it
+publishes nothing, and a gate would only stop a page from drawing a chip), cached for
+`LINEAR_WORKSPACE_TTL` in the store so the page's ask on every connect costs no request and
+survives a restart, and forgotten the moment the key that named it changes. A read that FAILED
+falls back to whatever was stored, however old: a url key from this morning addresses every issue.
+
+Seven rules hold the recognition, and each is pinned by a test in `web/src/lib/tracker-ref.test.ts`
+or `web/e2e/tracker-refs.spec.ts`:
+
+- **A reference nothing can address stays the text it is.** A `!42` in a body that names no
+  project, an `ENG-123` on a machine whose workspace was never read, a GitLab URL on another
+  host: each stays the word it was. That is the rule an @mention already follows — a name the
+  thread does not hold is plain text — and it is what stops `UTF-8`, `SHA-1`, `RFC-2119`,
+  `AES-256` and `ISO-8601` from becoming links to nothing. **The TEAM KEYS are what make that
+  honest** rather than a guess about the shape of a word: this workspace holds three teams (read
+  from Linear on 2026-08-07), so a reference to any other prefix is a word.
+- **The words are never replaced by other words.** A chip shows the reference the author wrote,
+  or the label they gave their own link. The one text this ever drops is a bare URL turned into
+  that URL's own short reference, which is the case where the words ARE the address — and it is
+  what keeps a quoted line readable, since a URL fills one on its own.
+- **A reference inside code is code.** The scan skips a `code` / `pre` subtree, exactly as a
+  mention does: an answer explaining what `!42` means must not link to somebody's branch while
+  it does so.
+- **A bare `!42` belongs to the CONTAINING project**, which is GitLab's own rule. The surface
+  says which that is — the open merge request, on its page and on its diff
+  (`TrackerProjectProvider`) — and a chat message resolves it against the WHOLE message, quote
+  included: a reply's subject is the thing it quotes, which is exactly the shape an agent's
+  answer takes, since "Review this merge request: !42 <url>" comes back quoted above it. That is
+  also why the project is read with `projectNamedIn` rather than `extractLinks`: a quote carries
+  its preview as PLAIN TEXT, so the URL in it is words by the time the bubble sees it.
+- **Only a merge request is claimed on the GitLab side.** `#123` (an issue) and `&5` (an epic)
+  are GitLab references too, and this app has a page for neither, so they are left alone rather
+  than sent to a page that would say "not built yet".
+- **A merge-request chip NAVIGATES; a Linear chip leaves.** Both are anchors, so the browser's
+  own affordances still work — the status bar says where it goes, a middle click opens a second
+  window, "copy link" copies something that resolves — and the merge-request one intercepts a
+  plain left press so it stays inside the app. Every modified click is the browser's.
+- **An enriched link is still a CARD.** `dropLinks` runs first, so a link that earned a preview
+  card is gone from the body before the scan sees it: a chip beside its own card would state one
+  thing twice.
+
+The address a bare identifier is turned into is Linear's own — `linear::issue_url`, the workspace
+path plus the identifier, with no slug — and that shape is **measured** rather than assumed:
+read from this workspace on 2026-08-07, Linear's API answers exactly that URL as an issue's own
+`url` when the title carries no slug, and the slug is decoration when it does.
+`examples/linear_workspace_recon.rs` re-measures the whole chain through this crate's own
+functions — the workspace, the URL written from an identifier, and whether Linear resolves it. It
+is READ-ONLY and takes the key from the ENVIRONMENT, which is also why it has **not been run
+yet**: nothing here may read the user's own key out of their store, so that run is theirs. What
+is therefore untested against the tenant is the pairing — one `linear_workspace` answered by the
+real API — while the parse itself is pinned by unit tests against the shape Linear answers with.
+
+`web/mock/server.ts` reproduces the whole feature with no Linear and no GitLab: it answers
+`linear_workspace` with one team key (`ENG`), the seeded thread carries a bare `!99` in a REPLY —
+so the project comes from the quote, and no second card is drawn — the mock agent's answer names
+`acme/webapp!596` and `ENG-1` in the words a CLI would write, and every fixture puts `UTF-8`
+beside them, because the word that must NOT become a chip is half the rule. `cd web && bun run
+preview -- --out /tmp/ref --tracker-refs` captures the chat message, the chip in both themes, a
+phone's width, the agent's own answer and a merge request's description.
 
 ## Automation safety (MANDATORY — read before driving the UI)
 
@@ -1730,19 +2071,26 @@ user. Two independent mechanisms enforce that split:
   width, a 150-character title at both widths, the people rows in both of their shapes and a
   blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt` /
-  `openMergeRequestPage` from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
-  each of the three files with no patch, the expand control and what it hands over, and both of
-  its columns at a phone's width:
-  `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` from the same
-  file. For a COMMENT on a diff line — the affordance in the gutter, the box on one line, the
-  span a drag covers, the thread it lands as, a comment being rewritten and the fold a resolved
-  thread takes:
+  `openMergeRequestPage` from the same file. For its DIFF PAGE — the way in, the FEED in both
+  themes, the split layout, the feed scrolled with the tree's lit row following it, each of the
+  three files with no patch, the expand control and what it hands over, and both of its columns at
+  a phone's width:
+  `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` /
+  `scrollDiffFeed` / `diffFileItem` from the same file. For a COMMENT on a diff line — the
+  affordance in the gutter, the box on one line, the span a drag covers, the thread it lands as, a
+  comment being rewritten and the fold a resolved thread takes:
   `bun run preview -- --out /tmp/dc --diff-comment`, or `diffGutterLine` / `dragDiffLines` from
-  the same file (the drag is driven with the pointer, because the drag IS the feature).
+  the same file — each of which names the FILE it is about, because in a feed a line number does
+  not (the drag is driven with the pointer, because the drag IS the feature).
+  For one JOB's LOG — the card that opens it, the page in both themes, every section folded, the
+  filter, a cut log, a job that has not run, a live one and a refused read:
+  `bun run preview -- --out /tmp/log --job-log`, or `openJobLog` from the same file.
   For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
-  `bun run preview -- --out /tmp/ask --answer-with`. For the typing hint above the
+  `bun run preview -- --out /tmp/ask --answer-with`. For a tracker REFERENCE drawn as a
+  chip — in a chat message, in an agent's own answer and in a merge request's
+  description: `bun run preview -- --out /tmp/ref --tracker-refs`. For the typing hint above the
   composer, one typist then three: `bun run preview -- --out /tmp/typ --typing`
   (it honours `--dpr`, because the faces in it are 20px). For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
@@ -3223,8 +3571,11 @@ user's. What changes is only what is asked.
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its six reads (the DIFF
-  among them, whose unified patch this app writes over GitLab's bare hunks) in
+  `src/gitlab.rs` and `src/linear.rs`, whose `fetch_workspace` also answers what a bare
+  `ENG-123` written anywhere is addressed with — see § A tracker REFERENCE in the words), the
+  merge-request PAGE — its seven reads (the DIFF among them, whose unified patch this app writes
+  over GitLab's bare hunks, and one JOB's LOG, whose cache window the answer itself decides —
+  see § A job's LOG is a page) in
   `src/gitlab_mr.rs` over a durable response cache, what each CI job WAITS FOR in
   `src/gitlab_ci_graph.rs` (the one GraphQL read in this app, and query-only by construction —
   see § The pipeline is a GRAPH) and its six writes in `src/gitlab_mr_write.rs`, plus who a

@@ -433,6 +433,43 @@ html[data-virtual-keyboard-open] .composer-shell {
   display: inline;
 }
 
+/* A tracker reference: a Linear issue or a GitLab merge request named in somebody's words
+   (lib/tracker-ref.ts, drawn by components/tracker-ref-chip.tsx). The mark says which
+   tracker and the chip says it is a link, which is what a word in the middle of a sentence
+   cannot say for itself.
+
+   It is an ANCHOR, so the underline every other link in a body wears is taken off here: the
+   chip's own surface already says it can be pressed, and an underline under a mark reads as
+   a rule drawn through it. */
+.tracker-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  border-radius: 0.25rem;
+  background-color: var(--tracker-ref-surface);
+  color: var(--tracker-ref);
+  padding: 0.05rem 0.3rem;
+  font-weight: 600;
+  text-decoration: none;
+  /* One reference, one chip: a line break inside it would draw the mark on one line and the
+     number on the next — the rule `.mention-chip` holds for a name. */
+  white-space: nowrap;
+  /* An inline-flex box sits on its own bottom edge, which would lift the chip off the line
+     it is written on. */
+  vertical-align: -0.15em;
+  transition: background-color 120ms ease-out;
+}
+.tracker-ref:hover {
+  background-color: var(--tracker-ref-surface-hover);
+}
+/* The mark rides with the text: sized in `em` so it follows the font of whatever the chip
+   sits in — a message body, a comment, a merge request's description. */
+.tracker-ref-logo {
+  width: 0.9em;
+  height: 0.9em;
+  flex-shrink: 0;
+}
+
 /* Placeholder shown while the editor is empty (from extension-placeholder). */
 .tiptap-message p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
@@ -959,3 +996,91 @@ file-tree-container {
   --trees-font-size-override: 12px;
   --trees-focus-ring-color-override: var(--ring);
 }
+
+/* ---------------------------------------------------------------------------
+   A CI JOB's LOG: the sixteen ANSI colours, in both themes
+   (§ A job's LOG is a page).
+
+   `anser` parses the runner's escape sequences into class names — `ansi-red`,
+   `ansi-bright-green`, `ansi-palette-208` for the 256-colour cube, and a
+   truecolor case the renderer resolves inline. What a class MEANS is this app's
+   decision, so the sixteen live here rather than in the component: a log is read
+   in the light theme and the dark one, and a terminal's own #000000 on a white
+   page is a line nobody can read.
+
+   Measured on this instance: 35 856 SGR sequences over 48 logs, so this palette
+   is most of what a reader sees. The hues are the ones a terminal uses — red is
+   a failure, green a pass, yellow a warning — because that is the vocabulary the
+   runner wrote them in, and re-tinting them into the app's accents would say
+   something the log did not. What changes with the theme is only their
+   LIGHTNESS, so each stays legible against the surface it is on. */
+.ansi-log {
+  --ansi-black: oklch(0.32 0 0);
+  --ansi-red: oklch(0.52 0.19 25);
+  --ansi-green: oklch(0.5 0.14 145);
+  --ansi-yellow: oklch(0.52 0.11 85);
+  --ansi-blue: oklch(0.52 0.16 260);
+  --ansi-magenta: oklch(0.52 0.19 320);
+  --ansi-cyan: oklch(0.5 0.09 210);
+  --ansi-white: oklch(0.62 0 0);
+  --ansi-bright-black: oklch(0.55 0 0);
+  --ansi-bright-red: oklch(0.6 0.21 25);
+  --ansi-bright-green: oklch(0.58 0.16 145);
+  --ansi-bright-yellow: oklch(0.6 0.13 85);
+  --ansi-bright-blue: oklch(0.6 0.18 260);
+  --ansi-bright-magenta: oklch(0.6 0.21 320);
+  --ansi-bright-cyan: oklch(0.58 0.11 210);
+  --ansi-bright-white: oklch(0.42 0 0);
+}
+[data-theme="dark"] .ansi-log {
+  --ansi-black: oklch(0.45 0 0);
+  --ansi-red: oklch(0.68 0.19 25);
+  --ansi-green: oklch(0.75 0.17 145);
+  --ansi-yellow: oklch(0.82 0.15 90);
+  --ansi-blue: oklch(0.7 0.15 255);
+  --ansi-magenta: oklch(0.72 0.18 320);
+  --ansi-cyan: oklch(0.78 0.11 200);
+  --ansi-white: oklch(0.86 0 0);
+  --ansi-bright-black: oklch(0.6 0 0);
+  --ansi-bright-red: oklch(0.75 0.19 25);
+  --ansi-bright-green: oklch(0.84 0.17 145);
+  --ansi-bright-yellow: oklch(0.9 0.15 95);
+  --ansi-bright-blue: oklch(0.78 0.14 255);
+  --ansi-bright-magenta: oklch(0.8 0.17 320);
+  --ansi-bright-cyan: oklch(0.86 0.1 200);
+  --ansi-bright-white: oklch(0.98 0 0);
+}
+
+.ansi-log .ansi-black-fg { color: var(--ansi-black); }
+.ansi-log .ansi-red-fg { color: var(--ansi-red); }
+.ansi-log .ansi-green-fg { color: var(--ansi-green); }
+.ansi-log .ansi-yellow-fg { color: var(--ansi-yellow); }
+.ansi-log .ansi-blue-fg { color: var(--ansi-blue); }
+.ansi-log .ansi-magenta-fg { color: var(--ansi-magenta); }
+.ansi-log .ansi-cyan-fg { color: var(--ansi-cyan); }
+.ansi-log .ansi-white-fg { color: var(--ansi-white); }
+.ansi-log .ansi-bright-black-fg { color: var(--ansi-bright-black); }
+.ansi-log .ansi-bright-red-fg { color: var(--ansi-bright-red); }
+.ansi-log .ansi-bright-green-fg { color: var(--ansi-bright-green); }
+.ansi-log .ansi-bright-yellow-fg { color: var(--ansi-bright-yellow); }
+.ansi-log .ansi-bright-blue-fg { color: var(--ansi-bright-blue); }
+.ansi-log .ansi-bright-magenta-fg { color: var(--ansi-bright-magenta); }
+.ansi-log .ansi-bright-cyan-fg { color: var(--ansi-bright-cyan); }
+.ansi-log .ansi-bright-white-fg { color: var(--ansi-bright-white); }
+
+/* A BACKGROUND is drawn as a tint rather than as the flat colour: a runner that
+   highlights one word with `ansi-red-bg` means "look here", and a solid block of
+   terminal red inside a page of this app's own surfaces reads as a rendering
+   fault. The ink stays whatever the sequence asked for. */
+.ansi-log [class*="-bg"] {
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.ansi-log .ansi-black-bg { background: color-mix(in oklab, var(--ansi-black) 22%, transparent); }
+.ansi-log .ansi-red-bg { background: color-mix(in oklab, var(--ansi-red) 22%, transparent); }
+.ansi-log .ansi-green-bg { background: color-mix(in oklab, var(--ansi-green) 22%, transparent); }
+.ansi-log .ansi-yellow-bg { background: color-mix(in oklab, var(--ansi-yellow) 22%, transparent); }
+.ansi-log .ansi-blue-bg { background: color-mix(in oklab, var(--ansi-blue) 22%, transparent); }
+.ansi-log .ansi-magenta-bg { background: color-mix(in oklab, var(--ansi-magenta) 22%, transparent); }
+.ansi-log .ansi-cyan-bg { background: color-mix(in oklab, var(--ansi-cyan) 22%, transparent); }
+.ansi-log .ansi-white-bg { background: color-mix(in oklab, var(--ansi-white) 22%, transparent); }

@@ -56,6 +56,7 @@ import { Panel } from "./gitlab-panel";
 import { GitLabPipelinePage } from "./gitlab-pipeline-page";
 import { PipelineGraphView, PipelineStatusBadge } from "./gitlab-pipeline-graph";
 import { RichNodes } from "./rich-content";
+import { TrackerProjectProvider } from "./tracker-refs-context";
 
 // The merge-request page. It occupies the same slot as `MessagePane` and `MailPane`, so the
 // two-column layout, the mobile full-screen page and the back button behave identically
@@ -138,6 +139,10 @@ export function GitLabPane(props: {
   if (!open) return <GitLabEmptyState />;
 
   return (
+    // A bare `!42` written in this merge request's description or in one of its comments means
+    // a merge request of THIS project — GitLab's own rule for a reference inside a project —
+    // so the project travels to every body drawn below (see lib/tracker-ref.ts).
+    <TrackerProjectProvider project={open.projectPath}>
     <section data-testid="gitlab-pane" className="flex min-w-0 flex-1 flex-col bg-background">
       <header className="flex min-h-16 shrink-0 items-center gap-2 border-b border-border-subtle px-3 pt-[env(safe-area-inset-top)] md:gap-3 md:px-5">
         {props.onBack && (
@@ -263,6 +268,7 @@ export function GitLabPane(props: {
         </div>
       )}
     </section>
+    </TrackerProjectProvider>
   );
 }
 

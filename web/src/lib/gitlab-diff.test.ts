@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeDiffFeedFile,
   canExpandDiff,
+  DIFF_FEED_TOLERANCE,
+  diffFeedVersions,
   DIFF_COLUMNS_MIN_WIDTH,
   diffFileNotice,
   diffFilePaths,
@@ -14,6 +17,7 @@ import {
   effectiveDiffLayout,
   expandDiffHint,
   formatDiffStat,
+  sameDiffFile,
   selectDiffFile,
   SPLIT_MIN_WIDTH,
   type GitLabDiff,
@@ -216,5 +220,118 @@ describe("the page's two columns", () => {
     // Width 0 is the first paint. A page whose subject the reader has not picked yet opens on
     // the list of files, and never on a patch drawn at a width nothing measured.
     expect(diffPageColumns(0, "files")).toEqual({ files: true, patch: false, narrow: true });
+  });
+});
+
+describe("which file the reader is at in the feed", () => {
+  const tops = [
+    { path: "a.ts", top: 0 },
+    { path: "b.ts", top: 400 },
+    { path: "c.ts", top: 900 },
+  ];
+  // Room for one more screenful under the last file, so the end of the feed is a state of its own.
+  const scrollHeight = 1600;
+  const viewport = 500;
+
+  it("names the file whose code fills the top of the screen", () => {
+    expect(activeDiffFeedFile(tops, 0, viewport, scrollHeight)).toBe("a.ts");
+    expect(activeDiffFeedFile(tops, 300, viewport, scrollHeight)).toBe("a.ts");
+    expect(activeDiffFeedFile(tops, 400, viewport, scrollHeight)).toBe("b.ts");
+    expect(activeDiffFeedFile(tops, 700, viewport, scrollHeight)).toBe("b.ts");
+    expect(activeDiffFeedFile(tops, 900, viewport, scrollHeight)).toBe("c.ts");
+  });
+
+  it("forgives a few pixels, because a scroll position is fractional", () => {
+    // A file whose top is a hair below the fold is the one being read, not the one above it.
+    expect(activeDiffFeedFile(tops, 400 - DIFF_FEED_TOLERANCE, viewport, scrollHeight)).toBe("b.ts");
+    expect(activeDiffFeedFile(tops, 400 - DIFF_FEED_TOLERANCE - 1, viewport, scrollHeight)).toBe("a.ts");
+  });
+
+  it("keeps the file the reader ASKED for while the feed is pinned at its end", () => {
+    // The last screenful holds several files and none of them can reach the top, so the rule
+    // above would answer with whichever starts above the fold — and a press on any of the others
+    // would light a row the reader did not press.
+    const end = scrollHeight - viewport;
+    const short = [...tops, { path: "d.ts", top: 1400 }, { path: "e.ts", top: 1500 }];
+    expect(activeDiffFeedFile(short, end, viewport, scrollHeight, "d.ts")).toBe("d.ts");
+    expect(activeDiffFeedFile(short, end, viewport, scrollHeight, "e.ts")).toBe("e.ts");
+  });
+
+  it("hands the question back once the reader scrolls away from what they asked for", () => {
+    // Away from the end, and away from the file itself: the file at the top of the screen is the
+    // answer again.
+    expect(activeDiffFeedFile(tops, 400, viewport, scrollHeight, "a.ts")).toBe("b.ts");
+    // At the end, but the asked file is above the viewport now.
+    expect(activeDiffFeedFile(tops, scrollHeight - viewport, viewport, scrollHeight, "a.ts")).toBe(
+      "c.ts",
+    );
+  });
+
+  it("names a file nobody asked for by where it is", () => {
+    expect(activeDiffFeedFile(tops, scrollHeight - viewport, viewport, scrollHeight)).toBe("c.ts");
+    expect(activeDiffFeedFile(tops, scrollHeight - viewport, viewport, scrollHeight, "gone.ts")).toBe(
+      "c.ts",
+    );
+  });
+
+  it("answers nothing for a diff with no files", () => {
+    expect(activeDiffFeedFile([], 0, viewport, scrollHeight)).toBeNull();
+  });
+
+  it("names the first file before anything has been measured", () => {
+    // Width and height are 0 on the first paint, and the honest answer is where the feed opens.
+    expect(activeDiffFeedFile(tops, 0, 0, 0)).toBe("a.ts");
+  });
+});
+
+describe("the version each file's item carries", () => {
+  const cards = (path: string) => ({ file: file({ path }), cards: "" });
+
+  it("starts at one and stands still while nothing changes", () => {
+    const first = diffFeedVersions(new Map(), [cards("a.ts"), cards("b.ts")]);
+    expect(first.get("a.ts")?.version).toBe(1);
+    const second = diffFeedVersions(first, [cards("a.ts"), cards("b.ts")]);
+    expect(second.get("a.ts")?.version).toBe(1);
+    expect(second.get("b.ts")?.version).toBe(1);
+  });
+
+  it("moves when the FILE changed, which is what the expanded read does", () => {
+    // A file GitLab withheld comes back with its patch under the same path. A version that stood
+    // still there left the renderer drawing the sentence that stood in for the code.
+    const withheld = { file: file({ path: "bun.lock", patch: undefined, collapsed: true }), cards: "" };
+    const first = diffFeedVersions(new Map(), [withheld]);
+    const expanded = diffFeedVersions(first, [
+      { file: file({ path: "bun.lock", patch: "diff --git a/bun.lock b/bun.lock\n@@ -1 +1 @@\n-a\n+b\n" }), cards: "" },
+    ]);
+    expect(expanded.get("bun.lock")?.version).toBe(2);
+  });
+
+  it("moves when a CARD opened or landed, and only for that file", () => {
+    const first = diffFeedVersions(new Map(), [cards("a.ts"), cards("b.ts")]);
+    const second = diffFeedVersions(first, [
+      { file: file({ path: "a.ts" }), cards: "composer:additions:5:2" },
+      cards("b.ts"),
+    ]);
+    expect(second.get("a.ts")?.version).toBe(2);
+    expect(second.get("b.ts")?.version).toBe(1);
+  });
+
+  it("reads a fresh read of the same file as the same file", () => {
+    // Every read is fresh JSON, several times a minute, and almost all of it says what the last
+    // one said. Bumping on identity would hand the renderer every file again for nothing.
+    const first = diffFeedVersions(new Map(), [cards("a.ts")]);
+    expect(sameDiffFile(file({ path: "a.ts" }), file({ path: "a.ts" }))).toBe(true);
+    expect(diffFeedVersions(first, [cards("a.ts")]).get("a.ts")?.version).toBe(1);
+  });
+
+  it("sees every field that decides what is drawn", () => {
+    const base = file();
+    expect(sameDiffFile(base, file({ patch: base.patch + " " }))).toBe(false);
+    expect(sameDiffFile(base, file({ additions: 9 }))).toBe(false);
+    expect(sameDiffFile(base, file({ change: "new" }))).toBe(false);
+    expect(sameDiffFile(base, file({ old_path: "was.ts" }))).toBe(false);
+    expect(sameDiffFile(base, file({ generated: true }))).toBe(false);
+    expect(sameDiffFile(base, file({ binary: true }))).toBe(false);
+    expect(sameDiffFile(base, file({ collapsed: true }))).toBe(false);
   });
 });

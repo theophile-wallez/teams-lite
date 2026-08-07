@@ -20,6 +20,7 @@ import {
   chatIsMuted,
   chatIsPinned,
   copyableMessageText,
+  fullSizeMediaUrl,
   mergeOlderHistoryPage,
   mergeOlderMailPage,
   mergeRefreshedHistoryPage,
@@ -34,6 +35,7 @@ import {
   type AddressPerson,
   type AvatarPicture,
   type AppSettings,
+  type LinearWorkspace,
   type BrokerStatus,
   type CalendarEvent,
   type BackendRestartResult,
@@ -117,7 +119,6 @@ import {
 } from "./call-failure";
 import {
   canExpandDiff,
-  selectDiffFile,
   type DiffDepth,
   type DiffLayout,
   type GitLabDiff,
@@ -127,14 +128,17 @@ import {
   diffCommentTarget,
   diffCommentsAvailable,
   type DiffCommentTarget,
+  type DiffLineSelection,
   type PierreLineRange,
 } from "./gitlab-diff-comment";
+import { jobLogIsLive } from "./gitlab-job-log";
 import {
   isNotMerged,
   mergeRequestId,
   pipelineIsLive,
   sameMergeRequest,
   type GitLabDiscussionList,
+  type GitLabJobLog,
   type GitLabPipelineView,
   type MergeRequestDetail,
   type MergeRequestKey,
@@ -456,6 +460,15 @@ export type AppState = {
    *  is stored + Ghost mode), loaded from the backend on start. Drives which links
    *  get rich previews, and whether reading a chat is declared to Teams. */
   settings: AppSettings;
+  /** The Linear workspace this machine's key belongs to, or null while it is unknown —
+   *  no key, a key Linear refused, a read that failed, or a backend too old to answer.
+   *
+   *  It is what turns a bare `STMN-3439` written anywhere into a link to that issue (see
+   *  lib/tracker-ref.ts). Null means no bare identifier is recognised, which is the reading
+   *  every unanswered capability takes in this app: a hopeful guess would draw a chip
+   *  pointing at a workspace nobody named. GitLab needs no counterpart here — its host is
+   *  in `settings`, so a `!42` is addressed from what the page already holds. */
+  linearWorkspace: LinearWorkspace | null;
   /** Push notifications for THIS device: what the browser supports, what stands in
    *  the way, and which devices the backend notifies. The only path that reaches a
    *  phone whose app is closed — see lib/push.ts. */
@@ -569,6 +582,18 @@ export type AppState = {
   /** Its comments, and its pipeline with jobs. */
   gitlabNotes: GitLabDiscussionList | null;
   gitlabPipeline: GitLabPipelineView | null;
+  /** ONE job's log, for the page a job card opens (`/mr/<id>/jobs/<jobId>`), or null when no job
+   *  is open. It is not cached across opens for the pipeline's own reason: the backend holds a
+   *  finished log for a day, so re-opening one is a local round trip, while a stale log of a
+   *  RUNNING job is the one thing here that would be read as current. */
+  gitlabJobLog: GitLabJobLog | null;
+  /** Which job the URL asks for, whether or not its log has arrived. It is what a frame about
+   *  another job is checked against, and what the header names while the read is travelling. */
+  gitlabJobId: number | null;
+  gitlabJobLogLoading: boolean;
+  /** Why the log could not be read. This page IS that read, so a failure it never stated would
+   *  be "Reading the log…" for ever — the rule the pipeline page already holds. */
+  gitlabJobLogError: string | null;
   /** Why the pipeline could not be read, when nothing of it is on screen. The PANEL can fall
    *  back on the rest of the page, but the pipeline PAGE is that read and nothing else — so a
    *  failure it never stated would be "Reading the pipeline…" for ever. */
@@ -583,8 +608,10 @@ export type AppState = {
   /** Reported inside the section rather than on the page: a diff that could not be read
    *  costs the Changes panel and nothing else, exactly as the comments do. */
   gitlabDiffError: string | null;
-  /** Which file the section is showing, or null for "whichever `selectDiffFile` picks".
-   *  Per merge request, so walking away and back keeps the file the reader was on. */
+  /** Which file the reader is AT in the diff's feed, or null for "whichever `selectDiffFile`
+   *  picks". It is what the file tree lights, and it moves two ways: a press on a row, and the
+   *  reader scrolling the feed past the top of another file. Per merge request, so walking away
+   *  and back opens where they stopped reading. */
   gitlabDiffPath: string | null;
   /** Whether the reader has asked for the expanded read of THIS merge request. Their ask,
    *  their merge request: it is not a preference, because the cost is per diff. */
@@ -598,8 +625,11 @@ export type AppState = {
    *  Kept apart from the composer below, and the split is load-bearing: the box has to open at
    *  the END of a gesture rather than during it. A card drawn mid-drag inserts a row into the
    *  patch, which moves the line numbers under the reader's own pointer — measured, and it cut
-   *  a drag from line 3 to line 6 short at line 4. */
-  gitlabDiffSelection: PierreLineRange | null;
+   *  a drag from line 3 to line 6 short at line 4.
+   *
+   *  It names its FILE, because the diff is a feed of all of them: a bare range would light line
+   *  42 of every file that has one. */
+  gitlabDiffSelection: DiffLineSelection | null;
   /** WHERE on the diff the reader is writing a comment: the file and the line — or the two
    *  ends of the range they dragged over — and null when they are not writing one. Set when a
    *  gesture ENDS. */
@@ -703,6 +733,14 @@ const RETAINED_MERGE_REQUESTS = 8;
 // to stay short enough that a job turning green is seen while the reader is still looking.
 // Only ever armed while something is actually in flight (see `pipelineIsLive`).
 const GITLAB_PIPELINE_POLL_MS = 6000;
+// How often a LIVE job's log is re-read while its page is open.
+//
+// The pipeline's own interval, for the pipeline's own reasons: it sits above the backend's cache
+// window for a running log (5 s) so a poll is never served the same answer twice, and it is short
+// enough that a line arriving is seen while the reader is looking at it. Armed only while the job
+// has not finished (see `jobLogIsLive`), so a red job nobody is going to touch again costs
+// nothing.
+const GITLAB_JOB_LOG_POLL_MS = 6000;
 // Where the locally-chosen visible calendars are persisted (client-only, like the
 // channel-pin overrides).
 const VISIBLE_CALENDARS_KEY = "teams-lite:visible-calendars";
@@ -803,6 +841,7 @@ function initialState(): AppState {
       // be told no icon is fetched while one is.
       sender_icons: true,
     },
+    linearWorkspace: null,
     push: INITIAL_PUSH_STATE,
     agent: null,
     agentRuns: {},
@@ -851,6 +890,10 @@ function initialState(): AppState {
     gitlabNotes: null,
     gitlabPipeline: null,
     gitlabPipelineError: null,
+    gitlabJobLog: null,
+    gitlabJobId: null,
+    gitlabJobLogLoading: false,
+    gitlabJobLogError: null,
     gitlabDiff: null,
     gitlabDiffLoading: false,
     gitlabDiffError: null,
@@ -1107,6 +1150,10 @@ export class TeamsController {
       // are best-effort too — a failure just leaves the defaults, which enrich
       // nothing but public gitlab.com links.
       void this.loadSettings();
+      // And the Linear workspace those settings' key belongs to, which is what a bare
+      // `STMN-3439` in anybody's words is addressed with (see `linearWorkspace`). Asked on
+      // every connect because the backend answers it from a cache that outlives a restart.
+      void this.loadLinearWorkspace();
       // Which conversations answer an `@claude` message, and whether this machine
       // holds an agent CLI at all. Best-effort: a failure leaves the menu saying the
       // backend has not answered, never a switch that pretends to work.
@@ -1522,6 +1569,16 @@ export class TeamsController {
         // arm it.
         if (pipelineIsLive(view)) this.schedulePipelinePoll(key);
         else this.stopPipelinePolling();
+      } else if (d.kind === "job") {
+        // WHICH job is in the payload's own `job.id`: a page watching one job's log ignores a
+        // frame about another, exactly as the sidebar ignores a frame about another filter.
+        const log = d as unknown as GitLabJobLog;
+        if (typeof log.job?.id !== "number" || log.job.id !== this.get().gitlabJobId) return;
+        this.set({ gitlabJobLog: log, gitlabJobLogError: null });
+        // A refresh that arrived from somewhere else still decides whether this page keeps
+        // polling: a job that has just finished must stop the timer.
+        if (jobLogIsLive(log)) this.scheduleJobLogPoll(key, log.job.id);
+        else this.stopJobLogPolling();
       } else if (d.kind === "stale") {
         void this.reloadMergeRequest();
       }
@@ -3267,6 +3324,9 @@ export class TeamsController {
   /** The pipeline poll of the OPEN merge request, and nothing else: a page polls the one
    *  pipeline it is showing, and closing the page stops it. */
   private gitlabPipelineTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The log poll of the OPEN job, and nothing else. Leaving the page stops it, so a job log
+   *  nobody is looking at asks GitLab nothing — the rule the pipeline poll already holds. */
+  private gitlabJobLogTimer: ReturnType<typeof setTimeout> | null = null;
 
   private refreshGitLabList = coalesce(() => this.loadMergeRequests(false));
 
@@ -3397,8 +3457,15 @@ export class TeamsController {
       ?? this.gitlabDiffCache.get(this.gitlabDiffKey(id, "listed"))
       ?? null;
     this.stopPipelinePolling();
+    // A job belongs to ONE merge request's pipeline, so opening another takes its log away — the
+    // rule a diff comment already follows.
+    this.stopJobLogPolling();
     this.set({
       openMergeRequest: key,
+      gitlabJobLog: null,
+      gitlabJobId: null,
+      gitlabJobLogLoading: false,
+      gitlabJobLogError: null,
       gitlabDetail: detail,
       gitlabDetailLoading: !detail,
       gitlabDetailError: null,
@@ -3526,29 +3593,31 @@ export class TeamsController {
     }
   }
 
-  /** Show one file of the open diff. */
+  /**
+   * The file the reader is at in the open diff — the row the tree lights, and where the page
+   * opens next time.
+   *
+   * It is written by a press on a row AND by the feed scrolling past the top of another file, so
+   * it must be cheap and it must touch nothing else: a comment being written stays where it is,
+   * because in a feed the reader never leaves the file it is about. It used to clear that
+   * composer, which was right while the page drew one file at a time and would now throw away a
+   * half-written comment for scrolling.
+   */
   setGitLabDiffFile(path: string): void {
+    if (this.get().gitlabDiffPath === path) return;
     const key = this.get().openMergeRequest;
     if (key) this.gitlabDiffPathCache.set(mergeRequestId(key), path);
-    // A comment being written is about a line of the file being left, so walking to another
-    // file takes it away. Keeping it would leave a composer open over code it is not about.
-    this.set({
-      gitlabDiffPath: path,
-      gitlabDiffSelection: null,
-      gitlabDiffComment: null,
-      gitlabDiffCommentDraft: "",
-      gitlabDiffCommentError: null,
-    });
+    this.set({ gitlabDiffPath: path });
   }
 
   // ---- a comment on a diff line ---------------------------------------------
 
-  /** The file the diff page is showing, which every rule about a comment on it is relative
-   *  to. One place to ask, so the store and the page can never disagree about which file a
-   *  line number belongs to. */
-  private openDiffFile() {
-    const state = this.get();
-    return selectDiffFile(state.gitlabDiff, state.gitlabDiffPath);
+  /** One file of the open diff, by its own path. Every rule about a comment is relative to the
+   *  file the GESTURE was made in — which in a feed is not the file the reader is at — so the
+   *  path travels with the gesture and this is the one place it is resolved. */
+  private diffFileAt(path: string | null | undefined) {
+    if (!path) return null;
+    return this.get().gitlabDiff?.files.find((file) => file.path === path) ?? null;
   }
 
   /**
@@ -3559,13 +3628,13 @@ export class TeamsController {
    * ({@link openGitLabDiffComment}), because a card drawn mid-drag inserts a row into the patch
    * and moves the line numbers under the reader's own pointer.
    */
-  setGitLabDiffSelection(range: PierreLineRange | null): void {
+  setGitLabDiffSelection(path: string, range: PierreLineRange | null): void {
     if (!range) {
       this.closeGitLabDiffComment();
       return;
     }
-    if (!diffCommentsAvailable(this.openDiffFile(), this.get().gitlabDetail?.diff_refs)) return;
-    this.set({ gitlabDiffSelection: range });
+    if (!diffCommentsAvailable(this.diffFileAt(path), this.get().gitlabDetail?.diff_refs)) return;
+    this.set({ gitlabDiffSelection: { path, range } });
   }
 
   /**
@@ -3579,14 +3648,15 @@ export class TeamsController {
    * A range that resolves to the lines already open is left alone, draft and all: a reader
    * dragging over the same lines twice has not asked for their words to be thrown away.
    */
-  openGitLabDiffComment(range: PierreLineRange | null): void {
+  openGitLabDiffComment(path: string, range: PierreLineRange | null): void {
     if (!range) {
       this.closeGitLabDiffComment();
       return;
     }
     const state = this.get();
-    if (!diffCommentsAvailable(this.openDiffFile(), state.gitlabDetail?.diff_refs)) return;
-    const target = diffCommentTarget(this.openDiffFile(), range);
+    const file = this.diffFileAt(path);
+    if (!diffCommentsAvailable(file, state.gitlabDetail?.diff_refs)) return;
+    const target = diffCommentTarget(file, range);
     if (!target) return;
     const open = state.gitlabDiffComment;
     if (
@@ -3598,7 +3668,7 @@ export class TeamsController {
       return;
     }
     this.set({
-      gitlabDiffSelection: range,
+      gitlabDiffSelection: { path, range },
       gitlabDiffComment: target,
       gitlabDiffCommentDraft: "",
       gitlabDiffCommentError: null,
@@ -3643,9 +3713,15 @@ export class TeamsController {
     // A reply lands in the thread it answers, which already hangs where it hangs; only a NEW
     // comment carries a position. Sending both is refused by the backend, so the page must
     // not build both.
+    // The file the COMMENT is about, never the one the reader has since scrolled to: the box
+    // stays open while the feed moves under it.
     const position = discussionId
       ? null
-      : diffCommentPosition(this.openDiffFile(), state.gitlabDetail?.diff_refs, state.gitlabDiffComment);
+      : diffCommentPosition(
+          this.diffFileAt(state.gitlabDiffComment?.path),
+          state.gitlabDetail?.diff_refs,
+          state.gitlabDiffComment,
+        );
     if (!discussionId && !position) {
       this.set({
         gitlabDiffCommentError: {
@@ -3828,10 +3904,96 @@ export class TeamsController {
     this.gitlabPipelineTimer = null;
   }
 
+  /** Open ONE job's log — the page a job card opens.
+   *
+   *  It is read on its own rather than with the merge request: a pipeline holds up to fifteen
+   *  jobs and each log is up to a megabyte, so reading them with the page would be the biggest
+   *  read here made fifteen times over for the one card the reader might press. The job the URL
+   *  names is put in the state FIRST, so the header can say which job is being read while the
+   *  read is still travelling. */
+  async openJobLog(key: MergeRequestKey, jobId: number): Promise<void> {
+    this.stopJobLogPolling();
+    // A different job's log must never be left on screen under a new job's header, so the old
+    // one goes at once — the rule the pipeline follows across merge requests.
+    if (this.get().gitlabJobId !== jobId) {
+      this.set({ gitlabJobLog: null, gitlabJobLogError: null });
+    }
+    this.set({ gitlabJobId: jobId, gitlabJobLogLoading: !this.get().gitlabJobLog });
+    await this.loadJobLog(key, jobId, false);
+  }
+
+  /** Re-read the open job's log at the user's own asking. */
+  async reloadJobLog(): Promise<void> {
+    const key = this.get().openMergeRequest;
+    const jobId = this.get().gitlabJobId;
+    if (!key || jobId === null) return;
+    this.set({ gitlabJobLogLoading: true });
+    await this.loadJobLog(key, jobId, true);
+  }
+
+  private async loadJobLog(
+    key: MergeRequestKey,
+    jobId: number,
+    refresh: boolean,
+  ): Promise<void> {
+    // BOTH halves are checked on the way back, because both can change while a megabyte is
+    // travelling: the reader can walk to another job, or to another merge request entirely.
+    const open = () =>
+      sameMergeRequest(this.get().openMergeRequest, key) && this.get().gitlabJobId === jobId;
+    try {
+      const log = await this.backend.gitlabJobLog(key, jobId, refresh);
+      if (!open()) return;
+      this.set({ gitlabJobLog: log, gitlabJobLogError: null });
+      if (jobLogIsLive(log)) this.scheduleJobLogPoll(key, jobId);
+      else this.stopJobLogPolling();
+    } catch (e) {
+      // A log that cannot be read leaves whatever is on screen standing and stops polling:
+      // hammering a refusal would earn the token a rate limit. The reason is kept for a page
+      // that has nothing else to draw, which is this one whenever no log has arrived.
+      if (open() && !this.get().gitlabJobLog) this.set({ gitlabJobLogError: errText(e) });
+      this.stopJobLogPolling();
+    } finally {
+      if (open()) this.set({ gitlabJobLogLoading: false });
+    }
+  }
+
+  private scheduleJobLogPoll(key: MergeRequestKey, jobId: number): void {
+    this.stopJobLogPolling();
+    this.gitlabJobLogTimer = setTimeout(() => {
+      this.gitlabJobLogTimer = null;
+      if (sameMergeRequest(this.get().openMergeRequest, key) && this.get().gitlabJobId === jobId) {
+        void this.loadJobLog(key, jobId, false);
+      }
+    }, GITLAB_JOB_LOG_POLL_MS);
+  }
+
+  private stopJobLogPolling(): void {
+    if (this.gitlabJobLogTimer === null) return;
+    clearTimeout(this.gitlabJobLogTimer);
+    this.gitlabJobLogTimer = null;
+  }
+
+  /** Leave the job-log page. The merge request stays open underneath, because the reader came
+   *  from it and is going back to it. */
+  closeJobLog(): void {
+    this.stopJobLogPolling();
+    this.set({
+      gitlabJobLog: null,
+      gitlabJobId: null,
+      gitlabJobLogLoading: false,
+      gitlabJobLogError: null,
+    });
+  }
+
   closeMergeRequestPage(): void {
     this.stopPipelinePolling();
+    this.stopJobLogPolling();
     this.set({
       openMergeRequest: null,
+      gitlabJobLog: null,
+      gitlabJobId: null,
+      gitlabJobLogLoading: false,
+      gitlabJobLogError: null,
       gitlabDetail: null,
       gitlabDetailError: null,
       gitlabNotes: null,
@@ -4431,6 +4593,32 @@ export class TeamsController {
     return this.loadBlob(url, () => this.backend.fetchMedia(url));
   }
 
+  /**
+   * Resolve a PICTURE a message carries to a local blob object URL, at the best resolution
+   * its object store serves (see {@link fullSizeMediaUrl}): the view a Teams client writes
+   * on an `<img>` is a reduced, re-encoded copy, and this app draws pictures rather than
+   * previews of them.
+   *
+   * The cache is keyed on the URL the MESSAGE carries, never on the view that answered, so
+   * the picture's identity is the message's own — which is what lets `MediaImage` retain and
+   * release it without knowing which view the bytes came from.
+   *
+   * The reduced view is the FALLBACK, and it is what keeps this from ever costing a picture:
+   * an object whose full view the store refuses (too large for the proxy's own cap, or a
+   * shape this tenant does not publish) still draws exactly as it did before.
+   */
+  loadPicture(url: string): Promise<string> {
+    const full = fullSizeMediaUrl(url);
+    if (!full) return this.loadMedia(url);
+    return this.loadBlob(url, async () => {
+      try {
+        return await this.backend.fetchMedia(full);
+      } catch {
+        return await this.backend.fetchMedia(url);
+      }
+    });
+  }
+
   /** Resolve one picture a GitLab description or comment points at to a local blob object URL,
    *  fetching the bytes through the backend (see `gitlab-upload.ts` for why they cannot come
    *  any other way). Shares the media cache, so its LRU order and byte budget cover a merge
@@ -4933,6 +5121,21 @@ export class TeamsController {
     }
   }
 
+  /** Load the Linear workspace a bare `STMN-3439` is addressed in (see `linearWorkspace`).
+   *
+   *  Best-effort, like the settings beside it: a failure leaves it null, and a reference then
+   *  stays the word it is — which is what it was before this feature existed. The backend
+   *  caches the answer for hours, so asking on every connect costs no request (see
+   *  `linear_workspace` in src/bin/server.rs). */
+  private async loadLinearWorkspace(): Promise<void> {
+    try {
+      const { workspace } = await this.backend.linearWorkspace();
+      this.set({ linearWorkspace: workspace ?? null });
+    } catch {
+      // ignore — no chip is drawn for a bare identifier, and every link still is.
+    }
+  }
+
   /** Persist app settings (partial) and reflect the fresh non-secret view in
    *  state. Clears the link cache so previews re-evaluate against the new host /
    *  tokens — including the links that resolved to nothing before a token was
@@ -4957,6 +5160,10 @@ export class TeamsController {
     // which is a whole world seen through that token.
     this.approvalResolved.clear();
     this.forgetGitLabReads();
+    // A new Linear key may name another workspace, and the backend forgets its cached one on
+    // the same write — so the page reads it again rather than keeping an address that key no
+    // longer reaches.
+    void this.loadLinearWorkspace();
     playCue("success");
     return settings;
   }

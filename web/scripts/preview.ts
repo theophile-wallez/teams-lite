@@ -40,6 +40,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/pipe --pipeline    # its pipeline graph
 //   bun run web/scripts/preview.ts --out /tmp/diff --diff       # the Changes section
 //   bun run web/scripts/preview.ts --out /tmp/dc --diff-comment # a comment on a diff line
+//   bun run web/scripts/preview.ts --out /tmp/log --job-log     # one CI job's log
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/img --image       # the picture lightbox
 //   bun run web/scripts/preview.ts --out /tmp/pics --compose-images # several pending images
@@ -55,6 +56,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/app --maintenance # Settings › This app
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
+//   bun run web/scripts/preview.ts --out /tmp/ref --tracker-refs # a reference as a chip
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
 //   bun run web/scripts/preview.ts --out /tmp/mr --merge-request # review + approve a merge request
 //   bun run web/scripts/preview.ts --out /tmp/chat --chat-menu  # chat sections + the row's "…" menu
@@ -488,6 +490,24 @@ export async function openMergeRequestPage(
   });
 }
 
+/**
+ * Open one JOB's LOG from the pipeline page, by the job's own name, and wait for its lines.
+ *
+ * A card is a LINK (the graph holds no buttons — see `gitlab-pipeline-graph.tsx`), so this is a
+ * navigation: what it waits for is the log page's own container plus a first row, because the read
+ * is a round trip and a capture taken before it lands is a capture of "Reading the log…".
+ */
+export async function openJobLog(page: Page, jobName: string): Promise<void> {
+  await page.locator(`[data-testid="gitlab-pipeline-job"][data-name="${jobName}"]`).click();
+  await page.waitForSelector('[data-testid="gitlab-job-log-page"]', {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  await page
+    .locator('[data-testid="gitlab-job-log-line"], [data-testid="gitlab-job-log-empty"]')
+    .first()
+    .waitFor({ timeout: APP_READY_TIMEOUT_MS });
+}
+
 /** Open the PIPELINE page of the open merge request, and wait for its graph.
  *
  *  The wait is on the graph's own container rather than on the route: the page paints from the
@@ -518,11 +538,11 @@ export async function setPipelineGrouping(page: Page, grouping: "stage" | "needs
   await page.waitForTimeout(250);
 }
 
-/** Scroll the Changes section into view and wait for its diff to be drawn.
+/** Scroll the Changes section into view and wait for the diff FEED to be drawn.
  *
- *  The wait is for the PATCH rather than the section: the section paints from the read, and
- *  what takes time after that is the lazy chunk (`@pierre/diffs` carries Shiki) and then the
- *  grammar for the file's own language. A shot taken before both is a shot of the
+ *  The wait is for a file's own header rather than the feed's box: the box paints from the read,
+ *  and what takes time after that is the lazy chunk (`@pierre/diffs` carries Shiki) and then the
+ *  grammar for the first files' languages. A shot taken before both is a shot of the
  *  "Highlighting…" placeholder. */
 export async function openChanges(page: Page): Promise<void> {
   await page.locator('[data-testid="gitlab-review-changes"]').scrollIntoViewIfNeeded();
@@ -530,48 +550,83 @@ export async function openChanges(page: Page): Promise<void> {
   await page.waitForSelector('[data-testid="gitlab-diff-page"]', {
     timeout: APP_READY_TIMEOUT_MS,
   });
-  await page.waitForSelector('[data-testid="gitlab-diff-patch"]', {
+  // ATTACHED rather than visible: the header's sentinel is data — a file with nothing to say
+  // beside its name draws no ink at all, which is most files.
+  await page.waitForSelector('[data-testid="gitlab-diff-feed"] [data-testid="gitlab-diff-file"]', {
+    state: "attached",
     timeout: APP_READY_TIMEOUT_MS,
   });
-  // The highlighter resolves its grammar and theme asynchronously, so the element exists
-  // before it holds any code. One frame past that is what makes a capture readable.
+  // The highlighter resolves its grammar and theme asynchronously, so the rows exist before
+  // they hold any code. One frame past that is what makes a capture readable.
   await page.waitForTimeout(800);
 }
 
-/** Show one file of the open diff by clicking its row in the tree.
+/** Bring one file of the feed to the top by clicking its row in the tree.
  *
  *  The tree renders inside a shadow root, and Playwright's CSS engine pierces an open one — so
  *  this drives the row a reader would press rather than the store behind it. `data-item-path`
- *  is `@pierre/trees`' own attribute per row; the WAIT is on this app's own heading, which is
- *  what proves the click reached the page rather than only the tree.
+ *  is `@pierre/trees`' own attribute per row; the WAIT is on the PANE's own statement of which
+ *  file the reader is at, which is what proves the click reached the page rather than only the
+ *  tree.
  *
  *  What is asserted afterwards is always the app's own `[data-testid]`s. Reaching further into
  *  a vendor's markup would be a test of their release notes. */
 export async function pickDiffFile(page: Page, path: string): Promise<void> {
   await page.locator(`[data-item-path="${path}"]`).first().click();
-  // The PANE's own statement of what it holds, which is present whatever draws the file's name
-  // — pierre's header over a patch, this app's over a sentence.
   await page.waitForSelector(`[data-testid="gitlab-diff-pane"][data-path="${path}"]`, {
     timeout: APP_READY_TIMEOUT_MS,
   });
-  // A file whose language the highlighter has not loaded yet resolves one more grammar.
+  // A file whose language the highlighter has not loaded yet resolves one more grammar, and the
+  // feed has just scrolled to it.
   await page.waitForTimeout(600);
 }
 
 /**
- * One line NUMBER in the gutter of the open diff — where the comment gesture starts.
+ * Scroll the diff's feed the way a reader does — the wheel over the code.
  *
- * The number and the SIDE together, because in a unified diff an old line and a new line can
- * wear the same number: three lines down a change block, `3` is both the line that went and the
- * line that came. So the side is not decoration, and the default is the new one, which is what
- * a reviewer comments on.
+ * Through the pointer rather than by writing `scrollTop`, because the feed is virtualized: the
+ * renderer mounts what the viewport reaches, measures it, and holds the scroll anchored while it
+ * does. A capture taken after a scripted assignment can be a capture of a frame no reader ever
+ * sees.
+ */
+export async function scrollDiffFeed(page: Page, by: number): Promise<void> {
+  const feed = page.locator('[data-testid="gitlab-diff-feed"]');
+  await feed.hover();
+  await page.mouse.wheel(0, by);
+  // The renderer settles over a frame or two: it mounts the files the scroll reached, resolves
+  // their grammars and corrects the layout it had only estimated.
+  await page.waitForTimeout(900);
+}
+
+/**
+ * One FILE of the feed, as the renderer's own element.
+ *
+ * The element carries no path of its own, so it is found by the header slot this app renders
+ * into it (`gitlab-diff-file`, a light-DOM child of that element). It is what scopes a line
+ * number to one file, which in a feed of 149 files is the whole difference between commenting on
+ * the code the reader means and on line 42 of something else.
+ */
+export function diffFileItem(page: Page, path: string) {
+  return page
+    .locator(`diffs-container:has([data-testid="gitlab-diff-file"][data-path="${path}"])`)
+    .first();
+}
+
+/**
+ * One line NUMBER in the gutter of one file of the feed — where the comment gesture starts.
+ *
+ * The FILE, the number and the SIDE together. The file because the feed holds them all; the side
+ * because in a unified diff an old line and a new line can wear the same number: three lines
+ * down a change block, `3` is both the line that went and the line that came. So neither is
+ * decoration, and the side's default is the new one, which is what a reviewer comments on.
  *
  * `data-column-number` and `data-line-type` are `@pierre/diffs`' own attributes on a gutter
  * cell, and Playwright's CSS engine pierces the open shadow root they live in. Everything
- * ASSERTED afterwards is this app's own `[data-testid]` — the same line `pickDiffFile` draws.
+ * ASSERTED afterwards is this app's own `[data-testid]`.
  */
 export function diffGutterLine(
   page: Page,
+  path: string,
   line: number,
   side: "additions" | "deletions" = "additions",
 ) {
@@ -582,7 +637,7 @@ export function diffGutterLine(
   const selector = types
     .map((type) => `[data-column-number="${line}"][data-line-type="${type}"]`)
     .join(", ");
-  return page.locator(`[data-testid="gitlab-diff-patch"] :is(${selector})`).first();
+  return diffFileItem(page, path).locator(`:is(${selector})`).first();
 }
 
 /**
@@ -595,12 +650,13 @@ export function diffGutterLine(
  */
 export async function dragDiffLines(
   page: Page,
+  path: string,
   from: number,
   to: number,
   side: "additions" | "deletions" = "additions",
 ): Promise<void> {
-  const start = await diffGutterLine(page, from, side).boundingBox();
-  const end = await diffGutterLine(page, to, side).boundingBox();
+  const start = await diffGutterLine(page, path, from, side).boundingBox();
+  const end = await diffGutterLine(page, path, to, side).boundingBox();
   if (!start || !end) throw new Error(`[preview] no gutter line ${from} or ${to} to drag between`);
   await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
   await page.mouse.down();
@@ -2208,6 +2264,114 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // ONE JOB's LOG: the page a job card opens. Everything the renderer has to draw is in the
+  // mock's own trace — sections that NEST, ANSI colour over 16 names and the 256-colour cube, a
+  // progress line rewritten in place — plus the three states that are not a log at all: a job
+  // that has not run, a log too big to travel whole, and a read that was refused.
+  if (args.includes("--job-log")) {
+    await withPreview(
+      async ({ page, shot, setTheme, emit }) => {
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 1);
+        await openPipelinePage(page);
+
+        // The way IN: a card in the graph, which is a link to the log rather than a trip out to
+        // GitLab. Cropped to one card — pass `--dpr 4` to read its own words.
+        const card = '[data-testid="gitlab-pipeline-job"][data-status="failed"]';
+        await page.locator(card).first().hover();
+        await page.waitForTimeout(250);
+        await shot(`${out}-card-light.png`, card);
+
+        // THE PAGE, on the job that failed: the sections the runner wrote, the colours it wrote
+        // them in, and what the job cost above them.
+        await page.mouse.move(4, 4);
+        const failed = (await page.locator(card).first().getAttribute("data-name")) ?? "";
+        await openJobLog(page, failed);
+        await page.waitForTimeout(300);
+        await shot(`${out}-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`);
+        await setTheme("light");
+
+        // FOLDED: every section shut, which is the shape a reader scans a long run in — each row
+        // says what its section is called and what it cost.
+        await page.locator('[data-testid="gitlab-job-log-fold-all"]').click();
+        await page.waitForTimeout(250);
+        await shot(`${out}-folded-light.png`);
+        await page.locator('[data-testid="gitlab-job-log-fold-all"]').click();
+        await page.waitForTimeout(250);
+
+        // FILTERED: the lines that say `error`, each keeping the log's own line number — which is
+        // what takes the reader back into the log in place.
+        await page.locator('[data-testid="gitlab-job-log-search"]').fill("error");
+        await page.waitForTimeout(300);
+        await shot(`${out}-filtered-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-filtered-dark.png`);
+        await setTheme("light");
+        await page.locator('[data-testid="gitlab-job-log-search-clear"]').click();
+
+        // A PHONE: one column, sideways scrolling for a long line, and the header's own controls
+        // still on screen.
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(400);
+        await shot(`${out}-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+        await page.waitForTimeout(400);
+
+        // A log too big to travel whole: what is on screen is its END, and the whole of it is in
+        // GitLab — this instance refuses a Range read, so there is nothing here to ask with.
+        await emit({ kind: "gitlab_mr", truncate_job_log: true });
+        await page.locator('[data-testid="gitlab-job-log-reload"]').click();
+        await page.waitForSelector('[data-testid="gitlab-job-log-truncated"]');
+        await shot(`${out}-truncated-light.png`);
+        await emit({ kind: "gitlab_mr", clear: true });
+
+        // A job that has not RUN: its empty log is a state, and the page says which one rather
+        // than drawing a blank screen.
+        await page.goBack();
+        await page.waitForSelector('[data-testid="gitlab-pipeline-page"]');
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 0);
+        await openPipelinePage(page);
+        await page.mouse.move(4, 4);
+        await openJobLog(page, "🚀 deploy staging");
+        await shot(`${out}-empty-light.png`);
+
+        // A LIVE one: the log is followed as its lines arrive, and the page says it is.
+        await page.goBack();
+        await page.waitForSelector('[data-testid="gitlab-pipeline-page"]');
+        await openJobLog(page, "🧪 unit");
+        await page.waitForTimeout(400);
+        await shot(`${out}-live-light.png`);
+
+        // And a read that was REFUSED: this page IS that read, so the failure is the whole screen
+        // and it offers the one thing left.
+        await emit({
+          kind: "gitlab_mr",
+          refuse_job_log: "GitLab refused: this account may not read the job's log",
+        });
+        await page.locator('[data-testid="gitlab-job-log-reload"]').click();
+        await page.waitForTimeout(600);
+        await page.reload();
+        await page.waitForSelector('[data-testid="gitlab-job-log-error"]', {
+          timeout: APP_READY_TIMEOUT_MS,
+        });
+        await shot(`${out}-refused-light.png`);
+        await emit({ kind: "gitlab_mr", clear: true });
+
+        console.log(
+          `[preview] wrote ${out}-card-light.png, ${out}-{light,dark}.png, ` +
+            `${out}-folded-light.png, ${out}-filtered-{light,dark}.png, ` +
+            `${out}-mobile-light.png, ${out}-truncated-light.png, ${out}-empty-light.png, ` +
+            `${out}-live-light.png and ${out}-refused-light.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
   // The DIFF: the Changes section, which is the one part of this page drawn by somebody
   // else's renderer (`@pierre/trees` and `@pierre/diffs`, behind a lazy import — see
   // web/src/components/gitlab-diff-view.tsx). Every state a real answer holds is in the
@@ -2243,8 +2407,15 @@ if (import.meta.main) {
         await page.locator('[data-testid="gitlab-diff-layout-unified"]').click();
         await page.waitForTimeout(300);
 
+        // The FEED, scrolled: the reader is reading, and the tree's lit row followed them into
+        // whichever file the top of the screen now holds. That pairing is the whole feature, so
+        // the shot is the page — both columns — rather than either one of them.
+        await scrollDiffFeed(page, 2400);
+        await shot(`${out}-scrolled-light.png`);
+
         // The three files with NO patch, each of which says something different. The shot is
-        // the PATCH column, because the point of these three is the sentence in place of code.
+        // the FEED column, because the point of these three is the sentence in place of code —
+        // and each is reached the way a reader reaches it, by pressing its row.
         for (const [name, path] of [
           ["rename", "src/server/drain.ts"],
           ["binary", "docs/diagrams/rollout.png"],
@@ -2258,7 +2429,14 @@ if (import.meta.main) {
         // files column because that is a fact about that list.
         await shot(`${out}-expand-light.png`, '[data-testid="gitlab-diff-files"]');
         await page.locator('[data-testid="gitlab-diff-expand"]').click();
-        await page.waitForSelector('[data-testid="gitlab-diff-patch"]', { timeout: 15_000 });
+        // The file that was withheld now has a patch, and the way to look at it is the way a
+        // reader looks at any file: press its row. A file the feed has not reached is not in the
+        // page at all — that is what virtualized means — so the press is what brings it there.
+        await pickDiffFile(page, "bun.lock");
+        await page.waitForSelector(
+          '[data-testid="gitlab-diff-file"][data-path="bun.lock"][data-state="patch"]',
+          { state: "attached", timeout: 15_000 },
+        );
         await page.waitForTimeout(600);
         await shot(`${out}-expanded-light.png`);
 
@@ -2278,7 +2456,8 @@ if (import.meta.main) {
 
         console.log(
           `[preview] wrote ${out}-entry-light.png, ${out}-{light,dark}.png, ` +
-            `${out}-split-light.png, ${out}-{rename,binary,collapsed}-light.png, ` +
+            `${out}-split-light.png, ${out}-scrolled-light.png, ` +
+            `${out}-{rename,binary,collapsed}-light.png, ` +
             `${out}-expand-light.png, ${out}-expanded-light.png and ` +
             `${out}-mobile-{files,patch}-light.png`,
         );
@@ -2295,12 +2474,15 @@ if (import.meta.main) {
   // makes it: pressing a line number, and dragging from one line number to another. Both go
   // through the mock like every other write in this suite — nothing reaches a GitLab.
   if (args.includes("--diff-comment")) {
+    // The one file every gesture below is made in. In a feed a line number names nothing on its
+    // own, so the file travels with it — the rule the app itself follows.
+    const HEALTH_FILE = "src/server/health.ts";
     await withPreview(
       async ({ page, shot, setTheme }) => {
         await openGitLabTab(page);
         await openMergeRequestAt(page, 0);
         await openChanges(page);
-        await pickDiffFile(page, "src/server/health.ts");
+        await pickDiffFile(page, HEALTH_FILE);
 
         // The THREAD already on this file, and its span. It is a comment on lines 8–10 by a
         // colleague with the user's own reply under it, so the deletion that makes commenting
@@ -2313,12 +2495,12 @@ if (import.meta.main) {
 
         // The AFFORDANCE: hovering a line reveals the control that says a comment can go
         // there. It is pierre's own gutter slot, wearing this app's glyph.
-        await diffGutterLine(page, 5).hover();
+        await diffGutterLine(page, HEALTH_FILE, 5).hover();
         await page.waitForTimeout(200);
-        await shot(`${out}-affordance-light.png`, '[data-testid="gitlab-diff-patch"]');
+        await shot(`${out}-affordance-light.png`, '[data-testid="gitlab-diff-pane"]');
 
         // ONE LINE: a press on its number opens the box under it.
-        await diffGutterLine(page, 5).click();
+        await diffGutterLine(page, HEALTH_FILE, 5).click();
         await page.waitForSelector('[data-testid="gitlab-diff-composer"][data-lines="Line 5"]', {
           timeout: 10_000,
         });
@@ -2326,7 +2508,7 @@ if (import.meta.main) {
 
         // SEVERAL: a drag from one line number down to another, which is the half of the
         // gesture nobody discovers by looking — hence the hint on the control.
-        await dragDiffLines(page, 3, 6);
+        await dragDiffLines(page, HEALTH_FILE, 3, 6);
         await page.waitForSelector('[data-testid="gitlab-diff-composer"][data-lines="Lines 3–6"]', {
           timeout: 10_000,
         });
@@ -2381,7 +2563,7 @@ if (import.meta.main) {
         // And on a PHONE, where the box shares the screen with the code it is about.
         await page.setViewportSize({ width: 390, height: 844 });
         await page.waitForTimeout(600);
-        await diffGutterLine(page, 5).click();
+        await diffGutterLine(page, HEALTH_FILE, 5).click();
         await page.waitForSelector('[data-testid="gitlab-diff-composer"]', { timeout: 10_000 });
         await shot(`${out}-mobile-light.png`);
         await page.setViewportSize(VIEWPORT);
@@ -2709,6 +2891,77 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-{linear,gitlab}-light.png, ${out}-{gitlab,linear}-dark.png and ` +
           `${out}-{linear,gitlab}-mobile-light.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // A TRACKER REFERENCE in somebody's words: a Linear issue and a GitLab merge request named
+  // as text, drawn as the chip that goes to each (see web/src/lib/tracker-ref.ts). Captured on
+  // the three surfaces that carry one for three different reasons — a chat message, an agent's
+  // own answer, and a merge request's description — because the whole claim of this feature is
+  // that they read the same everywhere.
+  if (args.includes("--tracker-refs")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      // 1. A CHAT MESSAGE. The seeded thread carries the three cases at once: a bare `!99`
+      // resolved from the project this message's own link names, a Linear identifier, and
+      // `UTF-8`, which must stay the word it is.
+      await openConversation(page, "GitLab Links");
+      await page.waitForSelector('[data-testid="tracker-ref"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-message-light.png`);
+      const bubble = '[data-testid="message"]:has([data-testid="tracker-ref"])';
+      await shot(`${out}-bubble-light.png`, bubble);
+      await setTheme("dark");
+      await shot(`${out}-bubble-dark.png`, bubble);
+      await setTheme("light");
+      // On a phone, where the chip has to stay one piece: it is `nowrap`, so a narrow bubble
+      // wraps around it rather than breaking the mark off its number.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(400);
+      await shot(`${out}-mobile-light.png`);
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(400);
+
+      // 2. An AGENT'S ANSWER, which is where this started: the reply names a merge request and
+      // an issue, and the chips are read out of the words the CLI wrote — there is no markup in
+      // them (see lib/tracker-ref.ts). Waited out to the finished message, because that is the
+      // body every client shows and the one a reader acts on.
+      await openFirstConversation(page);
+      await turnAgentOn(page);
+      await askAgent(page, "@claude which port does the backend listen on?");
+      const answer = '[data-testid="message"]:has([data-testid="agent-signature"])';
+      // The chips are drawn as the words arrive — the stream goes through the same renderer —
+      // so waiting on one is waiting for the part of the answer this capture is about.
+      await page
+        .locator(`${answer} [data-testid="tracker-ref"]`)
+        .last()
+        .waitFor({ state: "visible", timeout: 60_000 });
+      // Then, best-effort, let the run END, so what is captured is the message's own body
+      // rather than the overlay above it: the two agree, and the posted one is what a reader
+      // comes back to.
+      await page
+        .waitForFunction(`!document.querySelector('[data-testid="agent-status"]')`, undefined, {
+          timeout: 30_000,
+        })
+        .catch(() => console.log("[preview] the run is still going — capturing the stream"));
+      await page.waitForTimeout(400);
+      await shot(`${out}-answer-light.png`, answer);
+      await setTheme("dark");
+      await shot(`${out}-answer-dark.png`, answer);
+      await setTheme("light");
+
+      // 3. A MERGE REQUEST's own description, where a bare `!595` means a merge request of the
+      // project the page is about — GitLab's own rule, and the one thing a chat message has no
+      // surface to say (see `TrackerProjectProvider`).
+      await openGitLabTab(page);
+      await openMergeRequestAt(page, 0);
+      await page.waitForSelector('[data-testid="gitlab-description"] [data-testid="tracker-ref"]');
+      await shot(`${out}-description-light.png`, '[data-testid="gitlab-description"]');
+      await setTheme("dark");
+      await shot(`${out}-description-dark.png`, '[data-testid="gitlab-description"]');
+      console.log(
+        `[preview] wrote ${out}-{message,bubble,mobile,answer,description}-*.png`,
       );
     });
     process.exit(0);

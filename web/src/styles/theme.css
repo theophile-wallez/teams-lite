@@ -103,6 +103,16 @@
   --agent-tag-opencode: #55504c;
   --agent-tag-surface-opencode: #e9e7e5;
 
+  /* A tracker reference chip (`STMN-3439`, `!42` — see lib/tracker-ref.ts). Its surface is
+   * its OWN rather than a wash of whatever it sits on, because this chip appears on every
+   * surface in the app — an incoming bubble, our own solid accent one, a merge request's
+   * description, a card — and a Linear mark is a single flat ink: it needs a background it
+   * can be read on that the chip itself guarantees. Neutral on purpose too: the mark says
+   * which tracker, so a tint would only compete with it. */
+  --tracker-ref: #3f3f46; /* zinc-700 */
+  --tracker-ref-surface: #ededf0;
+  --tracker-ref-surface-hover: #e2e2e8;
+
   /* Reaction pills straddle the bubble's bottom edge, and their fill is
    * translucent so that edge shows faintly through the chip. The chip pairs it
    * with a backdrop blur, which keeps the emoji legible over whatever is behind.
@@ -231,6 +241,13 @@
   --agent-tag-surface-claude: rgba(217, 119, 87, 0.24);
   --agent-tag-opencode: #d6d1d1;
   --agent-tag-surface-opencode: rgba(183, 177, 177, 0.2);
+
+  /* The tracker chip on dark. Opaque like its light twin, and for the same reason: the mark
+   * inside it is one flat ink (white, on this theme), so the chip owns the contrast under
+   * it wherever it is drawn. */
+  --tracker-ref: #e4e4e7; /* zinc-200 */
+  --tracker-ref-surface: #34343a;
+  --tracker-ref-surface-hover: #3f3f47;
 
   --reaction-chip: rgba(46, 46, 46, 0.7);
   --reaction-chip-mine: rgba(58, 65, 128, 0.76);

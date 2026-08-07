@@ -65,7 +65,14 @@ export type RichTag =
    *  for nothing. So the node names the upload — `project`, `secret`, `filename` — and the
    *  renderer loads it through the backend (see `gitlab-upload.ts`). The parser only ever
    *  produces one for a fetchable upload; every other image stays the link it always was. */
-  | "gitlabImage";
+  | "gitlabImage"
+  /** A tracker reference: a Linear issue (`STMN-3439`) or a GitLab merge request (`!42`)
+   *  named in somebody's words. The parser never produces one — a reference carries no
+   *  markup anywhere, which is why it is read from the words — so it only ever comes from
+   *  {@link markTrackerRefs}, the way `agent` only comes from {@link markAgentTag}. Its
+   *  children are the author's own text, verbatim, so anything that does not know the tag
+   *  still shows exactly what was written. */
+  | "trackerRef";
 
 export type RichAttrs = {
   href?: string;
@@ -94,10 +101,21 @@ export type RichAttrs = {
   /** Custom emoji only: the code (`:shipit:`) the emoji was sent with. */
   code?: string;
   /** GitLab images only: which upload the picture is (see the `gitlabImage` tag). The three
-   *  together are the whole address, and the backend spells the endpoint from them. */
+   *  together are the whole address, and the backend spells the endpoint from them.
+   *
+   *  `project` is also a tracker reference's project path, for the same reason: it is which
+   *  project the thing named lives in. */
   project?: string;
   secret?: string;
   filename?: string;
+  /** Tracker references only: which tracker the reference names, so the chip wears that
+   *  vendor's own mark and goes where that vendor's things are read — Linear's own page for
+   *  an issue, THIS app's page for a merge request. */
+  tracker?: "linear" | "gitlab";
+  /** Tracker references only: the short reference the chip shows when the author wrote no
+   *  label of their own (`STMN-3439`, `!42`). Kept beside the children rather than derived
+   *  from them, because the children may be the author's own words instead. */
+  reference?: string;
   /** GitLab images only: the size the author asked for, out of GitLab's own
    *  `{width=777 height=312}` attribute block. Used to hold the picture's room before the
    *  bytes arrive, so a description does not re-flow around it as it loads. */
@@ -218,6 +236,23 @@ function safeSrc(raw: string | undefined): string | undefined {
   if (/^https?:\/\//i.test(url)) return url;
   if (/^data:image\//i.test(url)) return url;
   return undefined;
+}
+
+/** The largest picture size an attribute may state, in px. The number comes from a body
+ *  somebody else wrote, and it is used to hold a box on screen. */
+const MAX_PICTURE_PX = 100_000;
+
+/**
+ * One `width` / `height` attribute as pixels, or `undefined` when it states none this app can
+ * use. Teams writes a FRACTION on a picture the sender resized in their composer
+ * (`width="521.5654952076677"`), so the value is rounded rather than refused — it holds a box,
+ * and a box is whole pixels. A percentage, a unit or anything else is dropped: a value this
+ * app cannot turn into pixels is no value at all.
+ */
+function pixelAttr(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const value = /^\s*\d+(?:\.\d+)?\s*$/.test(raw) ? Math.round(Number(raw)) : 0;
+  return value > 0 && value <= MAX_PICTURE_PX ? value : undefined;
 }
 
 type RawAttrs = Record<string, string>;
@@ -465,7 +500,13 @@ export function parseRichHtml(html: string): RichNode[] {
       const src = safeSrc(attrs["src"]);
       if (src) {
         const alt = attrs["alt"] ? decodeEntities(attrs["alt"]) : undefined;
-        pushChild({ type: "element", tag: "img", attrs: { src, alt }, children: [] });
+        // The size the sender's client wrote on the tag, so the picture holds its own room
+        // while the bytes travel through the media proxy — the rule a GitLab upload already
+        // follows. Both halves or neither: an aspect ratio needs the pair.
+        const width = pixelAttr(attrs["width"]);
+        const height = pixelAttr(attrs["height"]);
+        const size = width && height ? { width, height } : {};
+        pushChild({ type: "element", tag: "img", attrs: { src, alt, ...size }, children: [] });
       }
       continue;
     }

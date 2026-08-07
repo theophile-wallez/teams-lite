@@ -174,6 +174,13 @@ pub fn cache_key(project_path: &str, iid: u64, kind: &str) -> String {
     format!("{}{kind}", cache_prefix(project_path, iid))
 }
 
+/// The kind one JOB's log is cached under. It names the job, because a pipeline holds up to
+/// fifteen of them and each log is its own read — and it sits under the merge request's own
+/// prefix like every other, so a write drops them all together.
+pub fn job_cache_kind(job_id: u64) -> String {
+    format!("job-{job_id}")
+}
+
 /// One merge request as the sidebar draws it. Deliberately narrow: this list is 100 rows
 /// long and every field costs bytes on the socket and a re-render on the page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -373,6 +380,111 @@ pub struct Job {
     /// graph reads it as the former and groups by stage when no job carries one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
+}
+
+// ---- one job's LOG ----------------------------------------------------------
+//
+// Pressing a job card opens that job's log on a page of its own. Everything below was
+// measured against this instance by `examples/job_trace_recon.rs` — READ-ONLY, over 58 jobs
+// of the 12 newest open merge requests — and each fact decides something here:
+//
+//   - **The trace is `text/plain`, and a LENGTH always travels** (58/58). So nothing about it
+//     is JSON, which is why it has a reader of its own below.
+//   - **A RANGE READ IS REFUSED.** No `accept-ranges` on any answer, and a `Range` request
+//     was answered `200` with the whole log 48 times out of 48. So a log too big to travel
+//     cannot be asked for in pieces: the only choice is WHICH end travels, and it is the
+//     TAIL — a job fails at the end of its log, which is what a reader opening one is after.
+//   - **It is small, until it is not.** Median 11 KB, p90 148 KB, largest 510 KB; median 192
+//     lines, largest 4 238 — and the longest single LINE measured 22 129 bytes, which is why
+//     the page never wraps by default.
+//   - **A job with NO log answers 200 with an empty body** (10 of 58 — 8 `manual`, 2
+//     `created`), never a 404. Both are stated rather than drawn as an empty page.
+//   - **`failure_reason` is present only on a job that failed** (2 of 58), and `runner`,
+//     `started_at`, `finished_at` and `queued_duration` only once a job has really run
+//     (48 of 58). Every one of them is therefore optional here.
+
+/// How much of one job's log travels.
+///
+/// Twice the largest log measured on this instance (510 KB), so nothing real is cut — and a
+/// ceiling all the same, because a monorepo job can produce tens of megabytes and this payload
+/// crosses a WebSocket into a phone. What travels is the TAIL (see [`tail_of`]): a Range read
+/// is refused by this instance, so choosing an end is the only choice there is.
+const MAX_TRACE_BYTES: usize = 1024 * 1024;
+
+/// One CI job in full: what the log page's header states.
+///
+/// Wider than [`Job`], which is a card in a graph — this is the one job a reader opened, so it
+/// carries why it failed, what ran it and how long it waited. Every field GitLab omits until a
+/// job has run is optional, because a `manual` job carries none of them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct JobDetail {
+    pub id: u64,
+    pub name: String,
+    pub stage: String,
+    pub status: String,
+    pub allow_failure: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+    /// How long the job waited for a runner. GitLab's own job page states it, and it is the
+    /// difference between a slow job and a busy fleet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_duration: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    /// GitLab's own word for why a job failed — `script_failure`, `runner_system_failure`,
+    /// `job_execution_timeout`. It is the one thing a log cannot always say for itself: a job
+    /// killed for taking too long ends mid-sentence with nothing to explain it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    /// What ran it, as the runner describes itself. Nothing about the reader travels here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    /// When somebody ERASED the log. An erased job is why a finished job can have no log at
+    /// all, and saying so is the difference between "there is nothing" and "there was
+    /// something".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub erased_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_id: Option<u64>,
+}
+
+/// One job's log, with the job it belongs to.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct JobLog {
+    pub job: JobDetail,
+    /// The log itself, ANSI and section markers as the runner wrote them — the page parses
+    /// both (`web/src/lib/gitlab-job-log.ts`). Empty when the job produced none.
+    pub trace: String,
+    /// How many bytes GitLab holds, which is more than `trace` when it was cut.
+    pub bytes: u64,
+    /// Whether `trace` is the TAIL of a longer log. The page says so, and offers GitLab's own
+    /// job page for the whole of it — the only thing left, since a Range read is refused.
+    pub truncated: bool,
+    /// Whether this log is FINISHED. It decides two things: whether the page keeps re-reading
+    /// it, and how long the answer is cached — a settled log never changes again.
+    pub complete: bool,
+    /// Why the LOG could not be read, when the job itself could.
+    ///
+    /// It is the difference between "this job printed nothing" and "this app does not know what
+    /// it printed", and the page says whichever is true — GitLab answers 404 for a job whose
+    /// trace file is gone, so both are real states. Without it a refusal was drawn as an empty
+    /// log, which is this app stating something it was never told.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_error: Option<String>,
+}
+
+/// Whether a job's status means its log will never change again.
+///
+/// `manual`, `created` and `pending` are deliberately NOT settled: each is a job that has not
+/// run yet and may still run, so its empty log is a state rather than a result.
+pub fn job_is_settled(status: &str) -> bool {
+    matches!(status, "success" | "failed" | "canceled" | "skipped")
 }
 
 /// One comment.
@@ -746,6 +858,95 @@ pub async fn fetch_pipeline(
         }
     };
     Ok(PipelineView { pipeline: Some(pipeline), jobs, stages: Vec::new() })
+}
+
+/// One job in full, with its log.
+///
+/// Two requests, and the second cannot fail the first: a job whose TRACE is refused is still a
+/// job whose state, timing and failure reason the page can state — which is the same contract
+/// the jobs list holds inside [`fetch_pipeline`]. An empty log is not a failure at all: it is
+/// what GitLab answers for a job that has not run (measured: 10 of 58, all `manual` or
+/// `created`), and the page says so.
+///
+/// The job is addressed by its own id rather than by the merge request, because that is how
+/// GitLab addresses one — the merge request travels only to key the cache under the same prefix
+/// as every other read of it, so a write drops this too.
+pub async fn fetch_job_log(
+    http: &reqwest::Client,
+    gitlab_host: &str,
+    token: Option<&str>,
+    project_path: &str,
+    job_id: u64,
+) -> Result<JobLog> {
+    let token = require_token(token)?;
+    let base = format!(
+        "{}/projects/{}/jobs/{job_id}",
+        gitlab::api_base(gitlab_host),
+        gitlab::encode_path(project_path),
+    );
+    let body = read_json(http, &base, token, "the job").await?;
+    let job = job_detail_from_json(&body)
+        .context("GitLab answered with something that is not a job")?;
+
+    let (trace, trace_error) = match read_text(http, &format!("{base}/trace"), token).await {
+        Ok(text) => (text, None),
+        Err(e) => {
+            // A log that cannot be read costs the LOG and nothing else — the contract the jobs
+            // list already holds inside `fetch_pipeline` — but the reason travels with it, because
+            // "the job printed nothing" and "we could not read what it printed" are different
+            // sentences and only one of them is true.
+            eprintln!("[gitlab] the log of job {job_id} could not be read: {e:#}");
+            (String::new(), Some(format!("{e:#}")))
+        }
+    };
+    let bytes = trace.len() as u64;
+    let complete = job_is_settled(&job.status);
+    let (trace, truncated) = tail_of(trace, MAX_TRACE_BYTES);
+    Ok(JobLog { job, trace, bytes, truncated, complete, trace_error })
+}
+
+/// The LAST `limit` bytes of a log, cut on a line boundary, and whether anything was cut.
+///
+/// The tail rather than the head because a job fails at the END of its log — and cut at a
+/// newline because half a line is half an ANSI sequence, which a renderer would draw as junk.
+/// A log that fits is returned untouched, which is nearly every one of them (measured: the
+/// largest on this instance is 510 KB against a 1 MiB ceiling).
+fn tail_of(trace: String, limit: usize) -> (String, bool) {
+    if trace.len() <= limit {
+        return (trace, false);
+    }
+    let from = trace.len() - limit;
+    // Searched over the BYTES, because `from` may land inside a character and slicing a `str`
+    // there panics. A `\n` byte cannot appear inside a multi-byte character, so the index after
+    // one is always a safe place to cut.
+    let bytes = trace.as_bytes();
+    // The first WHOLE line at or after the cut is where the tail starts. A cut landing exactly
+    // on a line's first byte keeps that line — dropping it would throw away a line that fits —
+    // and a window holding no newline at all falls back to the next character boundary.
+    let start = if from == 0 || bytes[from - 1] == b'\n' {
+        from
+    } else {
+        match bytes[from..].iter().position(|byte| *byte == b'\n') {
+            Some(at) => from + at + 1,
+            None => (from..trace.len())
+                .find(|at| trace.is_char_boundary(*at))
+                .unwrap_or(trace.len()),
+        }
+    };
+    (trace[start..].to_string(), true)
+}
+
+/// One authenticated GET whose body is TEXT, with GitLab's refusal turned into a sentence.
+///
+/// A job's log is the one read on this page that is not JSON (measured: `text/plain` on every
+/// answer), so it has a reader of its own rather than a flag on [`read_json`].
+async fn read_text(http: &reqwest::Client, endpoint: &str, token: &str) -> Result<String> {
+    let resp = get(http, endpoint, Some(token)).await.context("gitlab job log")?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("{}", refusal(status, "the job's log"));
+    }
+    resp.text().await.context("gitlab job log body")
 }
 
 /// Every discussion on one merge request, oldest first.
@@ -1402,6 +1603,41 @@ fn job_from_json(value: &serde_json::Value) -> Option<Job> {
     })
 }
 
+/// One job in full, from the job endpoint's own body.
+///
+/// A row with no id is not a job; everything else defaults or stays absent, because a `manual`
+/// job carries no runner, no timing and no reason — and drawing "0s" over a job that never ran
+/// would state something GitLab did not say.
+fn job_detail_from_json(value: &serde_json::Value) -> Option<JobDetail> {
+    Some(JobDetail {
+        id: value.get("id").and_then(serde_json::Value::as_u64)?,
+        name: str_field(value, "name").unwrap_or_default(),
+        stage: str_field(value, "stage").unwrap_or_else(|| "other".to_string()),
+        status: str_field(value, "status").unwrap_or_default(),
+        allow_failure: bool_field(value, "allow_failure"),
+        duration: value.get("duration").and_then(serde_json::Value::as_f64),
+        queued_duration: value.get("queued_duration").and_then(serde_json::Value::as_f64),
+        web_url: str_field(value, "web_url"),
+        created_at: str_field(value, "created_at"),
+        started_at: str_field(value, "started_at"),
+        finished_at: str_field(value, "finished_at"),
+        failure_reason: str_field(value, "failure_reason"),
+        // The runner DESCRIBES itself, and its description is what a reader recognises a
+        // fleet's machine by. Its name is the fallback, because an unnamed runner still ran it.
+        runner: value
+            .get("runner")
+            .filter(|runner| !runner.is_null())
+            .and_then(|runner| {
+                str_field(runner, "description").or_else(|| str_field(runner, "name"))
+            }),
+        erased_at: str_field(value, "erased_at"),
+        pipeline_id: value
+            .get("pipeline")
+            .and_then(|pipeline| pipeline.get("id"))
+            .and_then(serde_json::Value::as_u64),
+    })
+}
+
 fn note_from_json(value: &serde_json::Value, me: Option<u64>) -> Option<Note> {
     let author = value.get("author");
     let author_id = author.and_then(|a| a.get("id")).and_then(serde_json::Value::as_u64);
@@ -1853,6 +2089,100 @@ mod tests {
         assert_eq!(job.duration, None);
         // A job with no id cannot be linked to, so it is dropped rather than drawn.
         assert!(job_from_json(&serde_json::json!({ "name": "x" })).is_none());
+    }
+
+    /// The job endpoint's own body, as `examples/job_trace_recon.rs` measured it on this
+    /// instance — including the two shapes that decide what the page can state: a job that
+    /// RAN carries a runner, its timings and, when it failed, GitLab's own reason; a `manual`
+    /// job carries none of them, and every one of those fields is absent rather than zero.
+    #[test]
+    fn reads_the_job_the_tenant_answers() {
+        let ran = job_detail_from_json(&serde_json::json!({
+            "id": 1_284_501,
+            "name": "unit tests",
+            "stage": "test",
+            "status": "failed",
+            "allow_failure": false,
+            "duration": 214.63,
+            "queued_duration": 3.1,
+            "failure_reason": "script_failure",
+            "created_at": "2026-08-06T09:12:00.000Z",
+            "started_at": "2026-08-06T09:12:04.000Z",
+            "finished_at": "2026-08-06T09:15:38.000Z",
+            "web_url": "https://git.example.com/g/app/-/jobs/1284501",
+            "runner": { "id": 9, "description": "shared-runner-04", "name": "gitlab-runner" },
+            "pipeline": { "id": 55_120, "status": "failed" },
+        }))
+        .expect("a job");
+        assert_eq!(ran.failure_reason.as_deref(), Some("script_failure"));
+        // The runner DESCRIBES itself, and the description wins over the name.
+        assert_eq!(ran.runner.as_deref(), Some("shared-runner-04"));
+        assert_eq!(ran.pipeline_id, Some(55_120));
+        assert!(job_is_settled(&ran.status));
+
+        let manual = job_detail_from_json(&serde_json::json!({
+            "id": 7,
+            "name": "deploy",
+            "stage": "deploy",
+            "status": "manual",
+            "allow_failure": false,
+            "duration": null,
+            "runner": null,
+            "failure_reason": null,
+        }))
+        .expect("a job");
+        assert_eq!((manual.duration, manual.queued_duration), (None, None));
+        assert_eq!((manual.runner, manual.failure_reason, manual.started_at), (None, None, None));
+        // A job that has not run yet is NOT settled: its empty log is a state, and it may
+        // still be started by somebody — so nothing may cache it as final.
+        assert!(!job_is_settled(&manual.status));
+        for state in ["running", "pending", "created", "waiting_for_resource"] {
+            assert!(!job_is_settled(state), "{state} is not a finished job");
+        }
+        for state in ["success", "failed", "canceled", "skipped"] {
+            assert!(job_is_settled(state), "{state} is a finished job");
+        }
+        // A body that is not a job at all is refused rather than drawn as an empty header.
+        assert!(job_detail_from_json(&serde_json::json!({ "name": "x" })).is_none());
+    }
+
+    /// A log too big to travel is cut at the END, on a line boundary.
+    ///
+    /// The tail because a job fails at the end of its log; the boundary because half a line is
+    /// half an ANSI sequence. A Range read is refused by this instance
+    /// (`examples/job_trace_recon.rs`), so which end travels is the only choice there is.
+    #[test]
+    fn a_log_too_big_to_travel_keeps_its_tail_whole_lines_only() {
+        let whole = "one\ntwo\nthree\n".to_string();
+        assert_eq!(tail_of(whole.clone(), 1024), (whole, false));
+
+        let (tail, truncated) = tail_of("aaaa\nbbbb\ncccc\ndddd\n".to_string(), 10);
+        assert!(truncated);
+        // The tail starts after a newline, so the first line is a whole one.
+        assert_eq!(tail, "cccc\ndddd\n");
+        assert!(!tail.starts_with('\n'));
+
+        // A log with no newline in the window at all still cuts on a character boundary rather
+        // than panicking in the middle of one.
+        let (tail, truncated) = tail_of("héllo wörld".to_string(), 4);
+        assert!(truncated);
+        assert!("héllo wörld".ends_with(&tail));
+
+        // The ceiling is generous against what was measured (510 KB the largest), so a real
+        // log travels whole.
+        assert!(MAX_TRACE_BYTES > 512 * 1024);
+    }
+
+    /// One job's log sits under its merge request's own prefix, so a write drops it with
+    /// everything else — and each job keys its own entry, because a pipeline holds fifteen.
+    #[test]
+    fn every_job_log_sits_under_the_merge_requests_prefix() {
+        let prefix = cache_prefix("group/sub/app", 42);
+        let one = cache_key("group/sub/app", 42, &job_cache_kind(1_284_501));
+        let other = cache_key("group/sub/app", 42, &job_cache_kind(1_284_502));
+        assert!(one.starts_with(&prefix) && other.starts_with(&prefix));
+        assert_ne!(one, other);
+        assert_ne!(one, cache_key("group/sub/app", 42, "pipeline"));
     }
 
     #[test]

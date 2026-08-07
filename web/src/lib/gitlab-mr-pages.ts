@@ -98,6 +98,19 @@ export function gitlabPageUrl(
   return `${base}${mergeRequestPageEntry(page).gitlabPath}`;
 }
 
+/**
+ * This app's own address for ONE job's log, under the merge request it belongs to.
+ *
+ * A job hangs off the Pipelines page rather than sitting beside it in the strip above: it is a
+ * detail of a run, so the strip keeps Pipelines current there and Back leaves the log for the run.
+ *
+ * `mergeRequestId` is already the URL-safe pair (see `mergeRequestId` in lib/gitlab-mr.ts), so
+ * nothing here encodes anything twice.
+ */
+export function jobLogPath(mergeRequestId: string, jobId: number): string {
+  return `/mr/${mergeRequestId}/jobs/${jobId}`;
+}
+
 /** What the way out to GitLab is called on a page that holds nothing yet. Names the PAGE, so
  *  a reader on Commits is never offered "the changes". */
 export function gitlabPageLinkLabel(page: MergeRequestPage): string {

@@ -23,6 +23,7 @@ import {
   type PipelineGrouping,
 } from "~/lib/gitlab-pipeline-graph";
 import { gitlabPageUrl, mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
+import { useJobLogLink } from "./gitlab-mr-pages";
 import { cn } from "~/lib/utils";
 import { useAppState } from "./controller-context";
 import {
@@ -240,6 +241,9 @@ export function GitLabPipelinePage() {
  *  a reader finds the four minutes they are looking for. */
 function JobList(props: { view: GitLabPipelineView }) {
   const stages = useMemo(() => pipelineStages(props.view), [props.view]);
+  // A row opens the job's LOG, exactly as a card in the graph does: two views of one read must not
+  // be two answers to "what happens when I press a job".
+  const link = useJobLogLink();
   return (
     <div data-testid="gitlab-pipeline-jobs" className="min-h-0 flex-1 overflow-y-auto px-3 py-3 md:px-5">
       <div className="mx-auto flex max-w-2xl flex-col gap-4">
@@ -261,11 +265,11 @@ function JobList(props: { view: GitLabPipelineView }) {
                   className="flex items-center gap-2 px-3 py-2"
                 >
                   <ToneDot tone={jobTone(job)} />
-                  {job.web_url ? (
+                  {link ? (
                     <a
-                      href={job.web_url}
-                      target="_blank"
-                      rel="noreferrer"
+                      {...link(job.id)}
+                      data-testid="gitlab-pipeline-job-link"
+                      title={`Open the log of ${job.name}`}
                       className="min-w-0 flex-1 truncate text-[13px] text-text-dim underline-offset-2 hover:text-foreground hover:underline"
                     >
                       {job.name}

@@ -17,6 +17,7 @@ import {
 import {
   bodyFormat,
   copyableMessageText,
+  extractImages,
   mentionsByItemId,
   parseRichMessage,
   urlHost,
@@ -26,6 +27,7 @@ import {
   type ParsedRichMessage,
   type Reaction,
   type ReactionPick,
+  type RichQuote,
 } from "~/lib/protocol";
 import { customReactionArt, reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
 import { hasActivePipeline } from "~/lib/gitlab-pipeline";
@@ -40,6 +42,7 @@ import {
   hasVisibleContent,
   parseMessageBody,
 } from "~/lib/rich-text";
+import { projectNamedIn } from "~/lib/tracker-ref";
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun, type AgentTranscript } from "~/lib/agent-run";
 import { agentTagsInMessage } from "~/lib/agent-tag";
@@ -69,6 +72,7 @@ import { FileAttachment, MediaImage, RecordingAttachment } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
 import { LinearLinkCard } from "./linear-link-card";
 import { PersonHoverCard } from "./person-card";
+import { TrackerProjectProvider, useTrackerVocabulary } from "./tracker-refs-context";
 import { Emoji } from "./emoji";
 import { useAppState, useController } from "./controller-context";
 import { useMessageGestures } from "./use-message-gestures";
@@ -263,6 +267,12 @@ function MessageBubbleImpl(props: {
     mergeRequest: MergeRequestLink,
   ) => void;
   onReply: (message: ChatMessage) => void;
+  /** Take the reader to the message this one quotes. Passed only where the jump can
+   *  really happen — the pane that owns the scroll — and absent on a surface with no
+   *  history to move (the bubble then draws the quote as the recessed block it always
+   *  was). The quote carries the quoted message's own id as its compose time, which is
+   *  what the pane resolves (see {@link RichQuote}). */
+  onQuoteJump?: (quote: RichQuote) => void;
   onCopy: (message: ChatMessage) => void;
   onReact: (message: ChatMessage, pick: ReactionPick) => void;
   onStartEdit: (message: ChatMessage) => void;
@@ -326,6 +336,22 @@ function MessageBubbleImpl(props: {
     () => mergeRequestsIn(candidateLinks, gitlabHost)[0] ?? null,
     [candidateLinks, gitlabHost],
   );
+
+  // The project a bare `!42` in this message belongs to (see lib/tracker-ref.ts). GitLab
+  // resolves such a reference against the project the text is IN, and for a chat message that
+  // is the message: the WHOLE of it, quote included, because a reply's subject is the thing it
+  // quotes — which is exactly the shape an agent's answer takes, since "Review this merge
+  // request: !42 <url>" comes back quoted above the answer.
+  //
+  // So it is read from the raw content rather than from `candidateLinks` (which excludes the
+  // quote on purpose — enriching it would draw a second card for a link already on screen),
+  // and through `projectNamedIn` rather than `extractLinks`, which sees anchors only: a quote
+  // carries its preview as PLAIN TEXT, so the URL in it is words by the time it gets here.
+  const trackers = useTrackerVocabulary();
+  const trackerProject = useMemo(() => {
+    if (!trackers) return null;
+    return projectNamedIn(parseMessageBody(props.message.content ?? "", format), trackers);
+  }, [props.message.content, format, trackers]);
 
   const enrichment = useEnrichedLinks(candidateLinks);
 
@@ -609,6 +635,39 @@ function MessageBubbleImpl(props: {
     return extractableCustomEmoji(allBody, customPack);
   }, [bodyParts, customPack]);
 
+  // Whether this quote can take the reader to what it quotes, which is a question about
+  // the PAYLOAD and not about the UI: a reply blockquote names the quoted message (Teams
+  // repeats its id — its ms-epoch compose time — in `itemprop="time"`), and a FORWARD
+  // names nothing at all. So a forward is never offered as a jump: the message it holds
+  // was said somewhere else, and this app cannot know where.
+  const quoteTarget = parsed.quote;
+  const quoteJumpable =
+    props.onQuoteJump !== undefined &&
+    quoteTarget !== undefined &&
+    quoteTarget.kind === "reply" &&
+    quoteTarget.time !== undefined;
+
+  // A picture in the quote is not a line of text, so the three-line clamp below would
+  // crop it rather than shorten it — a forwarded screenshot is often the whole quoted
+  // message. Measured on the quote's own HTML, which is the only part being clamped.
+  const quoteHasImage = useMemo(
+    () => (parsed.quote ? extractImages(parsed.quote.html).length > 0 : false),
+    [parsed.quote],
+  );
+
+  // A click inside the quote that the reader meant for something else: a link, a
+  // tracker chip, the quoted author's own hover trigger. The jump is what the BLOCK
+  // does; anything that already does something of its own keeps doing it.
+  //
+  // `block` is the quote itself, and it must be excluded from the search: the block is
+  // a `role="button"` now, so walking up from the clicked text finds IT first and every
+  // click would read as somebody else's.
+  const quoteClickIsOwn = (target: EventTarget | null, block: Element): boolean => {
+    if (!(target instanceof Element)) return false;
+    const owner = target.closest("a, button, [role='button'], [data-person-mri]");
+    return owner !== null && owner !== block;
+  };
+
   // The quoted message a reply carries. Its own variable because a streamed agent
   // answer needs it too: the answer is posted as a native reply to the message that
   // summoned it, and a quote that only appeared once the run finished would make the
@@ -617,9 +676,31 @@ function MessageBubbleImpl(props: {
     parsed.quote ? (
       <div
         data-testid="message-quote"
+        data-quote-jumpable={quoteJumpable ? "true" : undefined}
+        {...(quoteJumpable
+          ? {
+              role: "button",
+              tabIndex: 0,
+              "aria-label": "Go to the quoted message",
+              onClick: (event: React.MouseEvent<HTMLDivElement>) => {
+                if (quoteClickIsOwn(event.target, event.currentTarget)) return;
+                props.onQuoteJump?.(quoteTarget);
+              },
+              onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                if (quoteClickIsOwn(event.target, event.currentTarget)) return;
+                event.preventDefault();
+                props.onQuoteJump?.(quoteTarget);
+              },
+            }
+          : {})}
         className={cn(
           "my-1 rounded-lg px-2.5 py-1.5",
           mine ? "bg-quote-mine" : "bg-quote-incoming",
+          // A block that goes somewhere says so on hover, and takes the focus ring every
+          // other control in this app takes.
+          quoteJumpable &&
+            "cursor-pointer outline-none transition-colors hover:brightness-95 focus-visible:ring-2 focus-visible:ring-ring dark:hover:brightness-125",
         )}
       >
         {/* A forward carries no author at all — Teams sends the forwarded content
@@ -658,7 +739,16 @@ function MessageBubbleImpl(props: {
         ) : null}
         <RichContent
           html={parsed.quote.html}
-          className={cn("text-xs", mine ? "text-quote-text-mine" : "text-quote-text-incoming")}
+          className={cn(
+            "text-xs",
+            mine ? "text-quote-text-mine" : "text-quote-text-incoming",
+            // A quote is a POINTER to a message, not the message: three lines is enough to
+            // recognise which one, and a quoted wall of text otherwise pushed the words the
+            // author actually wrote off the screen. The clamp is CSS-only, so the full text
+            // is still in the DOM for a copy and for a find-in-page — and the jump above is
+            // the way to read the rest of it.
+            !quoteHasImage && "line-clamp-3",
+          )}
         />
       </div>
     ) : null;
@@ -732,6 +822,10 @@ function MessageBubbleImpl(props: {
   );
 
   return (
+    // Everything the bubble draws reads its references with this message's own project (see
+    // `trackerProject`), so a bare `!42` in it — or in the answer an agent streamed into it —
+    // means the merge request the message is about.
+    <TrackerProjectProvider project={trackerProject}>
     <div
       className={cn(
         "group flex w-full",
@@ -1009,6 +1103,7 @@ function MessageBubbleImpl(props: {
         />
       </motion.div>
     </div>
+    </TrackerProjectProvider>
   );
 }
 
