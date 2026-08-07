@@ -9,7 +9,7 @@ export type EmojiSuggestion =
 
 /** An active `:…` query in the text before the cursor. */
 export type EmojiQuery = {
-  /** What was typed after the ":" (may be empty for lone ":"). */
+  /** What was typed after the ":" — empty for a lone ":", which offers the pack. */
   query: string;
   /** Offset of the ":" itself, so the editor knows what to replace. */
   at: number;
@@ -23,7 +23,14 @@ const MAX_EMOJI_QUERY_LENGTH = 64;
  *
  * `text` is the plain text of the current block up to the cursor. An emoji code starts
  * at the beginning of a block or after whitespace — never inside a word — so "note: this"
- * does not trigger. An empty query (lone ":") returns null, so a lone colon opens no menu.
+ * does not trigger.
+ *
+ * A LONE ":" is a query too, and it offers the pack. Somebody who has just added their
+ * first emoji does not know its name yet, so "type a letter to see what you have" is
+ * backwards: the colon is the ask, and the pack is the answer. Slack opens on the colon
+ * as well. Its own risk is prose — "note:" mid-sentence — and that is why the list holds
+ * CUSTOM emoji only for an empty query (see {@link emojiSuggestions}): a lone colon
+ * cannot pull up 1800 Unicode shortcodes nobody asked for.
  */
 export function emojiQueryBefore(text: string): EmojiQuery | null {
   const at = text.lastIndexOf(":");
@@ -32,8 +39,8 @@ export function emojiQueryBefore(text: string): EmojiQuery | null {
   if (before !== undefined && !/\s/.test(before)) return null;
   const query = text.slice(at + 1);
   if (query.length > MAX_EMOJI_QUERY_LENGTH) return null;
+  // Whitespace ENDS a query, an empty one included: ": " is prose, and the list closes.
   if (/[\n\r\s]/.test(query)) return null;
-  if (query.trim() === "") return null;
   return { query, at };
 }
 
@@ -128,7 +135,11 @@ function hasAtLeastOneEmoji(nodes: RichNode[]): boolean {
 /**
  * Rank emoji suggestions for a typeahead query. Custom emoji come first,
  * then Unicode shortcodes, prefix matches before substring matches within each band.
- * An empty query returns nothing, so a lone ":" opens no menu.
+ *
+ * An EMPTY query — a lone ":" — offers the pack, and only the pack: the whole point of
+ * opening on the colon is "show me what I have", and every Unicode shortcode matches an
+ * empty prefix, so including them would bury the pack under whichever 10 come first
+ * alphabetically. A Unicode emoji is reached by naming it, which is how it always was.
  */
 export function emojiSuggestions(
   query: string,
@@ -136,7 +147,9 @@ export function emojiSuggestions(
   unicode: ReadonlyArray<readonly [string, string]>,
   limit = 10,
 ): EmojiSuggestion[] {
-  if (query.trim() === "") return [];
+  if (query.trim() === "") {
+    return pack.slice(0, limit).map((emoji) => ({ kind: "custom", name: emoji.name }));
+  }
 
   const lower = query.toLowerCase();
   const customPrefix: EmojiSuggestion[] = [];

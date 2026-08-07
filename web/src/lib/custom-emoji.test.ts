@@ -69,8 +69,33 @@ describe("emojiSuggestions", () => {
     expect(emojiSuggestions("shi", pack, [])).toEqual([{ kind: "custom", name: "ship" }]);
   });
 
-  it("offers nothing for an empty query, so a lone colon opens no menu", () => {
-    expect(emojiSuggestions("", [emoji("shipit")], [])).toEqual([]);
+  it("offers the pack for an empty query, so a lone colon shows what this machine holds", () => {
+    const pack = [emoji("shipit"), emoji("smirk-cat")];
+    expect(emojiSuggestions("", pack, [["smile", "😄"]])).toEqual([
+      { kind: "custom", name: "shipit" },
+      { kind: "custom", name: "smirk-cat" },
+    ]);
+  });
+
+  it("offers no UNICODE emoji for an empty query, which would bury the pack", () => {
+    // Every shortcode matches an empty prefix, so the ten that came first alphabetically
+    // would be the whole list — and the pack is what the reader asked to see.
+    const unicode: [string, string][] = [
+      ["smile", "😄"],
+      ["zzz", "💤"],
+    ];
+    expect(emojiSuggestions("", [emoji("shipit")], unicode)).toEqual([
+      { kind: "custom", name: "shipit" },
+    ]);
+  });
+
+  it("offers nothing at all for an empty query on an empty pack", () => {
+    expect(emojiSuggestions("", [], [["smile", "😄"]])).toEqual([]);
+  });
+
+  it("holds an empty query's list to the same bound as a typed one", () => {
+    const pack = Array.from({ length: 25 }, (_, i) => emoji(`e${i}`));
+    expect(emojiSuggestions("", pack, [])).toHaveLength(10);
   });
 });
 
@@ -93,8 +118,24 @@ describe("emojiQueryBefore", () => {
     expect(emojiQueryBefore(longQuery)).toBeNull();
   });
 
-  it("returns null for a lone colon", () => {
-    expect(emojiQueryBefore(":")).toBeNull();
+  it("makes a lone colon a query, with nothing typed after it", () => {
+    expect(emojiQueryBefore(":")).toEqual({ query: "", at: 0 });
+  });
+
+  it("makes a lone colon after a space a query too", () => {
+    expect(emojiQueryBefore("ok :")).toEqual({ query: "", at: 3 });
+  });
+
+  it("returns null once a space follows the colon, because that is prose", () => {
+    expect(emojiQueryBefore(": ")).toBeNull();
+    expect(emojiQueryBefore("note: ")).toBeNull();
+  });
+
+  it("still returns null for a colon glued to a word", () => {
+    // The rule that keeps "note:" out is the character BEFORE the colon, and a lone
+    // colon must not weaken it.
+    expect(emojiQueryBefore("note:")).toBeNull();
+    expect(emojiQueryBefore("https:")).toBeNull();
   });
 });
 

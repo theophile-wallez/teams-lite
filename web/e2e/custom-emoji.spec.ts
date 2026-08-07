@@ -347,6 +347,49 @@ test.describe("custom emoji", () => {
     await page.keyboard.press("Backspace");
   });
 
+  test("a lone : offers the pack, and only the pack", async ({ page }) => {
+    const field = await openEmojiThread(page);
+
+    // Nothing typed after the colon. Somebody who has just added their first emoji does
+    // not know its name yet, so the colon alone has to answer "what do I have?".
+    await page.keyboard.type(":");
+    const list = page.locator('[data-testid="emoji-suggestions"]');
+    await expect(list).toBeVisible();
+
+    const rows = list.locator('[role="option"]');
+    // The mock seeds three emoji, and every row is one of them: a Unicode shortcode
+    // matches an empty prefix too, so all 1800 of them would otherwise be the list.
+    // Asserted as a SET, because the order is the pack's own and this test is not about it.
+    await expect(rows).toHaveCount(3);
+    await expect(list.locator('[data-kind="unicode"]')).toHaveCount(0);
+    const names = await rows.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-testid")).sort(),
+    );
+    expect(names).toEqual([
+      "emoji-suggestion-partyparrot",
+      "emoji-suggestion-ship",
+      "emoji-suggestion-shipit",
+    ]);
+
+    // Enter still inserts the chip, so the colon alone is a whole path to an emoji.
+    const first = (await rows.first().getAttribute("data-testid"))!.replace(
+      "emoji-suggestion-",
+      "",
+    );
+    await page.keyboard.press("Enter");
+    await expect(packArt(page, first)).toBeVisible();
+
+    // A space after the colon is prose, not a query: "note: " closes the list again.
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type(": ");
+    await expect(list).toHaveCount(0);
+
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.press("Backspace");
+    await expect(field).toHaveText("");
+  });
+
   test("a taken name is refused with Slack's own sentence", async ({ page }) => {
     const section = await openEmojiSettings(page);
 

@@ -3270,6 +3270,16 @@ feature worth having: a local-only decoration would be a different, smaller feat
   hand-typed `:shipit:` too, so the autocomplete is a convenience rather than the mechanism.
   The nearest precedent in this codebase is the agent tag — a chip in the composer, bare
   text on the wire, read back by the backend.
+- **A LONE ":" opens the list, and offers the PACK.** Somebody who has just added their
+  first emoji does not know its name yet, so "type a letter and I will tell you what you
+  have" is backwards — the colon is the ask. An empty query therefore returns the pack from
+  `emojiSuggestions`, and **no Unicode shortcode**: every one of the ~1800 matches an empty
+  prefix, so including them would bury the user's own art under whichever ten sort first.
+  A Unicode emoji is still reached by naming it, exactly as before. The two rules that keep
+  prose out are untouched and each has its own test: the colon must open the line or follow
+  whitespace (so `note:` and `https:` are words), and whitespace ENDS a query (so `: ` closes
+  the list again). Pinned in `web/src/lib/custom-emoji.test.ts` and by "a lone : offers the
+  pack, and only the pack" in `web/e2e/custom-emoji.spec.ts`.
 - **This was measured, not assumed.** Two probes established the shape against the real
   tenant on 2026-08-05. `examples/custom_emoji_send_probe.rs` posted a message with two
   inline `<img itemtype="http://schema.skype.com/Emoji">` images mid-sentence, and read it
