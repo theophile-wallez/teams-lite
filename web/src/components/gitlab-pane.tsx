@@ -29,6 +29,7 @@ import {
   descriptionFoldSeconds,
   descriptionIsFoldable,
   mergeRequestId,
+  mergeRequestPeopleLines,
   mergeVerdict,
   pipelineIsLive,
   stateChangeFor,
@@ -293,14 +294,12 @@ function MergeRequestHeader(props: { detail: MergeRequestDetail }) {
         </code>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <PersonLine label="Author" people={[detail.author]} />
-        {detail.reviewers && detail.reviewers.length > 0 && (
-          <PersonLine label="Reviewers" people={detail.reviewers} />
-        )}
-        {detail.assignees && detail.assignees.length > 0 && (
-          <PersonLine label="Assignees" people={detail.assignees} />
-        )}
+      {/* The people, in rows the pure rule decides — including the one an author who is also
+          the assignee earns, which states that pair once (see `mergeRequestPeopleLines`). */}
+      <div data-testid="gitlab-people-rows" className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        {mergeRequestPeopleLines(detail).map((line) => (
+          <PersonLine key={line.label} label={line.label} people={line.people} />
+        ))}
       </div>
 
       {detail.labels && detail.labels.length > 0 && (
@@ -322,10 +321,13 @@ function MergeRequestHeader(props: { detail: MergeRequestDetail }) {
 
 /** One row of people, as faces and names. A colleague the user's Teams knows is drawn as
  *  that colleague — their Teams face and the name this app calls them (see `personFace`);
- *  anybody else keeps GitLab's own name over tinted initials. */
+ *  anybody else keeps GitLab's own name over tinted initials.
+ *
+ *  The row states its own label, because WHICH rows there are is the decision
+ *  `mergeRequestPeopleLines` makes and a test has to be able to read it back. */
 function PersonLine(props: { label: string; people: GitLabPerson[] }) {
   return (
-    <div className="flex items-center gap-2">
+    <div data-testid="gitlab-people" data-label={props.label} className="flex items-center gap-2">
       <span className="text-[12px] text-text-faint">{props.label}</span>
       {props.people.map((person) => (
         <PersonChip key={person.username || person.name} person={person} />

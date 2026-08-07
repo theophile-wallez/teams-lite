@@ -15,6 +15,7 @@ import {
   isNotMerged,
   isSystemOnly,
   mergeRequestId,
+  mergeRequestPeopleLines,
   mergeVerdict,
   parseMergeRequestId,
   pipelineIsLive,
@@ -299,6 +300,63 @@ describe("the sidebar's own rows", () => {
     expect(isNotMerged(row())).toBe(true);
     expect(isNotMerged(row({ state: "closed" }))).toBe(true);
     expect(isNotMerged(row({ state: "merged" }))).toBe(false);
+  });
+});
+
+describe("the people rows of a merge request", () => {
+  const ada = { name: "Ada", username: "ada" };
+  const lucas = { name: "Lucas Silva", username: "lucas.silva" };
+  const labels = (patch: Partial<MergeRequestDetail>) =>
+    mergeRequestPeopleLines(detail(patch)).map((line) => line.label);
+
+  it("states an author who is the sole assignee ONCE", () => {
+    const lines = mergeRequestPeopleLines(detail({ author: ada, assignees: [ada] }));
+    expect(lines).toEqual([{ label: "Author & assignee", people: [ada] }]);
+  });
+
+  it("keeps the two rows for two different people", () => {
+    expect(labels({ author: ada, assignees: [lucas] })).toEqual(["Author", "Assignees"]);
+    // A merge request nobody is assigned names its author alone, as it always did.
+    expect(labels({ author: ada })).toEqual(["Author"]);
+    expect(labels({ author: ada, assignees: [] })).toEqual(["Author"]);
+  });
+
+  it("keeps the two rows when a SECOND person is assigned as well", () => {
+    // Merging would drop Lucas, and who else the work sits with is what the row is for.
+    const lines = mergeRequestPeopleLines(detail({ author: ada, assignees: [ada, lucas] }));
+    expect(lines).toEqual([
+      { label: "Author", people: [ada] },
+      { label: "Assignees", people: [ada, lucas] },
+    ]);
+  });
+
+  it("leaves the REVIEWERS alone, and draws them between the two", () => {
+    expect(labels({ author: ada, reviewers: [lucas], assignees: [lucas] })).toEqual([
+      "Author",
+      "Reviewers",
+      "Assignees",
+    ]);
+    // Reviewing what one wrote is a different statement, so it is stated separately.
+    expect(labels({ author: ada, reviewers: [ada], assignees: [ada] })).toEqual([
+      "Author & assignee",
+      "Reviewers",
+    ]);
+    expect(labels({ author: ada, reviewers: [] })).toEqual(["Author"]);
+  });
+
+  it("names the pair only when the two accounts are PROVEN to be one person", () => {
+    // Two people GitLab keys apart, spelled the same way: a display name proves nothing, so
+    // both rows stand rather than one of them claiming the wrong thing about somebody.
+    const other = { name: "Ada", username: "ada.lovelace" };
+    expect(labels({ author: ada, assignees: [other] })).toEqual(["Author", "Assignees"]);
+    // And the colleague they resolve to is what proves it when a handle is missing.
+    const mri = { mri: "8:orgid:ada", name: "Ada" };
+    expect(
+      labels({
+        author: { name: "Ada", username: "", teams: mri },
+        assignees: [{ name: "A. Lovelace", username: "", teams: mri }],
+      }),
+    ).toEqual(["Author & assignee"]);
   });
 });
 

@@ -657,6 +657,31 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(robot.locator("img")).toHaveCount(0);
   });
 
+  test("names an author who is also the assignee once, and two people twice", async ({ page }) => {
+    await openGitLab(page);
+
+    // !596 is assigned to the person who wrote it, which is the common case on the tenant. Its
+    // name used to be spelled twice a centimetre apart — Author Ada, Assignees Ada — which
+    // reads at a glance as two people.
+    await openMergeRequest(page, 596);
+    const rows = page.locator('[data-testid="gitlab-people"]');
+    await expect(rows.filter({ hasText: "Author & assignee" })).toBeVisible();
+    await expect(rows.filter({ hasText: "Assignees" })).toHaveCount(0);
+    // Once, not twice: one chip carries the pair.
+    await expect(rows.locator('[data-person="Ada Lovelace"]')).toHaveCount(1);
+
+    // !63 is assigned to somebody else, and then both rows stand: merging them would drop a
+    // name, and who the work sits with is what the assignee row is for.
+    await openMergeRequest(page, 63);
+    await expect(rows.filter({ hasText: "Author & assignee" })).toHaveCount(0);
+    await expect(page.locator('[data-testid="gitlab-people"][data-label="Author"]')).toContainText(
+      "Ada Lovelace",
+    );
+    await expect(
+      page.locator('[data-testid="gitlab-people"][data-label="Assignees"]'),
+    ).toContainText("Lucas Silva");
+  });
+
   test("says a machine with no token can read nothing, rather than showing an empty list", async ({
     page,
   }) => {

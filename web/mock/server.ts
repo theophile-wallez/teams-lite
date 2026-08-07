@@ -4383,7 +4383,10 @@ const mockMergeRequests: MockMergeRequest[] = [
     draft: false,
     author: MOCK_GITLAB_ADA,
     reviewers: [MOCK_GITLAB_ME],
-    assignees: [],
+    // The one merge request whose assignee is somebody OTHER than its author, so both shapes
+    // of the people rows are reviewable: this one names the two, and !596 — assigned to the
+    // person who wrote it, which is the common case here — names them once.
+    assignees: [MOCK_GITLAB_LUCAS],
     labels: ["design"],
     source_branch: "refactor/token-scale",
     target_branch: "main",

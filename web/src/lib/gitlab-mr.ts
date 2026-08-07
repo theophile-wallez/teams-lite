@@ -16,7 +16,7 @@
 // drawn two ways.
 
 import type { DiffRefs } from "./gitlab-diff-comment";
-import type { TrackerPerson } from "./tracker-people";
+import { samePerson, type TrackerPerson } from "./tracker-people";
 
 /** A GitLab person is a tracker person: one shape, one match rule, one way of drawing them
  *  (`personFace`). Kept as a name of its own because this file mirrors `gitlab_mr.rs`, whose
@@ -530,6 +530,42 @@ export function rowStateLabel(row: MergeRequestRow): string {
  *  drawn in a list whose whole promise is "not merged". */
 export function isNotMerged(row: MergeRequestRow): boolean {
   return row.state !== "merged";
+}
+
+/** One row of people under the branches: what it calls them, and who stands under it. */
+export type MergeRequestPeopleLine = { label: string; people: GitLabPerson[] };
+
+/** The people rows of a merge request, in the order the page draws them.
+ *
+ *  **An author who is the SOLE assignee is stated once**, as `Author & assignee`. Most
+ *  merge requests here are written by the person they are assigned to, so the header used to
+ *  spell one name twice a centimetre apart — which asks the reader to compare two chips to
+ *  learn one fact, and reads at a glance as two people. Three rules hold it, and each is
+ *  pinned by a test:
+ *
+ *  - **Whose the two accounts are is PROVEN** (`samePerson`), never read off a display name.
+ *    Saying somebody assigned their own merge request when they did not is the wrong-face
+ *    rule of `tracker_people` again, and this surface is where that rule already lives.
+ *  - **A SECOND assignee keeps both rows.** Merging would then drop a name, and who else
+ *    the work sits with is the whole fact an assignee row carries.
+ *  - **REVIEWERS are untouched, whoever they are.** Authoring what one reviews is a
+ *    different statement about a merge request, and GitLab lists the same person as both far
+ *    less often than it lists an author as their own assignee.
+ */
+export function mergeRequestPeopleLines(detail: MergeRequestDetail): MergeRequestPeopleLine[] {
+  const reviewers = detail.reviewers ?? [];
+  const assignees = detail.assignees ?? [];
+  const sole = assignees.length === 1 ? assignees[0] : undefined;
+  const authorIsAssignee = Boolean(sole && samePerson(detail.author, sole));
+
+  const lines: MergeRequestPeopleLine[] = [
+    { label: authorIsAssignee ? "Author & assignee" : "Author", people: [detail.author] },
+  ];
+  if (reviewers.length > 0) lines.push({ label: "Reviewers", people: reviewers });
+  if (assignees.length > 0 && !authorIsAssignee) {
+    lines.push({ label: "Assignees", people: assignees });
+  }
+  return lines;
 }
 
 /** The notes of one discussion, split into what a person said and what GitLab recorded.

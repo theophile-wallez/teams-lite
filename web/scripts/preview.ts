@@ -2072,8 +2072,19 @@ if (import.meta.main) {
         await page.setViewportSize(VIEWPORT);
         await page.waitForTimeout(400);
 
-        await setTheme("dark");
+        // The PEOPLE rows, in both of their shapes — cropped, because what is worth reading
+        // is which rows there are. !63 is assigned to somebody other than its author and names
+        // the two; !596 is assigned to the person who wrote it and names them ONCE, as
+        // "Author & assignee" (see `mergeRequestPeopleLines`).
+        const people = '[data-testid="gitlab-people-rows"]';
+        await openMergeRequestAt(page, 3);
+        await shot(`${out}-people-light.png`, people);
         await openMergeRequestAt(page, 0);
+        await shot(`${out}-people-authored-light.png`, people);
+        await setTheme("dark");
+        await shot(`${out}-people-authored-dark.png`, people);
+
+        // …and the whole page in the dark theme, which this merge request is already on.
         await shot(`${out}-dark.png`);
         console.log(
           `[preview] wrote ${out}-tabs-{rest,current}-{light,dark}.png, ` +
@@ -2084,7 +2095,8 @@ if (import.meta.main) {
             `${out}-description-picture-{light,dark}.png, ` +
             `${out}-description-mobile-light.png, ` +
             `${out}-long-title-{light,mobile-light}.png, ` +
-            `${out}-blocked-{light,dark}.png and ${out}-dark.png`,
+            `${out}-blocked-{light,dark}.png, ${out}-people-light.png, ` +
+            `${out}-people-authored-{light,dark}.png and ${out}-dark.png`,
         );
       },
       { deviceScaleFactor: dpr },

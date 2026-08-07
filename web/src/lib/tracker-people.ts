@@ -56,3 +56,19 @@ export function personFace(person: TrackerPerson): TrackerFace {
     label: person.name || person.username,
   };
 }
+
+/** Whether two tracker people are ONE person, so a surface can say once what it would
+ *  otherwise say twice (the author of a merge request who is also its assignee).
+ *
+ *  The identity is PROVEN, never read off a display name: the handle is what the tracker
+ *  keys an account on, the mri is what this app keys a colleague on, and a name is neither
+ *  — two colleagues may share one, which is the rule `tracker_people` already refuses to
+ *  cross. So people this app cannot tell apart are two people, and a surface says both
+ *  names rather than one wrong one. */
+export function samePerson(a: TrackerPerson, b: TrackerPerson): boolean {
+  if (a.username && b.username) return a.username === b.username;
+  // No handle on one of them — a Linear user with nothing but a name — so the colleague they
+  // resolve to is the only thing left that proves it.
+  const mri = a.teams?.mri;
+  return Boolean(mri) && mri === b.teams?.mri;
+}

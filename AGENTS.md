@@ -724,7 +724,7 @@ read. That is exactly where a Teams message edit sits (§ Sending messages: an e
 reaction toggles off, a deletion is final), so it is offered the same way: one press, on the
 user's OWN comment only, checked against GitLab before the network like the deletion. Asking
 twice for a rewrite while a message that reaches the same people asks once would teach the
-reader that the dialog means nothing. Eight more rules hold the page together:
+reader that the dialog means nothing. Nine more rules hold the page together:
 
 - **A comment is deleted or EDITED only when it is the USER'S OWN**, and whose it is comes
   from GitLab (`note.mine`, matched on the account's id) read BEFORE the write — not from what
@@ -798,6 +798,21 @@ reader that the dialog means nothing. Eight more rules hold the page together:
     ANOTHER merge request opens folded: this pane is not re-created when the open merge request
     changes, so the description is keyed by it (`mergeRequestId`) — without that key a reader
     who opened one description found the next one already open.
+- **An author who is also the ASSIGNEE is named once.** Most merge requests on this instance
+  are written by the person they are assigned to, and the header spelled that one name twice a
+  centimetre apart — `Author <Ada>  Assignees <Ada>` — which asks the reader to compare two
+  chips to learn one fact and reads at a glance as two people. `mergeRequestPeopleLines`
+  (`web/src/lib/gitlab-mr.ts`) decides which rows there are, the capture is
+  `${out}-people-{light,authored-light,authored-dark}.png`, and `web/e2e/gitlab.spec.ts` pins
+  each of the three rules:
+  - **Whose the two accounts are is PROVEN** (`samePerson` in `lib/tracker-people.ts`): the
+    handle GitLab keys the account on, then the mri this app keys a colleague on, and NEVER a
+    display name — two colleagues may share one, and saying somebody assigned their own merge
+    request when they did not is the wrong-face rule of `tracker_people` again.
+  - **A SECOND assignee keeps both rows**, because merging them would then drop a name, and who
+    else the work sits with is the whole fact an assignee row carries.
+  - **REVIEWERS are untouched, whoever they are.** Authoring what one reviews is a different
+    statement about a merge request, and GitLab lists the same person as both far less often.
 - **A long TITLE is shortened by the header and wrapped by the page, and widens neither.** An
   author here writes the summary and then every ticket the branch closes, so a title runs to
   150 characters — and `truncate` shortens NOTHING while its container is free to grow: a
@@ -1256,8 +1271,8 @@ watchable — and the `{kind:"gitlab_mr"}` test hook arms a refusal, a machine w
 and the reset a spec MUST call afterwards. `cd web && bun run preview -- --out /tmp/mr
 --gitlab` captures the tab strip in both of its states (pass `--dpr 4`: the tanuki is 17px),
 the list, the page, the merge armed, the comments, the description folded in both
-themes and opened, the description at a phone's width, a 150-character title at both widths and
-a blocked merge in both themes;
+themes and opened, the description at a phone's width, a 150-character title at both widths,
+the people rows in both of their shapes and a blocked merge in both themes;
 `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
 is the user's own click, in their own app.
@@ -1659,7 +1674,8 @@ user. Two independent mechanisms enforce that split:
   the merge armed, the comments — one of which carries a pasted PICTURE beside an image on
   another host — the description folded and opened, the picture the description ends with in
   both themes, the description at a phone's
-  width, a 150-character title at both widths and a blocked merge:
+  width, a 150-character title at both widths, the people rows in both of their shapes and a
+  blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt` /
   `openMergeRequestPage` from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
   each of the three files with no patch, the expand control and what it hands over, and both of
