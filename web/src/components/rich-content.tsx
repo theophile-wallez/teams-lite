@@ -12,7 +12,6 @@ import {
   type RichNode,
   type RichTag,
 } from "~/lib/rich-text";
-import { bodyIsOnlyEmoji } from "~/lib/custom-emoji";
 import { markAgentTag } from "~/lib/agent-tag";
 import type { AgentCandidate } from "~/lib/mentions";
 import type { BodyFormat, MessageMention } from "~/lib/protocol";
@@ -121,7 +120,6 @@ export function RichNodes(props: {
     () => mergeMentionRuns(props.nodes, props.mentions),
     [props.nodes, props.mentions],
   );
-  const jumbo = useMemo(() => bodyIsOnlyEmoji(nodes), [nodes]);
   if (!hasVisibleContent(nodes)) return null;
   return (
     <div className={cn("break-words", props.className)}>
@@ -130,7 +128,6 @@ export function RichNodes(props: {
           mentions: props.mentions,
           cardShownSeparately: props.cardShownSeparately,
           tokens: props.tokens,
-          jumbo,
         }),
       )}
     </div>
@@ -300,7 +297,6 @@ type RenderContext = {
   inPre?: boolean;
   cardShownSeparately?: boolean;
   tokens?: boolean;
-  jumbo?: boolean;
 };
 
 function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode {
@@ -318,10 +314,6 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
     inPre: ctx.inPre || node.tag === "pre",
     cardShownSeparately: ctx.cardShownSeparately,
     tokens: ctx.tokens,
-    // An emoji-only body is decided once, on the whole tree, so it has to travel DOWN
-    // it: a one-emoji message serializes as `<p><img …></p>`, so the emoji is never a
-    // top-level node and a `jumbo` left behind here reached nothing.
-    jumbo: ctx.jumbo,
   };
   const children = node.children.map((child, i) => renderNode(child, i, childCtx));
 
@@ -588,7 +580,6 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
           key={key}
           src={node.attrs.src ?? ""}
           label={node.attrs.code ?? ""}
-          jumbo={ctx.jumbo}
         />
       );
     default:

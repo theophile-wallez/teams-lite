@@ -22,7 +22,6 @@ export function CustomEmoji(props: {
    *  neutral phrase where the key names only art. Used as `alt`, `title`, and as the
    *  text drawn in its place when the bytes cannot be fetched. */
   label: string;
-  jumbo?: boolean;
   className?: string;
 }) {
   const controller = useController();
@@ -65,7 +64,6 @@ export function CustomEmoji(props: {
     );
   }
 
-  const size = props.jumbo ? "size-[2.5em]" : "size-[1.15em]";
   return (
     <img
       src={objectUrl}
@@ -77,7 +75,7 @@ export function CustomEmoji(props: {
       onError={onError}
       className={cn(
         "inline-block select-none object-contain align-[-0.15em]",
-        props.className ?? size,
+        props.className ?? "size-[1.15em]",
       )}
     />
   );

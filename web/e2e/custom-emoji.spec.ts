@@ -211,25 +211,43 @@ test.describe("custom emoji", () => {
     await expect(reply.locator(SHIPIT_ART)).toHaveCount(1);
   });
 
-  test("an emoji-only message renders jumbo", async ({ page }) => {
+  test("an emoji-only message renders at text size, matching stock Teams", async ({ page }) => {
     const field = await openEmojiThread(page);
 
-    // A mixed message first: its glyph is the inline size to measure against, so the test
-    // pins the RATIO rather than a pixel count that a font change would move.
+    // A mixed message: emoji among words.
     await page.keyboard.type("inline :shipit: here");
     const inline = await sendAndAwaitEcho(page);
-    await expect(inline.locator(SHIPIT_ART)).toBeVisible();
-    const inlineBox = await inline.locator(SHIPIT_ART).boundingBox();
+    const inlineImg = inline.locator(SHIPIT_ART);
+    await expect(inlineImg).toBeVisible();
 
+    // An emoji-only message: stock Teams draws it at text size, so this app does too.
+    // It used to render jumbo (2.5em), copied from Slack, which made teams-lite the
+    // only client in a thread showing something different from everyone else.
     await field.click();
     await page.keyboard.type(":shipit:");
     const alone = await sendAndAwaitEcho(page);
-    await expect(alone.locator(SHIPIT_ART)).toBeVisible();
-    const jumboBox = await alone.locator(SHIPIT_ART).boundingBox();
+    const aloneImg = alone.locator(SHIPIT_ART);
+    await expect(aloneImg).toBeVisible();
 
-    expect(inlineBox).not.toBeNull();
-    expect(jumboBox).not.toBeNull();
-    expect(jumboBox!.height).toBeGreaterThan(inlineBox!.height * 2);
+    // Check the computed width/height style of the images - this is what determines
+    // the actual rendered size based on the className.
+    const inlineSize = await inlineImg.evaluate((el) => {
+      const style = window.getComputedStyle(el);
+      return { width: style.width, height: style.height };
+    });
+    const aloneSize = await aloneImg.evaluate((el) => {
+      const style = window.getComputedStyle(el);
+      return { width: style.width, height: style.height };
+    });
+
+    // Both should have the same computed size (1.15em in pixels), not jumbo (2.5em).
+    // Stock Teams renders emoji at text size, so this app matches that behavior.
+    expect(inlineSize).toEqual(aloneSize);
+
+    // And both are under a bound that says neither is jumbo. At 14pt base font,
+    // 1.15em ~= 16px, while 2.5em would be ~35px.
+    const heightPx = parseFloat(aloneSize.height);
+    expect(heightPx).toBeLessThan(25);
   });
 
   test("the reaction row offers the pack's art, and the chip that lands is that art", async ({

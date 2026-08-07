@@ -2726,6 +2726,13 @@ feature worth having: a local-only decoration would be a different, smaller feat
   two because Slack does not render an emoji in code either; the third because a quote
   holds a colleague's own words and substituting our art into them would rewrite what they
   wrote — the same reason `agent_policy` strips quoted blocks before reading a trigger.
+- **A custom emoji is always drawn at text size**, never jumbo. The 2026-08-05 tenant probe
+  established that stock Teams renders an emoji-only message at text size, so drawing one
+  larger here would make teams-lite the only client in a thread showing something different
+  from everyone else. The design already treats an emoji as a glyph — inline, no lightbox,
+  no zoom — and text-sized at all times is the natural end of that. Slack renders emoji-only
+  messages at 2.5em; this app does not, because parity with Microsoft Teams is what matters
+  in a Teams thread.
 - **The writes are gated, and why.** `custom_emoji_add` / `custom_emoji_remove` /
   `custom_emoji_import` are `MACHINE_METHODS` entries even though they write only to the
   local store, because the pack decides what art this machine will post under the user's
