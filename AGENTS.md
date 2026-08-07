@@ -166,6 +166,57 @@ screenshots carry the last one.
   the deep-link scroll in `notifications.spec.ts` time out, which is a fragility of the
   virtualized history worth its own look and NOT something a test should hide.
 
+## A picture somebody SENT is drawn WHOLE (the view is a display decision)
+
+An inline picture travels as an AMS object, and one object serves several VIEWS of itself.
+The view a Teams client writes on the `<img>` is not the picture: measured on this tenant by
+`examples/inline_image_recon.rs` — READ-ONLY, over the store's own 857 inline pictures, and
+it prints byte counts and pixel shapes rather than anybody's screenshot:
+
+    . bin/broker-env.sh && teams_lite_export_broker_bus && \
+      cargo run --example inline_image_recon
+
+Measured 2026-08-07 in region `fr`: `views/imgo` is a **JPEG whose long side is capped at
+800 px**, and `views/imgpsh_fullsize_anim` carries the pixels the sender uploaded, in the
+format they uploaded. Of 24 pictures, **10 arrived between 1.49x and 2.83x smaller** than the
+object holds — and the 14 that fitted still came re-encoded, so a screenshot's text carried
+JPEG ringing every single time. The whole picture costs **3.90x the bytes** over that sample
+(475 KB → 1.85 MB for 24), which is what the rules below are weighed against. `imgpsh_mthumb`,
+`original` and `thumbnail` answer **400** here, so the view table is not a guess either.
+
+- **The choice is a DISPLAY decision, and the body keeps what Teams wrote.**
+  `fullSizeMediaUrl` (`web/src/lib/protocol.ts`) names the whole view; the stored frame is
+  untouched, which is the rule § Renaming a person states for a name — this app never rewrites
+  the record of a Teams frame.
+- **One place asks, and it keys on the MESSAGE's own URL.** `TeamsController.loadPicture` is
+  it, so the picture's identity in the media cache is the URL the message carries and never
+  the view that answered — which is what lets `MediaImage` retain and release it without
+  knowing. The LIGHTBOX is the same blob, so opening a picture magnifies real pixels: it grows
+  one up to `MAX_UPSCALE`, and 3x of an 800px JPEG is the mush that rule exists to avoid.
+- **The reduced view is the FALLBACK, so this can never cost a PICTURE.** An object whose full
+  view the store refuses — too large for `MAX_MEDIA_BYTES`, or a shape this tenant does not
+  publish — draws exactly as it did before, one request later.
+- **Only the media proxy's own hosts are ever touched** (`mediaNeedsProxy`), and only a view
+  measured to be a reduction (`imgo`, `imgt1`, `imgt1_anim`, `imgpsh_mthumb`,
+  `imgpsh_mobile_save_anim`). An attachment's `views/original`, an avatar's
+  `views/avatar_fullsize` and a picture on a stranger's server are left alone: asking somebody
+  else's server for a "view" would be this app inventing a URL for their file.
+- **A custom EMOJI keeps the cheap view.** It is a 20px glyph, so it goes through
+  `loadMedia` — the full PNG of an emoji is bytes nobody can see.
+- **The picture holds its own ROOM, out of the size the sender's client stated.** The parse
+  keeps `width`/`height` (`pixelAttr` in `web/src/lib/rich-text.ts`, which ROUNDS the fraction
+  Teams writes on a picture the sender resized: `width="521.5654952076677"`), and drops both
+  when it cannot use both — an aspect ratio needs the pair. Before this the words around a
+  picture re-flowed when its bytes landed, which is the defect a GitLab upload's own
+  `{width=… height=…}` was already fixed for.
+
+`web/mock/server.ts` reproduces the object store's two resolutions with no tenant
+(`mockInlinePicture`: 160px for a reduced view, 640px for the whole one) and REFUSES the full
+view of its second inline fixture (`MOCK_NO_FULL_VIEW`), so both rules are numbers a spec can
+measure — `web/e2e/media.spec.ts` reads `naturalWidth` rather than trusting either. That
+refusal rides an existing fixture on purpose: one mock process serves the whole run, and a
+picture added to the seeded history moves every row a later spec counts on.
+
 ## The local agent (`@claude` in a thread)
 
 The user can summon a coding agent that runs on this machine from any Teams client —

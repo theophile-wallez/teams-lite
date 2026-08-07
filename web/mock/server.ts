@@ -2730,6 +2730,7 @@ function hashString(s: string): number {
 function mockMedia(url: string): { content_type: string; data_base64: string } {
   if (url.endsWith("/views/avatar_fullsize")) return mockGroupPicture(url);
   if (url.includes("mock-img-small")) return mockSmallPng(url);
+  if (url.includes("mock-inline-")) return mockInlinePicture(url);
   // A custom emoji travels as hosted content like any inline image, but it is a GLYPH:
   // the 320×200 picture below would draw it as a flat bar sized to the text, which says
   // nothing about the size a capture is meant to show. Square, and its own hue per code.
@@ -2752,8 +2753,11 @@ function mockMedia(url: string): { content_type: string; data_base64: string } {
       ),
     };
   }
-  const hue = hashString(url) % 360;
-  const label = (url.split("/").filter(Boolean).pop() ?? "media").slice(0, 24);
+  // The hue and the label name the OBJECT rather than the view, so one picture is one colour
+  // and one word whichever resolution the page asked for (see `mockInlinePicture`).
+  const object = url.replace(/\/views\/[^/]*$/, "");
+  const hue = hashString(object) % 360;
+  const label = (object.split("/").filter(Boolean).pop() ?? "media").slice(0, 24);
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">` +
     `<rect width="320" height="200" rx="12" fill="hsl(${hue} 65% 52%)"/>` +
@@ -2762,6 +2766,40 @@ function mockMedia(url: string): { content_type: string; data_base64: string } {
   return {
     content_type: "image/svg+xml",
     data_base64: Buffer.from(svg, "utf8").toString("base64"),
+  };
+}
+
+/** The view an AMS object serves the whole picture from, spelled here as the backend spells
+ *  it (`protocol.ts`'s `FULL_MEDIA_VIEW`) — this mock stands for that backend, so it holds
+ *  its own copy rather than importing the app's. */
+const MOCK_FULL_VIEW = "imgpsh_fullsize_anim";
+
+/** The object whose full view this mock REFUSES, so the fallback to the reduced view the
+ *  message points at is a state a spec can reach: a picture must never be lost to an object
+ *  store that publishes one view and not the other. It is the SECOND inline fixture rather
+ *  than a message of its own — one mock process serves the whole run, and a picture added to
+ *  the seeded history moves every row a later spec counts on. */
+const MOCK_NO_FULL_VIEW = "mock-inline-2";
+
+/**
+ * An inline picture, in the two resolutions the real object store really serves.
+ *
+ * Measured on the tenant by `examples/inline_image_recon.rs`: the `views/imgo` a Teams client
+ * writes on an `<img>` is a JPEG capped at 800 px, while `views/imgpsh_fullsize_anim` carries
+ * the pixels the sender uploaded — up to 2.8x more of them. A mock that answered one picture
+ * for every view could not show whether the app asks for the right one, so these two differ in
+ * RESOLUTION, which is a fact a page can be measured against (`naturalWidth`).
+ */
+function mockInlinePicture(url: string): { content_type: string; data_base64: string } {
+  const hue = hashString(url.replace(/\/views\/.*$/, "")) % 360;
+  const whole = url.endsWith(`/views/${MOCK_FULL_VIEW}`);
+  if (whole && url.includes(MOCK_NO_FULL_VIEW)) {
+    throw new Error("hosted-content media -> 404 Not Found");
+  }
+  const [width, height] = whole ? [640, 400] : [160, 100];
+  return {
+    content_type: "image/png",
+    data_base64: solidPng(width, height, hslToRgb(hue, 0.65, 0.52)).toString("base64"),
   };
 }
 

@@ -585,6 +585,43 @@ describe("parseRichHtml — Teams emoji", () => {
   it("keeps an emoji as a character when the message is re-serialized to send", () => {
     expect(serializeTeamsHtml(EMOJI_MESSAGE)).toBe("<p>Il faut un espace 💡</p>");
   });
+
+  it("keeps the size the sender's client stated, so the picture holds its own room", () => {
+    const nodes = parseRichHtml(
+      '<p><img src="https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frc-d3-9a7/views/imgo" ' +
+        'itemtype="http://schema.skype.com/AMSImage" width="366" height="58" alt="image"></p>',
+    );
+    const image = findNode(nodes, (n) => n.type === "element" && n.tag === "img");
+    if (image?.type !== "element") throw new Error("no image");
+    expect(image.attrs.width).toBe(366);
+    expect(image.attrs.height).toBe(58);
+  });
+
+  it("rounds the FRACTION Teams writes on a picture the sender resized", () => {
+    // Real shape from this tenant: `width="521.5654952076677" height="250"`. It holds a box,
+    // and a box is whole pixels — so it is rounded rather than refused.
+    const nodes = parseRichHtml(
+      '<p><img src="https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frc-d4-edc/views/imgo" ' +
+        'itemtype="http://schema.skype.com/AMSImage" width="521.5654952076677" height="250"></p>',
+    );
+    const image = findNode(nodes, (n) => n.type === "element" && n.tag === "img");
+    if (image?.type !== "element") throw new Error("no image");
+    expect(image.attrs.width).toBe(522);
+    expect(image.attrs.height).toBe(250);
+  });
+
+  it("states NEITHER size when it cannot use both", () => {
+    // An aspect ratio needs the pair, and a percentage or a unit is not pixels.
+    for (const size of ['width="366"', 'width="50%" height="10em"', 'width="0" height="0"']) {
+      const nodes = parseRichHtml(
+        `<p><img src="https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-a/views/imgo" ${size}></p>`,
+      );
+      const image = findNode(nodes, (n) => n.type === "element" && n.tag === "img");
+      if (image?.type !== "element") throw new Error("no image");
+      expect(image.attrs.width).toBeUndefined();
+      expect(image.attrs.height).toBeUndefined();
+    }
+  });
 });
 
 describe("parseRichHtml — custom emoji", () => {

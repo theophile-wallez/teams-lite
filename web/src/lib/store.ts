@@ -20,6 +20,7 @@ import {
   chatIsMuted,
   chatIsPinned,
   copyableMessageText,
+  fullSizeMediaUrl,
   mergeOlderHistoryPage,
   mergeOlderMailPage,
   mergeRefreshedHistoryPage,
@@ -4561,6 +4562,32 @@ export class TeamsController {
    *  The returned object URL stays valid until the controller is disposed. */
   loadMedia(url: string): Promise<string> {
     return this.loadBlob(url, () => this.backend.fetchMedia(url));
+  }
+
+  /**
+   * Resolve a PICTURE a message carries to a local blob object URL, at the best resolution
+   * its object store serves (see {@link fullSizeMediaUrl}): the view a Teams client writes
+   * on an `<img>` is a reduced, re-encoded copy, and this app draws pictures rather than
+   * previews of them.
+   *
+   * The cache is keyed on the URL the MESSAGE carries, never on the view that answered, so
+   * the picture's identity is the message's own — which is what lets `MediaImage` retain and
+   * release it without knowing which view the bytes came from.
+   *
+   * The reduced view is the FALLBACK, and it is what keeps this from ever costing a picture:
+   * an object whose full view the store refuses (too large for the proxy's own cap, or a
+   * shape this tenant does not publish) still draws exactly as it did before.
+   */
+  loadPicture(url: string): Promise<string> {
+    const full = fullSizeMediaUrl(url);
+    if (!full) return this.loadMedia(url);
+    return this.loadBlob(url, async () => {
+      try {
+        return await this.backend.fetchMedia(full);
+      } catch {
+        return await this.backend.fetchMedia(url);
+      }
+    });
   }
 
   /** Resolve one picture a GitLab description or comment points at to a local blob object URL,

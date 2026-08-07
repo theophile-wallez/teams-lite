@@ -62,6 +62,54 @@ test.describe("media (images + attachments)", () => {
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
+  test("draws a picture at the resolution its object store holds, not the reduced view", async ({
+    page,
+    consoleErrors,
+  }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    // The view a Teams client writes on an <img> is a reduced, re-encoded copy of the object
+    // behind it — measured on the tenant at up to 2.8x smaller. So the page asks for the whole
+    // one, and the mock answers the two views at two resolutions (160px reduced, 640px whole)
+    // exactly so this is a number rather than an opinion.
+    const whole = page
+      .locator("[data-message-id]")
+      .filter({ has: page.locator('img[alt="incident graph"]') })
+      .locator('[data-testid="message-image"]');
+    await expect(whole).toBeVisible();
+    await expect
+      .poll(() => whole.evaluate((img: HTMLImageElement) => img.naturalWidth), { timeout: 10_000 })
+      .toBe(640);
+
+    expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
+  test("keeps a picture whose object store publishes no full view", async ({
+    page,
+    consoleErrors,
+  }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    // The second inline picture is the one whose full view the mock refuses. The reduced view
+    // the message points at is the FALLBACK, so an object store that publishes one view and
+    // not the other costs resolution and never the picture.
+    const images = page.locator('[data-testid="message-image"]');
+    await expect.poll(() => images.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+    const fallback = page
+      .locator("[data-message-id]")
+      .filter({ has: page.locator('img[alt="whiteboard"]') })
+      .locator('[data-testid="message-image"]');
+    await expect(fallback).toBeVisible();
+    await expect(fallback).toHaveAttribute("src", /^blob:/);
+    await expect
+      .poll(() => fallback.evaluate((img: HTMLImageElement) => img.naturalWidth))
+      .toBe(160);
+
+    expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
   test("shows a shared file as a labeled chip", async ({ page }) => {
     await gotoApp(page);
     await openByPalette(page, "Media Gallery");

@@ -1119,6 +1119,49 @@ export function mediaNeedsProxy(url: string): boolean {
   return PROXY_MEDIA_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
 }
 
+/** The view an AMS object serves the picture somebody really uploaded from: full pixels,
+ *  in the format it was uploaded in, and animated when it was a GIF (which is what the
+ *  `_anim` suffix is for). */
+export const FULL_MEDIA_VIEW = "imgpsh_fullsize_anim";
+
+/** The views a Teams client writes on an inline `<img>` that are a REDUCTION of the object
+ *  behind them, measured against this tenant by `examples/inline_image_recon.rs`: `imgo` is
+ *  a JPEG whose long side is capped at 800 px, `imgpsh_mobile_save_anim` caps at 2048, and
+ *  the `imgt1` pair is a 348 px square thumbnail. Every one of them is what the MESSAGE
+ *  points at; none of them is what the app should draw. */
+const REDUCED_MEDIA_VIEWS = new Set([
+  "imgo",
+  "imgt1",
+  "imgt1_anim",
+  "imgpsh_mthumb",
+  "imgpsh_mobile_save_anim",
+]);
+
+/**
+ * The same hosted-content object under {@link FULL_MEDIA_VIEW}, or `null` when `url` names
+ * no reduced view this app should upgrade.
+ *
+ * A pasted screenshot travels as `…/v1/objects/<id>/views/imgo`, and measured over this
+ * tenant that view is a JPEG capped at 800 px: 10 of 24 pictures arrived between 1.5x and
+ * 2.8x smaller than the object holds, and even the ones that fit came re-encoded, so a
+ * screenshot's text carried JPEG ringing every time. So the view is a DISPLAY decision made
+ * here, and never a rewrite of the body — the stored frame keeps the URL Teams wrote.
+ *
+ * Only a Microsoft hosted-content host is ever touched (`mediaNeedsProxy`), so a picture on
+ * a stranger's server is left exactly as it is: this is the media proxy's own object store
+ * and nothing else.
+ */
+export function fullSizeMediaUrl(url: string): string | null {
+  if (!mediaNeedsProxy(url)) return null;
+  const marker = url.lastIndexOf("/views/");
+  if (marker < 0) return null;
+  const view = url.slice(marker + "/views/".length);
+  // A query or a fragment is not part of the view name, and a view with either is left
+  // alone: this app has never seen one, and a URL it cannot read whole is one to keep.
+  if (!REDUCED_MEDIA_VIEWS.has(view)) return null;
+  return `${url.slice(0, marker)}/views/${FULL_MEDIA_VIEW}`;
+}
+
 /** The two Teams quote blockquotes, captured together so a reply and a forward are
  *  split out of the body the same way. The `itemtype` word is captured to tell them
  *  apart (see {@link QuoteKind}). */

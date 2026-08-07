@@ -545,6 +545,11 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
           key={key}
           src={node.attrs.src ?? ""}
           alt={node.attrs.alt ?? ""}
+          // The size the sender's client stated, when it stated one: the picture then holds
+          // its own room while the proxy fetches it, instead of the words around it
+          // re-flowing when the bytes land.
+          width={node.attrs.width}
+          height={node.attrs.height}
           className="my-1"
         />
       );

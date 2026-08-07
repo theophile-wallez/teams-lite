@@ -220,6 +220,23 @@ function safeSrc(raw: string | undefined): string | undefined {
   return undefined;
 }
 
+/** The largest picture size an attribute may state, in px. The number comes from a body
+ *  somebody else wrote, and it is used to hold a box on screen. */
+const MAX_PICTURE_PX = 100_000;
+
+/**
+ * One `width` / `height` attribute as pixels, or `undefined` when it states none this app can
+ * use. Teams writes a FRACTION on a picture the sender resized in their composer
+ * (`width="521.5654952076677"`), so the value is rounded rather than refused — it holds a box,
+ * and a box is whole pixels. A percentage, a unit or anything else is dropped: a value this
+ * app cannot turn into pixels is no value at all.
+ */
+function pixelAttr(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const value = /^\s*\d+(?:\.\d+)?\s*$/.test(raw) ? Math.round(Number(raw)) : 0;
+  return value > 0 && value <= MAX_PICTURE_PX ? value : undefined;
+}
+
 type RawAttrs = Record<string, string>;
 
 function parseAttributes(source: string): RawAttrs {
@@ -465,7 +482,13 @@ export function parseRichHtml(html: string): RichNode[] {
       const src = safeSrc(attrs["src"]);
       if (src) {
         const alt = attrs["alt"] ? decodeEntities(attrs["alt"]) : undefined;
-        pushChild({ type: "element", tag: "img", attrs: { src, alt }, children: [] });
+        // The size the sender's client wrote on the tag, so the picture holds its own room
+        // while the bytes travel through the media proxy — the rule a GitLab upload already
+        // follows. Both halves or neither: an aspect ratio needs the pair.
+        const width = pixelAttr(attrs["width"]);
+        const height = pixelAttr(attrs["height"]);
+        const size = width && height ? { width, height } : {};
+        pushChild({ type: "element", tag: "img", attrs: { src, alt, ...size }, children: [] });
       }
       continue;
     }

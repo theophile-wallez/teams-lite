@@ -13,6 +13,8 @@ import {
   parseMessageContent,
   extractImages,
   mediaNeedsProxy,
+  fullSizeMediaUrl,
+  FULL_MEDIA_VIEW,
   urlHost,
   mergeMessages,
   appendLiveMessage,
@@ -302,6 +304,43 @@ describe("mediaNeedsProxy", () => {
     expect(mediaNeedsProxy("https://skype.com.evil.example/x")).toBe(false);
     expect(mediaNeedsProxy("https://sharepoint.com.evil.example/x")).toBe(false);
     expect(mediaNeedsProxy("not a url")).toBe(false);
+  });
+});
+
+describe("fullSizeMediaUrl", () => {
+  const object = "https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frs-d1-abc";
+
+  it("upgrades every reduced view a Teams client writes on an <img>", () => {
+    // Measured on the tenant (`examples/inline_image_recon.rs`): each of these is a smaller,
+    // re-encoded copy of the object behind it.
+    for (const view of ["imgo", "imgt1", "imgt1_anim", "imgpsh_mthumb", "imgpsh_mobile_save_anim"]) {
+      expect(fullSizeMediaUrl(`${object}/views/${view}`)).toBe(
+        `${object}/views/${FULL_MEDIA_VIEW}`,
+      );
+    }
+  });
+
+  it("leaves a view that is already the whole picture alone", () => {
+    expect(fullSizeMediaUrl(`${object}/views/${FULL_MEDIA_VIEW}`)).toBeNull();
+    expect(fullSizeMediaUrl(`${object}/views/imgpsh_fullsize`)).toBeNull();
+    // An attachment's own view, and an avatar's: neither is a reduction of a picture.
+    expect(fullSizeMediaUrl(`${object}/views/original`)).toBeNull();
+    expect(fullSizeMediaUrl(`${object}/views/avatar_fullsize`)).toBeNull();
+  });
+
+  it("never touches a picture on a host that is not the media proxy's own", () => {
+    // A stranger's server has no object store and no views; asking it for one would be this
+    // app inventing a URL for somebody else's file.
+    expect(fullSizeMediaUrl("https://media1.giphy.com/media/abc/views/imgo")).toBeNull();
+    expect(fullSizeMediaUrl("https://skype.com.evil.example/v1/objects/x/views/imgo")).toBeNull();
+    expect(fullSizeMediaUrl("not a url")).toBeNull();
+  });
+
+  it("keeps a URL it cannot read whole", () => {
+    // The view name is the END of the URL. A query, a fragment or no view at all is left as
+    // it is rather than guessed at.
+    expect(fullSizeMediaUrl(`${object}/views/imgo?token=x`)).toBeNull();
+    expect(fullSizeMediaUrl(object)).toBeNull();
   });
 });
 
