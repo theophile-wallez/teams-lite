@@ -3529,8 +3529,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 );
 
                 let session = ctx.session().await?;
-                let media =
-                    teams_media::fetch_media(&ctx.http, &session, media_url).await?;
+                // Ask for the bytes as they were uploaded, not the rendition the message
+                // names: AMS answers `views/imgo` with a still JPEG for an animated GIF
+                // (see `custom_emoji::original_art_url`). A pack entry is kept for good, so
+                // storing the still frame would outlive the message it was taken from.
+                let art_url = custom_emoji::original_art_url(media_url);
+                let media = teams_media::fetch_media(&ctx.http, &session, &art_url).await?;
 
                 let (content_type, width, height) = custom_emoji::measure_art(&media.bytes)?;
 

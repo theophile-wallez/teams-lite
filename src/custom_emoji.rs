@@ -109,6 +109,32 @@ pub fn custom_reaction_key(object_url: &str) -> String {
     format!("{CUSTOM_REACTION_PREFIX}{object_url}")
 }
 
+/// The URL that answers an AMS object's ORIGINAL bytes, given the rendition a message
+/// body references. Everything else is returned untouched.
+///
+/// This is the Rust spelling of `originalArtUrl` in `web/src/lib/custom-emoji.ts` and must
+/// move with it. Measured against the tenant by `examples/custom_emoji_gif_probe.rs`:
+/// `…/v1/objects/<id>/views/imgo` answers `image/jpeg` — AMS transcodes an uploaded GIF
+/// into a single still frame — while `…/v1/objects/<id>/content/imgpsh` answers the
+/// original `GIF89a` bytes with the animation intact.
+///
+/// The page needed it to DRAW an animated emoji. This copy exists for the other
+/// direction: taking a colleague's emoji into the pack (`custom_emoji_add`'s `media_url`
+/// source) fetched the rendition the message named, so an animated GIF was stored as the
+/// still frame AMS had made of it — and a pack entry is kept for good, so that loss would
+/// outlive the message it came from.
+pub fn original_art_url(src: &str) -> String {
+    let Some(object) = src.strip_suffix("/views/imgo") else {
+        return src.to_string();
+    };
+    // Only a real object URL is rewritten: the suffix alone is not enough, since a mail
+    // image or a CDN glyph must come back byte-identical.
+    if object.starts_with("https://") && object.contains("/v1/objects/") {
+        return format!("{object}/content/imgpsh");
+    }
+    src.to_string()
+}
+
 /// Every distinct `:name:` code in `html`'s text runs, outside tags, outside
 /// `<code>`/`<pre>`, outside reply quotes, in first-appearance order.
 ///
@@ -443,5 +469,36 @@ mod tests {
         // in the key, so `blob-2` and `parrot-1` cost nothing.
         let key = custom_reaction_key("https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo");
         assert_eq!(key, "tlcustom-https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo");
+    }
+
+    /// The cases here are the ones `originalArtUrl` is held to in
+    /// `web/src/lib/custom-emoji.test.ts`. The two spellings must agree, so they are
+    /// tested against the same table.
+    #[test]
+    fn the_original_bytes_are_asked_for_only_on_an_ams_rendition() {
+        // The measured rewrite: `views/imgo` is a still JPEG, `content/imgpsh` the GIF.
+        assert_eq!(
+            original_art_url("https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frc-d4-abc/views/imgo"),
+            "https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frc-d4-abc/content/imgpsh"
+        );
+        assert_eq!(
+            original_art_url("https://eu-api.asm.skype.com/v1/objects/0-eu-d1/views/imgo"),
+            "https://eu-api.asm.skype.com/v1/objects/0-eu-d1/content/imgpsh"
+        );
+
+        // Everything else comes back byte-identical. A Teams emoji from the
+        // personal-expressions CDN, an object already naming its own content, a
+        // rendition this app never measured, and something that merely ends the same
+        // way without being an object URL at all.
+        for untouched in [
+            "https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/smile/default/20_f.png",
+            "https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frc-d4-abc/content/imgpsh",
+            "https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-frc-d4-abc/views/imgt",
+            "https://example.com/views/imgo",
+            "blob:http://127.0.0.1:19441/9f0b",
+            "",
+        ] {
+            assert_eq!(original_art_url(untouched), untouched, "{untouched} must not be rewritten");
+        }
     }
 }
