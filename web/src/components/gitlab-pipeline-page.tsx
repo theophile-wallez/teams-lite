@@ -12,6 +12,7 @@ import {
   pipelineIsLive,
   pipelineStages,
   type GitLabJob,
+  type GitLabPipelineView,
   type PipelineTone,
 } from "~/lib/gitlab-mr";
 import {
@@ -226,7 +227,7 @@ export function GitLabPipelinePage() {
               <Legend jobs={jobs} />
             </div>
           ) : (
-            <JobList jobs={jobs} />
+            <JobList view={view} />
           )}
         </>
       )}
@@ -237,8 +238,8 @@ export function GitLabPipelinePage() {
 /** The jobs as a list, in GitLab's own stage order: what the graph is bad at. A stage view
  *  reads down a phone's screen with no sideways scroll, and a duration beside every name is how
  *  a reader finds the four minutes they are looking for. */
-function JobList(props: { jobs: GitLabJob[] }) {
-  const stages = useMemo(() => pipelineStages(props.jobs), [props.jobs]);
+function JobList(props: { view: GitLabPipelineView }) {
+  const stages = useMemo(() => pipelineStages(props.view), [props.view]);
   return (
     <div data-testid="gitlab-pipeline-jobs" className="min-h-0 flex-1 overflow-y-auto px-3 py-3 md:px-5">
       <div className="mx-auto flex max-w-2xl flex-col gap-4">

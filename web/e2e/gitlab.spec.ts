@@ -1464,6 +1464,28 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(edges).toHaveCount(0);
   });
 
+  test("orders the stages as the PIPELINE does, not as GitLab answered", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openPipeline(page);
+    await page.locator('[data-testid="gitlab-pipeline-grouping"] [data-value="stage"]').click();
+    const columns = page.locator('[data-testid="gitlab-pipeline-column"]');
+
+    // GitLab's jobs endpoint answers NEWEST FIRST, so the mock hands them over reversed exactly
+    // as the tenant does — measured: 16 of 25 pipelines. Reading the order off that answer drew
+    // every multi-stage pipeline backwards, `check` last, and it shipped that way.
+    await expect(columns.nth(0)).toHaveAttribute("data-stage", "check");
+    await expect(columns.nth(1)).toHaveAttribute("data-stage", "test");
+    await expect(columns.nth(2)).toHaveAttribute("data-stage", "deploy");
+
+    // The JOBS list is the same read and takes the same order, so the two views never disagree
+    // about which stage came first.
+    await page.locator('[data-testid="gitlab-pipeline-view"] [data-value="jobs"]').click();
+    const stages = page.locator('[data-testid="gitlab-pipeline-jobs-stage"]');
+    await expect(stages.first()).toContainText("check");
+    await expect(stages.last()).toContainText("deploy");
+  });
+
   test("answers what one job waits for, and what waits on it", async ({ page }) => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
@@ -1478,6 +1500,11 @@ test.describe.serial("the GitLab merge-request page", () => {
     await page.mouse.move(4, 4);
     await expect(graph).not.toHaveAttribute("data-focused", /.+/);
     await expect(job("🤖 opencode review")).toHaveAttribute("data-related", "true");
+    // At rest the graph is ONE neutral colour: not a single curve wears the accent, because an
+    // accent on every wire says every dependency matters, which says nothing.
+    await expect(graph.locator('[data-testid="gitlab-pipeline-edge"][data-lit="true"]')).toHaveCount(
+      0,
+    );
 
     // Pointing at the unit test lights its own chain — the lint it waits for, and the deploy
     // that waits on it — and takes the weight off everything else.
@@ -1486,15 +1513,43 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(job("🔎 lint")).toHaveAttribute("data-related", "true");
     await expect(job("🚀 deploy staging")).toHaveAttribute("data-related", "true");
     await expect(job("🤖 opencode review")).toHaveAttribute("data-related", "false");
-    // The curves of that chain are lit and the rest are not — counted rather than looked at,
+    // The curves of that chain are LIT and the rest are not — counted rather than looked at,
     // because a horizontal `<path>` has no box for a visibility check to measure. The unit test
     // waits for the lint and the deploy waits for the unit: two of the four.
+    await expect(graph.locator('[data-testid="gitlab-pipeline-edge"][data-lit="true"]')).toHaveCount(
+      2,
+    );
     await expect(
-      graph.locator('[data-testid="gitlab-pipeline-edge"][data-related="true"]'),
+      graph.locator('[data-testid="gitlab-pipeline-edge"][data-lit="false"]'),
     ).toHaveCount(2);
-    await expect(
-      graph.locator('[data-testid="gitlab-pipeline-edge"][data-related="false"]'),
-    ).toHaveCount(2);
+  });
+
+  test("keeps every card's surface opaque, so a curve never crosses its words", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openPipeline(page);
+    const graph = page.locator('[data-testid="gitlab-pipeline-graph"]');
+    const job = (name: string) =>
+      graph.locator(`[data-testid="gitlab-pipeline-job"][data-name="${name}"]`);
+
+    // The whole card used to take an `opacity` when another job was pointed at, and a
+    // translucent card lets the curves behind it show through its own name. So what fades is
+    // the CONTENT and the card itself stays solid — in both states.
+    const opacityOf = (name: string) =>
+      job(name).evaluate((el) => getComputedStyle(el).opacity);
+    expect(await opacityOf("🤖 opencode review")).toBe("1");
+    await job("🧪 unit").hover();
+    await expect(job("🤖 opencode review")).toHaveAttribute("data-related", "false");
+    expect(await opacityOf("🤖 opencode review")).toBe("1");
+
+    // And the curves are BEHIND the cards rather than over them, which is what makes an opaque
+    // surface worth having.
+    const behind = await graph
+      .locator('[data-testid="gitlab-pipeline-edges"]')
+      .evaluate((el) => getComputedStyle(el).zIndex);
+    expect(Number(behind)).toBeLessThan(0);
   });
 
   test("tells the four tones apart, and offers nothing that writes", async ({ page }) => {

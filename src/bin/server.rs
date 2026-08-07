@@ -6866,14 +6866,15 @@ impl GitLabRead {
                 json!(gitlab_mr::fetch_discussions(&ctx.http, host, token, project_path, *iid).await?)
             }
             // The pipeline is TWO reads, and the second one cannot fail the first. GitLab's
-            // REST jobs endpoint carries no `needs`, so the graph's dependency mode is read
-            // over GraphQL afterwards (`gitlab_ci_graph`) and attached to the jobs in place.
-            // A GitLab that will not answer it costs that one mode and leaves the graph
-            // grouped by stage.
+            // REST jobs endpoint carries neither `needs` nor the pipeline's stage ORDER — it
+            // answers newest first, which is reverse stage order — so both are read over
+            // GraphQL afterwards (`gitlab_ci_graph`) and attached in place. A GitLab that will
+            // not answer costs the dependency mode and leaves the stages ordered by the jobs'
+            // own ids.
             Self::Pipeline { project_path, iid } => {
                 let mut view =
                     gitlab_mr::fetch_pipeline(&ctx.http, host, token, project_path, *iid).await?;
-                gitlab_ci_graph::attach_needs(
+                gitlab_ci_graph::attach(
                     &ctx.http,
                     host,
                     token,

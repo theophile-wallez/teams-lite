@@ -98,13 +98,17 @@ export function pipelineGraph(
   view: GitLabPipelineView | null | undefined,
   grouping: PipelineGrouping,
 ): PipelineGraph {
-  const jobs = view?.jobs ?? [];
+  // The jobs are put in CREATION order once, here, and every decision below reads that list.
+  // GitLab answers them newest first (measured: 16 of 25 pipelines came back in reverse stage
+  // order), so a layout that walked the answer laid every column out newest-first and resolved a
+  // retried job's name to the run it replaced. One sort at the top is the whole fix.
+  const jobs = [...(view?.jobs ?? [])].sort((a, b) => a.id - b.id);
   const effective: PipelineGrouping = grouping === "needs" && canGroupByNeeds(jobs) ? "needs" : "stage";
   const nodes = new Map<string, GraphNode>();
   // A `needs` names a job by NAME (GitLab declares dependencies per name), and an edge joins
   // two CARDS. So names are resolved to keys once, here — and a name carried by two cards, a
-  // retried job, resolves to the newest of them: GitLab returns jobs oldest-first within a
-  // stage, so the last one under a name is the run that counts.
+  // retried job, resolves to the NEWEST of them, which is the run that counts. That is what the
+  // sort above buys: the last card under a name is the newest whatever order GitLab answered in.
   const keyByName = new Map<string, string>();
   for (const job of jobs) keyByName.set(job.name, jobKey(job));
   for (const job of jobs) {
@@ -115,8 +119,7 @@ export function pipelineGraph(
     nodes.set(key, { key, job, tone: jobTone(job), needs: dedupe(needs) });
   }
 
-  const columns =
-    effective === "needs" ? needsColumns(jobs, nodes) : stageColumns(jobs, nodes);
+  const columns = effective === "needs" ? needsColumns(jobs, nodes) : stageColumns(view, nodes);
   const edges: GraphEdge[] = [];
   for (const node of nodes.values()) {
     for (const need of node.needs) edges.push({ from: need, to: node.key });
@@ -124,9 +127,13 @@ export function pipelineGraph(
   return { grouping: effective, columns, edges, nodes };
 }
 
-/** Columns in GitLab's own stage order. Nothing is sorted — see `pipelineStages`. */
-function stageColumns(jobs: readonly GitLabJob[], nodes: Map<string, GraphNode>): GraphColumn[] {
-  return pipelineStages(jobs as GitLabJob[]).map((stage, index) => ({
+/** Columns in the pipeline's own stage order — which is NOT the order the jobs arrive in; see
+ *  `pipelineStages`, and the measurement behind it. */
+function stageColumns(
+  view: GitLabPipelineView | null | undefined,
+  nodes: Map<string, GraphNode>,
+): GraphColumn[] {
+  return pipelineStages(view).map((stage, index) => ({
     key: `${stage.name}:${index}`,
     label: stage.name,
     tone: jobsTone(stage.jobs),
@@ -212,11 +219,15 @@ export function relatedNodes(graph: PipelineGraph, key: string): Set<string> {
   return related;
 }
 
-/** Whether an edge joins two jobs a reader is looking at, so the renderer can draw the rest
- *  of them faint. Both ends have to be in the set: an edge with one end outside it belongs to
- *  a run the reader did not ask about. */
-export function edgeIsRelated(edge: GraphEdge, related: Set<string> | null): boolean {
-  return !related || (related.has(edge.from) && related.has(edge.to));
+/** Whether an edge is LIT: part of the chain the reader is pointing at.
+ *
+ *  Two rules, and the first is what keeps the graph readable. **Nothing is lit at rest**
+ *  (`related` is null), because a wall of accent-coloured wires says every dependency matters,
+ *  which is the same as saying none does — the accent is what a pointer buys. And both ends have
+ *  to be in the set: an edge with one end outside it belongs to a run the reader did not ask
+ *  about. */
+export function edgeIsLit(edge: GraphEdge, related: Set<string> | null): boolean {
+  return !!related && related.has(edge.from) && related.has(edge.to);
 }
 
 /** How the graph says what it holds, in one line under the controls: "9 jobs · 3 stages", and

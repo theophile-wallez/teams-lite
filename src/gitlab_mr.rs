@@ -341,6 +341,13 @@ pub struct PipelineView {
     pub pipeline: Option<PipelineSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub jobs: Vec<Job>,
+    /// The pipeline's stage names, first to last. **The jobs above are NOT in that order**:
+    /// GitLab's jobs endpoint answers newest first, which for one pipeline is reverse stage
+    /// order (measured — 8 of 12 merge requests on this instance came back reversed, and the
+    /// other 4 had one stage). So the order is read separately, over GraphQL, by
+    /// [`crate::gitlab_ci_graph::attach`], and is empty whenever that read could not be made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<String>,
 }
 
 /// One CI job.
@@ -716,7 +723,7 @@ pub async fn fetch_pipeline(
     let body = read_json(http, &merge_request_api(gitlab_host, project_path, iid), token, "merge request")
         .await?;
     let Some(pipeline) = pipeline_summary(&body) else {
-        return Ok(PipelineView { pipeline: None, jobs: Vec::new() });
+        return Ok(PipelineView { pipeline: None, jobs: Vec::new(), stages: Vec::new() });
     };
 
     let jobs_endpoint = format!(
@@ -738,7 +745,7 @@ pub async fn fetch_pipeline(
             Vec::new()
         }
     };
-    Ok(PipelineView { pipeline: Some(pipeline), jobs })
+    Ok(PipelineView { pipeline: Some(pipeline), jobs, stages: Vec::new() })
 }
 
 /// Every discussion on one merge request, oldest first.
@@ -1390,7 +1397,7 @@ fn job_from_json(value: &serde_json::Value) -> Option<Job> {
         web_url: str_field(value, "web_url"),
         finished_at: str_field(value, "finished_at"),
         // Never on a REST job row — measured, and re-measured by
-        // `examples/pipeline_needs_recon.rs`. `gitlab_ci_graph::attach_needs` fills it.
+        // `examples/pipeline_needs_recon.rs`. `gitlab_ci_graph::attach` fills it.
         needs: Vec::new(),
     })
 }

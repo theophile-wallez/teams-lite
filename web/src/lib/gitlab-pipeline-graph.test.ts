@@ -4,7 +4,7 @@ import type { GitLabJob, GitLabPipelineView } from "./gitlab-mr";
 import {
   canGroupByNeeds,
   defaultGrouping,
-  edgeIsRelated,
+  edgeIsLit,
   graphSummary,
   pipelineGraph,
   relatedNodes,
@@ -22,24 +22,29 @@ function job(over: Partial<GitLabJob> = {}): GitLabJob {
   };
 }
 
-function view(jobs: GitLabJob[]): GitLabPipelineView {
-  return { pipeline: { id: 1, status: "running" }, jobs };
+/** A pipeline in the shape the BACKEND answers with: the jobs newest first, as GitLab's own
+ *  endpoint gives them, and the stage order named separately (see `pipelineStages`). */
+function view(jobs: GitLabJob[], stages?: string[]): GitLabPipelineView {
+  return { pipeline: { id: 1, status: "running" }, jobs: [...jobs].reverse(), stages };
 }
 
 /** The pipeline the screenshot this surface was asked for shows: three build jobs and a lint
  *  job in one stage, three tests, two deploys — and `needs` that cross the stages. */
 function tenantShapedPipeline(): GitLabPipelineView {
-  return view([
-    job({ id: 1, name: "build-job1", stage: "build" }),
-    job({ id: 2, name: "build-job2", stage: "build" }),
-    job({ id: 3, name: "build-job3", stage: "build" }),
-    job({ id: 4, name: "lint-job1", stage: "test" }),
-    job({ id: 5, name: "test-job1", stage: "test", needs: ["build-job1"] }),
-    job({ id: 6, name: "test-job2", stage: "test", needs: ["build-job2"] }),
-    job({ id: 7, name: "test-job3", stage: "test", needs: ["build-job3"] }),
-    job({ id: 8, name: "deploy-job1", stage: "deploy", needs: ["test-job1"] }),
-    job({ id: 9, name: "deploy-job2", stage: "deploy", needs: ["test-job2", "test-job3"] }),
-  ]);
+  return view(
+    [
+      job({ id: 1, name: "build-job1", stage: "build" }),
+      job({ id: 2, name: "build-job2", stage: "build" }),
+      job({ id: 3, name: "build-job3", stage: "build" }),
+      job({ id: 4, name: "lint-job1", stage: "test" }),
+      job({ id: 5, name: "test-job1", stage: "test", needs: ["build-job1"] }),
+      job({ id: 6, name: "test-job2", stage: "test", needs: ["build-job2"] }),
+      job({ id: 7, name: "test-job3", stage: "test", needs: ["build-job3"] }),
+      job({ id: 8, name: "deploy-job1", stage: "deploy", needs: ["test-job1"] }),
+      job({ id: 9, name: "deploy-job2", stage: "deploy", needs: ["test-job2", "test-job3"] }),
+    ],
+    ["build", "test", "deploy"],
+  );
 }
 
 describe("the pipeline graph", () => {
@@ -78,6 +83,16 @@ describe("the pipeline graph", () => {
     // A column of a dependency layout is a LEVEL and carries no name: the card names its own
     // stage, which is what GitLab's own dependency view does.
     expect(graph.columns.every((column) => column.label === "")).toBe(true);
+  });
+
+  it("lays the columns out in CREATION order, whatever order GitLab answered in", () => {
+    // GitLab's jobs endpoint answers newest first, and `view()` reverses the fixture for that
+    // reason. Walking the answer laid every column out backwards — and it drew `install` last on
+    // every real pipeline until somebody looked at one.
+    const graph = pipelineGraph(tenantShapedPipeline(), "needs");
+    expect(graph.columns[0]!.nodes.map((node) => node.job.id)).toEqual([1, 2, 3, 4]);
+    const byStage = pipelineGraph(tenantShapedPipeline(), "stage");
+    expect(byStage.columns.map((column) => column.label)).toEqual(["build", "test", "deploy"]);
   });
 
   it("draws one curve per declared dependency, both ends being cards", () => {
@@ -185,13 +200,14 @@ describe("the pipeline graph", () => {
     expect(relatedNodes(graph, "nope").size).toBe(0);
   });
 
-  it("dims an edge with one end outside what the reader asked about", () => {
+  it("lights the pointed-at chain only, and nothing at rest", () => {
     const graph = pipelineGraph(tenantShapedPipeline(), "needs");
     const related = relatedNodes(graph, "6");
-    expect(edgeIsRelated({ from: "2", to: "6" }, related)).toBe(true);
-    expect(edgeIsRelated({ from: "1", to: "5" }, related)).toBe(false);
-    // Nothing pointed at: every edge is drawn in full.
-    expect(edgeIsRelated({ from: "1", to: "5" }, null)).toBe(true);
+    expect(edgeIsLit({ from: "2", to: "6" }, related)).toBe(true);
+    expect(edgeIsLit({ from: "1", to: "5" }, related)).toBe(false);
+    // Nothing pointed at: NOTHING is lit. The graph is one neutral colour until a reader asks,
+    // because an accent on every wire is an accent that says nothing.
+    expect(edgeIsLit({ from: "1", to: "5" }, null)).toBe(false);
   });
 
   it("says what it holds, and counts what it left out", () => {

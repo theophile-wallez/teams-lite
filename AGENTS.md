@@ -1279,6 +1279,24 @@ It replaced a list of stages with the jobs under each. What that shape cannot sa
 thing a reader of a red pipeline asks — WHICH job is holding the rest up — because a list has no
 room for the dependencies between its rows.
 
+**THE STAGE ORDER IS NOT THE ANSWER'S ORDER**, and reading it as one shipped a graph that drew
+every real pipeline backwards. GitLab's jobs endpoint answers NEWEST FIRST — measured on this
+instance: of 25 merge requests, 16 came back in reverse stage order and the other 9 had a single
+stage — so `install` was drawn last, after the tests that wait for it. Three things follow, and
+each is pinned by a test:
+
+- **The order is READ, over the same GraphQL query as the `needs`** (`PipelineShape.stages`,
+  travelling as `PipelineView.stages`). GraphQL named the stages on all 25.
+- **Nothing else trusts the order the jobs arrive in.** `pipelineStages` groups by name and
+  `pipelineGraph` sorts the jobs by id ONCE at the top, because the same reversal also laid every
+  column out newest-first and resolved a retried job's name to the run it replaced. The fallback,
+  for a GitLab whose GraphQL could not be read, is ascending id — a pipeline's jobs are created
+  stage by stage, so creation order IS stage order, except across a retry, which is the one case
+  `stages` answers correctly.
+- **The MOCK answers newest first too.** It used to answer in stage order, which is the one way it
+  could have hidden this: every test passed while the tenant drew backwards. A fixture that is
+  tidier than the real answer is a fixture that lies.
+
 **FOUR COLOURS, and they are a closed vocabulary** (`PipelineTone`, `jobTone`, `jobsTone` in
 `web/src/lib/gitlab-mr.ts`): **green** when the work is done, **red** when it failed and somebody
 has to fix it, **ORANGE** for a failure nobody has to fix (a job GitLab reports `failed` with
@@ -1331,7 +1349,15 @@ Eight rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
 - **Pointing at a card answers "what is this waiting for, and what waits for it"**
   (`relatedNodes`), followed the whole way through rather than one step — "what is holding this
   up" is a chain — by drawing everything else faint. It is an ENHANCEMENT and never the only way
-  to read the graph, because there is no hover on a phone.
+  to read the graph, because there is no hover on a phone. Two rules hold the drawing of it:
+  - **The curves are NEUTRAL at rest, and the accent is what a pointer buys** (`edgeIsLit`,
+    whose whole point is that nothing is lit with nothing pointed at). Every wire in the app's
+    accent says every dependency matters, which is the same as saying none does.
+  - **A card's surface stays OPAQUE in every state, and the curves run under it** (the graph's
+    own `isolate` plus the edges' `-z-10`). What fades on a dimmed card is its CONTENT: an
+    `opacity` on the whole card made it translucent, so the wires behind showed through its own
+    name — and `isolate` is load-bearing, because a negative layer with no stacking context here
+    falls behind the PAGE's background and draws no curves at all.
 - **A control is drawn only where it changes something.** A pipeline whose jobs declare no
   dependency the graph can draw gets neither the grouping nor the toggle, and asking for the
   dependency layout on one answers a STAGE layout — a single column holding every job is not a
@@ -1384,11 +1410,13 @@ the 25 newest open merge requests, printing counts and field NAMES and never any
 
     cargo run --example pipeline_needs_recon
 
-Measured 2026-08-06 on `git.sia.partners`: a REST job row carries 25 fields and `needs` is not
+Measured 2026-08-07 on `git.sia.partners`: a REST job row carries 25 fields and `needs` is not
 among them; of 25 pipelines holding 143 jobs, **21 declare dependencies and 0 refused the
 query**; 96 jobs carry a `needs`, 142 edges in all, of which **9 name a job the REST read did not
 carry** (a bridge — the count the summary states); the longest dependency chain is **4** deep and
-the stage counts run from 1 to 8. Run it again rather than widening the parse on a hunch.
+the stage counts run from 1 to 8. And the third fact, the one that cost a shipped bug: GraphQL
+named the stages of all 25, and against the REST order **16 are REVERSED** while the other 9 have
+a single stage — never anything else. Run it again rather than widening a parse on a hunch.
 
 `web/mock/server.ts` reproduces the whole surface with no GitLab and no token: its live pipeline
 declares `needs` (`MOCK_LIVE_PIPELINE_JOBS`, whose shape is deliberate — a job the rest waits

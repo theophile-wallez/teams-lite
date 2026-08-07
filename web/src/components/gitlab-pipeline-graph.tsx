@@ -10,7 +10,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { formatJobDuration, jobsTone, type GitLabJob, type PipelineTone } from "~/lib/gitlab-mr";
 import {
-  edgeIsRelated,
+  edgeIsLit,
   relatedNodes,
   type GraphNode,
   type PipelineGraph,
@@ -67,6 +67,9 @@ export function PipelineGraphView(props: {
     () => (focused ? relatedNodes(graph, focused) : null),
     [graph, focused],
   );
+  // Whether this curve is part of the chain the reader is pointing at. Nothing is lit at rest —
+  // the rule lives in `edgeIsLit`, so it is unit-tested rather than implied here.
+  const lit = (edge: { from: string; to: string }) => edgeIsLit(edge, related);
   const scroller = useRef<HTMLDivElement | null>(null);
   const cards = useRef(new Map<string, HTMLElement>());
   const edges = useEdgePaths(graph, scroller, cards, showNeeds);
@@ -94,17 +97,22 @@ export function PipelineGraphView(props: {
       // a page as tall as a screen: a four-row pipeline floated in the middle with a hand's width
       // of nothing above it. The COLUMNS inside stay top-aligned against each other too, or the
       // first card of each would sit on a different line from its neighbours.
+      // `isolate` is load-bearing: the curves sit at `-z-10` so a card's own background hides
+      // whatever runs under it, and without a stacking context HERE that negative layer falls
+      // behind the PAGE's background instead — which draws no curves at all.
       className={cn(
-        "relative flex min-w-0 items-start overflow-x-auto overflow-y-hidden",
+        "relative isolate flex min-w-0 items-start overflow-x-auto overflow-y-hidden",
         props.className,
       )}
       onPointerLeave={() => setFocused(null)}
     >
-      {/* The curves, behind the cards and deaf to the pointer: an edge is a statement about two
-          cards, never something to press. */}
+      {/* The curves, BEHIND the cards and deaf to the pointer: an edge is a statement about two
+          cards, never something to press — and a card is opaque, so a curve that runs past one
+          goes under it rather than across its words. `-z-10` is what puts it there: without a
+          layer of its own, a positioned sibling paints over the cards' own backgrounds. */}
       <svg
         data-testid="gitlab-pipeline-edges"
-        className="pointer-events-none absolute left-0 top-0 overflow-visible"
+        className="pointer-events-none absolute left-0 top-0 -z-10 overflow-visible"
         width={edges.width}
         height={edges.height}
         aria-hidden
@@ -115,15 +123,20 @@ export function PipelineGraphView(props: {
             data-testid="gitlab-pipeline-edge"
             data-from={path.from}
             data-to={path.to}
-            data-related={edgeIsRelated({ from: path.from, to: path.to }, related) ? "true" : "false"}
+            data-lit={lit(path) ? "true" : "false"}
             d={path.d}
             fill="none"
-            strokeWidth={1.5}
+            strokeWidth={lit(path) ? 2 : 1.5}
             className={cn(
-              "transition-[stroke,opacity] duration-200",
-              edgeIsRelated({ from: path.from, to: path.to }, related)
-                ? "stroke-primary opacity-90"
-                : "stroke-border opacity-40",
+              "transition-[stroke,opacity,stroke-width] duration-200",
+              // At REST the graph is one neutral colour: a wall of accent-coloured wires says
+              // every dependency matters, which is the same as saying none does. The accent is
+              // what a POINTER buys — the chain of the job under it, and only that.
+              lit(path)
+                ? "stroke-primary opacity-100"
+                : related
+                  ? "stroke-border opacity-30"
+                  : "stroke-border opacity-70",
             )}
           />
         ))}
@@ -215,16 +228,24 @@ function JobCard(props: {
       onFocus={props.onFocus}
       onBlur={props.onBlur}
       className={cn(
+        // `bg-card` is OPAQUE and stays that way in every state. The whole card used to take an
+        // `opacity` when another job was pointed at, and a translucent card lets the curves
+        // behind it show through its own words — so what fades is the CONTENT below, and the
+        // surface keeps hiding whatever runs under it.
         "group relative flex items-center gap-2 rounded-xl border bg-card transition-all duration-200",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         density === "compact" ? "w-44 px-2 py-1.5" : "w-56 px-2.5 py-2",
-        toneBorder(node.tone),
-        // A dimmed card is still readable: what is faint is the card's own weight, never its
-        // words, because the reader is looking for the name they are pointing near.
-        props.dimmed ? "opacity-45" : "opacity-100",
-        job.web_url && "hover:border-border hover:shadow-sm",
+        // A dimmed card's ring goes neutral rather than translucent, for the same reason.
+        props.dimmed ? "border-border-subtle" : toneBorder(node.tone),
+        job.web_url && !props.dimmed && "hover:border-border hover:shadow-sm",
       )}
     >
+      <span
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-2 transition-opacity duration-200",
+          props.dimmed ? "opacity-40" : "opacity-100",
+        )}
+      >
       <StatusGlyph tone={node.tone} status={job.status} />
       <span className="flex min-w-0 flex-1 flex-col">
         <span
@@ -253,6 +274,7 @@ function JobCard(props: {
         )}
       >
         {words}
+      </span>
       </span>
     </Element>
   );

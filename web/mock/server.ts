@@ -3922,6 +3922,12 @@ type MockPipeline = {
   id: number;
   status: string;
   jobs: MockJob[];
+  /** The stage names in the pipeline's own order, which is what the backend reads over GraphQL
+   *  (`src/gitlab_ci_graph.rs`) — because GitLab's REST jobs endpoint answers NEWEST FIRST and
+   *  therefore in REVERSE stage order. `mockPipelineView` reverses the jobs on the way out for
+   *  exactly that reason, so a page that read the order off the answer draws this fixture
+   *  backwards, as it drew every real multi-stage pipeline backwards until it was measured. */
+  stages?: string[];
   live?: boolean;
   /** How many times this pipeline has been read. The FIRST read never advances it, so the
    *  first paint shows the seeded state and every POLL after it shows something happening —
@@ -4149,6 +4155,7 @@ const mockMergeRequests: MockMergeRequest[] = [
       id: 190_933,
       status: "running",
       live: true,
+      stages: ["check", "test", "deploy"],
       jobs: MOCK_LIVE_PIPELINE_JOBS.map((job) => ({ ...job })),
     },
     discussions: [
@@ -4300,6 +4307,7 @@ const mockMergeRequests: MockMergeRequest[] = [
     pipeline: {
       id: 190_901,
       status: "failed",
+      stages: ["check", "test", "deploy"],
       // RED and ORANGE in one pipeline, which is the pair the tones exist to tell apart: the
       // unit test failed and blocks the merge, the review failed and nobody has to fix it. The
       // deploy was SKIPPED, because a job that will never run now is neither of those.
@@ -4388,6 +4396,7 @@ const mockMergeRequests: MockMergeRequest[] = [
     pipeline: {
       id: 190_500,
       status: "success",
+      stages: ["check", "test"],
       jobs: [
         { id: 21, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 30 },
         { id: 22, name: "🧪 unit", stage: "test", status: "success", allow_failure: false, duration: 88 },
@@ -4430,6 +4439,7 @@ function resetMockLivePipeline(): void {
     status: "running",
     live: true,
     reads: 0,
+    stages: ["check", "test", "deploy"],
     jobs: MOCK_LIVE_PIPELINE_JOBS.map((job) => ({ ...job })),
   };
 }
@@ -4596,7 +4606,12 @@ function mockPipelineView(mr: MockMergeRequest): Record<string, unknown> {
       status: mr.pipeline.status,
       web_url: `${mockMergeRequestUrl(mr)}/pipelines`,
     },
-    jobs: mr.pipeline.jobs.map((job) => ({
+    stages: mr.pipeline.stages ?? [],
+    // NEWEST FIRST, which is what the real endpoint answers — measured on this instance: of 25
+    // merge requests, 16 came back in reverse stage order and the other 9 had a single stage.
+    // The mock used to answer in stage order, which is the one way it could have hidden the bug
+    // that shipped: the page drew `install` last on every real pipeline.
+    jobs: [...mr.pipeline.jobs].reverse().map((job) => ({
       ...job,
       web_url: `${mockMergeRequestUrl(mr)}/jobs/${job.id}`,
     })),

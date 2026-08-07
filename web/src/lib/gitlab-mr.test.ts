@@ -217,18 +217,44 @@ describe("pipelines", () => {
     expect(pipelineIsLive({ pipeline: { id: 1, status: "manual" }, jobs: [job({ status: "manual" })] })).toBe(false);
   });
 
-  it("stages keep GitLab's own order, emoji names and all", () => {
-    const stages = pipelineStages([
-      job({ id: 1, name: "🤖 Opencode", stage: "detect 🕵️" }),
-      job({ id: 2, name: "🔖 Tag Branch", stage: "detect 🕵️", status: "created" }),
-      job({ id: 3, name: "unit", stage: "🧪 test", status: "running" }),
-    ]);
+  it("stages take the pipeline's own order, never the answer's", () => {
+    // GitLab's jobs endpoint answers NEWEST FIRST, so these arrive in reverse stage order —
+    // measured on the tenant: 16 of 25 pipelines. The order comes from `stages`, which the
+    // backend reads over GraphQL.
+    const stages = pipelineStages({
+      stages: ["detect 🕵️", "🧪 test"],
+      jobs: [
+        job({ id: 3, name: "unit", stage: "🧪 test", status: "running" }),
+        job({ id: 2, name: "🔖 Tag Branch", stage: "detect 🕵️", status: "created" }),
+        job({ id: 1, name: "🤖 Opencode", stage: "detect 🕵️" }),
+      ],
+    });
     expect(stages.map((s) => s.name)).toEqual(["detect 🕵️", "🧪 test"]);
     expect(stages[0]!.jobs.length).toBe(2);
-    // Nothing is sorted: an alphabetical order would put "🧪 test" before "detect".
+    // Inside a stage the ids order the jobs, which is the order GitLab's own graph shows.
+    expect(stages[0]!.jobs.map((j) => j.id)).toEqual([1, 2]);
     expect(stages[1]!.jobs[0]!.name).toBe("unit");
+  });
+
+  it("falls back to the jobs' own ids when nothing named the stages", () => {
+    // An older backend, or a GitLab whose GraphQL refused the query: a pipeline's jobs are
+    // created stage by stage, so ascending id is creation order is stage order.
+    const stages = pipelineStages({
+      jobs: [
+        job({ id: 30, name: "deploy", stage: "deploy" }),
+        job({ id: 20, name: "test", stage: "test" }),
+        job({ id: 10, name: "build", stage: "build" }),
+      ],
+    });
+    expect(stages.map((s) => s.name)).toEqual(["build", "test", "deploy"]);
+    // And a stage the named list forgot still gets its column, after the ones it named.
+    const partial = pipelineStages({
+      stages: ["build"],
+      jobs: [job({ id: 2, stage: "extra" }), job({ id: 1, stage: "build" })],
+    });
+    expect(partial.map((s) => s.name)).toEqual(["build", "extra"]);
     expect(pipelineStages(null)).toEqual([]);
-    expect(pipelineStages([])).toEqual([]);
+    expect(pipelineStages({ jobs: [] })).toEqual([]);
   });
 
   it("a stage's tone reads the jobs that count", () => {
