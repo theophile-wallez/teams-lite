@@ -1930,13 +1930,21 @@ or `web/e2e/tracker-refs.spec.ts`:
 - **A reference inside code is code.** The scan skips a `code` / `pre` subtree, exactly as a
   mention does: an answer explaining what `!42` means must not link to somebody's branch while
   it does so.
-- **A bare `!42` belongs to the CONTAINING project**, which is GitLab's own rule. The surface
-  says which that is — the open merge request, on its page and on its diff
-  (`TrackerProjectProvider`) — and a chat message resolves it against the WHOLE message, quote
-  included: a reply's subject is the thing it quotes, which is exactly the shape an agent's
-  answer takes, since "Review this merge request: !42 <url>" comes back quoted above it. That is
-  also why the project is read with `projectNamedIn` rather than `extractLinks`: a quote carries
-  its preview as PLAIN TEXT, so the URL in it is words by the time the bubble sees it.
+- **A bare `!42` belongs to the CONTAINING project**, which is GitLab's own rule, and what
+  "containing" means is decided per surface, nearest first:
+  - the open **merge request**, on its page and on its diff (`TrackerProjectProvider`) — a
+    reference written inside a project is about that project;
+  - then the **message's own** links, quote included: a reply's subject is the thing it quotes,
+    which is exactly the shape an agent's answer takes, since "Review this merge request: !42
+    <url>" comes back quoted above it. The project is read with `projectNamedIn` rather than
+    `extractLinks` because a quote carries its preview as PLAIN TEXT, so the URL in it is words
+    by the time the bubble sees it;
+  - then the **THREAD**, from the nearest project it named at or ABOVE that message
+    (`threadProjects`, computed once by the message pane). That last one is not a nicety: read on
+    this tenant, the link is pasted ONCE and everything after it — the reader's own words and
+    every answer an agent writes — says `!298`. With a window of one message, the shape people
+    really write recognised nothing. It never looks forward, and it moves with the thread, which
+    is how a reader resolves "the merge request we are talking about" themselves.
 - **Only a merge request is claimed on the GitLab side.** `#123` (an issue) and `&5` (an epic)
   are GitLab references too, and this app has a page for neither, so they are left alone rather
   than sent to a page that would say "not built yet".
@@ -1960,8 +1968,9 @@ is therefore untested against the tenant is the pairing — one `linear_workspac
 real API — while the parse itself is pinned by unit tests against the shape Linear answers with.
 
 `web/mock/server.ts` reproduces the whole feature with no Linear and no GitLab: it answers
-`linear_workspace` with one team key (`ENG`), the seeded thread carries a bare `!99` in a REPLY —
-so the project comes from the quote, and no second card is drawn — the mock agent's answer names
+`linear_workspace` with one team key (`ENG`), the seeded thread carries a bare `!99` twice — once
+in a REPLY, so the project comes from the quote and no second card is drawn, and once in a message
+that names nothing at all, so the project comes from the thread — the mock agent's answer names
 `acme/webapp!596` and `ENG-1` in the words a CLI would write, and every fixture puts `UTF-8`
 beside them, because the word that must NOT become a chip is half the rule. `cd web && bun run
 preview -- --out /tmp/ref --tracker-refs` captures the chat message, the chip in both themes, a

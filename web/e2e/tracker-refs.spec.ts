@@ -32,7 +32,9 @@ test.describe("tracker references", () => {
     page,
   }) => {
     await openTrackerThread(page);
-    const bubble = page.locator('[data-testid="message"]:has([data-testid="tracker-ref"])').last();
+    // The REPLY, whose quote is what names the project — told apart by its own words, because
+    // the thread holds several messages with chips in them now.
+    const bubble = page.locator('[data-testid="message"]', { hasText: "Done —" }).last();
 
     // `!99` names a merge request of the project the message itself names — GitLab's own rule
     // for a bare reference — and it points at THIS app's page for it.
@@ -57,9 +59,22 @@ test.describe("tracker references", () => {
     await expect(bubble.locator(`${chip}:text-is("UTF-8")`)).toHaveCount(0);
   });
 
+  test("a message that names no project at all takes the THREAD's", async ({ page }) => {
+    // The shape measured on the real tenant: the link is pasted once, and every message after
+    // it — a colleague's own words, and every answer an agent writes — says `!99`. A window of
+    // one message recognises nothing there, which is what it did.
+    await openTrackerThread(page);
+    const bubble = page
+      .locator('[data-testid="message"]', { hasText: "I will look at" })
+      .last();
+    const mr = bubble.locator(gitlabChip);
+    await expect(mr).toHaveAttribute("href", "/mr/acme%2Fwebapp!99");
+    await expect(mr).toHaveText("!99");
+  });
+
   test("a merge request chip opens this app's own page for it", async ({ page }) => {
     await openTrackerThread(page);
-    const bubble = page.locator('[data-testid="message"]:has([data-testid="tracker-ref"])').last();
+    const bubble = page.locator('[data-testid="message"]', { hasText: "Done —" }).last();
     await bubble.locator(`${gitlabChip}[data-reference="!99"]`).click();
 
     // The route changed — no reload, no link out — and the page that came up is the merge

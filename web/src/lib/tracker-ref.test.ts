@@ -8,6 +8,8 @@ import {
   markTrackerRefs,
   mergeRequestPath,
   projectNamedIn,
+  projectNamedInText,
+  threadProjects,
   trackerRefFromUrl,
   type TrackerVocabulary,
 } from "./tracker-ref";
@@ -216,6 +218,55 @@ describe("what a machine can recognise", () => {
   it("recognises no bare identifier for a team the workspace does not hold", () => {
     const nodes = body("<p>ENG-7</p>");
     expect(chips(nodes)).toEqual([]);
+  });
+});
+
+describe("the project a THREAD puts a bare reference in", () => {
+  /** A thread in reading order, oldest first, the way `threadProjects` takes one. */
+  function thread(...bodies: string[]): (readonly [string, string])[] {
+    return bodies.map((body, i) => [`m${i}`, body] as const);
+  }
+
+  it("carries the project forward from the message that named it", () => {
+    // Measured on the tenant: the link is pasted ONCE, and every message after it — the
+    // reader's own words and every answer an agent writes — says `!298`.
+    const projects = threadProjects(
+      thread(`<p>can you look at ${MR_URL}</p>`, "<p>@claude review it</p>", "<p>!42 is fine</p>"),
+      VOCAB,
+    );
+    expect(projects.get("m0")).toBe("heka/platform");
+    expect(projects.get("m2")).toBe("heka/platform");
+  });
+
+  it("never looks forward", () => {
+    // A project named later says nothing about a reference written before it.
+    const projects = threadProjects(thread("<p>!42 is fine</p>", `<p>${MR_URL}</p>`), VOCAB);
+    expect(projects.has("m0")).toBe(false);
+    expect(projects.get("m1")).toBe("heka/platform");
+  });
+
+  it("moves with the thread, and a message's own project wins", () => {
+    // "The merge request we are talking about" is the nearest one, which is how a reader
+    // resolves it themselves.
+    const projects = threadProjects(
+      thread(`<p>${MR_URL}</p>`, "<p>and other/repo!8 too</p>", "<p>!9 next</p>"),
+      VOCAB,
+    );
+    expect(projects.get("m1")).toBe("other/repo");
+    expect(projects.get("m2")).toBe("other/repo");
+  });
+
+  it("names nothing when the machine has no GitLab host", () => {
+    expect(threadProjects(thread(`<p>${MR_URL}</p>`), { gitlabHost: "", linear: null }).size).toBe(
+      0,
+    );
+  });
+
+  it("reads a project out of a raw body, href and all", () => {
+    // The thread asks this of every message it holds, so it reads the TEXT rather than a parsed
+    // tree — and an `href` is text too.
+    expect(projectNamedInText(`<a href="${MR_URL}">the branch</a>`, VOCAB)).toBe("heka/platform");
+    expect(projectNamedInText("<p>nothing here</p>", VOCAB)).toBeNull();
   });
 });
 

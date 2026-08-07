@@ -1735,10 +1735,10 @@ function seedGitLabSamples(): void {
     },
     120_000,
   );
-  // The same two trackers named the way people really write them in a thread: bare
-  // references, with no link on them at all. `!99` is a merge request of the project this
-  // message's own link names — GitLab's own rule for a bare reference — `ENG-1` is a Linear
-  // issue, and `UTF-8` is a word that only looks like one (see lib/tracker-ref.ts).
+  // A message that names its OWN project through the quote it replies to, and one that names
+  // none at all — the shape measured on the tenant, where the link is pasted once and every
+  // message after it says `!99`. `ENG-1` needs no project; `UTF-8` is a word that only looks
+  // like a reference (see lib/tracker-ref.ts).
   push(
     {
       sender: SELF_NAME,
@@ -1759,6 +1759,18 @@ function seedGitLabSamples(): void {
       is_self: true,
     },
     150_000,
+  );
+  // And the one that names NOTHING: no link, no quote, no full reference. It reads `!99`
+  // because the thread said which project three messages ago, which is the rule
+  // `threadProjects` exists for.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: `<p>Thanks — I will look at !99 tomorrow.</p>`,
+      is_self: false,
+    },
+    165_000,
   );
   // A message that is ONLY a link (as Teams autolinks a pasted URL — the anchor
   // text is the URL itself). It should render as just the integration card, with

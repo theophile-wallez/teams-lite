@@ -267,6 +267,65 @@ export function projectNamedIn(nodes: RichNode[], vocab: TrackerVocabulary): str
   return null;
 }
 
+/**
+ * The project a raw body names, read off the TEXT rather than a parsed tree: the first merge
+ * request it names in full, as a URL or as a `group/project!7` reference.
+ *
+ * Its own entry point beside {@link projectNamedIn} because its caller is different in kind: a
+ * thread asks this of every message it holds (see {@link threadProjects}), and parsing a few
+ * hundred bodies into node trees to find a URL is work nobody needs. Reading the raw HTML is
+ * enough and is honest about what it can find — an `href` is text too.
+ */
+export function projectNamedInText(body: string, vocab: TrackerVocabulary): string | null {
+  for (const candidate of candidates(body)) {
+    if (isUrl(candidate.text)) {
+      const ref = trackerRefFromUrl(trimUrlPunctuation(candidate.text), vocab);
+      if (ref?.tracker === "gitlab") return ref.projectPath;
+      continue;
+    }
+    const cut = candidate.text.lastIndexOf("!");
+    if (cut > 0) return candidate.text.slice(0, cut);
+  }
+  return null;
+}
+
+/**
+ * The project each message of a thread puts a bare `!42` in: the nearest one named AT or ABOVE
+ * it, in reading order.
+ *
+ * This is the rule the words themselves follow, and it is measured rather than guessed: on this
+ * tenant, the link is pasted ONCE and everything after it — the reader's own words and every
+ * answer an agent writes — says `!298`. A window of one message therefore recognises almost
+ * nothing, which is what it did.
+ *
+ * Two things bound the claim, because a chip that opens ANOTHER project's `!298` states
+ * something false:
+ *
+ *  - it only ever looks BACKWARDS. A project named later in the thread says nothing about a
+ *    reference written before it.
+ *  - it is the NEAREST one, so a thread that moves from one project to another moves with it —
+ *    the reader's own reading of "the merge request we are talking about".
+ *
+ * `bodies` is the thread in reading order, oldest first, as `[id, raw body]`. The answer is
+ * keyed by message id, and a message that no project precedes is absent from it: a reference
+ * there stays the text it is.
+ */
+export function threadProjects(
+  bodies: readonly (readonly [string, string])[],
+  vocab: TrackerVocabulary,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  if (vocab.gitlabHost.trim() === "") return out;
+  let nearest: string | null = null;
+  for (const [id, body] of bodies) {
+    // The message's OWN project first, so a body that names one is never resolved against an
+    // older thing — it is the containing project, exactly as it is on a merge-request page.
+    nearest = projectNamedInText(body, vocab) ?? nearest;
+    if (nearest) out.set(id, nearest);
+  }
+  return out;
+}
+
 /** A reference node: the chip the renderer draws, carrying the author's own words as its text
  *  so anything that does not know the tag still shows what was written. */
 function refNode(ref: TrackerRef, children: RichNode[]): RichNode {

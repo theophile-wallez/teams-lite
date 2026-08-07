@@ -266,6 +266,11 @@ function MessageBubbleImpl(props: {
     agent: AgentCandidate,
     mergeRequest: MergeRequestLink,
   ) => void;
+  /** The GitLab project the THREAD puts this message's bare `!42` in — the nearest one named at
+   *  or above it (`threadProjects`). The message's OWN links win over it: this is the fallback
+   *  for the shape people really write, where the link is pasted once and everything after it
+   *  says `!298` (see lib/tracker-ref.ts). */
+  trackerProject?: string;
   onReply: (message: ChatMessage) => void;
   /** Take the reader to the message this one quotes. Passed only where the jump can
    *  really happen — the pane that owns the scroll — and absent on a surface with no
@@ -350,8 +355,12 @@ function MessageBubbleImpl(props: {
   const trackers = useTrackerVocabulary();
   const trackerProject = useMemo(() => {
     if (!trackers) return null;
-    return projectNamedIn(parseMessageBody(props.message.content ?? "", format), trackers);
-  }, [props.message.content, format, trackers]);
+    return (
+      projectNamedIn(parseMessageBody(props.message.content ?? "", format), trackers) ??
+      props.trackerProject ??
+      null
+    );
+  }, [props.message.content, format, trackers, props.trackerProject]);
 
   const enrichment = useEnrichedLinks(candidateLinks);
 

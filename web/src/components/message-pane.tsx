@@ -33,7 +33,9 @@ import { CallButton } from "./call-button";
 import { useCallOwnsComposer } from "./call-stage-context";
 import { AgentPendingBubble } from "./agent-reply";
 import { Avatar, conversationFallback, conversationPhoto, type AvatarPhoto } from "./avatar";
+import { threadProjects } from "~/lib/tracker-ref";
 import { MessageBubble } from "./message-bubble";
+import { useTrackerVocabulary } from "./tracker-refs-context";
 import { SystemEventLine } from "./system-event-line";
 import { ReadReceipts } from "./read-receipts";
 import { ModifierKey } from "./shortcut";
@@ -152,6 +154,23 @@ export function MessagePane(props: { onBack?: () => void }) {
   const answerAgents = useMemo(
     () => defaultAgentCandidatesFor(agentStatus, openId),
     [agentStatus, openId],
+  );
+
+  // Which GitLab project each message's bare `!42` belongs to: the nearest one the thread names
+  // at or above it (see `threadProjects`). Computed here rather than per bubble for the reason
+  // above — one pass over the loaded history, and a stable value per row — and because no
+  // bubble can see the messages before it. A thread that names none leaves every bare
+  // reference the word it is.
+  const trackers = useTrackerVocabulary();
+  const trackerProjects = useMemo(
+    () =>
+      trackers
+        ? threadProjects(
+            messages.map((m) => [m.id, m.content ?? ""] as const),
+            trackers,
+          )
+        : new Map<string, string>(),
+    [messages, trackers],
   );
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -676,6 +695,7 @@ export function MessagePane(props: { onBack?: () => void }) {
             answerAgents={answerAgents}
             onAnswerWith={doAnswerWith}
             onReviewWith={doReviewWith}
+            trackerProject={trackerProjects.get(m.id)}
             onReact={doReact}
             onStartEdit={doStartEdit}
             onSaveEdit={doSaveEdit}
