@@ -8315,19 +8315,24 @@ function withoutQuotedBlocks(html: string): string {
 }
 
 /** The backend a message asks for, or null — `agent_policy::split_prefix`, and the same
- *  rule: the prefix must OPEN the message. */
+ *  rule: the address may sit ANYWHERE, as a word of its own, and something has to be left
+ *  over to ask. */
 function mockAgentBackend(text: string): string | null {
-  const trimmed = text.trimStart();
+  let found: { backend: string; at: number } | null = null;
   for (const backend of ["claude", "opencode"]) {
-    const prefix = `@${backend}`;
-    if (!trimmed.toLowerCase().startsWith(prefix)) continue;
-    const rest = trimmed.slice(prefix.length);
-    // The prefix has to be a word of its own ("@claudette" summons nothing), and
-    // something has to follow it (a bare "@claude" asks nothing).
-    if (rest !== "" && !/^[\s:,]/.test(rest)) continue;
-    return rest.replace(/^[\s:,]+/, "") === "" ? null : backend;
+    // A word of its own on both sides: the text opens there or whitespace separates it,
+    // and it ends the text or is followed by something that ends a word — so
+    // "@claudette" is another word and "ping@claude.example" is another kind of address.
+    const at = new RegExp(`(^|\\s)@${backend}(?![\\p{L}\\p{N}_-])`, "iu").exec(text);
+    if (!at) continue;
+    const start = at.index + at[1]!.length;
+    if (!found || start < found.at) found = { backend, at: start };
   }
-  return null;
+  if (!found) return null;
+  const rest = text.slice(found.at + found.backend.length + 1);
+  // A bare "@claude" asks nothing, and neither does one with only its own punctuation.
+  const prompt = `${text.slice(0, found.at)} ${rest.replace(/^[:,]+/, "")}`.trim();
+  return prompt === "" ? null : found.backend;
 }
 
 /** Answer a trigger the user wrote, if the conversation is opted in.

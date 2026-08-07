@@ -6,8 +6,8 @@
 //
 //   - **It notifies nobody, so it carries no identity.** A mention is a pair (an indexed
 //     span in the body, an entry naming an MRI beside it) and that pair is what pings a
-//     person. An agent has no MRI; what summons it is the prefix the message OPENS with,
-//     read back by `agent_policy::split_prefix` on the backend.
+//     person. An agent has no MRI; what summons it is the prefix itself, wherever the
+//     message writes it, read back by `agent_policy::split_prefix` on the backend.
 //   - **It serializes to that prefix, as plain text.** `renderHTML` emits the bare
 //     `@claude` inside a span our own parser unwraps, so the body that reaches Teams is
 //     exactly what the user would have typed by hand — no markup that would render as
@@ -44,10 +44,15 @@ declare module "@tiptap/core" {
         from: number;
         to: number;
       }) => ReturnType;
-      /** Put a tag summoning `backend` at the START of the message — the one place the
-       *  backend reads a prefix from — keeping whatever the composer already held after
-       *  it, and leave the caret at the end. `request` seeds the words after the tag for
-       *  a composer that had none (see `answerRequest` in lib/agent-answer.ts).
+      /** Put a tag summoning `backend` at the START of the message, keeping whatever the
+       *  composer already held after it, and leave the caret at the end. `request` seeds
+       *  the words after the tag for a composer that had none (see `answerRequest` in
+       *  lib/agent-answer.ts).
+       *
+       *  The front is a READABLE place rather than the only working one — the backend reads
+       *  an address wherever it stands (`agent_policy::split_prefix`) — and it is where a
+       *  draft the user did not type should start: "Answer with Claude" writes a sentence
+       *  they are about to add to, and the agent it names belongs at the top of it.
        *
        *  A tag already leading the message is REPLACED: picking a second agent changes
        *  which one answers, it does not queue both. */

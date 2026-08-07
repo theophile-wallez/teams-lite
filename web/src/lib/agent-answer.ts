@@ -16,8 +16,10 @@
 //     `agentCandidatesFor`, which is the backend's own state: a usable CLI, a provider
 //     the user left on, and THIS conversation opted in. The consent gate stays in the
 //     thread's own menu; this only reflects it.
-//   - **The tag goes to the START of the message**, because that is the only place the
-//     backend reads it from (`agent_policy::split_prefix`).
+//   - **The tag goes to the START of the message.** Not because it must — the backend reads
+//     an address wherever it stands (`agent_policy::split_prefix`) — but because a sentence
+//     the user did not write should read like one: "@claude Answer this message." is a
+//     request they can add to, and the agent it names belongs at the top of it.
 
 /** What the composer says after the tag when the user had written nothing.
  *

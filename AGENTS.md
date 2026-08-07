@@ -253,9 +253,9 @@ whether it is a control; `message-pane.tsx` owns the scroll and resolves the tar
 ## The local agent (`@claude` in a thread)
 
 The user can summon a coding agent that runs on this machine from any Teams client —
-their phone included — by writing `@claude <prompt>` or `@opencode <prompt>` in a
-thread. The backend runs that CLI, posts one message, and EDITS it as the answer
-arrives, so everybody in the thread watches the reply being written.
+their phone included — by writing `@claude` anywhere in a message in a thread. The backend
+runs that CLI, posts one message, and EDITS it as the answer arrives, so everybody in the
+thread watches the reply being written.
 
 `src/agent.rs` runs the CLI, `src/agent_policy.rs` decides whether a message asked for
 one, `src/agent_markdown.rs` turns the answer into the HTML a Teams message renders,
@@ -370,6 +370,22 @@ Five rules hold it together. Each one is load-bearing, and each is pinned by a t
   with the user's files in reach, so a trigger a colleague could type is remote code
   execution with a friendly syntax. Never relax this to "a mention of the app", and
   never to "an allowlist of colleagues".
+- **The address may sit ANYWHERE in the message, and that is all it takes.** `@claude` is
+  read as a word of its own wherever it stands, and the prompt is the whole message minus
+  that word (`agent_policy::split_prefix` / `address_in` / `prompt_without`): "which port
+  does it use, @claude?" is the same request as "@claude which port does it use?", because
+  a person writing to somebody does not always open with their name. The earliest address
+  wins when a message names two, the match ignores case, and the punctuation an address is
+  written with belongs to it — the `:` or `,` after the name and the vocative `,` before
+  it. The cost is stated where the rule is: a message ABOUT the agent now reads as a
+  message TO it, which the text alone can never tell apart. Two things pay for it. It is a
+  WORD — it opens the text or follows whitespace, and it ends the text or is followed by
+  something that ends a word — so `ping@claude.example` and `@claudette` summon nothing.
+  And the one shape that arrives `from_me` without the user writing it, an ANSWER, is
+  refused by name (`agent_policy::is_agent_answer`, which reads the signature line the way
+  `web/src/lib/agent-message.ts` does): an answer is free to write `@claude` in its own
+  words, and without that gate a run would summon itself. The old rule — the address had
+  to OPEN the message — prevented that loop by accident; now it is prevented on purpose.
 - **A conversation must be opted in.** The default is `off` everywhere. The sandbox
   channel is the single built-in exception, because § Sending messages pre-authorizes
   it. Anything else needs `agent_set_mode`, a write-token-gated `MACHINE_METHODS`
@@ -3376,10 +3392,13 @@ notifies a colleague, a tag starts a program on this machine.
   which is exactly what the user would have typed by hand, so
   `agent_policy::split_prefix` reads it back, and every other client shows words rather
   than markup it cannot render.
-- **It is offered only where it would work: at the START of the message.** The backend
-  summons an agent from the prefix a message OPENS with, so a tag anywhere else runs
-  nothing — and a chip that looks like it started a program while nothing ran is worse
-  than plain text. It is the same rule that refuses a mention with no visible span.
+- **It is offered wherever an "@" is, because it works wherever it is written.** The
+  backend reads an address anywhere in the message (`agent_policy::address_in`), so a tag
+  mid-sentence summons the agent exactly as one at the front does. The rule that keeps a
+  row honest was never the position: it is the next bullet — a row is drawn only for
+  something it would really reach, because a chip that looks like it started a program
+  while nothing ran is worse than plain text. It is the same rule that refuses a mention
+  with no visible span.
 - **A row is drawn only for an agent that would really answer**: the backend is not
   read-only, the CLI is installed and that provider is on (`usableBackends`), and THIS
   conversation is opted in (`agentModeFor`). The consent gate stays where it is — the
@@ -3393,9 +3412,12 @@ notifies a colleague, a tag starts a program on this machine.
   `rich-content.tsx` an `agent` node, drawn by the composer's own `AgentTagChip`. It is the
   choice `agent-message.ts` makes for a reply's signature, and for the same reason: a
   message read back covers the tags typed from a phone too. The rules above still decide —
-  `agentTagInText` is a port of `agent_policy::split_prefix` plus its prompt rules — so a
-  prefix mid-sentence and one in a quote stay plain words: the backend strips quoted blocks
-  before it reads a trigger, so a prefix inside one started nothing.
+  `agentTagInText` is a port of `agent_policy::split_prefix` plus its prompt rules — so an
+  address mid-sentence is marked (it is a request now) while one in a quote stays plain
+  words: the backend strips quoted blocks before it reads a trigger, so a prefix inside one
+  started nothing. The offsets are taken over the whole body the way `teams_read` flattens
+  it, one newline per block, so the chip sits where the BACKEND read the address and not
+  wherever those letters happen to appear.
 - **WHOSE agent decides which gates apply**, and that split is the whole of
   `agentTagsInMessage`. On a message of OURS the chip says a program started on THIS
   machine, so every gate the composer applies before it offers a tag applies again

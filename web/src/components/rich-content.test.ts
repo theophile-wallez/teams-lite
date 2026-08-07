@@ -174,7 +174,7 @@ describe("RichContent — agent tags", () => {
   const withAgents = (html: string, agents = [CLAUDE]) =>
     renderToStaticMarkup(createElement(RichContent, { html, agentTags: agents }));
 
-  it("draws the opening prefix as the vendor's chip, and keeps the prompt", () => {
+  it("draws the prefix as the vendor's chip, and keeps the prompt", () => {
     const out = withAgents("<p>@claude which port does the backend listen on?</p>");
     expect(out).toContain('data-testid="agent-tag"');
     expect(out).toContain('data-agent="claude"');
@@ -194,9 +194,18 @@ describe("RichContent — agent tags", () => {
     expect(out).not.toContain('data-testid="agent-tag"');
   });
 
+  it("draws an address that stands mid-sentence, because the backend reads one there", () => {
+    const out = withAgents("<p>which port does the backend listen on, @claude?</p>");
+    expect(out).toContain('data-testid="agent-tag"');
+    // The author's own comma stays their text; only the prefix wears the chip.
+    expect(out).toContain("which port does the backend listen on,");
+    expect(out).not.toContain("@claude");
+  });
+
   it("leaves a prefix that summons nothing as words", () => {
-    const out = withAgents("<p>as we said @claude is quick</p>");
-    expect(out).toContain("@claude");
+    // An address of another kind: glued to a word, so it is not a word of its own.
+    const out = withAgents("<p>write to ping@claude.example</p>");
+    expect(out).toContain("ping@claude.example");
     expect(out).not.toContain('data-testid="agent-tag"');
   });
 });

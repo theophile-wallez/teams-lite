@@ -157,19 +157,41 @@ describe("agentTagInText", () => {
     expect(agentTagInText("  \n@claude which port?", AGENTS)).toBe(CLAUDE);
   });
 
-  it("reads nothing when the prefix does not open the message", () => {
-    // Somebody talking ABOUT the agent, not to it — which is what the backend reads too.
-    expect(agentTagInText("as we said @claude is quick", AGENTS)).toBeNull();
+  it("reads the address wherever it stands", () => {
+    // One request written several ways: a person does not always open with the name of
+    // whoever they are writing to, and the backend reads every one of these the same.
+    expect(agentTagInText("which port, @claude?", AGENTS)).toBe(CLAUDE);
+    expect(agentTagInText("which port? @claude", AGENTS)).toBe(CLAUDE);
+    expect(agentTagInText("bon @claude, tu peux regarder ?", AGENTS)).toBe(CLAUDE);
+    // The case this rule gives up, and it is stated where the rule is: talking ABOUT the
+    // agent and talking TO it are the same words, so this is a request now.
+    expect(agentTagInText("as we said @claude is quick", AGENTS)).toBe(CLAUDE);
+  });
+
+  it("takes the FIRST agent addressed when a message names two", () => {
+    // The agent the sentence turns to first, whichever order the caller's list is in.
+    expect(agentTagInText("ask @claude, not @opencode", AGENTS)).toBe(CLAUDE);
+    expect(agentTagInText("ask @opencode, not @claude", AGENTS)).toBe(OPENCODE);
   });
 
   it("reads nothing from a word that merely starts the same way", () => {
     expect(agentTagInText("@claudette which port?", AGENTS)).toBeNull();
+    expect(agentTagInText("ask @claudette which port?", AGENTS)).toBeNull();
+  });
+
+  it("reads nothing from an address of another kind", () => {
+    // An email is not a summons: the prefix has to be a word of its own on both sides.
+    expect(agentTagInText("write to ping@claude.example", AGENTS)).toBeNull();
+    expect(agentTagInText("mail opencode@example.com about it", AGENTS)).toBeNull();
   });
 
   it("reads nothing without a prompt, and nothing from a paste", () => {
     expect(agentTagInText("@claude", AGENTS)).toBeNull();
     expect(agentTagInText("@claude   ", AGENTS)).toBeNull();
+    expect(agentTagInText("@claude:", AGENTS)).toBeNull();
     expect(agentTagInText(`@claude ${"x".repeat(4_001)}`, AGENTS)).toBeNull();
+    // The prompt is the whole message minus the address, so the cap counts all of it.
+    expect(agentTagInText(`${"x".repeat(4_001)} @claude`, AGENTS)).toBeNull();
   });
 
   it("reads nothing when the agent is not one the caller offers", () => {
@@ -194,13 +216,35 @@ describe("markAgentTag", () => {
     expect(tags(marked("<p><strong>@claude</strong> which port?</p>"))).toEqual(["claude"]);
   });
 
-  it("marks the FIRST prefix only", () => {
-    // The second one summons nobody: the backend reads the prefix a message opens with.
+  it("marks the FIRST address only", () => {
+    // The second one summons nobody: the backend takes the agent the sentence turns to
+    // first, and every later `@claude` is one of the author's own words.
     expect(tags(marked("<p>@claude ask @claude again</p>"))).toEqual(["claude"]);
   });
 
+  it("marks an address that stands mid-message, at the offset the backend read it", () => {
+    // The chip goes where the request is, not on the first `@claude`-shaped word: both are
+    // read from one pass over the whole text (see `agentAddressInText`).
+    const nodes = marked("<p>as we said @claude is quick</p>");
+    expect(tags(nodes)).toEqual(["claude"]);
+    expect(JSON.stringify(nodes)).toContain("as we said ");
+    expect(JSON.stringify(nodes)).toContain(" is quick");
+    // Across blocks, and through the markup it was written in.
+    expect(tags(marked("<p>look at this</p><p>@claude and that</p>"))).toEqual(["claude"]);
+    expect(tags(marked("<p>which port <strong>@claude</strong></p>"))).toEqual(["claude"]);
+  });
+
+  it("keeps the author's own comma out of the chip", () => {
+    // The backend cuts "do this, @claude" at the comma — it is how a person marks who they
+    // are talking to — but the comma is their punctuation and stays their text.
+    const nodes = marked("<p>which port, @claude?</p>");
+    expect(tags(nodes)).toEqual(["claude"]);
+    expect(JSON.stringify(nodes)).toContain("which port,");
+    expect(JSON.stringify(nodes)).toContain("?");
+  });
+
   it("leaves a body that summons nothing exactly as it was", () => {
-    const html = "<p>as we said @claude is quick</p>";
+    const html = "<p>write to ping@claude.example</p>";
     const parsed = parseMessageBody(html, "html");
     expect(markAgentTag(parsed, AGENTS)).toBe(parsed);
     expect(markAgentTag(parseMessageBody(html, "html"), [])).toEqual(parsed);
@@ -209,6 +253,7 @@ describe("markAgentTag", () => {
   it("leaves the prefix alone when no single text holds it whole", () => {
     // Markup splitting the prefix, so what the chip would name is a guess.
     expect(tags(marked("<p><strong>@cla</strong>ude which port?</p>"))).toEqual([]);
+    expect(tags(marked("<p>ask <strong>@cla</strong>ude which port?</p>"))).toEqual([]);
   });
 
   it("marks the prefix of a plain-text body too", () => {

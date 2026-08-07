@@ -46,8 +46,9 @@ export type RichTag =
   | "mention"
   /** An app link-unfurl card (`span itemtype=".../InputExtension"`). */
   | "card"
-  /** An agent tag: the `@claude` prefix a message of ours OPENS with, which summons a
-   *  CLI on the backend's machine. The parser never produces one — a tag carries no
+  /** An agent tag: the `@claude` prefix a message of ours addresses an agent with, wherever
+   *  it stands in the words, which summons a CLI on the backend's machine. The parser never
+   *  produces one — a tag carries no
    *  markup at all, by design — so it only ever comes from {@link markAgentTag}, which
    *  recognises the prefix in the words the way the backend does. Its children are that
    *  prefix, verbatim, so anything that does not know the tag (the outbound serializer

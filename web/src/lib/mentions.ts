@@ -150,16 +150,16 @@ export function shortenMentionLabel(label: string): string | null {
  * Tagging one is NOT a Teams mention, and must never become one. There is nobody to
  * notify, so the pair a mention needs (an indexed span plus an entry naming an MRI) would
  * be blue text that pings nobody — the exact failure `serializeTeamsMessage` refuses. What
- * a tag becomes on the wire is the plain prefix the backend's own trigger reads
- * (`agent_policy::split_prefix`), which is what the user would otherwise have typed by
- * hand.
+ * a tag becomes on the wire is the plain prefix the backend's own trigger reads wherever
+ * it stands in the message (`agent_policy::split_prefix`), which is what the user would
+ * otherwise have typed by hand.
  */
 export type AgentCandidate = {
   /** The backend name (`claude`, `opencode`): the mark it wears and the palette it uses. */
   backend: string;
   /** How it is named to a reader — each vendor's own casing. */
   name: string;
-  /** The prefix a message must open with to summon it, as the BACKEND spelled it. */
+  /** The prefix that summons it wherever a message writes it, as the BACKEND spelled it. */
   prefix: string;
 };
 
@@ -241,12 +241,11 @@ export function mentionOptionKey(option: MentionOption): string {
 /**
  * Everything one "@…" offers: the agents first, then the people.
  *
- * Agents lead because there are at most two of them and they are what an "@" at the
- * start of a message usually means — and they are offered ONLY there
- * (`atMessageStart`). That is not a style choice: the backend summons an agent from the
- * prefix the message OPENS with (`agent_policy::split_prefix`), so a tag anywhere else
- * runs nothing, and a chip that looks like it summoned a program while nothing ran is
- * worse than plain text.
+ * Agents lead because there are at most two of them, and they are offered EVERYWHERE an
+ * "@" is. The backend reads an address wherever it stands (`agent_policy::split_prefix`),
+ * so a tag mid-sentence summons the agent exactly as one at the front does — and the rule
+ * that keeps a row honest was never the position: it is that a row is drawn only for
+ * something it would really reach, which for an agent is `agentCandidatesFor`.
  *
  * The total is capped like the people-only list was, so the menu stays a menu.
  */
@@ -254,12 +253,10 @@ export function mentionOptions(input: {
   people: readonly MentionCandidate[];
   agents: readonly AgentCandidate[];
   query: string;
-  /** Whether the "@" being typed opens the message (nothing but space before it). */
-  atMessageStart: boolean;
   limit?: number;
 }): MentionOption[] {
   const limit = input.limit ?? MAX_MENTION_SUGGESTIONS;
-  const agents = input.atMessageStart ? matchAgentCandidates(input.agents, input.query) : [];
+  const agents = matchAgentCandidates(input.agents, input.query);
   const people = matchMentionCandidates(
     input.people,
     input.query,

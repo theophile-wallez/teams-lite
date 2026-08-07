@@ -212,22 +212,22 @@ describe("matchAgentCandidates", () => {
 });
 
 describe("mentionOptions", () => {
-  const both = (query: string, atMessageStart: boolean) =>
-    mentionOptions({ people: PEOPLE, agents: [CLAUDE, OPENCODE], query, atMessageStart });
+  const both = (query: string) =>
+    mentionOptions({ people: PEOPLE, agents: [CLAUDE, OPENCODE], query });
 
   it("puts the agents above the people", () => {
-    expect(both("", true).map(mentionOptionKey).slice(0, 3)).toEqual([
+    expect(both("").map(mentionOptionKey).slice(0, 3)).toEqual([
       "agent:claude",
       "agent:opencode",
       "person:8:orgid:charlotte",
     ]);
   });
 
-  it("offers no agent once the @ is not the start of the message", () => {
-    // The backend summons an agent from the prefix a message OPENS with, so a tag
-    // anywhere else would look like a run that never happened.
-    expect(both("", false).every((option) => option.kind === "person")).toBe(true);
-    expect(both("cl", false)).toEqual([]);
+  it("offers the agents wherever the @ stands", () => {
+    // The backend reads an address anywhere in the message, so a row mid-sentence
+    // summons the agent exactly as one at the front does.
+    expect(both("").map(mentionOptionKey).slice(0, 2)).toEqual(["agent:claude", "agent:opencode"]);
+    expect(both("cl").map(mentionOptionKey)).toEqual(["agent:claude"]);
   });
 
   it("caps the whole list, agents included", () => {
@@ -235,7 +235,6 @@ describe("mentionOptions", () => {
       people: PEOPLE,
       agents: [CLAUDE, OPENCODE],
       query: "",
-      atMessageStart: true,
       limit: 3,
     });
     expect(options.map(mentionOptionKey)).toEqual([

@@ -17,9 +17,10 @@ import type { Page } from "@playwright/test";
 //   - it DRAFTS and never sends — the request is written, the Enter stays the user's;
 //   - it is offered only where an agent would really answer, which is the thread's own
 //     opt-in and nothing this menu may widen;
-//   - the draft is a REPLY whose body opens with the plain prefix, because that is the
-//     only shape the backend reads as a trigger (`agent_policy::split_prefix`), and the
-//     quote is how it knows which message the request is about (`agent_policy::answering`).
+//   - the draft is a REPLY whose body opens with the plain prefix — the backend reads an
+//     address wherever it stands (`agent_policy::split_prefix`), and the front is where a
+//     sentence the user did not type should start — and the quote is how it knows which
+//     message the request is about (`agent_policy::answering`).
 //
 // Everything happens in the "Agent Sandbox" thread — the one the backend's own policy opts
 // in out of the box (`seedAgentSandbox` in web/mock/server.ts) — except the one test that

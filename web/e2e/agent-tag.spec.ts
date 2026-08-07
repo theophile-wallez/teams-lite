@@ -58,18 +58,13 @@ test.describe("agent tags", () => {
     await expect(page.locator(`${options}[data-kind="person"]`).first()).toBeVisible();
   });
 
-  test("no agent is offered once the @ is not the start of the message", async ({ page }) => {
+  test("the agent is offered wherever the @ stands", async ({ page }) => {
     await openSandbox(page);
-    // The backend summons an agent from the prefix the message OPENS with, so a chip
-    // anywhere else would promise a run that never happens.
-    await page.keyboard.type("as we said @cl");
-    await expect(page.locator(agentOptions)).toHaveCount(0);
-    // …and the same query at the start does offer it, so this is the position and not
-    // the letters.
-    await page.keyboard.press("ControlOrMeta+a");
-    await page.keyboard.press("Backspace");
-    await page.keyboard.type("@cl");
+    // The backend reads an address anywhere in the message (`agent_policy::address_in`),
+    // so a row mid-sentence promises a run that really happens.
+    await page.keyboard.type("which port does it use, @cl");
     await expect(page.locator(agentOptions)).toHaveCount(1);
+    await expect(page.locator(agentOptions)).toHaveAttribute("data-agent", "claude");
   });
 
   test("the picked agent becomes one chip carrying its mark and its name", async ({ page }) => {
@@ -181,18 +176,49 @@ test.describe("agent tags", () => {
     await expect(reply).toHaveAttribute("data-mine", "false");
   });
 
+  test("an address typed by hand mid-sentence wears the chip and summons the agent", async ({
+    page,
+  }) => {
+    await openSandbox(page);
+    // No suggestion list, no chip in the composer: just the words, the way somebody
+    // writing from a phone would. The backend reads the address where it stands, so the
+    // bubble says the same thing it would have said from the front.
+    const marker = `middle-${Date.now()}`;
+    await page.keyboard.type(`${marker} which port does it use, @claude?`);
+    await page.keyboard.press("Enter");
+
+    const bubble = page
+      .locator('[data-testid="message"][data-mine="true"]', { hasText: marker })
+      .filter({ hasNot: page.locator('[data-testid="agent-signature"]') })
+      .last();
+    await expect(bubble.locator('[data-testid="agent-tag"]')).toHaveAttribute(
+      "data-agent",
+      "claude",
+    );
+    // The chip replaced the prefix; the author's own comma is still their text.
+    await expect(bubble).not.toContainText("@claude");
+    await expect(bubble).toContainText("which port does it use,");
+
+    // And it really ran: the mock answers it the way the backend does.
+    const answering = page
+      .locator('[data-testid="agent-stream"], [data-testid="agent-signature"]')
+      .first();
+    await expect(answering).toBeVisible({ timeout: 30_000 });
+  });
+
   test("a prefix that summons nothing stays plain words", async ({ page }) => {
     await openSandbox(page);
-    // Typed by hand, mid-sentence: the backend reads the prefix a message OPENS with, so
-    // this one started no program and must not look as if it had.
+    // An address of another kind: glued to a word, so it is not a word of its own and the
+    // backend reads no trigger out of it (`agent_policy::address_in`). Nothing ran, and
+    // this must not look as if something had.
     const marker = `plain-${Date.now()}`;
-    await page.keyboard.type(`${marker} as we said @claude is quick`);
+    await page.keyboard.type(`${marker} write to ping@claude.example`);
     await page.keyboard.press("Enter");
 
     const bubble = page
       .locator('[data-testid="message"][data-mine="true"]', { hasText: marker })
       .last();
-    await expect(bubble).toContainText("@claude is quick");
+    await expect(bubble).toContainText("ping@claude.example");
     await expect(bubble.locator('[data-testid="agent-tag"]')).toHaveCount(0);
   });
 });

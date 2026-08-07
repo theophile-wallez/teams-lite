@@ -86,9 +86,9 @@ const EXTENSIONS = [
  *  layout and React warns about the former). */
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
-/** An "@…" being typed: what was typed, the document range it occupies (so picking
- *  somebody replaces exactly that text), and whether it opens the message. */
-type MentionQueryState = { query: string; from: number; to: number; atStart: boolean };
+/** An "@…" being typed: what was typed, and the document range it occupies (so picking
+ *  somebody replaces exactly that text). */
+type MentionQueryState = { query: string; from: number; to: number };
 
 /** A ":…" being typed: what was typed, the document range it occupies (so picking
  *  an emoji replaces exactly that text). */
@@ -155,11 +155,10 @@ function removeSentWords(editor: Editor, sent: SentWords): void {
 
 /** The `@…` the caret sits in, in document coordinates, or null when it sits in
  *  ordinary text. The text is read from the caret's own block, so a mention can only
- *  start at the beginning of a line or after a space (see `mentionQueryBefore`).
- *
- *  `atStart` says whether this "@" OPENS the message — the document's first block, with
- *  nothing but whitespace in front of it. Only there does a prefix summon an agent
- *  (`agent_policy::split_prefix`), so only there is one offered. */
+ *  start at the beginning of a line or after a space (see `mentionQueryBefore`) — the same
+ *  boundary the backend reads an agent address on, so what an "@" offers here is what that
+ *  address would really summon from wherever it is being typed
+ *  (`agent_policy::address_in`). */
 function mentionQueryInEditor(editor: Editor): MentionQueryState | null {
   const { $from, empty } = editor.state.selection;
   if (!empty || !$from.parent.isTextblock) return null;
@@ -168,11 +167,7 @@ function mentionQueryInEditor(editor: Editor): MentionQueryState | null {
   const before = $from.parent.textBetween(0, $from.parentOffset, undefined, "\ufffc");
   const found = mentionQueryBefore(before);
   if (!found) return null;
-  // A paragraph straight in the document, and its first one: a list item, or a second
-  // block, carries text ahead of the prefix even when its own line does not.
-  const atStart =
-    $from.depth === 1 && $from.index(0) === 0 && before.slice(0, found.at).trim() === "";
-  return { query: found.query, from: $from.start() + found.at, to: $from.pos, atStart };
+  return { query: found.query, from: $from.start() + found.at, to: $from.pos };
 }
 
 /** The `:\u2026` the caret sits in, in document coordinates, or null when it sits in
@@ -448,7 +443,6 @@ export function RichEditor(props: {
         people: props.mentionCandidates ?? [],
         agents: props.agentCandidates ?? [],
         query: mention.query,
-        atMessageStart: mention.atStart,
       })
     : [];
   rankedRef.current = ranked;

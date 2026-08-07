@@ -15,6 +15,16 @@
 //! trigger anybody in a chat could type is remote code execution with a friendly
 //! syntax. A colleague who writes `@claude` gets nothing.
 //!
+//! **The address may sit anywhere in the message, and that is all it takes.** A person
+//! writing to somebody does not always open with their name, so neither does a request
+//! here: `@claude` is looked for as a word of its own wherever it stands, and the prompt
+//! is the whole message minus that word (see [`split_prefix`]). The cost is stated where
+//! the rule is: a message ABOUT the agent now reads as a message TO it, which the text
+//! alone can never tell apart. What pays for it is that this is only ever reachable in
+//! the user's own message, in a thread they opted in — and that the one shape which
+//! arrives `from_me` without them writing it, an answer, is refused by name
+//! ([`is_agent_answer`]).
+//!
 //! **An answer is a real send, so a conversation must be opted in.** The default is
 //! [`Mode::Off`] everywhere. The sandbox channel is the single exception, because
 //! AGENTS.md § Sending messages pre-authorizes it; every other conversation needs an
@@ -405,7 +415,7 @@ pub fn command_for(
 }
 
 /// Every rule about the message itself: who wrote it, whether it is fresh, and which
-/// prefix it opens with. Knows nothing about the user's settings — [`command_for`]
+/// agent it addresses. Knows nothing about the user's settings — [`command_for`]
 /// applies those, and [`ignored_trigger`] applies none of them on purpose.
 fn trigger_for(message: &Message, from_me: bool, now_ms: i64) -> Option<Command> {
     // THE gate: only the user summons the agent. See the module docs.
@@ -413,6 +423,13 @@ fn trigger_for(message: &Message, from_me: bool, now_ms: i64) -> Option<Command>
         return None;
     }
     if !message.system_event.is_empty() || message.deleted {
+        return None;
+    }
+    // An answer goes out under the user's own account, so it arrives `from_me` like
+    // anything they typed — and it may write `@claude` in its own words. See
+    // [`is_agent_answer`]: an address anywhere means this gate is what stops a run from
+    // answering itself.
+    if is_agent_answer(&message.content) {
         return None;
     }
     if is_stale(message.compose_time, now_ms) {
@@ -458,25 +475,153 @@ pub fn ignored_trigger(
 
 /// Split `@claude do the thing` into its backend and its prompt.
 ///
-/// The prefix must open the message: a `@claude` in the middle of a sentence is
-/// somebody talking ABOUT the agent, not to it. It must also be followed by
-/// whitespace, so `@claudette` summons nothing.
+/// The address may sit ANYWHERE in the message. "@claude look at this file", "look at
+/// this file @claude" and "bon @claude, tu peux regarder ?" are one request written
+/// three ways, and a rule that only read the first of them made the user re-type their
+/// own sentence to be understood. So the address is looked for as a word of its own
+/// wherever it stands ([`address_in`]), and what is left is the prompt — the whole
+/// message minus the address, because every word around it is part of the ask
+/// ([`prompt_without`]).
+///
+/// The earliest address wins when a message holds several: it is the agent the sentence
+/// turns to first, and every later `@claude` is one of the user's own words.
+///
+/// **What this gives up, deliberately.** "I asked @claude yesterday" used to be plain
+/// words, and now it is a request. That distinction is not recoverable from the text —
+/// talking about the agent and talking to it look the same — and it was only ever
+/// reachable in the user's OWN message, in a thread they opted in, within
+/// [`MAX_AGE_MS`]. Every gate that makes this feature safe is untouched: `from_me` above
+/// all (see the module docs), and one shape had to be added to keep it true, which is
+/// [`is_agent_answer`].
 fn split_prefix(text: &str) -> Option<(&'static Backend, String)> {
-    let trimmed = text.trim_start();
+    let mut found: Option<(&'static Backend, usize, usize)> = None;
     for backend in BACKENDS.iter() {
-        let Some(rest) = strip_prefix_ignore_case(trimmed, backend.prefix) else {
+        let Some((start, end)) = address_in(text, backend.prefix) else {
             continue;
         };
-        match rest.chars().next() {
-            None => return Some((backend, String::new())),
-            Some(c) if c.is_whitespace() || c == ':' || c == ',' => {
-                return Some((backend, rest.trim_start_matches([':', ',']).trim().to_string()));
-            }
-            // `@claudette …`: a different word that merely starts the same way.
-            Some(_) => continue,
+        if found.is_none_or(|(_, earliest, _)| start < earliest) {
+            found = Some((backend, start, end));
         }
     }
+    let (backend, start, end) = found?;
+    Some((backend, prompt_without(text, start, end)))
+}
+
+/// Where `prefix` ADDRESSES an agent in `text`: the byte range of the address and of the
+/// punctuation that belongs to it, or `None` when the text merely contains those letters.
+///
+/// An address is a word of its own, on both sides. It opens the text or follows
+/// whitespace — so `ping@claude.example` is an address of another kind and summons
+/// nothing — and it ends the text or is followed by something that ends a word
+/// ([`ends_address`]), so `@claudette` is a different word.
+///
+/// The range also swallows the punctuation the address is written with, in both
+/// directions: the `,` or `:` a name is followed by ("@claude, do this") and the `,` that
+/// introduces one ("do this, @claude"). Both are how a person marks who they are talking
+/// to, and neither is part of what they are asking.
+fn address_in(text: &str, prefix: &str) -> Option<(usize, usize)> {
+    for (at, _) in text.char_indices() {
+        // A word of its own: the text opens here, or whitespace does the separating.
+        if !text[..at].chars().next_back().is_none_or(char::is_whitespace) {
+            continue;
+        }
+        let Some(rest) = strip_prefix_ignore_case(&text[at..], prefix) else {
+            continue;
+        };
+        let after = rest.trim_start_matches([':', ',']);
+        // Punctuation ends the word by itself, so only an unpunctuated address is asked
+        // whether what follows it ends one.
+        if after.len() == rest.len() && !ends_address(rest) {
+            continue;
+        }
+        // A vocative comma belongs to the address it introduces.
+        let before = text[..at].trim_end();
+        let start = if before.ends_with(',') { before.len() - 1 } else { at };
+        return Some((start, text.len() - after.len()));
+    }
     None
+}
+
+/// Whether what follows an address really ends it: anything but the characters that carry
+/// a word on. A `?` or a `)` closes it ("what is the port, @claude?"), a letter or a digit
+/// does not (`@claudette`), and a `.` does whichever its own next character says — so a
+/// sentence may end on an address while `@claude.example` stays an address of another kind.
+fn ends_address(rest: &str) -> bool {
+    match rest.chars().next() {
+        None => true,
+        Some(c) if c.is_alphanumeric() || c == '_' || c == '-' => false,
+        Some('.') => !rest[1..].chars().next().is_some_and(char::is_alphanumeric),
+        Some(_) => true,
+    }
+}
+
+/// The user's words with the address cut out of them, and nothing else touched.
+///
+/// The whole message is the prompt, so what is dropped is the address and only it: the
+/// sentence somebody wrote around it is what they are asking. The two halves are then
+/// closed with ONE separator, whatever whitespace each side happened to carry — a newline
+/// when either side had one, so a request written over several lines stays on several
+/// lines, and nothing at all when neither did ("the port, @claude?" asks about the port).
+fn prompt_without(text: &str, start: usize, end: usize) -> String {
+    let head = text[..start].trim_end();
+    let tail = text[end..].trim_start();
+    if head.is_empty() || tail.is_empty() {
+        return format!("{head}{tail}").trim().to_string();
+    }
+    let dropped_before = &text[head.len()..start];
+    let dropped_after = &text[end..text.len() - tail.len()];
+    let seam = match (dropped_before, dropped_after) {
+        (before, after) if before.contains('\n') || after.contains('\n') => "\n",
+        ("", "") => "",
+        _ => " ",
+    };
+    format!("{head}{seam}{tail}").trim().to_string()
+}
+
+/// Whether this message is an agent's own ANSWER, read from the line it signs itself
+/// with.
+///
+/// It is a gate rather than a nicety, and [`split_prefix`] is why. An answer goes out
+/// through the user's own account — that is the whole feature — so it comes back
+/// `from_me` like anything they typed, and an answer is free to write `@claude` in its
+/// own words: explaining how to summon one, quoting the request it was given. While the
+/// address had to OPEN the message an answer could not become a trigger — a reply does not
+/// start by addressing itself. Now it could, and the run it summoned would write another.
+/// The loop the old rule prevented by accident is prevented here on purpose.
+///
+/// The four shapes are the ones this module writes ([`thinking_html`], [`reply_html`]
+/// streaming and finished, and [`failure_html`]) — the same read `agentAuthorship` in
+/// web/src/lib/agent-message.ts already does, where this rule has always kept the chip
+/// off an answer.
+fn is_agent_answer(content: &str) -> bool {
+    let Some(line) = signature_line(content) else {
+        return false;
+    };
+    BACKENDS.iter().any(|backend| {
+        let name = backend.name;
+        line.eq_ignore_ascii_case(&format!("— {name}, via teams-lite"))
+            || line.eq_ignore_ascii_case(&format!("{name} is writing…"))
+            || line.eq_ignore_ascii_case(&format!("{name} is thinking…"))
+            || line.len() > name.len()
+                && line[..name.len()].eq_ignore_ascii_case(name)
+                && line[name.len()..].starts_with(" could not answer:")
+    })
+}
+
+/// The text of a body's trailing `<p><em>…</em></p>`, which is where every one of this
+/// module's own bodies says who wrote it.
+///
+/// Tolerates the whitespace Teams inserts when it stores a body (it returns `</p>\r\n<p>`
+/// for our `</p><p>`), and nothing else: a line carrying markup of its own is not a
+/// signature this module wrote.
+fn signature_line(content: &str) -> Option<&str> {
+    let body = content.trim_end().strip_suffix("</p>")?.trim_end().strip_suffix("</em>")?;
+    let at = body.rfind("<em>")?;
+    if !body[..at].trim_end().ends_with("<p>") {
+        return None;
+    }
+    let line = body[at + "<em>".len()..].trim();
+    (!line.contains('<')).then_some(line)
 }
 
 /// The message a trigger replies to, as one `Sender: text` line — the same shape the
@@ -861,18 +1006,124 @@ mod tests {
     }
 
     #[test]
-    fn text_that_only_mentions_the_agent_is_not_a_command() {
+    fn text_that_addresses_nobody_is_not_a_command() {
         for text in [
-            "<p>I asked @claude yesterday</p>",       // not at the start
             "<p>@claudette said hello</p>",           // a different word
             "<p>@claude</p>",                         // no prompt
-            "<p>hello</p>",                           // no prefix
+            "<p>@claude:</p>",                        // an address and nothing asked
+            "<p>hello</p>",                           // no address
+            "<p>write to ping@claude.example</p>",    // an address of another kind
+            "<p>ask opencode@example.com</p>",        // …and the other backend's
         ] {
             assert!(
                 command_for(&message(text), true, Mode::Reply, &on(), 1_000_000).is_none(),
                 "{text} must not be a command"
             );
         }
+    }
+
+    #[test]
+    fn the_address_may_sit_anywhere_in_the_message() {
+        // One request written three ways. A person does not always open with the name of
+        // whoever they are writing to, and re-typing the sentence to be understood is the
+        // relou this rule exists to remove.
+        for text in [
+            "<p>@claude what is the port?</p>",
+            "<p>what is the port? @claude</p>",
+            "<p>what is the port, @claude?</p>",
+        ] {
+            let command = command_for(&message(text), true, Mode::Reply, &on(), 1_000_000)
+                .unwrap_or_else(|| panic!("{text} is a command"));
+            assert_eq!(command.backend.name, "claude", "{text}");
+            assert!(!command.prompt.contains("@claude"), "the address is not the ask: {text}");
+            assert!(command.prompt.contains("what is the port"), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_prompt_is_the_whole_message_minus_the_address() {
+        // Every word around the address is part of the ask, so the seam closes cleanly
+        // wherever it was cut.
+        for (text, prompt) in [
+            ("<p>bon @claude, tu peux regarder ?</p>", "bon tu peux regarder ?"),
+            ("<p>tu peux regarder @claude ?</p>", "tu peux regarder ?"),
+            ("<p>hello @claude</p>", "hello"),
+            // A multi-line request keeps its lines: the address takes the space in front
+            // of it, never the newline behind it.
+            ("<p>look at this @claude</p><p>and that</p>", "look at this\nand that"),
+            ("<p>look at this</p><p>@claude and that</p>", "look at this\nand that"),
+        ] {
+            let command = command_for(&message(text), true, Mode::Reply, &on(), 1_000_000)
+                .unwrap_or_else(|| panic!("{text} is a command"));
+            assert_eq!(command.prompt, prompt, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_first_address_wins_and_the_others_are_the_users_own_words() {
+        // The agent the sentence turns to first. A later `@claude` is a word the user
+        // wrote, so it travels in the prompt rather than being cut out of it.
+        let command =
+            command_for(&message("<p>ask @claude, not @opencode</p>"), true, Mode::Reply, &on(), 1_000_000)
+                .expect("a command");
+        assert_eq!(command.backend.name, "claude");
+        assert_eq!(command.prompt, "ask not @opencode");
+        // …and whichever of the two stands first, not whichever BACKENDS lists first.
+        let command =
+            command_for(&message("<p>ask @opencode, not @claude</p>"), true, Mode::Reply, &on(), 1_000_000)
+                .expect("a command");
+        assert_eq!(command.backend.name, "opencode");
+        assert_eq!(command.prompt, "ask not @claude");
+    }
+
+    #[test]
+    fn an_answer_never_summons_the_agent_again() {
+        // An answer goes out under the user's own account, so it arrives `from_me` like
+        // anything they typed — and it is free to write `@claude` in its own words. With
+        // the address allowed anywhere, this gate is what stops a run answering itself.
+        for signature in [
+            "<p><em>— claude, via teams-lite</em></p>",
+            "<p><em>claude is writing…</em></p>",
+            "<p><em>claude is thinking…</em></p>",
+            "<p><em>claude could not answer: boom</em></p>",
+            "<p><em>opencode could not answer: opencode exited 1</em></p>",
+        ] {
+            let body = format!("<p>summon it by writing @claude do the thing</p>{signature}");
+            assert!(
+                command_for(&message(&body), true, Mode::Reply, &on(), 1_000_000).is_none(),
+                "{signature} must not be a trigger"
+            );
+            // Not even worth a journal line: nothing was dropped by a setting.
+            assert!(ignored_trigger(&message(&body), true, 1_000_000).is_none(), "{signature}");
+        }
+        // The bodies this module really writes, whatever they carry.
+        let answer = reply_html(&BACKENDS[0], "run `@claude hi`", true);
+        assert!(command_for(&message(&answer), true, Mode::Reply, &on(), 1_000_000).is_none());
+        assert!(
+            command_for(&message(&thinking_html(&BACKENDS[0])), true, Mode::Reply, &on(), 1_000_000)
+                .is_none()
+        );
+        // …and the whitespace Teams inserts when it stores one does not reopen the gate.
+        let stored = "<p>@claude hi</p>\r\n<p>\r\n<em>— claude, via teams-lite</em>\r\n</p>\r\n";
+        assert!(command_for(&message(stored), true, Mode::Reply, &on(), 1_000_000).is_none());
+    }
+
+    #[test]
+    fn a_message_of_the_users_own_that_merely_ends_in_italics_still_asks() {
+        // The gate reads the signature this module writes, not "a body ending in an
+        // emphasis": the user's own closing aside must not swallow their request.
+        let command = command_for(
+            &message("<p>@claude which port?</p><p><em>no rush</em></p>"),
+            true,
+            Mode::Reply,
+            &on(),
+            1_000_000,
+        )
+        .expect("a command");
+        assert_eq!(command.prompt, "which port?\nno rush");
+        // A name this crate does not know is not one of its signatures either.
+        let other = "<p>@claude which port?</p><p><em>— gemini, via teams-lite</em></p>";
+        assert!(command_for(&message(other), true, Mode::Reply, &on(), 1_000_000).is_some());
     }
 
     #[test]
