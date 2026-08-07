@@ -818,6 +818,29 @@ export type AppSettings = {
   sender_icons: boolean;
 };
 
+/** The Linear workspace one machine's key belongs to (mirrors `linear::Workspace` in
+ *  src/linear.rs).
+ *
+ *  Each half answers a different question, and turning a bare `STMN-3439` into a link needs
+ *  both: `url_key` is what ADDRESSES an issue — Linear is SaaS, so the workspace is a segment
+ *  of every URL — and `team_keys` is what says a word NAMES one, which is what keeps `UTF-8`
+ *  and `SHA-1` from becoming links to nothing. See lib/tracker-ref.ts. */
+export type LinearWorkspace = {
+  url_key: string;
+  team_keys: string[];
+};
+
+/** What `linear_workspace` answers (mirrors the Rust handler in src/bin/server.rs):
+ *  the workspace this machine's Linear key belongs to, and when it was read.
+ *
+ *  `workspace` is null for a machine with no key, or a key Linear refused — a cached
+ *  answer as deliberately as a workspace is, because the reading a page takes from it is
+ *  the same either way: a bare identifier stays the text it is. */
+export type LinearWorkspaceResult = {
+  workspace: LinearWorkspace | null;
+  read_at_ms: number;
+};
+
 /** A partial settings update. An omitted field is left unchanged, so one
  *  integration's form never clears the other's token; an explicit `""` clears the
  *  stored token it names. */

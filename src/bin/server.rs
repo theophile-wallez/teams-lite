@@ -116,7 +116,7 @@ use teams_lite::{
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::{
-    gitlab, gitlab_approval, gitlab_ci_graph, gitlab_mr, gitlab_mr_write, link_preview,
+    gitlab, gitlab_approval, gitlab_ci_graph, gitlab_mr, gitlab_mr_write, linear, link_preview,
     tracker_people,
 };
 
@@ -151,6 +151,10 @@ const SETTING_GITLAB_TOKEN: &str = "gitlab_token";
 /// A Linear personal API key. Linear is SaaS-only, so unlike GitLab it has no host
 /// to configure — only whether we hold a key (see `linear`).
 const SETTING_LINEAR_TOKEN: &str = "linear_token";
+/// The Linear workspace that key belongs to, as `linear_workspace` last read it —
+/// its url key, its team keys, and when it was read (see [`linear_workspace_json`]).
+/// Cached because the page asks on every connect and neither half moves by the hour.
+const SETTING_LINEAR_WORKSPACE: &str = "linear_workspace";
 /// Ghost mode (`"1"` = on, anything else = off, and OFF is the default): read a
 /// conversation without telling Teams. `mark_read` then only moves our LOCAL read
 /// position, so the marker clears here while Teams keeps the thread unread and the
@@ -4246,6 +4250,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     store.set_setting(key, token.trim())?;
                 }
             }
+            // A new Linear key may name another workspace, so the one this machine cached
+            // is forgotten rather than left to age out (see LINEAR_WORKSPACE_TTL). Left in
+            // place, a reference would be addressed at the workspace of a key that is gone
+            // for up to six hours.
+            if params.get("linear_token").and_then(Value::as_str).is_some() {
+                store.set_setting(SETTING_LINEAR_WORKSPACE, "")?;
+            }
             // Ghost mode is stored as "1"/"0" so the settings table stays one
             // string-to-string map (see `ghost_mode`, which only trusts "1").
             if let Some(ghost) = params.get("ghost_mode").and_then(Value::as_bool) {
@@ -5203,6 +5214,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             with_teams_people(ctx, &mut answer);
             Ok(answer)
         }
+
+        // The Linear workspace this machine's key belongs to: how its issues are
+        // addressed, and which team keys an identifier can really name. A READ, ungated
+        // like `enrich_link`, and it carries no key — only what a reader needs to turn a
+        // bare `ENG-123` written in a message, an agent's answer or a merge request's
+        // description into a link to that issue (see AGENTS.md § A tracker REFERENCE in the words).
+        //
+        // GitLab needs no counterpart: its host is configured, so `!42` is addressed from
+        // the settings the page already holds. Linear's workspace is not configured
+        // anywhere — Linear is SaaS and the key names the workspace — so it is read once
+        // and cached, which is the whole reason this method exists.
+        "linear_workspace" => linear_workspace(ctx).await,
 
         // The approval state of one merge request: who has approved it, how many
         // approvals it still wants, and whether the user's own is among them. A READ,
@@ -6752,6 +6775,92 @@ fn settings_json(store: &Store) -> Result<Value> {
         "always_available": always_available(store)?,
         "sender_icons": sender_icons_enabled(store)?,
     }))
+}
+
+/// How long a cached Linear workspace stands before it is read again.
+///
+/// Wide on purpose: a workspace's url key never moves and a team is added a few times
+/// a year, so what the window buys is that the page's ask on every connect is answered
+/// from disk. A team added inside it costs exactly one thing — a reference to that
+/// team's key stays the text it is until the window turns, which is the same direction
+/// every other unknown in this app fails in.
+const LINEAR_WORKSPACE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// The wire shape of `linear_workspace`, which is also the cached one: the workspace
+/// (or `null`, for a machine with no key or a key Linear refused) and the moment it was
+/// read.
+///
+/// `null` is cached as deliberately as an answer is. Without it, a machine that holds no
+/// Linear key would ask Linear on every connect — and the reading a page takes from it is
+/// the same either way: a bare `ENG-123` stays plain text until something says otherwise.
+fn linear_workspace_json(workspace: Option<&linear::Workspace>, read_at_ms: i64) -> Value {
+    json!({ "workspace": workspace, "read_at_ms": read_at_ms })
+}
+
+/// The cached workspace answer, when one is there and still inside its window.
+///
+/// `Some(value)` is an answer to publish as it stands; `None` means "read Linear". A
+/// stored value that no longer parses reads as absent, because the only thing to do with
+/// one is to read again.
+fn fresh_linear_workspace(store: &Store, now_ms: i64) -> Result<Option<Value>> {
+    let Some(raw) = store.get_setting(SETTING_LINEAR_WORKSPACE)? else {
+        return Ok(None);
+    };
+    let Ok(cached) = serde_json::from_str::<Value>(&raw) else {
+        return Ok(None);
+    };
+    let read_at_ms = cached.get("read_at_ms").and_then(Value::as_i64).unwrap_or(0);
+    let age_ms = now_ms.saturating_sub(read_at_ms);
+    let fresh = read_at_ms > 0 && age_ms < LINEAR_WORKSPACE_TTL.as_millis() as i64;
+    Ok(fresh.then_some(cached))
+}
+
+/// Answer `linear_workspace`: the cached workspace while it is fresh, and otherwise
+/// what Linear says now.
+///
+/// A read that FAILED falls back to whatever was last stored, however old: a url key
+/// from this morning addresses every issue just as well, and the alternative is a page
+/// that draws no chip because Linear was slow once. With nothing stored, the failure is
+/// the answer — a reference then stays the text it is, which is what it was before.
+async fn linear_workspace(ctx: &Ctx) -> Result<Value> {
+    let now = now_ms();
+    let (settings, cached) = {
+        let store = ctx.store()?;
+        (link_preview_settings(&store)?, fresh_linear_workspace(&store, now)?)
+    };
+    if let Some(cached) = cached {
+        return Ok(cached);
+    }
+    match linear::fetch_workspace(&ctx.http, settings.linear_token.as_deref()).await {
+        Ok(workspace) => {
+            let answer = linear_workspace_json(workspace.as_ref(), now);
+            // Best-effort: a store that will not take the answer costs the cache, never
+            // the answer.
+            if let Ok(store) = ctx.store() {
+                let _ = store.set_setting(SETTING_LINEAR_WORKSPACE, &answer.to_string());
+            }
+            Ok(answer)
+        }
+        Err(err) => {
+            match ctx.store().ok().and_then(|store| stored_linear_workspace(&store)) {
+                Some(stale) => {
+                    eprintln!("[linear] workspace read failed, serving the stored one: {err:#}");
+                    Ok(stale)
+                }
+                None => Err(err),
+            }
+        }
+    }
+}
+
+/// The stored workspace answer whatever its age, for the one caller that wants a stale
+/// one: a read that failed.
+fn stored_linear_workspace(store: &Store) -> Option<Value> {
+    store
+        .get_setting(SETTING_LINEAR_WORKSPACE)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
 }
 
 /// Is "Always available" on? Off unless the stored value is exactly `"1"`, so a
@@ -11259,6 +11368,72 @@ mod tests {
             !configured.to_string().contains("lin_api_secret"),
             "the settings view must never carry a raw token: {configured}"
         );
+    }
+
+    /// The Linear workspace a bare `ENG-123` is addressed in: an open READ, cached, and
+    /// forgotten the moment the key that named it changes.
+    #[test]
+    fn the_linear_workspace_is_an_open_read_that_carries_no_key() {
+        // Open, like every other tracker read: it is asked on connect, it publishes
+        // nothing about the user, and a gate would only stop a page from drawing a chip.
+        assert_eq!(write_class("linear_workspace"), None);
+        assert!(check_write_allowed("linear_workspace", &json!({}), None).is_ok());
+        // The wire shape carries the workspace and when it was read — never the key.
+        let workspace = linear::Workspace {
+            url_key: "heka-internal".into(),
+            team_keys: vec!["STMN".into(), "CONFIG".into()],
+        };
+        let answer = linear_workspace_json(Some(&workspace), 1_700_000_000_000);
+        assert_eq!(answer["workspace"]["url_key"], "heka-internal");
+        assert_eq!(answer["workspace"]["team_keys"][1], "CONFIG");
+        assert_eq!(answer["read_at_ms"], 1_700_000_000_000_i64);
+        // A machine with no key answers the same shape with nothing in it, which is what
+        // makes "no chip" a cached answer rather than a request on every connect.
+        assert_eq!(linear_workspace_json(None, 1)["workspace"], Value::Null);
+    }
+
+    #[test]
+    fn a_cached_workspace_stands_for_its_window_and_no_longer() {
+        let store = Store::open_in_memory().unwrap();
+        let now = 10_000_000_000_i64;
+        // Nothing stored: read Linear.
+        assert_eq!(fresh_linear_workspace(&store, now).unwrap(), None);
+
+        let workspace =
+            linear::Workspace { url_key: "acme".into(), team_keys: vec!["ENG".into()] };
+        let answer = linear_workspace_json(Some(&workspace), now);
+        store.set_setting(SETTING_LINEAR_WORKSPACE, &answer.to_string()).unwrap();
+        // Inside the window the stored answer IS the answer, so a page that asks on every
+        // connect costs no request.
+        let fresh = fresh_linear_workspace(&store, now + 60_000).unwrap();
+        assert_eq!(fresh.unwrap()["workspace"]["url_key"], "acme");
+        // Past it, Linear is read again.
+        let stale = now + LINEAR_WORKSPACE_TTL.as_millis() as i64 + 1;
+        assert_eq!(fresh_linear_workspace(&store, stale).unwrap(), None);
+        // A stale answer is still there for the one caller that wants one: a read that
+        // failed, because a url key from this morning addresses every issue.
+        assert!(stored_linear_workspace(&store).is_some());
+
+        // A value that no longer parses reads as absent — the only thing to do with one
+        // is to read again.
+        store.set_setting(SETTING_LINEAR_WORKSPACE, "not json").unwrap();
+        assert_eq!(fresh_linear_workspace(&store, now).unwrap(), None);
+        assert_eq!(stored_linear_workspace(&store), None);
+    }
+
+    #[test]
+    fn a_new_linear_key_forgets_the_workspace_the_old_one_named() {
+        // A key may name another workspace, so the cached one cannot be left to age out:
+        // a reference would be addressed at a workspace that key no longer reaches.
+        let store = Store::open_in_memory().unwrap();
+        let workspace = linear::Workspace { url_key: "acme".into(), team_keys: vec![] };
+        store
+            .set_setting(SETTING_LINEAR_WORKSPACE, &linear_workspace_json(Some(&workspace), 1).to_string())
+            .unwrap();
+        // What the `set_settings` arm does when `linear_token` is among its params.
+        store.set_setting(SETTING_LINEAR_WORKSPACE, "").unwrap();
+        assert_eq!(fresh_linear_workspace(&store, 2).unwrap(), None);
+        assert_eq!(stored_linear_workspace(&store), None);
     }
 
     #[test]

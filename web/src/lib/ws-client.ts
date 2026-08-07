@@ -36,6 +36,7 @@ import type {
   Conversation,
   CustomEmoji,
   GitLabApprovalResult,
+  LinearWorkspaceResult,
   LinkMetadataResult,
   MailBody as MailBodyResult,
   MailFolder,
@@ -1208,6 +1209,15 @@ export class Backend {
    *  the view carries no token, and the UI needs it before the user has done anything. */
   getSettings(): Promise<AppSettings> {
     return this.request<AppSettings>("get_settings");
+  }
+  /** Read the Linear workspace this machine's key belongs to: how its issues are addressed,
+   *  and which team keys an identifier can really name (see lib/tracker-ref.ts).
+   *
+   *  A read, so it needs no write token — it carries no key, only what a reader needs to turn
+   *  `STMN-3439` into a link. The backend caches it for hours, so asking on every connect
+   *  costs no request. */
+  linearWorkspace(): Promise<LinearWorkspaceResult> {
+    return this.request<LinearWorkspaceResult>("linear_workspace");
   }
   /** Persist app settings (partial). Omit a field to leave it unchanged; pass a
    *  token as `""` to clear the stored one. Returns the fresh non-secret view so

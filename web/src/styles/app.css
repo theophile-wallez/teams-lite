@@ -433,6 +433,43 @@ html[data-virtual-keyboard-open] .composer-shell {
   display: inline;
 }
 
+/* A tracker reference: a Linear issue or a GitLab merge request named in somebody's words
+   (lib/tracker-ref.ts, drawn by components/tracker-ref-chip.tsx). The mark says which
+   tracker and the chip says it is a link, which is what a word in the middle of a sentence
+   cannot say for itself.
+
+   It is an ANCHOR, so the underline every other link in a body wears is taken off here: the
+   chip's own surface already says it can be pressed, and an underline under a mark reads as
+   a rule drawn through it. */
+.tracker-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+  border-radius: 0.25rem;
+  background-color: var(--tracker-ref-surface);
+  color: var(--tracker-ref);
+  padding: 0.05rem 0.3rem;
+  font-weight: 600;
+  text-decoration: none;
+  /* One reference, one chip: a line break inside it would draw the mark on one line and the
+     number on the next — the rule `.mention-chip` holds for a name. */
+  white-space: nowrap;
+  /* An inline-flex box sits on its own bottom edge, which would lift the chip off the line
+     it is written on. */
+  vertical-align: -0.15em;
+  transition: background-color 120ms ease-out;
+}
+.tracker-ref:hover {
+  background-color: var(--tracker-ref-surface-hover);
+}
+/* The mark rides with the text: sized in `em` so it follows the font of whatever the chip
+   sits in — a message body, a comment, a merge request's description. */
+.tracker-ref-logo {
+  width: 0.9em;
+  height: 0.9em;
+  flex-shrink: 0;
+}
+
 /* Placeholder shown while the editor is empty (from extension-placeholder). */
 .tiptap-message p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);

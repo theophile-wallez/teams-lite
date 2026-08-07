@@ -251,10 +251,110 @@ pub async fn fetch_metadata(
         Resource::Document { slug_id } => (DOCUMENT_QUERY, "document", slug_id.as_str()),
     };
 
-    let Some(entity) = run_query(http, token, query, id, field).await? else {
+    let Some(data) = run_query(http, token, query, serde_json::json!({ "id": id })).await? else {
+        return Ok(None);
+    };
+    let Some(entity) = query_field(&data, field) else {
         return Ok(None);
     };
     Ok(Some(build_metadata(&resource, &entity, url)))
+}
+
+/// The workspace one Linear key belongs to: how its URLs are addressed, and which
+/// team keys an issue identifier can really name.
+///
+/// It exists for the ONE thing a URL already carries and a bare `ENG-123` does not:
+/// where the issue lives. A reference written in a message, an agent's answer or a
+/// merge request's description names an issue by its identifier alone, so the app
+/// needs the workspace's own `urlKey` to address it — and the team keys to know that
+/// `ENG-123` names an issue at all while `UTF-8` and `SHA-1` name nothing.
+///
+/// The keys are what make the recognition honest rather than a guess about the shape
+/// of a word: this workspace holds three teams (read from Linear on 2026-08-07), so a
+/// reference to any other prefix stays the text it is.
+/// `examples/linear_workspace_recon.rs` is what re-measures both halves through this
+/// function — it has not been run yet, because it takes the key from the environment and
+/// nothing here may read the user's own out of their store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Workspace {
+    /// The workspace's own URL segment — `heka-internal` in
+    /// `linear.app/heka-internal/issue/STMN-3439`. Linear's own canonical form for
+    /// an issue is that path with the identifier and nothing else (measured), which
+    /// is what [`issue_url`] writes.
+    pub url_key: String,
+    /// Every team key the workspace holds, upper-cased ("STMN", "CONFIG", …).
+    pub team_keys: Vec<String>,
+}
+
+/// How many teams one workspace may name. Linear's own page ceiling, so a
+/// workspace with more teams than this loses the tail rather than the read — and a
+/// reference to a team nobody listed stays plain text, which is the safe direction.
+const MAX_TEAMS: usize = 250;
+
+/// The workspace query. Two fields in one request, because both halves are needed
+/// before a bare identifier can become a link and neither changes by the minute.
+const WORKSPACE_QUERY: &str = "\
+query Workspace($teams: Int!) {
+  organization { urlKey }
+  teams(first: $teams) { nodes { key } }
+}";
+
+/// Linear's own canonical address for one issue, from the workspace it lives in.
+///
+/// The slug Linear appends to its own links is decoration: measured against this
+/// workspace, `linear.app/<urlKey>/issue/<IDENTIFIER>` is exactly what Linear's API
+/// hands back as an issue's `url` when the title has no slug, and it resolves to the
+/// issue either way. So a reference is addressed with what is known rather than with
+/// a title guessed from an identifier.
+pub fn issue_url(url_key: &str, identifier: &str) -> String {
+    format!("https://{WEB_HOST}/{url_key}/issue/{identifier}")
+}
+
+/// Read the workspace this key belongs to.
+///
+/// - `Ok(Some(workspace))` — Linear answered, and it can be addressed.
+/// - `Ok(None)` — no key is configured, the key was refused, or Linear named no
+///   `urlKey`. Then a bare identifier stays plain text, which is the same reading
+///   this module already takes for a link it cannot enrich.
+/// - `Err(_)` — a transient failure the caller may retry.
+pub async fn fetch_workspace(
+    http: &reqwest::Client,
+    token: Option<&str>,
+) -> Result<Option<Workspace>> {
+    let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(data) =
+        run_query(http, token, WORKSPACE_QUERY, serde_json::json!({ "teams": MAX_TEAMS })).await?
+    else {
+        return Ok(None);
+    };
+    Ok(workspace_from_data(&data))
+}
+
+/// The workspace one answer describes, or `None` when it describes none.
+///
+/// Its own function so the parse is unit-tested against the shape Linear really
+/// answers with, rather than only against a live workspace.
+fn workspace_from_data(data: &serde_json::Value) -> Option<Workspace> {
+    let organization = query_field(data, "organization")?;
+    let url_key = str_field(&organization, "urlKey")?;
+    let mut team_keys: Vec<String> = Vec::new();
+    let nodes = data
+        .get("teams")
+        .and_then(|teams| teams.get("nodes"))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for node in nodes.iter().take(MAX_TEAMS) {
+        let Some(key) = str_field(node, "key").map(|key| key.to_ascii_uppercase()) else {
+            continue;
+        };
+        if !team_keys.contains(&key) {
+            team_keys.push(key);
+        }
+    }
+    Some(Workspace { url_key, team_keys })
 }
 
 /// The issue query. Written as a parameterized GraphQL *query* with a variable —
@@ -320,17 +420,21 @@ const TRANSIENT_ERROR_CODES: &[&str] = &[
     "NETWORK_ERROR",
 ];
 
-/// Run one GraphQL query against Linear and return the named top-level field.
+/// Run one GraphQL query against Linear and return its `data` object.
 ///
 /// This is the module's ONLY request path, and it only ever sends a query — see
 /// the read-only rail in the module doc. `Ok(None)` means "Linear answered, and
 /// there is nothing to show"; `Err` means "ask again later".
+///
+/// `variables` is whatever that query declares, so a link's own identifier can
+/// only ever arrive as a VARIABLE — never string-interpolated into the query. The
+/// caller picks the field it asked for, because a query may ask for more than one
+/// (see [`WORKSPACE_QUERY`]).
 async fn run_query(
     http: &reqwest::Client,
     token: &str,
     query: &str,
-    id: &str,
-    field: &str,
+    variables: serde_json::Value,
 ) -> Result<Option<serde_json::Value>> {
     let resp = http
         .post(API_URL)
@@ -338,7 +442,7 @@ async fn run_query(
         // A Linear personal API key is sent raw, with no "Bearer" prefix.
         .header("Authorization", token)
         .timeout(HTTP_TIMEOUT)
-        .json(&serde_json::json!({ "query": query, "variables": { "id": id } }))
+        .json(&serde_json::json!({ "query": query, "variables": variables }))
         .send()
         .await
         .context("linear api request")?;
@@ -362,11 +466,15 @@ async fn run_query(
     if let Some(code) = transient_error_code(&body) {
         anyhow::bail!("linear api error: {code}");
     }
-    Ok(body
-        .get("data")
-        .and_then(|data| data.get(field))
-        .filter(|entity| entity.is_object())
-        .cloned())
+    Ok(body.get("data").filter(|data| data.is_object()).cloned())
+}
+
+/// One top-level field of a query's answer, when Linear really sent an object for
+/// it. A field Linear answered `null` for — a missing or forbidden entity — is
+/// "nothing to show" rather than a failure, which is what makes enrichment
+/// best-effort.
+fn query_field(data: &serde_json::Value, field: &str) -> Option<serde_json::Value> {
+    data.get(field).filter(|entity| entity.is_object()).cloned()
 }
 
 /// The first transient error code in a GraphQL response body, if any. Used to
@@ -1077,5 +1185,65 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    // ---- the workspace a bare `ENG-123` is addressed in -------------------
+
+    #[test]
+    fn the_workspace_is_read_from_the_answer_linear_gives() {
+        // The shape `examples/linear_workspace_recon.rs` measures against the real
+        // workspace, so the parse is pinned without a network.
+        let data = serde_json::json!({
+            "organization": { "urlKey": "heka-internal" },
+            "teams": { "nodes": [{ "key": "STMN" }, { "key": "config" }, { "key": "STMN" }] }
+        });
+        let workspace = workspace_from_data(&data).expect("a workspace");
+        assert_eq!(workspace.url_key, "heka-internal");
+        // Upper-cased, because an identifier is written upper-case; and each key once.
+        assert_eq!(workspace.team_keys, vec!["STMN", "CONFIG"]);
+    }
+
+    #[test]
+    fn a_workspace_with_no_url_key_is_no_workspace() {
+        // Without it nothing can be addressed, so a bare identifier stays the text it
+        // is rather than becoming a link to a workspace nobody named.
+        for data in [
+            serde_json::json!({ "teams": { "nodes": [{ "key": "ENG" }] } }),
+            serde_json::json!({ "organization": null }),
+            serde_json::json!({ "organization": { "urlKey": "  " } }),
+        ] {
+            assert_eq!(workspace_from_data(&data), None, "{data}");
+        }
+    }
+
+    #[test]
+    fn a_workspace_with_no_teams_still_addresses_its_own_links() {
+        // The two halves answer different questions: the url key addresses an issue, the
+        // team keys say whether a word names one. A workspace whose teams could not be
+        // read is still the place a link resolved from a URL lives.
+        let data = serde_json::json!({ "organization": { "urlKey": "acme" } });
+        let workspace = workspace_from_data(&data).expect("a workspace");
+        assert!(workspace.team_keys.is_empty());
+    }
+
+    #[test]
+    fn an_issue_url_is_the_workspace_path_and_the_identifier() {
+        assert_eq!(
+            issue_url("heka-internal", "STMN-3439"),
+            "https://linear.app/heka-internal/issue/STMN-3439"
+        );
+        // And it parses back to the issue it names, which is the pair that matters: the
+        // address this app writes is one this app already reads.
+        assert_eq!(
+            parse_url(&issue_url("acme", "ENG-7")),
+            Some(Resource::Issue { identifier: "ENG-7".to_string() })
+        );
+    }
+
+    #[tokio::test]
+    async fn no_token_means_no_workspace_and_no_request() {
+        let http = reqwest::Client::new();
+        assert_eq!(fetch_workspace(&http, None).await.unwrap(), None);
+        assert_eq!(fetch_workspace(&http, Some("  ")).await.unwrap(), None);
     }
 }

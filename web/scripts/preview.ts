@@ -56,6 +56,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/app --maintenance # Settings › This app
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
+//   bun run web/scripts/preview.ts --out /tmp/ref --tracker-refs # a reference as a chip
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
 //   bun run web/scripts/preview.ts --out /tmp/mr --merge-request # review + approve a merge request
 //   bun run web/scripts/preview.ts --out /tmp/chat --chat-menu  # chat sections + the row's "…" menu
@@ -2890,6 +2891,77 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-{linear,gitlab}-light.png, ${out}-{gitlab,linear}-dark.png and ` +
           `${out}-{linear,gitlab}-mobile-light.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // A TRACKER REFERENCE in somebody's words: a Linear issue and a GitLab merge request named
+  // as text, drawn as the chip that goes to each (see web/src/lib/tracker-ref.ts). Captured on
+  // the three surfaces that carry one for three different reasons — a chat message, an agent's
+  // own answer, and a merge request's description — because the whole claim of this feature is
+  // that they read the same everywhere.
+  if (args.includes("--tracker-refs")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      // 1. A CHAT MESSAGE. The seeded thread carries the three cases at once: a bare `!99`
+      // resolved from the project this message's own link names, a Linear identifier, and
+      // `UTF-8`, which must stay the word it is.
+      await openConversation(page, "GitLab Links");
+      await page.waitForSelector('[data-testid="tracker-ref"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-message-light.png`);
+      const bubble = '[data-testid="message"]:has([data-testid="tracker-ref"])';
+      await shot(`${out}-bubble-light.png`, bubble);
+      await setTheme("dark");
+      await shot(`${out}-bubble-dark.png`, bubble);
+      await setTheme("light");
+      // On a phone, where the chip has to stay one piece: it is `nowrap`, so a narrow bubble
+      // wraps around it rather than breaking the mark off its number.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(400);
+      await shot(`${out}-mobile-light.png`);
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(400);
+
+      // 2. An AGENT'S ANSWER, which is where this started: the reply names a merge request and
+      // an issue, and the chips are read out of the words the CLI wrote — there is no markup in
+      // them (see lib/tracker-ref.ts). Waited out to the finished message, because that is the
+      // body every client shows and the one a reader acts on.
+      await openFirstConversation(page);
+      await turnAgentOn(page);
+      await askAgent(page, "@claude which port does the backend listen on?");
+      const answer = '[data-testid="message"]:has([data-testid="agent-signature"])';
+      // The chips are drawn as the words arrive — the stream goes through the same renderer —
+      // so waiting on one is waiting for the part of the answer this capture is about.
+      await page
+        .locator(`${answer} [data-testid="tracker-ref"]`)
+        .last()
+        .waitFor({ state: "visible", timeout: 60_000 });
+      // Then, best-effort, let the run END, so what is captured is the message's own body
+      // rather than the overlay above it: the two agree, and the posted one is what a reader
+      // comes back to.
+      await page
+        .waitForFunction(`!document.querySelector('[data-testid="agent-status"]')`, undefined, {
+          timeout: 30_000,
+        })
+        .catch(() => console.log("[preview] the run is still going — capturing the stream"));
+      await page.waitForTimeout(400);
+      await shot(`${out}-answer-light.png`, answer);
+      await setTheme("dark");
+      await shot(`${out}-answer-dark.png`, answer);
+      await setTheme("light");
+
+      // 3. A MERGE REQUEST's own description, where a bare `!595` means a merge request of the
+      // project the page is about — GitLab's own rule, and the one thing a chat message has no
+      // surface to say (see `TrackerProjectProvider`).
+      await openGitLabTab(page);
+      await openMergeRequestAt(page, 0);
+      await page.waitForSelector('[data-testid="gitlab-description"] [data-testid="tracker-ref"]');
+      await shot(`${out}-description-light.png`, '[data-testid="gitlab-description"]');
+      await setTheme("dark");
+      await shot(`${out}-description-dark.png`, '[data-testid="gitlab-description"]');
+      console.log(
+        `[preview] wrote ${out}-{message,bubble,mobile,answer,description}-*.png`,
       );
     });
     process.exit(0);

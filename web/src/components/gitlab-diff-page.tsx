@@ -32,6 +32,7 @@ import { useAppState, useController } from "./controller-context";
 import { DiffLineComposer, DiffLineThread } from "./gitlab-diff-comments";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
+import { TrackerProjectProvider } from "./tracker-refs-context";
 
 // The DIFF PAGE: the whole screen, the changed files down the left, and every one of them read
 // on the right as one FEED. It is its own route (`/mr/<id>/diff` — see
@@ -170,6 +171,9 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
   );
 
   return (
+    // A bare `!42` in a comment on a line of this diff means a merge request of THIS project,
+    // exactly as it does on the merge request's own page (see lib/tracker-ref.ts).
+    <TrackerProjectProvider project={detail?.project_path}>
     <section
       data-testid="gitlab-diff-page"
       data-column={columns.narrow ? column : "both"}
@@ -349,6 +353,7 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
         )}
       </div>
     </section>
+    </TrackerProjectProvider>
   );
 }
 

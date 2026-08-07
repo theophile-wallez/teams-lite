@@ -1824,6 +1824,100 @@ being rewritten, the fold a resolved thread takes in both themes, and the box on
 driving the POINTER, because the drag is the feature. **It has never run against a real GitLab
 project**: like every other write here, that is the user's own click, in their own app.
 
+## A tracker REFERENCE in the words (`ENG-123`, `!42`)
+
+The trackers the user works in turn up in everything written here — an agent's answer ("!42 is
+ready, it closes STMN-3439"), a colleague's message, a merge request's own description. Written
+out it is a word; read as a reference it is one press away from the thing it names, and where
+that press goes is the whole feature:
+
+- a **LINEAR issue** goes to Linear, wearing Linear's own mark, because this app holds no issue
+  page — the card a link earns is as far as it goes;
+- a **GitLab MERGE REQUEST** goes to THIS APP's own merge-request page (§ The GitLab page),
+  wearing the tanuki, because that page is where the reader is going anyway: the diff, the
+  pipeline, the conversation and the merge are all on it.
+
+`web/src/lib/tracker-ref.ts` holds every pure decision, `tracker-ref-chip.tsx` draws the chip,
+`tracker-refs-context.tsx` carries what a surface reads references WITH, and the one read the
+feature needs is `linear_workspace` (`linear::fetch_workspace` in src/linear.rs).
+
+**It is read from the WORDS, never from markup**, which is the choice `agent-tag.ts` makes for a
+`@claude` prefix and `agent-message.ts` for a reply's signature. A reference carries no markup
+anywhere: an agent writes `!42` because that is what a person writes, a colleague types
+`STMN-3439` from their phone, and GitLab hands us the author's own text. So there is nothing to
+restore, and every message ever written renders as one. Nothing is added to the wire either — the
+posted body is the words the agent wrote, so a colleague's own client shows exactly them.
+
+**It is drawn EVERYWHERE, from one place.** `RichNodes` is the seam every surface in this app
+draws words through, so the transform lives there and covers a message body, a reply quote, an
+app card, an agent's streamed answer, a merge request's description and a comment on a diff line
+at once. What the words are read WITH comes from a CONTEXT rather than a prop, because the answer
+belongs to the app — it is two settings — and threading it through eight callers would be eight
+chances to forget one, on the surface where a reference then silently stayed a word.
+
+**A bare identifier needs the WORKSPACE, and that is the one thing this app had to read.**
+GitLab's host is configured, so `!42` is addressed from a setting the page already holds; Linear
+is SaaS and the KEY names the workspace, so `linear_workspace` reads it — the url key that
+addresses an issue, and every team key the workspace holds. It is an ordinary open READ (it
+publishes nothing, and a gate would only stop a page from drawing a chip), cached for
+`LINEAR_WORKSPACE_TTL` in the store so the page's ask on every connect costs no request and
+survives a restart, and forgotten the moment the key that named it changes. A read that FAILED
+falls back to whatever was stored, however old: a url key from this morning addresses every issue.
+
+Seven rules hold the recognition, and each is pinned by a test in `web/src/lib/tracker-ref.test.ts`
+or `web/e2e/tracker-refs.spec.ts`:
+
+- **A reference nothing can address stays the text it is.** A `!42` in a body that names no
+  project, an `ENG-123` on a machine whose workspace was never read, a GitLab URL on another
+  host: each stays the word it was. That is the rule an @mention already follows — a name the
+  thread does not hold is plain text — and it is what stops `UTF-8`, `SHA-1`, `RFC-2119`,
+  `AES-256` and `ISO-8601` from becoming links to nothing. **The TEAM KEYS are what make that
+  honest** rather than a guess about the shape of a word: this workspace holds three teams (read
+  from Linear on 2026-08-07), so a reference to any other prefix is a word.
+- **The words are never replaced by other words.** A chip shows the reference the author wrote,
+  or the label they gave their own link. The one text this ever drops is a bare URL turned into
+  that URL's own short reference, which is the case where the words ARE the address — and it is
+  what keeps a quoted line readable, since a URL fills one on its own.
+- **A reference inside code is code.** The scan skips a `code` / `pre` subtree, exactly as a
+  mention does: an answer explaining what `!42` means must not link to somebody's branch while
+  it does so.
+- **A bare `!42` belongs to the CONTAINING project**, which is GitLab's own rule. The surface
+  says which that is — the open merge request, on its page and on its diff
+  (`TrackerProjectProvider`) — and a chat message resolves it against the WHOLE message, quote
+  included: a reply's subject is the thing it quotes, which is exactly the shape an agent's
+  answer takes, since "Review this merge request: !42 <url>" comes back quoted above it. That is
+  also why the project is read with `projectNamedIn` rather than `extractLinks`: a quote carries
+  its preview as PLAIN TEXT, so the URL in it is words by the time the bubble sees it.
+- **Only a merge request is claimed on the GitLab side.** `#123` (an issue) and `&5` (an epic)
+  are GitLab references too, and this app has a page for neither, so they are left alone rather
+  than sent to a page that would say "not built yet".
+- **A merge-request chip NAVIGATES; a Linear chip leaves.** Both are anchors, so the browser's
+  own affordances still work — the status bar says where it goes, a middle click opens a second
+  window, "copy link" copies something that resolves — and the merge-request one intercepts a
+  plain left press so it stays inside the app. Every modified click is the browser's.
+- **An enriched link is still a CARD.** `dropLinks` runs first, so a link that earned a preview
+  card is gone from the body before the scan sees it: a chip beside its own card would state one
+  thing twice.
+
+The address a bare identifier is turned into is Linear's own — `linear::issue_url`, the workspace
+path plus the identifier, with no slug — and that shape is **measured** rather than assumed:
+read from this workspace on 2026-08-07, Linear's API answers exactly that URL as an issue's own
+`url` when the title carries no slug, and the slug is decoration when it does.
+`examples/linear_workspace_recon.rs` re-measures the whole chain through this crate's own
+functions — the workspace, the URL written from an identifier, and whether Linear resolves it. It
+is READ-ONLY and takes the key from the ENVIRONMENT, which is also why it has **not been run
+yet**: nothing here may read the user's own key out of their store, so that run is theirs. What
+is therefore untested against the tenant is the pairing — one `linear_workspace` answered by the
+real API — while the parse itself is pinned by unit tests against the shape Linear answers with.
+
+`web/mock/server.ts` reproduces the whole feature with no Linear and no GitLab: it answers
+`linear_workspace` with one team key (`ENG`), the seeded thread carries a bare `!99` in a REPLY —
+so the project comes from the quote, and no second card is drawn — the mock agent's answer names
+`acme/webapp!596` and `ENG-1` in the words a CLI would write, and every fixture puts `UTF-8`
+beside them, because the word that must NOT become a chip is half the rule. `cd web && bun run
+preview -- --out /tmp/ref --tracker-refs` captures the chat message, the chip in both themes, a
+phone's width, the agent's own answer and a merge request's description.
+
 ## Automation safety (MANDATORY — read before driving the UI)
 
 **This section exists because of a real incident.** An agent was screenshotting a
@@ -1961,7 +2055,9 @@ user. Two independent mechanisms enforce that split:
   For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
-  `bun run preview -- --out /tmp/ask --answer-with`. For the typing hint above the
+  `bun run preview -- --out /tmp/ask --answer-with`. For a tracker REFERENCE drawn as a
+  chip — in a chat message, in an agent's own answer and in a merge request's
+  description: `bun run preview -- --out /tmp/ref --tracker-refs`. For the typing hint above the
   composer, one typist then three: `bun run preview -- --out /tmp/typ --typing`
   (it honours `--dpr`, because the faces in it are 20px). For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
@@ -3402,9 +3498,11 @@ user's. What changes is only what is asked.
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its seven reads (the DIFF
-  among them, whose unified patch this app writes over GitLab's bare hunks, and one JOB's LOG,
-  whose cache window the answer itself decides — see § A job's LOG is a page) in
+  `src/gitlab.rs` and `src/linear.rs`, whose `fetch_workspace` also answers what a bare
+  `ENG-123` written anywhere is addressed with — see § A tracker REFERENCE in the words), the
+  merge-request PAGE — its seven reads (the DIFF among them, whose unified patch this app writes
+  over GitLab's bare hunks, and one JOB's LOG, whose cache window the answer itself decides —
+  see § A job's LOG is a page) in
   `src/gitlab_mr.rs` over a durable response cache, what each CI job WAITS FOR in
   `src/gitlab_ci_graph.rs` (the one GraphQL read in this app, and query-only by construction —
   see § The pipeline is a GRAPH) and its six writes in `src/gitlab_mr_write.rs`, plus who a

@@ -35,6 +35,7 @@ import {
   type AddressPerson,
   type AvatarPicture,
   type AppSettings,
+  type LinearWorkspace,
   type BrokerStatus,
   type CalendarEvent,
   type BackendRestartResult,
@@ -459,6 +460,15 @@ export type AppState = {
    *  is stored + Ghost mode), loaded from the backend on start. Drives which links
    *  get rich previews, and whether reading a chat is declared to Teams. */
   settings: AppSettings;
+  /** The Linear workspace this machine's key belongs to, or null while it is unknown —
+   *  no key, a key Linear refused, a read that failed, or a backend too old to answer.
+   *
+   *  It is what turns a bare `STMN-3439` written anywhere into a link to that issue (see
+   *  lib/tracker-ref.ts). Null means no bare identifier is recognised, which is the reading
+   *  every unanswered capability takes in this app: a hopeful guess would draw a chip
+   *  pointing at a workspace nobody named. GitLab needs no counterpart here — its host is
+   *  in `settings`, so a `!42` is addressed from what the page already holds. */
+  linearWorkspace: LinearWorkspace | null;
   /** Push notifications for THIS device: what the browser supports, what stands in
    *  the way, and which devices the backend notifies. The only path that reaches a
    *  phone whose app is closed — see lib/push.ts. */
@@ -831,6 +841,7 @@ function initialState(): AppState {
       // be told no icon is fetched while one is.
       sender_icons: true,
     },
+    linearWorkspace: null,
     push: INITIAL_PUSH_STATE,
     agent: null,
     agentRuns: {},
@@ -1139,6 +1150,10 @@ export class TeamsController {
       // are best-effort too — a failure just leaves the defaults, which enrich
       // nothing but public gitlab.com links.
       void this.loadSettings();
+      // And the Linear workspace those settings' key belongs to, which is what a bare
+      // `STMN-3439` in anybody's words is addressed with (see `linearWorkspace`). Asked on
+      // every connect because the backend answers it from a cache that outlives a restart.
+      void this.loadLinearWorkspace();
       // Which conversations answer an `@claude` message, and whether this machine
       // holds an agent CLI at all. Best-effort: a failure leaves the menu saying the
       // backend has not answered, never a switch that pretends to work.
@@ -5106,6 +5121,21 @@ export class TeamsController {
     }
   }
 
+  /** Load the Linear workspace a bare `STMN-3439` is addressed in (see `linearWorkspace`).
+   *
+   *  Best-effort, like the settings beside it: a failure leaves it null, and a reference then
+   *  stays the word it is — which is what it was before this feature existed. The backend
+   *  caches the answer for hours, so asking on every connect costs no request (see
+   *  `linear_workspace` in src/bin/server.rs). */
+  private async loadLinearWorkspace(): Promise<void> {
+    try {
+      const { workspace } = await this.backend.linearWorkspace();
+      this.set({ linearWorkspace: workspace ?? null });
+    } catch {
+      // ignore — no chip is drawn for a bare identifier, and every link still is.
+    }
+  }
+
   /** Persist app settings (partial) and reflect the fresh non-secret view in
    *  state. Clears the link cache so previews re-evaluate against the new host /
    *  tokens — including the links that resolved to nothing before a token was
@@ -5130,6 +5160,10 @@ export class TeamsController {
     // which is a whole world seen through that token.
     this.approvalResolved.clear();
     this.forgetGitLabReads();
+    // A new Linear key may name another workspace, and the backend forgets its cached one on
+    // the same write — so the page reads it again rather than keeping an address that key no
+    // longer reaches.
+    void this.loadLinearWorkspace();
     playCue("success");
     return settings;
   }

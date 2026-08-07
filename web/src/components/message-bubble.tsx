@@ -40,6 +40,7 @@ import {
   hasVisibleContent,
   parseMessageBody,
 } from "~/lib/rich-text";
+import { projectNamedIn } from "~/lib/tracker-ref";
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun, type AgentTranscript } from "~/lib/agent-run";
 import { agentTagsInMessage } from "~/lib/agent-tag";
@@ -69,6 +70,7 @@ import { FileAttachment, MediaImage, RecordingAttachment } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
 import { LinearLinkCard } from "./linear-link-card";
 import { PersonHoverCard } from "./person-card";
+import { TrackerProjectProvider, useTrackerVocabulary } from "./tracker-refs-context";
 import { Emoji } from "./emoji";
 import { useAppState, useController } from "./controller-context";
 import { useMessageGestures } from "./use-message-gestures";
@@ -326,6 +328,22 @@ function MessageBubbleImpl(props: {
     () => mergeRequestsIn(candidateLinks, gitlabHost)[0] ?? null,
     [candidateLinks, gitlabHost],
   );
+
+  // The project a bare `!42` in this message belongs to (see lib/tracker-ref.ts). GitLab
+  // resolves such a reference against the project the text is IN, and for a chat message that
+  // is the message: the WHOLE of it, quote included, because a reply's subject is the thing it
+  // quotes — which is exactly the shape an agent's answer takes, since "Review this merge
+  // request: !42 <url>" comes back quoted above the answer.
+  //
+  // So it is read from the raw content rather than from `candidateLinks` (which excludes the
+  // quote on purpose — enriching it would draw a second card for a link already on screen),
+  // and through `projectNamedIn` rather than `extractLinks`, which sees anchors only: a quote
+  // carries its preview as PLAIN TEXT, so the URL in it is words by the time it gets here.
+  const trackers = useTrackerVocabulary();
+  const trackerProject = useMemo(() => {
+    if (!trackers) return null;
+    return projectNamedIn(parseMessageBody(props.message.content ?? "", format), trackers);
+  }, [props.message.content, format, trackers]);
 
   const enrichment = useEnrichedLinks(candidateLinks);
 
@@ -710,6 +728,10 @@ function MessageBubbleImpl(props: {
   );
 
   return (
+    // Everything the bubble draws reads its references with this message's own project (see
+    // `trackerProject`), so a bare `!42` in it — or in the answer an agent streamed into it —
+    // means the merge request the message is about.
+    <TrackerProjectProvider project={trackerProject}>
     <div
       className={cn(
         "group flex w-full",
@@ -987,6 +1009,7 @@ function MessageBubbleImpl(props: {
         />
       </motion.div>
     </div>
+    </TrackerProjectProvider>
   );
 }
 

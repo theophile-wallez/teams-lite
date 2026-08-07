@@ -16,6 +16,7 @@
 //          | fetch_avatar
 //          | profile | people_by_address | presence | sender_icon
 //          | get_settings | set_settings | set_always_available | enrich_link
+//          | linear_workspace
 //          | gitlab_approvals | gitlab_set_approval
 //          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
@@ -1733,6 +1734,31 @@ function seedGitLabSamples(): void {
       is_self: false,
     },
     120_000,
+  );
+  // The same two trackers named the way people really write them in a thread: bare
+  // references, with no link on them at all. `!99` is a merge request of the project this
+  // message's own link names — GitLab's own rule for a bare reference — `ENG-1` is a Linear
+  // issue, and `UTF-8` is a word that only looks like one (see lib/tracker-ref.ts).
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      // A REPLY, which is the shape that makes a bare reference resolvable: the project comes
+      // from the whole message, quote included (see `trackerProject` in message-bubble.tsx) —
+      // and it is exactly the shape an agent's answer takes, since the request it quotes is
+      // what named the merge request. It adds no card of its own: a quoted link is not
+      // enriched, or the thread would draw a second card for a link already on screen.
+      content:
+        quoteBlock({
+          compose_time: base,
+          sender: other.name,
+          sender_mri: other.mri,
+          preview: "Can you review https://gitlab.com/acme/webapp/-/merge_requests/42 …",
+        }) +
+        `<p>Done — !99 is the follow-up and ENG-1 tracks the rest. UTF-8 is untouched.</p>`,
+      is_self: true,
+    },
+    150_000,
   );
   // A message that is ONLY a link (as Teams autolinks a pasted URL — the anchor
   // text is the URL itself). It should render as just the integration card, with
@@ -3728,6 +3754,15 @@ function isValidMockModel(model: string): boolean {
   );
 }
 
+/** The Linear workspace this mock's key belongs to (`linear::Workspace`), which is what turns
+ *  a bare `ENG-1` in anybody's words into a link to that issue.
+ *
+ *  `ENG` and nothing else, deliberately: the seeded messages write `ENG-1` and also `UTF-8`,
+ *  so the surface shows both halves of the rule — a reference that resolves beside a word
+ *  that only looks like one. The url key matches the Linear links these fixtures already
+ *  carry, so a chip and a card name one workspace. */
+const MOCK_LINEAR_WORKSPACE = { url_key: "acme", team_keys: ["ENG"] };
+
 /** Non-secret settings view, matching the Rust `get_settings` result. */
 function settingsView(): {
   gitlab_host: string;
@@ -4153,6 +4188,10 @@ const mockMergeRequests: MockMergeRequest[] = [
       "## What changes\n\n" +
       "Adds **two replicas** and a PodDisruptionBudget to every user-facing API,\n" +
       "so a node drain can never take the last pod of one.\n\n" +
+      // Tracker references, in the three shapes an author writes them: a bare `!595` (this
+      // project, GitLab's own rule), a Linear identifier, and one word that only LOOKS like
+      // one. The last is the point — `UTF-8` must stay the text it is (see lib/tracker-ref.ts).
+      "Closes ENG-1, supersedes !595, and leaves the UTF-8 handling alone.\n\n" +
       "| Service  | Replicas | Budget |\n" +
       "| -------- | -------- | ------ |\n" +
       "| `web`    | 2        | 1      |\n" +
@@ -7518,6 +7557,15 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     case "get_settings":
       return settingsView();
 
+    // The Linear workspace a bare `ENG-1` is addressed in (see lib/tracker-ref.ts). A read
+    // this mock can answer with no Linear at all, because it is two facts rather than a
+    // lookup: how the workspace is addressed, and which team keys it holds.
+    case "linear_workspace":
+      return {
+        workspace: mockSettings.linear_token.length > 0 ? MOCK_LINEAR_WORKSPACE : null,
+        read_at_ms: Date.now(),
+      };
+
     case "set_settings": {
       const o = asObject(params);
       if (typeof o.gitlab_host === "string") mockSettings.gitlab_host = o.gitlab_host.trim();
@@ -8210,7 +8258,13 @@ const MOCK_AGENT_ANSWER =
   "- **19421** — the hands-on dev backend, so both can run at once\n" +
   "- **19430** — read-only, which is what tooling talks to\n\n" +
   "```rust\nconst DEFAULT_PORT: u16 = 19420;\n```\n\n" +
-  "The table in CLAUDE.md is the authority, and the defaults live in `src/bin/server.rs`.";
+  "The table in CLAUDE.md is the authority, and the defaults live in `src/bin/server.rs`.\n\n" +
+  // The trackers an answer names, which is what the reference chips are for: a merge
+  // request that lands on this app's own page, an issue that goes to Linear, one word that
+  // only looks like a reference, and one inside code that must stay code (see
+  // lib/tracker-ref.ts). It is written the way a CLI writes it: bare words, no markup.
+  "acme/webapp!596 moved them there, ENG-1 tracks the rest, and the UTF-8 handling is " +
+  "untouched. Write `!596` to name it in a message.";
 
 /** One entry of the transcript on the wire — `agent_step_json` in src/bin/server.rs. */
 type MockAgentStep =

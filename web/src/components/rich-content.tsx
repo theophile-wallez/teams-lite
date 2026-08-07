@@ -14,6 +14,7 @@ import {
 } from "~/lib/rich-text";
 import { markAgentTag } from "~/lib/agent-tag";
 import { uploadOf } from "~/lib/gitlab-upload";
+import { markTrackerRefs } from "~/lib/tracker-ref";
 import type { AgentCandidate } from "~/lib/mentions";
 import type { BodyFormat, MessageMention } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
@@ -23,6 +24,8 @@ import { EmailSummaryCard } from "./email-summary";
 import { GitLabImage } from "./gitlab-image";
 import { MediaImage } from "./media-image";
 import { PersonHoverCard } from "./person-card";
+import { TrackerRefChip } from "./tracker-ref-chip";
+import { useTrackerVocabulary } from "./tracker-refs-context";
 import { renderWordEffects } from "./word-effect";
 
 /**
@@ -107,6 +110,13 @@ export function RichContent(props: {
  * links and lists look exactly like a message body's instead of a second, drifting
  * implementation of the same styles.
  *
+ * It is also where a TRACKER REFERENCE becomes a chip (`markTrackerRefs`), and this is the
+ * one place it happens: every surface that draws words in this app draws them through here,
+ * so a Linear issue and a merge request read the same in a message, in a reply quote, in a
+ * card, in an agent's answer and in a merge request's own description. What the words are
+ * read WITH comes from a context ({@link useTrackerVocabulary}) rather than from a prop, for
+ * the same reason — see components/tracker-refs-context.tsx.
+ *
  * Renders nothing at all when the tree holds nothing visible, so a caller never has
  * to guard against an empty block.
  */
@@ -118,10 +128,11 @@ export function RichNodes(props: {
   /** See {@link RichContent}'s `tokens`. */
   tokens?: boolean;
 }) {
-  const nodes = useMemo(
-    () => mergeMentionRuns(props.nodes, props.mentions),
-    [props.nodes, props.mentions],
-  );
+  const trackers = useTrackerVocabulary();
+  const nodes = useMemo(() => {
+    const merged = mergeMentionRuns(props.nodes, props.mentions);
+    return trackers ? markTrackerRefs(merged, trackers) : merged;
+  }, [props.nodes, props.mentions, trackers]);
   if (!hasVisibleContent(nodes)) return null;
   return (
     <div className={cn("break-words", props.className)}>
@@ -591,6 +602,21 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
         </PersonHoverCard>
       );
     }
+    case "trackerRef":
+      // A Linear issue or a GitLab merge request named in the words (lib/tracker-ref.ts).
+      // The children are the author's own text — the reference they wrote, or the label they
+      // gave their own link — so the chip adds a mark and a target and replaces nothing.
+      return (
+        <TrackerRefChip
+          key={key}
+          tracker={node.attrs.tracker ?? "gitlab"}
+          reference={node.attrs.reference ?? ""}
+          href={node.attrs.href ?? ""}
+          project={node.attrs.project}
+        >
+          {children}
+        </TrackerRefChip>
+      );
     case "agent":
       // The very chip the composer drew (components/agent-tag.tsx), so tagging an agent
       // and reading the message back are one thing rather than two that look alike. The

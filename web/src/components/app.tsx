@@ -16,6 +16,7 @@ import { GitLabJobLogPage } from "./gitlab-job-log-page";
 import { IncomingCallBanner } from "./incoming-call-banner";
 import { AppToaster } from "./app-toaster";
 import { Splash } from "./splash";
+import { TrackerRefsProvider } from "./tracker-refs-context";
 import { useChatSections } from "./use-chat-sections";
 import { TooltipProvider } from "./ui/tooltip";
 import { Button } from "./ui/button";
@@ -38,7 +39,13 @@ export function App() {
             pane — which gives up its composer while the call's chat panel holds it (see
             `useCallOwnsComposer`). */}
         <CallStageProvider>
-          <AppInner />
+          {/* What this machine can read a tracker reference with — the GitLab host and the
+              Linear workspace. Above the whole shell because every surface that draws words
+              draws a reference: a message, a card, an agent's answer, a merge request's own
+              description (see components/tracker-refs-context.tsx). */}
+          <TrackerRefsProvider>
+            <AppInner />
+          </TrackerRefsProvider>
         </CallStageProvider>
       </TooltipProvider>
     </ControllerProvider>
