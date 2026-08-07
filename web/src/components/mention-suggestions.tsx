@@ -61,7 +61,11 @@ export function MentionSuggestions(props: {
             // Keep the caret where it is: the click must not blur the editor before
             // the mention is inserted.
             onMouseDown={(event) => event.preventDefault()}
-            onMouseEnter={() => props.onActivate(index)}
+            // MOVE, not enter — the same rule as the emoji list, and for the same reason.
+            // A bare "@" opens this list over the field the reader just clicked, and a row
+            // rendering beneath a STATIONARY cursor fires `mouseenter`, which would take the
+            // active row away from the keyboard. `mousemove` means the reader moved.
+            onMouseMove={() => props.onActivate(index)}
             onClick={() => props.onPick(option)}
             className={cn(
               "flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors",

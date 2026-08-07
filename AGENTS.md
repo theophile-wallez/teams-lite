@@ -3290,11 +3290,14 @@ feature worth having: a local-only decoration would be a different, smaller feat
     so a message ending in one is an ordinary sentence, and stealing its Enter would post an
     emoji nobody asked for instead of the words. Tab picks in both cases: it means "complete
     this" and it sends nothing.
-  - **A row is activated on `mousemove`, never on `mouseenter`**
-    (`web/src/components/emoji-suggestions.tsx`). The list opens right over the field the
-    reader just clicked, so a row appearing beneath a STATIONARY cursor fired `mouseenter`
-    and took the active row away from the keyboard. That broke rule 5's own test before it
-    was found. `mousemove` is the honest "the reader moved the mouse here" signal.
+  - **A row is activated on `mousemove`, never on `mouseenter`** — in BOTH composer
+    typeaheads, `web/src/components/emoji-suggestions.tsx` and `mention-suggestions.tsx`.
+    Either list opens right over the field the reader just clicked, so a row appearing
+    beneath a STATIONARY cursor fired `mouseenter` and took the active row away from the
+    keyboard. That broke rule 5's own test before it was found. The mention list carried the
+    same line and a bare "@" opens it the same way, so it was changed with the emoji one
+    rather than left to be found later. `mousemove` is the honest "the reader moved the
+    mouse here" signal.
   - The chip carries the name of the row that was PICKED, so an alias chip is
     `data-emoji-name="ship"` while the body it serializes to holds `:shipit:`. A spec that
     types `:ship` and then asserts on `shipit` art is asserting on the wire, not the chip.
