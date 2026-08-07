@@ -71,6 +71,10 @@ async fn main() -> Result<()> {
     let mut edges_total = 0usize;
     let mut edges_off_graph = 0usize;
     let mut longest_chain = 0usize;
+    let mut stage_order_answered = 0usize;
+    let mut rest_already_ordered = 0usize;
+    let mut rest_reversed = 0usize;
+    let mut rest_other_order = 0usize;
     let mut stage_counts: BTreeMap<usize, usize> = BTreeMap::new();
 
     for row in list.items.iter().take(MERGE_REQUESTS) {
@@ -106,7 +110,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        let needs = match teams_lite::gitlab_ci_graph::fetch_needs(
+        let shape = match teams_lite::gitlab_ci_graph::fetch_shape(
             &http,
             &host,
             token.as_deref(),
@@ -115,13 +119,42 @@ async fn main() -> Result<()> {
         )
         .await
         {
-            Ok(needs) => needs,
+            Ok(shape) => shape,
             Err(e) => {
                 pipelines_graphql_refused += 1;
                 println!("   !{} · graphql refused: {e:#}", row.iid);
                 continue;
             }
         };
+        // FACT 3: the stage ORDER, which REST does not answer. The jobs come back newest
+        // first, so the order they arrive in is the reverse of the pipeline's own — and a page
+        // that read it off the answer drew every multi-stage pipeline backwards.
+        let mut rest_order: Vec<&str> = Vec::new();
+        for job in &view.jobs {
+            if !rest_order.contains(&job.stage.as_str()) {
+                rest_order.push(&job.stage);
+            }
+        }
+        if !shape.stages.is_empty() {
+            stage_order_answered += 1;
+            let graphql: Vec<&str> = shape
+                .stages
+                .iter()
+                .map(String::as_str)
+                .filter(|name| rest_order.contains(name))
+                .collect();
+            let mut backwards = rest_order.clone();
+            backwards.reverse();
+            if graphql == rest_order {
+                rest_already_ordered += 1;
+            } else if graphql == backwards {
+                rest_reversed += 1;
+            } else {
+                rest_other_order += 1;
+            }
+        }
+
+        let needs = shape.needs;
         if needs.is_empty() {
             continue;
         }
@@ -165,6 +198,13 @@ async fn main() -> Result<()> {
     );
     println!("   the longest dependency chain is {longest_chain} deep");
     println!("   stages per pipeline: {stage_counts:?}");
+
+    println!("\n== FACT 3 · the stage ORDER, which REST does not answer");
+    println!("   {stage_order_answered} pipelines had their stages named by GraphQL");
+    println!(
+        "   against the REST order: {rest_already_ordered} already match (a single stage), \
+         {rest_reversed} are REVERSED, {rest_other_order} are neither"
+    );
     Ok(())
 }
 

@@ -19,6 +19,7 @@ import {
 import { noteWasEdited, threadResolution, threadResolveAction } from "~/lib/gitlab-diff-comment";
 import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
 import { defaultGrouping, graphSummary, pipelineGraph } from "~/lib/gitlab-pipeline-graph";
+import { gitLabMarkdownOptions } from "~/lib/gitlab-upload";
 import {
   DESCRIPTION_COLLAPSED_PX,
   DESCRIPTION_FADE_PX,
@@ -28,6 +29,7 @@ import {
   descriptionFoldSeconds,
   descriptionIsFoldable,
   mergeRequestId,
+  mergeRequestPeopleLines,
   mergeVerdict,
   pipelineIsLive,
   stateChangeFor,
@@ -38,6 +40,7 @@ import {
   type GitLabPerson,
   type MergeRequestDetail,
 } from "~/lib/gitlab-mr";
+import { mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import { personFace } from "~/lib/tracker-people";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
@@ -192,7 +195,12 @@ export function GitLabPane(props: {
            drawn blank — which reads as a read that failed. */
         <UnbuiltMergeRequestPage page={page} webUrl={detail?.web_url} />
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6">
+        // The Overview's own content IS the panel the strip's first tab controls, so it
+        // carries that tab's id (see `mergeRequestPagePanel`).
+        <div
+          {...mergeRequestPagePanel("overview")}
+          className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6"
+        >
           <article className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {error && !detail ? (
               <p data-testid="gitlab-detail-error" className="text-[13px] text-destructive">
@@ -286,14 +294,12 @@ function MergeRequestHeader(props: { detail: MergeRequestDetail }) {
         </code>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <PersonLine label="Author" people={[detail.author]} />
-        {detail.reviewers && detail.reviewers.length > 0 && (
-          <PersonLine label="Reviewers" people={detail.reviewers} />
-        )}
-        {detail.assignees && detail.assignees.length > 0 && (
-          <PersonLine label="Assignees" people={detail.assignees} />
-        )}
+      {/* The people, in rows the pure rule decides — including the one an author who is also
+          the assignee earns, which states that pair once (see `mergeRequestPeopleLines`). */}
+      <div data-testid="gitlab-people-rows" className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        {mergeRequestPeopleLines(detail).map((line) => (
+          <PersonLine key={line.label} label={line.label} people={line.people} />
+        ))}
       </div>
 
       {detail.labels && detail.labels.length > 0 && (
@@ -315,10 +321,13 @@ function MergeRequestHeader(props: { detail: MergeRequestDetail }) {
 
 /** One row of people, as faces and names. A colleague the user's Teams knows is drawn as
  *  that colleague — their Teams face and the name this app calls them (see `personFace`);
- *  anybody else keeps GitLab's own name over tinted initials. */
+ *  anybody else keeps GitLab's own name over tinted initials.
+ *
+ *  The row states its own label, because WHICH rows there are is the decision
+ *  `mergeRequestPeopleLines` makes and a test has to be able to read it back. */
 function PersonLine(props: { label: string; people: GitLabPerson[] }) {
   return (
-    <div className="flex items-center gap-2">
+    <div data-testid="gitlab-people" data-label={props.label} className="flex items-center gap-2">
       <span className="text-[12px] text-text-faint">{props.label}</span>
       {props.people.map((person) => (
         <PersonChip key={person.username || person.name} person={person} />
@@ -419,8 +428,14 @@ function StateBadge(props: { detail: MergeRequestDetail }) {
  *    which is the state a page should open in. */
 function MergeRequestDescription(props: { detail: MergeRequestDetail }) {
   const nodes = useMemo(
-    () => parseGitLabMarkdown(props.detail.description ?? ""),
-    [props.detail.description],
+    // The project is what makes a pasted screenshot a picture rather than a link nobody can
+    // follow: an upload path names no project of its own (see `gitLabMarkdownOptions`).
+    () =>
+      parseGitLabMarkdown(
+        props.detail.description ?? "",
+        gitLabMarkdownOptions(props.detail.project_path),
+      ),
+    [props.detail.description, props.detail.project_path],
   );
   const reduce = useReducedMotion();
   const [open, setOpen] = useState(false);
@@ -985,7 +1000,13 @@ function NoteBubble(props: { note: GitLabNote }) {
   const note = props.note;
   const controller = useController();
   const acting = useAppState((s) => s.gitlabActing);
-  const nodes = useMemo(() => parseGitLabMarkdown(note.body), [note.body]);
+  // A comment's own pictures are uploads of the merge request's project, exactly as the
+  // description's are — and the open merge request IS the one these comments belong to.
+  const project = useAppState((s) => s.openMergeRequest?.projectPath);
+  const nodes = useMemo(
+    () => parseGitLabMarkdown(note.body, gitLabMarkdownOptions(project)),
+    [note.body, project],
+  );
   const author = useMemo(() => personFace(note.author), [note.author]);
   const deleting = acting === `delete:${note.id}`;
   const [armed, setArmed] = useState(false);

@@ -13,12 +13,14 @@ import {
   type RichTag,
 } from "~/lib/rich-text";
 import { markAgentTag } from "~/lib/agent-tag";
+import { uploadOf } from "~/lib/gitlab-upload";
 import type { AgentCandidate } from "~/lib/mentions";
 import type { BodyFormat, MessageMention } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { AgentTagChip } from "./agent-tag";
 import { CustomEmoji } from "./custom-emoji";
 import { EmailSummaryCard } from "./email-summary";
+import { GitLabImage } from "./gitlab-image";
 import { MediaImage } from "./media-image";
 import { PersonHoverCard } from "./person-card";
 import { renderWordEffects } from "./word-effect";
@@ -546,6 +548,23 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
           className="my-1"
         />
       );
+    case "gitlabImage": {
+      // A GitLab upload: the picture is real, and its bytes come through the backend because
+      // no browser can ask GitLab for them (see `~/lib/gitlab-upload.ts`). An attribute this
+      // app cannot turn into an upload draws nothing rather than an empty box.
+      const upload = uploadOf(node.attrs);
+      if (!upload) return null;
+      return (
+        <GitLabImage
+          key={key}
+          upload={upload}
+          alt={node.attrs.alt ?? ""}
+          width={node.attrs.width}
+          height={node.attrs.height}
+          className="my-1"
+        />
+      );
+    }
     case "mention": {
       // The span carries only an index; who it names lives in the message's
       // mention list. A person we can identify gets their card on hover; a

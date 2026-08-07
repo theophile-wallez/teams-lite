@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { personFace } from "./tracker-people";
+import { personFace, samePerson } from "./tracker-people";
 
 // How a colleague is DRAWN, which is the one decision both the merge-request page and the two
 // preview cards read — so a person cannot be drawn one way on a card and another on a page.
@@ -39,5 +39,36 @@ describe("who a tracker user is drawn as", () => {
       personFace({ name: "Lucas Silva", username: "lucas", teams: { mri: "8:orgid:l", name: "" } })
         .label,
     ).toBe("Lucas Silva");
+  });
+});
+
+// Whether two tracker people are one person, which is what lets a surface say once what it
+// would otherwise say twice.
+describe("whether two tracker people are one person", () => {
+  it("the handle is what proves it", () => {
+    expect(samePerson({ name: "Ada", username: "ada" }, { name: "A. Lovelace", username: "ada" })).toBe(
+      true,
+    );
+    expect(samePerson({ name: "Ada", username: "ada" }, { name: "Ada", username: "ada2" })).toBe(false);
+  });
+
+  it("a NAME proves nothing, because two colleagues may share one", () => {
+    expect(samePerson({ name: "Ada", username: "" }, { name: "Ada", username: "" })).toBe(false);
+    // Not even beside a handle one of them lacks.
+    expect(samePerson({ name: "Ada", username: "ada" }, { name: "Ada", username: "" })).toBe(false);
+  });
+
+  it("falls back to the colleague they resolve to when a handle is missing", () => {
+    const teams = { mri: "8:orgid:ada", name: "Ada" };
+    expect(
+      samePerson({ name: "Ada", username: "", teams }, { name: "A. Lovelace", username: "", teams }),
+    ).toBe(true);
+    // An empty identity resolves nobody, so it can prove nothing either.
+    expect(
+      samePerson(
+        { name: "Ada", username: "", teams: { mri: "", name: "Ada" } },
+        { name: "Ada", username: "", teams: { mri: "", name: "Ada" } },
+      ),
+    ).toBe(false);
   });
 });

@@ -23,6 +23,13 @@ function useTabs(component: string): TabsContextValue {
   return ctx;
 }
 
+/** Whether the strip this trigger sits in wears the pill SURFACE (see `TabsList`). It travels
+ *  by context because it decides how the CURRENT tab is drawn as well: inside a card the
+ *  selected one is a raised tile, and with no card it is a wash on the row itself — a raised
+ *  tile needs something to be raised from. Absent (a trigger outside a list) reads as the
+ *  surface, which is the older shape. */
+const TabsSurfaceContext = React.createContext(true);
+
 export function Tabs(props: {
   value: string;
   onValueChange: (value: string) => void;
@@ -46,6 +53,18 @@ export function Tabs(props: {
 
 export function TabsList(props: {
   "aria-label": string;
+  /**
+   * Whether the strip wears the app's own pill SURFACE — a card with a shadow, which is what a
+   * segmented control in a sidebar wants. `false` puts the tabs directly on whatever holds
+   * them: a sub-header is already a surface, and a card floating inside it is two nested
+   * surfaces for one thing (see `MergeRequestPageStrip`).
+   *
+   * It is a prop rather than a className the caller overrides, because `shadow-chip` and
+   * `shadow-none` both survive tailwind-merge — a project shadow is not a name it can resolve
+   * — so the class list would carry a contradiction and the next reader could not tell which
+   * half wins.
+   */
+  surface?: boolean;
   className?: string;
   children: React.ReactNode;
 }) {
@@ -80,17 +99,19 @@ export function TabsList(props: {
     tabs[next]?.click();
   };
 
+  const surface = props.surface !== false;
   return (
     <div
       role="tablist"
       aria-label={props["aria-label"]}
       onKeyDown={onKeyDown}
       className={cn(
-        "inline-flex items-center gap-1 rounded-lg bg-card p-1 shadow-chip",
+        "inline-flex items-center gap-1",
+        surface && "rounded-lg bg-card p-1 shadow-chip",
         props.className,
       )}
     >
-      {props.children}
+      <TabsSurfaceContext.Provider value={surface}>{props.children}</TabsSurfaceContext.Provider>
     </div>
   );
 }
@@ -106,6 +127,7 @@ export function TabsTrigger(props: {
   "data-testid"?: string;
 }) {
   const ctx = useTabs("TabsTrigger");
+  const surface = React.useContext(TabsSurfaceContext);
   const selected = ctx.value === props.value;
   return (
     <button
@@ -124,9 +146,13 @@ export function TabsTrigger(props: {
       className={cn(
         "flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        selected
-          ? "bg-background text-foreground shadow-chip"
-          : "text-text-dim hover:text-foreground",
+        surface
+          ? selected
+            ? "bg-background text-foreground shadow-chip"
+            : "text-text-dim hover:text-foreground"
+          : selected
+            ? "bg-accent text-foreground"
+            : "text-text-dim hover:bg-accent/50 hover:text-foreground",
         props.className,
       )}
     >

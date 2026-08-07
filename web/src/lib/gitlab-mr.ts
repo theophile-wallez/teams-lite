@@ -16,7 +16,7 @@
 // drawn two ways.
 
 import type { DiffRefs } from "./gitlab-diff-comment";
-import type { TrackerPerson } from "./tracker-people";
+import { samePerson, type TrackerPerson } from "./tracker-people";
 
 /** A GitLab person is a tracker person: one shape, one match rule, one way of drawing them
  *  (`personFace`). Kept as a name of its own because this file mirrors `gitlab_mr.rs`, whose
@@ -93,6 +93,12 @@ export type GitLabJob = {
 export type GitLabPipelineView = {
   pipeline?: GitLabPipeline;
   jobs?: GitLabJob[];
+  /** The pipeline's stage names, first to last — and the ONLY thing that states that order.
+   *  GitLab's jobs endpoint answers NEWEST FIRST, so `jobs` arrives in reverse stage order
+   *  (measured: 16 of 25 pipelines on this instance, the other 9 having a single stage), and
+   *  the order is read separately over GraphQL. Absent when that read could not be made, which
+   *  is what `pipelineStages` falls back from. */
+  stages?: string[];
 };
 
 /** Mirrors `gitlab_mr::MergeRequestDetail`. */
@@ -328,22 +334,36 @@ export function pipelineIsLive(view: GitLabPipelineView | null | undefined): boo
 /** One stage of a pipeline, in GitLab's own order. */
 export type PipelineStage = { name: string; jobs: GitLabJob[] };
 
-/** Group a pipeline's jobs into stages, keeping GitLab's order for both.
+/** Group a pipeline's jobs into stages, in the pipeline's own order.
  *
- *  GitLab returns jobs in stage order already, so nothing is sorted here: a sort would
- *  invent an order (alphabetical) that contradicts the pipeline's real shape, and a stage
- *  named "🧪 test" would then come before "🏗 build". */
-export function pipelineStages(jobs: GitLabJob[] | null | undefined): PipelineStage[] {
-  const stages: PipelineStage[] = [];
-  for (const job of jobs ?? []) {
-    const last = stages[stages.length - 1];
-    // Consecutive jobs of one stage join it; a stage that reappears later (GitLab can
-    // interleave retried jobs) gets its own group rather than being merged backwards,
-    // because merging would move a job away from the run it belongs to.
-    if (last && last.name === job.stage) last.jobs.push(job);
-    else stages.push({ name: job.stage, jobs: [job] });
+ *  **The answer's own order is NOT that order.** GitLab's jobs endpoint answers newest first,
+ *  so the jobs of the last stage arrive first — measured on this instance: of 25 merge requests
+ *  16 came back in reverse stage order and the other 9 had a single stage. Reading the order off
+ *  the answer therefore drew every multi-stage pipeline backwards, `install` last, and it did
+ *  until somebody looked at a real one.
+ *
+ *  So the order comes from the view's own `stages`, which the backend reads over GraphQL
+ *  (`src/gitlab_ci_graph.rs`). When that read could not be made, the fallback is the jobs' own
+ *  IDS: GitLab creates a pipeline's jobs stage by stage, so ascending id is creation order is
+ *  stage order. It is a fallback rather than the rule because a RETRIED job is created later and
+ *  carries a higher id than its own stage's neighbours — which is exactly the case `stages`
+ *  answers correctly.
+ *
+ *  Within a stage the jobs are ordered by id too, which is the order GitLab's own graph shows
+ *  them in: an alphabetical sort would put a retry above the run it replaced. */
+export function pipelineStages(view: GitLabPipelineView | null | undefined): PipelineStage[] {
+  const jobs = [...(view?.jobs ?? [])].sort((a, b) => a.id - b.id);
+  const byName = new Map<string, GitLabJob[]>();
+  for (const job of jobs) {
+    const held = byName.get(job.stage);
+    if (held) held.push(job);
+    else byName.set(job.stage, [job]);
   }
-  return stages;
+  // The named order first, then anything left over in the order the ids put it — a stage the
+  // GraphQL read did not name (an older GitLab, a refused query) must still get its column.
+  const named = (view?.stages ?? []).filter((name) => byName.has(name));
+  const order = [...named, ...[...byName.keys()].filter((name) => !named.includes(name))];
+  return order.map((name) => ({ name, jobs: byName.get(name)! }));
 }
 
 /** The worst thing that happened in a group of jobs — a stage, a graph column, or a whole
@@ -510,6 +530,42 @@ export function rowStateLabel(row: MergeRequestRow): string {
  *  drawn in a list whose whole promise is "not merged". */
 export function isNotMerged(row: MergeRequestRow): boolean {
   return row.state !== "merged";
+}
+
+/** One row of people under the branches: what it calls them, and who stands under it. */
+export type MergeRequestPeopleLine = { label: string; people: GitLabPerson[] };
+
+/** The people rows of a merge request, in the order the page draws them.
+ *
+ *  **An author who is the SOLE assignee is stated once**, as `Author & assignee`. Most
+ *  merge requests here are written by the person they are assigned to, so the header used to
+ *  spell one name twice a centimetre apart — which asks the reader to compare two chips to
+ *  learn one fact, and reads at a glance as two people. Three rules hold it, and each is
+ *  pinned by a test:
+ *
+ *  - **Whose the two accounts are is PROVEN** (`samePerson`), never read off a display name.
+ *    Saying somebody assigned their own merge request when they did not is the wrong-face
+ *    rule of `tracker_people` again, and this surface is where that rule already lives.
+ *  - **A SECOND assignee keeps both rows.** Merging would then drop a name, and who else
+ *    the work sits with is the whole fact an assignee row carries.
+ *  - **REVIEWERS are untouched, whoever they are.** Authoring what one reviews is a
+ *    different statement about a merge request, and GitLab lists the same person as both far
+ *    less often than it lists an author as their own assignee.
+ */
+export function mergeRequestPeopleLines(detail: MergeRequestDetail): MergeRequestPeopleLine[] {
+  const reviewers = detail.reviewers ?? [];
+  const assignees = detail.assignees ?? [];
+  const sole = assignees.length === 1 ? assignees[0] : undefined;
+  const authorIsAssignee = Boolean(sole && samePerson(detail.author, sole));
+
+  const lines: MergeRequestPeopleLine[] = [
+    { label: authorIsAssignee ? "Author & assignee" : "Author", people: [detail.author] },
+  ];
+  if (reviewers.length > 0) lines.push({ label: "Reviewers", people: reviewers });
+  if (assignees.length > 0 && !authorIsAssignee) {
+    lines.push({ label: "Assignees", people: assignees });
+  }
+  return lines;
 }
 
 /** The notes of one discussion, split into what a person said and what GitLab recorded.

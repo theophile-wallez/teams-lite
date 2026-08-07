@@ -14,7 +14,7 @@
 //          | get_settings | set_settings | set_always_available | enrich_link
 //          | gitlab_approvals | gitlab_set_approval
 //          | gitlab_mr_list | gitlab_mr_detail | gitlab_mr_notes | gitlab_mr_pipeline
-//          | gitlab_mr_diff
+//          | gitlab_mr_diff | gitlab_mr_upload
 //          | gitlab_mr_merge | gitlab_mr_comment | gitlab_mr_delete_comment
 //          | gitlab_mr_edit_comment | gitlab_mr_resolve_thread | gitlab_mr_set_state
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
@@ -88,7 +88,9 @@
 // `gitlab_mr_write` for the writes, and AGENTS.md § The GitLab page). The reads — `list`,
 // `detail`, `notes`, `pipeline`, `diff` — are open like every other read and answer from a durable
 // response cache (`gitlab_reads`) before they ask GitLab, so the page paints from disk and
-// refreshes behind itself. The four writes — `merge`, `comment`, `delete_comment`,
+// refreshes behind itself. `upload` is the sixth read and the one that carries BYTES: a picture
+// a description or a comment points at, fetched with the token the browser does not hold, so
+// the page draws it without ever asking GitLab itself. The four writes — `merge`, `comment`, `delete_comment`,
 // `set_state` — are {@link OUTWARD_METHODS} entries, and `gitlab_mr_merge` is the one that
 // cannot be taken back.
 //
@@ -5388,6 +5390,41 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             .await
         }
 
+        // One PICTURE a description or a comment points at. An ordinary read, like every
+        // other one on this page — and the reason it exists at all is the promise those reads
+        // are written under: nothing on this page is fetched from GitLab BY THE BROWSER. An
+        // upload is served to a session or a token (measured: 404 to everything else), so the
+        // bytes come through here exactly as a Teams inline image and a colleague's face do,
+        // and the page draws a local blob.
+        //
+        // It is addressed by PRIMITIVES — the project, GitLab's own secret for the file, the
+        // file's name — never by a URL a client assembled, so the token cannot be aimed
+        // anywhere this app did not spell (`gitlab_mr::UploadRef::parse` checks each part).
+        // Not cached in `gitlab_reads`: the page holds the bytes as a blob for as long as it
+        // draws them, and a megabyte of base64 per screenshot is not what that table is for.
+        "gitlab_mr_upload" => {
+            let upload = gitlab_mr::UploadRef::parse(
+                &gitlab_project_path_param(params)?,
+                &param_str(params, "secret")?,
+                &param_str(params, "filename")?,
+            )?;
+            let settings = {
+                let store = ctx.store()?;
+                link_preview_settings(&store)?
+            };
+            let picture = gitlab_mr::fetch_upload(
+                &ctx.http,
+                &settings.gitlab_host,
+                settings.gitlab_token.as_deref(),
+                &upload,
+            )
+            .await?;
+            Ok(json!({
+                "content_type": picture.content_type,
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(&picture.bytes),
+            }))
+        }
+
         // ---- the merge-request page: the four writes -------------------------
         //
         // Each is an `OUTWARD_METHODS` entry: the write token, refused by a read-only
@@ -6833,14 +6870,15 @@ impl GitLabRead {
                 json!(gitlab_mr::fetch_discussions(&ctx.http, host, token, project_path, *iid).await?)
             }
             // The pipeline is TWO reads, and the second one cannot fail the first. GitLab's
-            // REST jobs endpoint carries no `needs`, so the graph's dependency mode is read
-            // over GraphQL afterwards (`gitlab_ci_graph`) and attached to the jobs in place.
-            // A GitLab that will not answer it costs that one mode and leaves the graph
-            // grouped by stage.
+            // REST jobs endpoint carries neither `needs` nor the pipeline's stage ORDER — it
+            // answers newest first, which is reverse stage order — so both are read over
+            // GraphQL afterwards (`gitlab_ci_graph`) and attached in place. A GitLab that will
+            // not answer costs the dependency mode and leaves the stages ordered by the jobs'
+            // own ids.
             Self::Pipeline { project_path, iid } => {
                 let mut view =
                     gitlab_mr::fetch_pipeline(&ctx.http, host, token, project_path, *iid).await?;
-                gitlab_ci_graph::attach_needs(
+                gitlab_ci_graph::attach(
                     &ctx.http,
                     host,
                     token,
@@ -7117,14 +7155,14 @@ fn gitlab_diff_depth(params: &Value) -> Result<gitlab_mr::DiffDepth> {
 /// characters, so anything longer names nothing there.
 const MAX_PROJECT_PATH_BYTES: usize = 255;
 
-/// WHICH merge request a call is about: a project path and an iid, checked for shape.
+/// WHICH project a call is about, checked for shape.
 ///
 /// The host is never in these params — it comes from the user's own settings and every
 /// endpoint is built from [`gitlab::api_base`] — so this cannot repoint the token. What it
 /// checks is that the path is a path: `gitlab::encode_path` would percent-encode a whole
 /// URL into one harmless segment, but a request built from junk earns a 404 nobody can read,
 /// and refusing it here says what was wrong instead.
-fn gitlab_merge_request_params(params: &Value) -> Result<(String, u64)> {
+fn gitlab_project_path_param(params: &Value) -> Result<String> {
     let project_path = param_str(params, "project_path")?.trim().to_string();
     anyhow::ensure!(!project_path.is_empty(), "`project_path` must name a project");
     anyhow::ensure!(
@@ -7140,6 +7178,12 @@ fn gitlab_merge_request_params(params: &Value) -> Result<(String, u64)> {
             && !project_path.chars().any(char::is_whitespace),
         "`project_path` must be a project path like \"group/sub/project\""
     );
+    Ok(project_path)
+}
+
+/// WHICH merge request a call is about: a project path and an iid, checked for shape.
+fn gitlab_merge_request_params(params: &Value) -> Result<(String, u64)> {
+    let project_path = gitlab_project_path_param(params)?;
     let iid = params
         .get("iid")
         .and_then(Value::as_u64)
@@ -7690,6 +7734,16 @@ async fn thread_mentionable_people(
 /// than parsed as HTML (otherwise `Vec<String>` renders as `Vec`). Empty for legacy
 /// rows stored before the column existed — treat empty as "unknown", i.e. keep the
 /// previous HTML behaviour.
+///
+/// `mentions_me` is the one fact about a message that only this side can answer: the
+/// page never learns the user's own MRI, so it cannot read the resolved mention list
+/// for itself. It is resolved by [`push_policy::mentions_user`], the same function the
+/// delivery policy reads, so a mention means one thing in this app — and it is what
+/// lets the page apply the user's own per-channel notification setting rather than
+/// chiming at every post in every channel (see `shouldNotify` in
+/// web/src/lib/protocol.ts). Absent from an older backend, and the reader then treats
+/// it as "not known" and notifies, because a mention nobody is told about is the worse
+/// failure.
 fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
     json!({
         "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
@@ -7701,6 +7755,7 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
         "reactions": reactions_value(m, self_mri),
         "system_event": system_event_value(m),
         "is_self": is_self(m, self_name, self_mri),
+        "mentions_me": push_policy::mentions_user(&m.mentions, self_mri),
         "thread_root_id": m.thread_root_id,
         "thread_subject": m.thread_subject,
         "deleted": m.deleted
@@ -12453,6 +12508,31 @@ mod tests {
         let mut broken = message(3);
         broken.mentions = "{not json".into();
         assert_eq!(message_json(&broken, "Alice", "8:me")["mentions"], json!([]));
+    }
+
+    #[test]
+    fn whether_a_message_mentions_the_user_rides_the_wire() {
+        // The page applies the user's own per-channel notification setting, and
+        // "mentions only" is Teams' default — so it has to know whether a post named
+        // them. It cannot work that out: it never learns their MRI, and the body's span
+        // carries a display name two colleagues may share. This is the answer, resolved
+        // by the same function the push policy reads.
+        let mut m = message(1);
+        m.mentions =
+            r#"[{"itemid":0,"mri":"8:me","kind":"person","display_name":"Alice"}]"#.into();
+        assert_eq!(message_json(&m, "Alice", "8:me")["mentions_me"], true);
+        assert_eq!(
+            message_json(&m, "Bob", "8:someone_else")["mentions_me"],
+            false,
+            "a mention of somebody else is not one of ours"
+        );
+
+        // A message that mentions nobody, and a row whose list is unusable, both say
+        // false rather than nothing — the page reads an ABSENT field as "not known".
+        assert_eq!(message_json(&message(2), "Alice", "8:me")["mentions_me"], false);
+        let mut broken = message(3);
+        broken.mentions = "{not json".into();
+        assert_eq!(message_json(&broken, "Alice", "8:me")["mentions_me"], false);
     }
 
     #[test]

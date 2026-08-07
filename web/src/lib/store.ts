@@ -17,7 +17,6 @@ import type { SendImage } from "./composer-image";
 import { dedupeCandidates, type MentionCandidate, type OutboundMention } from "./mentions";
 import {
   appendLiveMessage,
-  channelIsMuted,
   chatIsMuted,
   chatIsPinned,
   copyableMessageText,
@@ -59,6 +58,7 @@ import {
   type MessagePage,
   type Notification,
   type NotificationTab,
+  type NotifyPlacement,
   type PersonPresence,
   type PersonOverride,
   type PersonProfile,
@@ -99,6 +99,7 @@ import {
   type MeetingAddress,
 } from "./call";
 import { callStageTitle } from "./call-stage";
+import { uploadKey, type UploadRef } from "./gitlab-upload";
 import {
   simulatedCallMedia,
   startCallMedia,
@@ -1290,6 +1291,10 @@ export class TeamsController {
     on("message", (raw) => {
       const m = raw as ChatMessage;
       const cached = this.messageCache.get(m.conversation_id);
+      // Read BEFORE the merge: a frame carrying a message this page already holds is a
+      // reaction, an edit or a deletion on it rather than news (see `shouldNotify`), and
+      // after the append every frame looks known.
+      const alreadyKnown = cached?.messages.some((held) => held.id === m.id) === true;
       this.cacheMessages(m.conversation_id, appendLiveMessage(cached, m));
       // A message from a sender means they stopped typing — clear their hint.
       if (m.sender_mri) {
@@ -1304,7 +1309,11 @@ export class TeamsController {
         // only if the user is actually looking: a background tab reads nothing, and
         // claiming otherwise would tell the sender the user saw a message they did not.
         if (document.visibilityState === "visible") this.markThreadRead(m.conversation_id);
-      } else if (shouldNotify(m, this.get().openId, this.threadIsMuted(m.conversation_id))) {
+      } else if (
+        shouldNotify(m, this.get().openId, this.notifyPlacement(m.conversation_id), {
+          alreadyKnown,
+        })
+      ) {
         // The message's own text, read the way its type says it must be (a `Text`
         // body is plain, not HTML) — so a notification never eats what it quotes.
         notifyMessage(m.sender, copyableMessageText(m));
@@ -2996,14 +3005,23 @@ export class TeamsController {
     writeTimeMap(CHAT_HIDES_KEY, hides);
   }
 
-  /** Is this thread quiet? A chat muted in Teams or here, or a channel the user muted
-   *  in Teams. Read on every inbound message, so a mute silences this app's own
-   *  notification and cue as well as dimming the row. */
-  private threadIsMuted(id: string): boolean {
+  /** Where a live message landed, with the setting that decides how loud it may be: a
+   *  chat's mute (in Teams or here), or a channel's own Teams notification setting. Read
+   *  on every inbound message, so a mute silences this app's notification and cue as
+   *  well as dimming the row, and a channel is as quiet here as the user asked Teams to
+   *  make it.
+   *
+   *  A thread this page holds in NEITHER list — a chat not synced yet, a channel of a
+   *  team it has not read — is an unmuted chat: the frame is a message addressed to the
+   *  user until something says otherwise. */
+  private notifyPlacement(id: string): NotifyPlacement {
     const conversation = this.get().conversations.find((c) => c.id === id);
-    if (conversation) return chatIsMuted(conversation);
+    if (conversation) return { kind: "chat", muted: chatIsMuted(conversation) };
     const channel = this.get().channels.find((c) => c.id === id);
-    return channel ? channelIsMuted(channel) : false;
+    // Teams' own default, which is what the backend assumes for a channel whose setting
+    // it could not read (see `store::ChannelAlerts`).
+    if (channel) return { kind: "channel", alerts: channel.alerts ?? "mentions_only" };
+    return { kind: "chat", muted: false };
   }
 
   /**
@@ -4411,6 +4429,14 @@ export class TeamsController {
    *  The returned object URL stays valid until the controller is disposed. */
   loadMedia(url: string): Promise<string> {
     return this.loadBlob(url, () => this.backend.fetchMedia(url));
+  }
+
+  /** Resolve one picture a GitLab description or comment points at to a local blob object URL,
+   *  fetching the bytes through the backend (see `gitlab-upload.ts` for why they cannot come
+   *  any other way). Shares the media cache, so its LRU order and byte budget cover a merge
+   *  request full of screenshots exactly as they cover a chat full of images. */
+  loadGitLabUpload(upload: UploadRef): Promise<string> {
+    return this.loadBlob(uploadKey(upload), () => this.backend.gitlabUpload(upload));
   }
 
   /** Resolve one mail attachment to a local blob object URL, for downloading or

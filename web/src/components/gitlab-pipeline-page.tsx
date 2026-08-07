@@ -12,6 +12,7 @@ import {
   pipelineIsLive,
   pipelineStages,
   type GitLabJob,
+  type GitLabPipelineView,
   type PipelineTone,
 } from "~/lib/gitlab-mr";
 import {
@@ -21,7 +22,7 @@ import {
   pipelineGraph,
   type PipelineGrouping,
 } from "~/lib/gitlab-pipeline-graph";
-import { gitlabPageUrl } from "~/lib/gitlab-mr-pages";
+import { gitlabPageUrl, mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import { cn } from "~/lib/utils";
 import { useAppState } from "./controller-context";
 import {
@@ -82,7 +83,10 @@ export function GitLabPipelinePage() {
   }, [groupable, grouping]);
 
   return (
+    // This page's own content IS the panel the strip's Pipelines tab controls, so it carries
+    // that tab's id — see `mergeRequestPagePanel`.
     <section
+      {...mergeRequestPagePanel("pipelines")}
       data-testid="gitlab-pipeline-page"
       data-view={tab}
       className="flex min-h-0 min-w-0 flex-1 flex-col"
@@ -223,7 +227,7 @@ export function GitLabPipelinePage() {
               <Legend jobs={jobs} />
             </div>
           ) : (
-            <JobList jobs={jobs} />
+            <JobList view={view} />
           )}
         </>
       )}
@@ -234,8 +238,8 @@ export function GitLabPipelinePage() {
 /** The jobs as a list, in GitLab's own stage order: what the graph is bad at. A stage view
  *  reads down a phone's screen with no sideways scroll, and a duration beside every name is how
  *  a reader finds the four minutes they are looking for. */
-function JobList(props: { jobs: GitLabJob[] }) {
-  const stages = useMemo(() => pipelineStages(props.jobs), [props.jobs]);
+function JobList(props: { view: GitLabPipelineView }) {
+  const stages = useMemo(() => pipelineStages(props.view), [props.view]);
   return (
     <div data-testid="gitlab-pipeline-jobs" className="min-h-0 flex-1 overflow-y-auto px-3 py-3 md:px-5">
       <div className="mx-auto flex max-w-2xl flex-col gap-4">

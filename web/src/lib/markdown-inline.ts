@@ -17,10 +17,13 @@
 //     `examples/merge_request_markdown_recon.rs`);
 //   * a bare URL is recognised BEFORE any delimiter, so a query string full of underscores
 //     stays a URL instead of turning into emphasis;
-//   * an IMAGE is a link, never an `<img>`. Both callers promise that displaying a body makes
-//     no network request — a remote image is a read receipt for whoever hosts it, and a
-//     GitLab upload answers 401 without a session anyway — so `![alt](url)` renders as the
-//     link its alt text names.
+//   * an IMAGE never makes the BROWSER fetch anything. `![alt](url)` renders as the link its
+//     alt text names — a remote image is a read receipt for whoever hosts it — unless the
+//     caller can name a picture whose bytes come through the backend instead. That is what
+//     `options.image` is for: the GitLab page passes a resolver that recognises an UPLOAD (a
+//     screenshot somebody pasted) and turns it into a node the renderer loads over the
+//     socket, with the token the browser does not hold (see `gitlab-upload.ts`). A card
+//     passes none, so a connector card's images are links exactly as before.
 
 import { trimUrlPunctuation, type RichAttrs, type RichNode, type RichTag } from "./rich-text";
 
@@ -48,14 +51,38 @@ export function element(tag: RichTag, children: RichNode[], attrs: RichAttrs = {
 
 /** Only display-safe schemes become links; anything else stays text (a card comes from a bot,
  *  and a `javascript:` "link" in one is not a link). A GitLab upload's `/uploads/…` is
- *  relative, so it is not a safe href either and keeps its literal text — which is honest: it
- *  would answer 401 without a session. */
+ *  relative, so it is not a safe href either — which is honest, since a browser asking for it
+ *  is answered 404 (measured). On the GitLab page that address is a PICTURE instead, through
+ *  the resolver above; anywhere else it stays the literal text the author typed. */
 export function safeHref(url: string): string | undefined {
   return /^(https?:|mailto:|tel:)/i.test(url) ? url : undefined;
 }
 
 /** A match a scanner rule produced: the node, and where the scan resumes. */
 type Match = { node: RichNode; end: number };
+
+/** One `![alt](url){width=… height=…}` as the scanner read it. `width` / `height` are absent
+ *  unless the author wrote GitLab's own attribute block, and are already numbers. */
+export type InlineImage = {
+  url: string;
+  alt: string;
+  width?: number;
+  height?: number;
+};
+
+/** What one caller may decide for itself. Today that is images and only images: everything
+ *  else about an inline is the same wherever it is written (see the module header). */
+export type InlineOptions = {
+  /** What an image becomes, when this caller can draw one without the browser fetching it.
+   *  Return `null` — or pass no resolver at all — and the image stays the LINK its alt text
+   *  names, which is what every surface did before the GitLab page could show a picture. */
+  image?: (image: InlineImage) => RichNode | null;
+};
+
+/** GitLab's own attribute block after an image: `{width=777 height=312}`. Read for the size
+ *  and CONSUMED either way, because a block left in the text would be printed beside the
+ *  picture as if the author had typed it. */
+const IMAGE_ATTRIBUTES_AT = /\{([^{}\n]*)\}/y;
 
 /** What a delimiter opens, and how it is written. */
 const EMPHASIS: readonly { delimiter: string; tag: RichTag }[] = [
@@ -75,14 +102,19 @@ const EMPHASIS: readonly { delimiter: string; tag: RichTag }[] = [
  *     never read as bold;
  *  3. an autolink, `<https://…>`;
  *  4. inline code, whose content is verbatim;
- *  5. an image, `![alt](url)`, which becomes the link above;
+ *  5. an image, `![alt](url)`, which becomes whatever `options.image` says — the link above
+ *     when it says nothing;
  *  6. a `[label](url)` link;
  *  7. emphasis.
  *
  * Anything that does not match — an unclosed `**`, a `[` that opens nothing — stays the
  * literal character it is, which is also how every markdown host renders it.
  */
-export function parseMarkdownInline(source: string, depth = 0): RichNode[] {
+export function parseMarkdownInline(
+  source: string,
+  options: InlineOptions = {},
+  depth = 0,
+): RichNode[] {
   const nodes: RichNode[] = [];
   let text = "";
   const flush = () => {
@@ -104,9 +136,9 @@ export function parseMarkdownInline(source: string, depth = 0): RichNode[] {
       (char === "h" ? matchBareUrl(source, i) : null) ??
       (char === "<" ? matchAutolink(source, i) : null) ??
       (char === "`" ? matchCode(source, i) : null) ??
-      (char === "!" ? matchImage(source, i, depth) : null) ??
-      (char === "[" ? matchLink(source, i, depth) : null) ??
-      matchEmphasis(source, i, depth);
+      (char === "!" ? matchImage(source, i, options, depth) : null) ??
+      (char === "[" ? matchLink(source, i, options, depth) : null) ??
+      matchEmphasis(source, i, options, depth);
     if (match) {
       flush();
       nodes.push(match.node);
@@ -151,18 +183,87 @@ function matchCode(source: string, at: number): Match | null {
 }
 
 /**
- * `![alt](url)` — rendered as the LINK its alt text names, because nothing in this app
- * fetches a picture a body points at (see the module header). An image with no alt text is
- * named by its address, so the row is never an empty link nobody can see.
+ * `![alt](url)`, with GitLab's `{width=… height=…}` block when the author wrote one.
+ *
+ * What it becomes is the CALLER's decision, in one of three answers:
+ *
+ *  1. whatever `options.image` returns — a picture whose bytes this app can fetch itself;
+ *  2. otherwise the LINK its alt text names, when the address is one a browser could follow
+ *     (an image on somebody else's host stays a link on purpose: fetching it would tell that
+ *     host the user read this page);
+ *  3. otherwise nothing at all, so the characters stay the literal text the author typed —
+ *     which is what a RELATIVE address does here, since it names nothing outside GitLab.
+ *
+ * An image with no alt text is named by its address, so a link is never one nobody can see.
  */
-function matchImage(source: string, at: number, depth: number): Match | null {
+function matchImage(
+  source: string,
+  at: number,
+  options: InlineOptions,
+  depth: number,
+): Match | null {
   if (source[at + 1] !== "[") return null;
-  const link = matchLink(source, at + 1, depth);
-  if (!link || link.node.type !== "element") return null;
-  const labelled = link.node.children.length > 0
-    ? link.node
-    : element("a", [{ type: "text", text: link.node.attrs.href ?? "" }], link.node.attrs);
-  return { node: labelled, end: link.end };
+  const label = matchDelimited(source, at + 2, "[", "]");
+  if (!label) return null;
+  if (source[label.end] !== "(") return null;
+  const target = matchDelimited(source, label.end + 1, "(", ")");
+  if (!target) return null;
+  // A markdown image may carry a title after the URL — `(url "title")` — which is a tooltip we
+  // do not render.
+  const url = target.inner.trim().split(/\s+/)[0] ?? "";
+  if (!url) return null;
+
+  // The attribute block is consumed whether or not it is understood, because it is markup:
+  // printed, it reads as something the author typed beside their picture.
+  const attributes = matchImageAttributes(source, target.end);
+  const end = attributes?.end ?? target.end;
+
+  const picture = options.image?.({
+    url,
+    alt: label.inner,
+    width: attributes?.width,
+    height: attributes?.height,
+  });
+  if (picture) return { node: picture, end };
+
+  const href = safeHref(url);
+  if (!href) return null;
+  const children =
+    label.inner.length > 0
+      ? depth < MAX_DEPTH
+        ? parseMarkdownInline(label.inner, options, depth + 1)
+        : [{ type: "text" as const, text: label.inner }]
+      : [{ type: "text" as const, text: href }];
+  return { node: element("a", children, { href }), end };
+}
+
+/** GitLab's `{width=777 height=312}` at `at`, if one is there: the size it names, and where
+ *  the scan resumes past it. An attribute naming anything else is consumed and ignored — the
+ *  block is markup either way. */
+function matchImageAttributes(
+  source: string,
+  at: number,
+): { width?: number; height?: number; end: number } | null {
+  IMAGE_ATTRIBUTES_AT.lastIndex = at;
+  const match = IMAGE_ATTRIBUTES_AT.exec(source);
+  if (!match) return null;
+  return {
+    width: imageAttribute(match[1]!, "width"),
+    height: imageAttribute(match[1]!, "height"),
+    end: at + match[0].length,
+  };
+}
+
+/** One `name=<pixels>` out of an attribute block. A percentage, a unit or anything that is not
+ *  a plain positive number is dropped: the value is used to hold a box on the page, so a value
+ *  this app cannot turn into pixels is no value at all. It is capped, because the number comes
+ *  from a body somebody else wrote. */
+function imageAttribute(attributes: string, name: string): number | undefined {
+  const match = new RegExp(`(?:^|[\\s,])${name}\\s*=\\s*"?(\\d{1,5})"?(?![\\d.%a-z])`, "i").exec(
+    attributes,
+  );
+  const value = match ? Number(match[1]) : 0;
+  return value > 0 ? value : undefined;
 }
 
 /**
@@ -173,7 +274,12 @@ function matchImage(source: string, at: number, depth: number): Match | null {
  * parentheses, which Grafana's Explore links do. An unsafe or empty URL makes the whole thing
  * fall back to literal text rather than silently swallow the label.
  */
-function matchLink(source: string, at: number, depth: number): Match | null {
+function matchLink(
+  source: string,
+  at: number,
+  options: InlineOptions,
+  depth: number,
+): Match | null {
   const label = matchDelimited(source, at + 1, "[", "]");
   if (!label) return null;
   if (source[label.end] !== "(") return null;
@@ -185,7 +291,7 @@ function matchLink(source: string, at: number, depth: number): Match | null {
   if (!href) return null;
   const children =
     depth < MAX_DEPTH
-      ? parseMarkdownInline(label.inner, depth + 1)
+      ? parseMarkdownInline(label.inner, options, depth + 1)
       : [{ type: "text" as const, text: label.inner }];
   return { node: element("a", children, { href }), end: target.end };
 }
@@ -227,7 +333,12 @@ function isBoundary(char: string | undefined): boolean {
  * emphasis), and a `_` delimiter must sit at a word boundary — otherwise every
  * `snake_case_name` and `__alert_rule_uid__` in a body would come out italic.
  */
-function matchEmphasis(source: string, at: number, depth: number): Match | null {
+function matchEmphasis(
+  source: string,
+  at: number,
+  options: InlineOptions,
+  depth: number,
+): Match | null {
   for (const { delimiter, tag } of EMPHASIS) {
     if (!source.startsWith(delimiter, at)) continue;
     const from = at + delimiter.length;
@@ -245,7 +356,7 @@ function matchEmphasis(source: string, at: number, depth: number): Match | null 
     const inner = source.slice(from, close);
     const children =
       depth < MAX_DEPTH
-        ? parseMarkdownInline(inner, depth + 1)
+        ? parseMarkdownInline(inner, options, depth + 1)
         : [{ type: "text" as const, text: inner }];
     return { node: element(tag, children), end: close + delimiter.length };
   }

@@ -23,16 +23,18 @@
 //   * **raw HTML stays literal text**, and so does an HTML comment. Not one description writes
 //     either, and parsing HTML here would be a second renderer with a second set of remote
 //     references. What an author typed is what they see.
-//   * an IMAGE is still handled, though none appears yet, because the rail matters more than
-//     the count: it becomes a LINK (see `markdown-inline.ts`), never an `<img>` the browser
-//     would fetch.
+//   * an IMAGE is a PICTURE when it is one this app can fetch itself — a project upload, which
+//     is what a pasted screenshot is — and a link otherwise. The rail is unchanged and it is
+//     the reason the two answers differ: the browser never asks GitLab, or anybody else, for
+//     anything. Which one a body gets is the caller's, through `gitLabMarkdownOptions` (see
+//     `gitlab-upload.ts`); a caller that passes nothing gets links, as before.
 //
 // The result is the same {@link RichNode} tree a Teams message body becomes, so
 // `rich-content.tsx` draws a description's headings, tables and code with the styles the rest
 // of the app already uses (see `RichNodes`). The parser is pure — no DOM, no network — so it
 // runs identically under SSR and in node-environment unit tests.
 
-import { element, parseMarkdownInline } from "./markdown-inline";
+import { element, parseMarkdownInline, type InlineOptions } from "./markdown-inline";
 import type { RichNode, RichTag } from "./rich-text";
 
 /** An ATX heading: `## Summary`, with the closing hashes GitLab also accepts. */
@@ -83,11 +85,11 @@ const TASK_OPEN = "☐ ";
  * inside a bullet, work without a rule of its own — and a paragraph last, gathering the lines
  * that opened nothing.
  */
-export function parseGitLabMarkdown(text: string): RichNode[] {
-  return parseBlocks(text.replace(/\r\n?/g, "\n").split("\n"));
+export function parseGitLabMarkdown(text: string, options: InlineOptions = {}): RichNode[] {
+  return parseBlocks(text.replace(/\r\n?/g, "\n").split("\n"), options);
 }
 
-function parseBlocks(lines: string[]): RichNode[] {
+function parseBlocks(lines: string[], options: InlineOptions): RichNode[] {
   const nodes: RichNode[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -108,7 +110,7 @@ function parseBlocks(lines: string[]): RichNode[] {
 
     const heading = HEADING.exec(line);
     if (heading) {
-      nodes.push(element(headingTag(heading[1]!.length), parseMarkdownInline(heading[2]!)));
+      nodes.push(element(headingTag(heading[1]!.length), parseMarkdownInline(heading[2]!, options)));
       i += 1;
       continue;
     }
@@ -121,7 +123,7 @@ function parseBlocks(lines: string[]): RichNode[] {
 
     const quote = BLOCKQUOTE.exec(line);
     if (quote) {
-      const block = blockquote(lines, i);
+      const block = blockquote(lines, i, options);
       nodes.push(block.node);
       i = block.next;
       continue;
@@ -130,20 +132,20 @@ function parseBlocks(lines: string[]): RichNode[] {
     // A table is the one block whose opening line looks like ordinary prose: what declares it
     // is the delimiter row UNDER the header, so both are read together or neither is.
     if (line.includes("|") && i + 1 < lines.length && isTableDelimiter(lines[i + 1]!)) {
-      const block = table(lines, i);
+      const block = table(lines, i, options);
       nodes.push(block.node);
       i = block.next;
       continue;
     }
 
     if (itemAt(line)) {
-      const block = list(lines, i);
+      const block = list(lines, i, options);
       nodes.push(block.node);
       i = block.next;
       continue;
     }
 
-    const block = paragraph(lines, i);
+    const block = paragraph(lines, i, options);
     if (block.node) nodes.push(block.node);
     i = block.next;
   }
@@ -184,7 +186,11 @@ function fencedCode(lines: string[], start: number, fence: string): { node: Rich
 
 /** Consecutive `>` lines, stripped of one level of mark and parsed as blocks of their own — so
  *  a quote holding a list or a fence keeps it. */
-function blockquote(lines: string[], start: number): { node: RichNode; next: number } {
+function blockquote(
+  lines: string[],
+  start: number,
+  options: InlineOptions,
+): { node: RichNode; next: number } {
   const inner: string[] = [];
   let i = start;
   while (i < lines.length) {
@@ -193,7 +199,7 @@ function blockquote(lines: string[], start: number): { node: RichNode; next: num
     inner.push(quote[1]!);
     i += 1;
   }
-  return { node: element("blockquote", parseBlocks(inner)), next: i };
+  return { node: element("blockquote", parseBlocks(inner, options)), next: i };
 }
 
 /** True for the `|---|---|` row, which is what declares the line above it a table header. */
@@ -208,12 +214,16 @@ function isTableDelimiter(line: string): boolean {
  * off to the header's width, because GFM drops the cells past it and fills the ones missing:
  * a ragged table is one the renderer would draw with holes in it.
  */
-function table(lines: string[], start: number): { node: RichNode; next: number } {
+function table(
+  lines: string[],
+  start: number,
+  options: InlineOptions,
+): { node: RichNode; next: number } {
   const headers = tableCells(lines[start]!);
   const head = element("thead", [
     element(
       "tr",
-      headers.map((cell) => element("th", parseMarkdownInline(cell))),
+      headers.map((cell) => element("th", parseMarkdownInline(cell, options))),
     ),
   ]);
 
@@ -224,7 +234,7 @@ function table(lines: string[], start: number): { node: RichNode; next: number }
     rows.push(
       element(
         "tr",
-        headers.map((_, column) => element("td", parseMarkdownInline(cells[column] ?? ""))),
+        headers.map((_, column) => element("td", parseMarkdownInline(cells[column] ?? "", options))),
       ),
     );
     i += 1;
@@ -279,7 +289,11 @@ function itemAt(line: string): Item | null {
  * without a rule apiece. The item's leading paragraph is then UNWRAPPED, so a tight list reads
  * as one line per item instead of a paragraph's worth of air around each.
  */
-function list(lines: string[], start: number): { node: RichNode; next: number } {
+function list(
+  lines: string[],
+  start: number,
+  options: InlineOptions,
+): { node: RichNode; next: number } {
   const first = itemAt(lines[start]!)!;
   const items: RichNode[] = [];
   let i = start;
@@ -315,7 +329,7 @@ function list(lines: string[], start: number): { node: RichNode; next: number } 
       i += 1;
     }
 
-    items.push(element("li", itemContent(own)));
+    items.push(element("li", itemContent(own, options)));
   }
 
   return { node: element(first.tag, items), next: i };
@@ -331,10 +345,10 @@ function indentOf(line: string): number {
  * What goes inside one `<li>`: the item's blocks, with a leading paragraph unwrapped into the
  * item itself, and a task list's checkbox drawn as the first thing in it.
  */
-function itemContent(lines: string[]): RichNode[] {
+function itemContent(lines: string[], options: InlineOptions): RichNode[] {
   const task = TASK_MARKER.exec(lines[0] ?? "");
   const own = task ? [task[2]!, ...lines.slice(1)] : lines;
-  const blocks = parseBlocks(own);
+  const blocks = parseBlocks(own, options);
   const unwrapped =
     blocks[0]?.type === "element" && blocks[0].tag === "p"
       ? [...blocks[0].children, ...blocks.slice(1)]
@@ -354,7 +368,11 @@ function itemContent(lines: string[]): RichNode[] {
  * A setext underline (`===` or `---`) directly under the first line makes the whole thing a
  * heading instead, which is what GitLab does with it.
  */
-function paragraph(lines: string[], start: number): { node: RichNode | null; next: number } {
+function paragraph(
+  lines: string[],
+  start: number,
+  options: InlineOptions,
+): { node: RichNode | null; next: number } {
   const own: string[] = [];
   let i = start;
   while (i < lines.length) {
@@ -365,10 +383,10 @@ function paragraph(lines: string[], start: number): { node: RichNode | null; nex
     i += 1;
     if (i < lines.length && SETEXT_UNDERLINE.test(lines[i]!)) {
       const level = lines[i]!.trim().startsWith("=") ? 1 : 2;
-      return { node: element(headingTag(level), inlineWithBreaks(own)), next: i + 1 };
+      return { node: element(headingTag(level), inlineWithBreaks(own, options)), next: i + 1 };
     }
   }
-  const children = inlineWithBreaks(own);
+  const children = inlineWithBreaks(own, options);
   return { node: children.length > 0 ? element("p", children) : null, next: Math.max(i, start + 1) };
 }
 
@@ -384,11 +402,11 @@ function opensAnotherBlock(lines: string[], at: number): boolean {
 
 /** One paragraph's lines as inline nodes, with a `<br>` where a line asked for a break and a
  *  newline where it did not. */
-function inlineWithBreaks(lines: string[]): RichNode[] {
+function inlineWithBreaks(lines: string[], options: InlineOptions): RichNode[] {
   const nodes: RichNode[] = [];
   lines.forEach((line, index) => {
     const hard = HARD_BREAK.test(line);
-    nodes.push(...parseMarkdownInline(line.replace(HARD_BREAK, "").trim()));
+    nodes.push(...parseMarkdownInline(line.replace(HARD_BREAK, "").trim(), options));
     if (index === lines.length - 1) return;
     if (hard) nodes.push(element("br", []));
     else nodes.push({ type: "text", text: "\n" });

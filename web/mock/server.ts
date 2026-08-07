@@ -156,6 +156,7 @@ type ChatMessage = {
   mentions?: MessageMention[]; // who the body's @mention spans point at, by itemid
   system_event?: SystemEvent; // when set, rendered as a centered system line
   is_self?: boolean;
+  mentions_me?: boolean; // whether the mention spans point at US (backend-resolved)
   thread_root_id?: string; // channel only: id of the thread's root post
   thread_subject?: string; // channel only: thread title, present on the root
   deleted?: boolean; // sender deleted it; content (if kept) is revealable
@@ -2529,10 +2530,17 @@ function nickname(mri: string | undefined): string {
   return personOverrides.get(mri)?.display_name ?? "";
 }
 
-/** One message with its author renamed, when the user renamed them. */
+/** One message on its way to a page: its author renamed when the user renamed them,
+ *  and the two facts only a backend can state about it.
+ *
+ *  `mentions_me` is one of them (see `message_json` in src/bin/server.rs): the page
+ *  never learns the user's own MRI, so it cannot read the mention list for itself — and
+ *  it needs the answer to apply the user's per-channel notification setting rather than
+ *  chiming at every post in every channel. */
 function nicknamed(m: ChatMessage): ChatMessage {
   const own = nickname(m.sender_mri);
-  return own ? { ...m, sender: own } : m;
+  const mentions_me = (m.mentions ?? []).some((mention) => mention.mri === SELF_MRI);
+  return { ...m, sender: own || m.sender, mentions_me };
 }
 
 /** Drop an override entry that no longer overrides anything, so "no override" is
@@ -3914,6 +3922,12 @@ type MockPipeline = {
   id: number;
   status: string;
   jobs: MockJob[];
+  /** The stage names in the pipeline's own order, which is what the backend reads over GraphQL
+   *  (`src/gitlab_ci_graph.rs`) — because GitLab's REST jobs endpoint answers NEWEST FIRST and
+   *  therefore in REVERSE stage order. `mockPipelineView` reverses the jobs on the way out for
+   *  exactly that reason, so a page that read the order off the answer draws this fixture
+   *  backwards, as it drew every real multi-stage pipeline backwards until it was measured. */
+  stages?: string[];
   live?: boolean;
   /** How many times this pipeline has been read. The FIRST read never advances it, so the
    *  first paint shows the seeded state and every POLL after it shows something happening —
@@ -4113,7 +4127,13 @@ const mockMergeRequests: MockMergeRequest[] = [
       "  - 2s everywhere else\n\n" +
       "---\n\n" +
       "- [x] staging\n" +
-      "- [ ] production, one cluster at a time",
+      "- [ ] production, one cluster at a time\n\n" +
+      "### Before and after\n\n" +
+      // A pasted SCREENSHOT, in the exact shape GitLab writes one — a relative upload path
+      // and its own attribute block (measured: the one description with a picture on the
+      // tenant had both). Its bytes come through `gitlab_mr_upload`, because no browser can
+      // ask GitLab for an upload at all.
+      "![deploy-topology.png](/uploads/9f3c1e77a4bd42f0b6e5c8d31a7b04e2/deploy-topology.png){width=777 height=312}",
     state: "opened",
     draft: false,
     author: MOCK_GITLAB_ADA,
@@ -4135,6 +4155,7 @@ const mockMergeRequests: MockMergeRequest[] = [
       id: 190_933,
       status: "running",
       live: true,
+      stages: ["check", "test", "deploy"],
       jobs: MOCK_LIVE_PIPELINE_JOBS.map((job) => ({ ...job })),
     },
     discussions: [
@@ -4148,7 +4169,13 @@ const mockMergeRequests: MockMergeRequest[] = [
             // and the name the user calls her — beside the bot below, which stays what
             // GitLab called it.
             author: MOCK_GITLAB_MIA,
-            body: "Two replicas is right, but please check the `preStop` timing against the load balancer.",
+            // An upload of this project, which is drawn — and beside it an image on somebody
+            // ELSE's host, which stays a link: fetching that one would tell its host the user
+            // read this page (measured: every image in a comment on the tenant was one).
+            body:
+              "Two replicas is right, but please check the `preStop` timing against the load balancer.\n\n" +
+              "![drain.png](/uploads/1b7d40c9e5f84a2db3608c17ae9f52d4/drain.png){width=420 height=180}\n\n" +
+              "![build status](https://img.shields.io/badge/build-passing-green.svg)",
             system: false,
             created_at: agoIso(90),
             resolvable: false,
@@ -4280,6 +4307,7 @@ const mockMergeRequests: MockMergeRequest[] = [
     pipeline: {
       id: 190_901,
       status: "failed",
+      stages: ["check", "test", "deploy"],
       // RED and ORANGE in one pipeline, which is the pair the tones exist to tell apart: the
       // unit test failed and blocks the merge, the review failed and nobody has to fix it. The
       // deploy was SKIPPED, because a job that will never run now is neither of those.
@@ -4355,7 +4383,10 @@ const mockMergeRequests: MockMergeRequest[] = [
     draft: false,
     author: MOCK_GITLAB_ADA,
     reviewers: [MOCK_GITLAB_ME],
-    assignees: [],
+    // The one merge request whose assignee is somebody OTHER than its author, so both shapes
+    // of the people rows are reviewable: this one names the two, and !596 — assigned to the
+    // person who wrote it, which is the common case here — names them once.
+    assignees: [MOCK_GITLAB_LUCAS],
     labels: ["design"],
     source_branch: "refactor/token-scale",
     target_branch: "main",
@@ -4368,6 +4399,7 @@ const mockMergeRequests: MockMergeRequest[] = [
     pipeline: {
       id: 190_500,
       status: "success",
+      stages: ["check", "test"],
       jobs: [
         { id: 21, name: "🔎 lint", stage: "check", status: "success", allow_failure: false, duration: 30 },
         { id: 22, name: "🧪 unit", stage: "test", status: "success", allow_failure: false, duration: 88 },
@@ -4410,6 +4442,7 @@ function resetMockLivePipeline(): void {
     status: "running",
     live: true,
     reads: 0,
+    stages: ["check", "test", "deploy"],
     jobs: MOCK_LIVE_PIPELINE_JOBS.map((job) => ({ ...job })),
   };
 }
@@ -4429,6 +4462,20 @@ let mockGitLabTokenMissing = false;
  *  else — the page's other four panels have to stay drawn. Same hook, same contract: a spec
  *  that arms it MUST clear it. */
 let mockGitLabDiffRefusal: string | null = null;
+
+/** When set, an UPLOAD read fails with this sentence. Its own switch for the reason the diff's
+ *  is: a picture this app cannot fetch must cost that picture and nothing else — the words
+ *  around it stay drawn. Same hook, same contract: a spec that arms it MUST clear it. */
+let mockGitLabUploadRefusal: string | null = null;
+
+/** The pictures the seeded merge requests point at, keyed the way the markdown names one:
+ *  the project, then GitLab's own secret for the file. Each is drawn on demand at the size its
+ *  own attribute block claims, so what the page shows is a real picture of the stated shape —
+ *  and a secret nobody seeded is a 404, exactly as GitLab answers one. */
+const mockUploads = new Map<string, { width: number; height: number; hue: number }>([
+  ["acme/webapp:9f3c1e77a4bd42f0b6e5c8d31a7b04e2", { width: 777, height: 312, hue: 214 }],
+  ["acme/webapp:1b7d40c9e5f84a2db3608c17ae9f52d4", { width: 420, height: 180, hue: 28 }],
+]);
 
 function mockMergeRequestFor(projectPath: string, iid: number): MockMergeRequest | undefined {
   return mockMergeRequests.find((mr) => mr.project_path === projectPath && mr.iid === iid);
@@ -4562,7 +4609,12 @@ function mockPipelineView(mr: MockMergeRequest): Record<string, unknown> {
       status: mr.pipeline.status,
       web_url: `${mockMergeRequestUrl(mr)}/pipelines`,
     },
-    jobs: mr.pipeline.jobs.map((job) => ({
+    stages: mr.pipeline.stages ?? [],
+    // NEWEST FIRST, which is what the real endpoint answers — measured on this instance: of 25
+    // merge requests, 16 came back in reverse stage order and the other 9 had a single stage.
+    // The mock used to answer in stage order, which is the one way it could have hidden the bug
+    // that shipped: the page drew `install` last on every real pipeline.
+    jobs: [...mr.pipeline.jobs].reverse().map((job) => ({
       ...job,
       web_url: `${mockMergeRequestUrl(mr)}/jobs/${job.id}`,
     })),
@@ -7416,6 +7468,28 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return mockDiffFor(mr, depth);
     }
 
+    // One PICTURE a description or a comment points at. The real backend asks GitLab's own
+    // upload API with the token, sniffs the bytes and hands them over base64; this answers with
+    // a picture it draws itself, so the whole surface is reviewable with no GitLab and no
+    // token. The upload is named by its three parts here exactly as it is there, so a page
+    // that assembled a URL instead would fail against both.
+    case "gitlab_mr_upload": {
+      const projectPath = requireString(params, "project_path");
+      const secret = requireString(params, "secret");
+      const filename = requireString(params, "filename");
+      if (!/^[0-9a-f]{16,64}$/i.test(secret)) throw new Error("that is not a GitLab upload secret");
+      if (!filename || filename.includes("/")) {
+        throw new Error("that is not a GitLab upload filename");
+      }
+      const upload = mockUploads.get(`${projectPath}:${secret}`);
+      if (!upload) {
+        throw new Error("GitLab no longer holds this picture, or the token cannot see it");
+      }
+      if (mockGitLabUploadRefusal) throw new Error(mockGitLabUploadRefusal);
+      const png = solidPng(upload.width, upload.height, hslToRgb(upload.hue, 0.5, 0.62));
+      return { content_type: "image/png", data_base64: png.toString("base64") };
+    }
+
     // MERGE. The one write in this app that no later call takes back — and the `sha` is
     // what stands between it and landing a commit nobody read, so this mock checks it the
     // way GitLab does: a mismatch is the 409 the page has to report.
@@ -8717,6 +8791,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         mockGitLabWriteRefusal = null;
         mockGitLabTokenMissing = false;
         mockGitLabDiffRefusal = null;
+        mockGitLabUploadRefusal = null;
         // The live pipeline goes back to its first frame too: every read moves it on, so a
         // spec that wants to WATCH it move has to start from a known one.
         resetMockLivePipeline();
@@ -8725,12 +8800,15 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       mockGitLabWriteRefusal = typeof body.refuse === "string" ? body.refuse : null;
       mockGitLabTokenMissing = body.no_token === true;
       mockGitLabDiffRefusal = typeof body.refuse_diff === "string" ? body.refuse_diff : null;
+      mockGitLabUploadRefusal =
+        typeof body.refuse_upload === "string" ? body.refuse_upload : null;
       return Response.json(
         {
           ok: true,
           refuse: mockGitLabWriteRefusal,
           no_token: mockGitLabTokenMissing,
           refuse_diff: mockGitLabDiffRefusal,
+          refuse_upload: mockGitLabUploadRefusal,
         },
         { status: 200 },
       );

@@ -322,6 +322,12 @@ export type ChatMessage = {
    *  is rendered as a centered line, not a chat bubble; `content` is empty. */
   system_event?: SystemEvent;
   is_self?: boolean;
+  /** Whether the body's @mention spans point at the USER. Resolved by the backend,
+   *  because the page never learns their MRI and a display name proves nothing — it is
+   *  what lets {@link shouldNotify} apply the user's own per-channel notification
+   *  setting. Absent from a backend older than the field, and the reader then treats it
+   *  as "not known" rather than as "mentions nobody". */
+  mentions_me?: boolean;
   /** Team-channel only: the id of the thread's ROOT message. All posts sharing a
    *  value belong to one thread. Empty for non-channel (chat) messages. */
   thread_root_id?: string;
@@ -1886,22 +1892,117 @@ export function organizeChannels(
   return { pinned, teams: groupChannelsByTeam(rest) };
 }
 
+/** How late a live frame may be and still be news. Mirrors `push_policy::MAX_AGE_MS`:
+ *  past this it is a replay (a trouter reconnect, a backfill) rather than something
+ *  that just happened. */
+export const MAX_NOTIFY_AGE_MS = 10 * 60 * 1000;
+
+/** Where a live message landed — the two shapes carry different settings, so they are
+ *  different states rather than one struct with an unused field. Mirrors
+ *  `push_policy::Placement`. */
+export type NotifyPlacement =
+  /** A one-to-one or group chat, with its mute (in Teams, or the local override —
+   *  see {@link chatIsMuted}). */
+  | { kind: "chat"; muted: boolean }
+  /** A team channel, with the user's own Teams notification setting for it. */
+  | { kind: "channel"; alerts: ChannelAlerts };
+
+/** What {@link shouldNotify} reads off a live message. Every field is on the wire
+ *  (see `message_json` in src/bin/server.rs). */
+export type NotifiableMessage = {
+  conversation_id: string;
+  compose_time: number;
+  is_self?: boolean;
+  system_event?: SystemEvent;
+  deleted?: boolean;
+  mentions_me?: boolean;
+  thread_root_id?: string;
+  id?: string;
+};
+
 /**
- * Should an incoming message raise a notification? Pure, so it is testable.
+ * Should an incoming message raise a notification — the sound and the desktop
+ * notification the page fires on a live frame? Pure, so it is testable.
  *
- * `muted` is the thread's own quiet setting — a chat muted in Teams or here (see
- * {@link chatIsMuted}), a channel the user muted in Teams ({@link channelIsMuted}).
- * A mute that dimmed the row and still chimed would not be a mute.
+ * **This mirrors `push_policy::notification_for`, and it has to.** The backend
+ * broadcasts EVERY live frame to every page, whether or not the frame is news: a
+ * reaction, an edit and a deletion all arrive as the whole stored message again, and a
+ * reconnect replays what it missed. The delivery policy says which of those deserve to
+ * interrupt somebody, and the page used to answer that question with three of its seven
+ * rules — so the app chimed at things the user's own phone deliberately stayed quiet
+ * about, and they found nothing new when they went to look. Measured over one week of
+ * this tenant's own traffic: 226 channel posts in channels the user set to "mentions
+ * only" and mentioning nobody, plus 26 system lines, every one of them a sound with
+ * nothing behind it. Two policies for one question is the bug; keep them one.
+ *
+ * `alreadyKnown` is the page's own half, and the one rule that is NOT in the Rust: this
+ * frame carries a message this page already holds, so it is a reaction or an edit on it
+ * rather than a new message. The delivery path answers the same question with its
+ * insert (a fresh row is the only news worth a lock screen); a page knows better, since
+ * it knows what it has drawn.
  */
 export function shouldNotify(
-  msg: { conversation_id: string; is_self?: boolean },
+  msg: NotifiableMessage,
   openConversationId: string | null,
-  muted = false,
+  placement: NotifyPlacement = { kind: "chat", muted: false },
+  { alreadyKnown = false, now = Date.now() }: { alreadyKnown?: boolean; now?: number } = {},
 ): boolean {
   if (msg.is_self) return false;
-  if (muted) return false;
   if (openConversationId !== null && msg.conversation_id === openConversationId) return false;
-  return true;
+  // Context, not news — "Call ended", "Member added". The same line the history draws
+  // centered rather than as a bubble.
+  if (msg.system_event) return false;
+  if (msg.deleted) return false;
+  if (alreadyKnown) return false;
+  if (isStaleFrame(msg.compose_time, now)) return false;
+  if (placement.kind === "channel") return channelPostNotifies(msg, placement.alerts);
+  // A mute that dimmed the row and still chimed would not be a mute.
+  return !placement.muted;
+}
+
+/**
+ * Whether one channel post passes the user's own Microsoft Teams setting for that
+ * channel. Mirrors `push_policy::channel_post_notifies`.
+ *
+ * An @mention always passes an unmuted channel: it is a summons. Above Teams' default
+ * the setting widens to every new post, and then to a reply inside a post's thread.
+ *
+ * `mentions_me` is resolved by the backend, which is the only side that holds the
+ * user's MRI. ABSENT means a backend older than the field rather than "mentions
+ * nobody", so it reads as a mention: being told about a post that named somebody else
+ * costs a sound, and staying silent on a real mention costs the summons.
+ */
+function channelPostNotifies(msg: NotifiableMessage, alerts: ChannelAlerts): boolean {
+  const mentioned = msg.mentions_me !== false;
+  switch (alerts) {
+    case "muted":
+      return false;
+    case "all_new_posts":
+      return mentioned || !isThreadReply(msg);
+    case "all_new_posts_and_replies":
+      return true;
+    default:
+      // `mentions_only`, and anything a newer Teams grows that this app cannot read:
+      // the default is the quiet one, because a channel can produce hundreds of
+      // messages a day and none of them is a summons.
+      return mentioned;
+  }
+}
+
+/** Whether a channel message is a reply inside a post's thread rather than the post
+ *  that opened it. The opening post names itself, so "the root is somebody else" is
+ *  what makes a message a reply; an absent root reads as a post, which is the safe way
+ *  round — "All new posts" then still notifies. Mirrors `push_policy::is_reply`. */
+function isThreadReply(msg: NotifiableMessage): boolean {
+  const root = msg.thread_root_id;
+  return root !== undefined && root !== "" && root !== msg.id;
+}
+
+/** Whether the frame is too old to be news — or timestamped in the future, which is
+ *  just as untrustworthy. Mirrors `push_policy::is_stale`. */
+function isStaleFrame(composeTime: number, now: number): boolean {
+  if (!composeTime || composeTime <= 0) return true;
+  return composeTime < now - MAX_NOTIFY_AGE_MS || composeTime > now + MAX_NOTIFY_AGE_MS;
 }
 
 /**

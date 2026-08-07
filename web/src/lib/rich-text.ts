@@ -57,7 +57,15 @@ export type RichTag =
    *  bytes the message itself carries, never from the reader's own pack. Distinguished
    *  from Teams' own emoji by the fact that theirs points at the personal-expressions
    *  CDN. A glyph, not a picture: sized to the text, never zoomable. */
-  | "customEmoji";
+  | "customEmoji"
+  /** A picture a GitLab description or comment points at — a screenshot somebody pasted,
+   *  which GitLab stores as a project UPLOAD. It is its own tag rather than an `img`
+   *  because the bytes cannot be fetched by the browser at all: an upload is served to a
+   *  session or a token (measured), and § The GitLab page promises the browser asks GitLab
+   *  for nothing. So the node names the upload — `project`, `secret`, `filename` — and the
+   *  renderer loads it through the backend (see `gitlab-upload.ts`). The parser only ever
+   *  produces one for a fetchable upload; every other image stays the link it always was. */
+  | "gitlabImage";
 
 export type RichAttrs = {
   href?: string;
@@ -85,6 +93,16 @@ export type RichAttrs = {
   rowspan?: number;
   /** Custom emoji only: the code (`:shipit:`) the emoji was sent with. */
   code?: string;
+  /** GitLab images only: which upload the picture is (see the `gitlabImage` tag). The three
+   *  together are the whole address, and the backend spells the endpoint from them. */
+  project?: string;
+  secret?: string;
+  filename?: string;
+  /** GitLab images only: the size the author asked for, out of GitLab's own
+   *  `{width=777 height=312}` attribute block. Used to hold the picture's room before the
+   *  bytes arrive, so a description does not re-flow around it as it loads. */
+  width?: number;
+  height?: number;
 };
 
 export type RichNode =

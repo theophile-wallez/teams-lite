@@ -687,8 +687,8 @@ graph's), and `web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw i
 
 **The split between the two backend modules is the whole safety story**, and it is the one
 in § The trackers: reading a tracker is what the feature is for, and writing to one is the
-user's own click. The five reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`)
-are open like every other read; the six writes (`gitlab_mr_merge`, `_comment`,
+user's own click. The six reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`,
+`_upload`) are open like every other read; the six writes (`gitlab_mr_merge`, `_comment`,
 `_edit_comment`, `_delete_comment`, `_resolve_thread`, `_set_state`) are `OUTWARD_METHODS`
 entries — the write token, refused read-only, and the automation hook refuses a command line, a
 script or a cargo example that names their endpoints. `_comment` covers three shapes of ONE act
@@ -724,7 +724,7 @@ read. That is exactly where a Teams message edit sits (§ Sending messages: an e
 reaction toggles off, a deletion is final), so it is offered the same way: one press, on the
 user's OWN comment only, checked against GitLab before the network like the deletion. Asking
 twice for a rewrite while a message that reaches the same people asks once would teach the
-reader that the dialog means nothing. Eight more rules hold the page together:
+reader that the dialog means nothing. Nine more rules hold the page together:
 
 - **A comment is deleted or EDITED only when it is the USER'S OWN**, and whose it is comes
   from GitLab (`note.mine`, matched on the account's id) read BEFORE the write — not from what
@@ -744,12 +744,11 @@ reader that the dialog means nothing. Eight more rules hold the page together:
   nothing requests it — an avatar on a private instance answers 401 without a session — and
   the description and every comment go through the app's own markdown parser
   (`parseGitLabMarkdown`), never GitLab's rendered HTML, which would bring remote references
-  with it. An IMAGE is the sharp case and it is handled in the parser: a `![alt](url)` becomes
-  the LINK its alt text names, never an `<img>`, so a description written by somebody outside
-  this app cannot make the page fetch anything either. A real FACE **is** drawn, and it is a
+  with it. A real FACE **is** drawn, and it is a
   TEAMS read: it goes through the backend's own `fetch_avatar` like every other avatar in this
   app, it tells the GitLab instance nothing, and it is what § A GitLab user who is also a
-  colleague is about.
+  colleague is about. A PICTURE somebody pasted is drawn the same way — through the backend
+  (§ A pasted PICTURE), which is the rule rather than an exception to it.
 - **The list can never ask for merged merge requests.** `ListScope` and `ListState` are
   closed Rust sets and `merged` is not among them, so the page's whole promise is enforced by
   the type rather than by a filter somebody could widen.
@@ -799,6 +798,21 @@ reader that the dialog means nothing. Eight more rules hold the page together:
     ANOTHER merge request opens folded: this pane is not re-created when the open merge request
     changes, so the description is keyed by it (`mergeRequestId`) — without that key a reader
     who opened one description found the next one already open.
+- **An author who is also the ASSIGNEE is named once.** Most merge requests on this instance
+  are written by the person they are assigned to, and the header spelled that one name twice a
+  centimetre apart — `Author <Ada>  Assignees <Ada>` — which asks the reader to compare two
+  chips to learn one fact and reads at a glance as two people. `mergeRequestPeopleLines`
+  (`web/src/lib/gitlab-mr.ts`) decides which rows there are, the capture is
+  `${out}-people-{light,authored-light,authored-dark}.png`, and `web/e2e/gitlab.spec.ts` pins
+  each of the three rules:
+  - **Whose the two accounts are is PROVEN** (`samePerson` in `lib/tracker-people.ts`): the
+    handle GitLab keys the account on, then the mri this app keys a colleague on, and NEVER a
+    display name — two colleagues may share one, and saying somebody assigned their own merge
+    request when they did not is the wrong-face rule of `tracker_people` again.
+  - **A SECOND assignee keeps both rows**, because merging them would then drop a name, and who
+    else the work sits with is the whole fact an assignee row carries.
+  - **REVIEWERS are untouched, whoever they are.** Authoring what one reviews is a different
+    statement about a merge request, and GitLab lists the same person as both far less often.
 - **A long TITLE is shortened by the header and wrapped by the page, and widens neither.** An
   author here writes the summary and then every ticket the branch closes, so a title runs to
   150 characters — and `truncate` shortens NOTHING while its container is free to grow: a
@@ -940,6 +954,69 @@ a `---` disappeared. Four things follow, and each is pinned by a test:
   and takes the page's own controls off a phone's screen — `bun run preview -- --out /tmp/mr
   --gitlab` captures it at 390px for that reason.
 
+### A pasted PICTURE is drawn, and its bytes come through the backend
+
+An author pastes a screenshot into a description or a comment and GitLab writes
+`![image.png](/uploads/<secret>/image.png){width=777 height=312}`. The page used to print that
+whole line as TEXT — a relative address is not a link a browser could follow, so the parser left
+it the characters it is — which made the most useful part of a review invisible. It is a picture
+now: `web/src/lib/gitlab-upload.ts` decides WHICH upload one is, `gitlab_mr::fetch_upload` gets
+the bytes, and `web/src/components/gitlab-image.tsx` draws them through the chat image's own
+component, so the loading box, the failure sentence and the lightbox are the ones this app
+already has.
+
+**It is the sixth READ and nothing more** — no gate of its own, because it publishes nothing and
+writes nothing (`gitlab_mr_upload`, open like every other read of this page). What it needed
+instead is the measured fact, and `examples/merge_request_image_recon.rs` is where every rule
+below comes from — READ-ONLY, over the 40 newest open merge requests, printing counts, statuses
+and shapes and never an upload path, because a path IS the whole authorization to read that file:
+
+    cargo run --example merge_request_image_recon
+
+Measured 2026-08-06 on `git.sia.partners` (18.6.4-ee), and each rule is pinned by a test:
+
+- **The bytes come from GitLab's own API route, and from nothing else.** The web path the
+  markdown writes answers **404** three ways — the `PRIVATE-TOKEN` header, `?private_token=`,
+  and no credential at all — while `GET /api/v4/projects/:id/uploads/:secret/:filename` answers
+  200 with the picture (104 KB at 777x312, and the attribute block claimed exactly that). So
+  the browser could never have drawn it whatever this app did, and a request built from the
+  markdown's own address would be a broken picture on every merge request that carries one.
+- **The upload is named by PRIMITIVES**, never by a URL a client assembled: the project,
+  GitLab's own secret, the filename (`gitlab_mr::UploadRef::parse` checks each part — a hex
+  secret, and a filename that is one path segment). The endpoint is spelled from
+  `gitlab::api_base`, so the token still reaches one host, and no client can aim it at
+  something other than one upload of one project. It is the rail `gitlab_diff_anchor` already
+  holds for a comment's position.
+- **The bytes must SNIFF as a raster image** (`sender_icon::image_kind`, never SVG) under a cap
+  (`MAX_UPLOAD_BYTES`, the composer's own per-picture ceiling, checked against the length GitLab
+  publishes before the bytes are read). This instance answers an upload
+  `application/octet-stream`, so the claimed type says nothing at all.
+- **An image on somebody ELSE's host stays a LINK.** Measured: every image in a description was
+  a project upload, and every image in a comment was an absolute URL elsewhere — a badge, a
+  screenshot host. Fetching one would tell that host the user read this page, which is the read
+  receipt § Mail strips out of every body. The rule is the parser's
+  (`markdown-inline.ts`): an image becomes a picture only where the caller can name one whose
+  bytes come through the backend, and a card passes no resolver at all, so a connector card's
+  images are links exactly as before.
+- **GitLab's `{width=… height=…}` block is CONSUMED, and it holds the picture's room.** Printed,
+  it reads as something the author typed beside their screenshot; used, it is what stops the
+  words around a picture from moving when the bytes land. A value this app cannot turn into
+  pixels — a percentage, a unit — is dropped rather than guessed at.
+- **A picture that cannot be read costs the PICTURE and nothing else.** The words around it stay
+  drawn and the failure names the file, which is the contract the diff's own failure already
+  holds. `parseGitLabMarkdown` also keeps one out of a fence and out of an inline code span, exactly
+  as it keeps a heading's hashes out of them.
+
+`web/mock/server.ts` reproduces the whole flow with no GitLab and no token (`mockUploads`, which
+draws a real PNG at the size the markdown claims, plus `refuse_upload` on the `{kind:"gitlab_mr"}`
+hook — a spec MUST clear it). `cd web && bun run preview -- --out /tmp/mr --gitlab` captures the
+picture in a description in both themes and the comment that carries one beside a link, and
+`web/e2e/gitlab.spec.ts` pins every rule above. **The READ is verified live through this app's own
+function**: the recon's fifth attempt is `gitlab_mr::fetch_upload` itself, and on 2026-08-06 it
+answered `image/png · 104 097 bytes · 777x312` for a real description's screenshot. What is still
+untested is the pairing — one open of a real merge request in the user's own app, where the page
+asks for that picture over the socket.
+
 **Performance is a durable cache plus one live read**, and three measured facts shaped it:
 
 - **`gitlab_reads` is a response cache in SQLite** (schema v14). Every read answers from it
@@ -999,13 +1076,26 @@ one page at a time without moving anything the reader has learned. Six rules hol
   never from the configured host and an assembled path). Drawn blank it would read as a read
   that failed. Only COMMITS says it today, and the sentence names the page rather than the app:
   a reader is told what is missing, not that something went wrong.
-- **It wears the app's own tab idiom and is a `nav`, not the `Tabs` primitive.**
-  `TabsTrigger` points `aria-controls` at a panel in the same document, and three of these
-  four are places rather than panels — the Diffs one replaces the whole screen. So it is
-  buttons carrying `aria-current`, and the row SCROLLS sideways rather than widening: four
-  labels are wider than a 320 px phone, and a header that grows past its column takes the
-  page's own controls off the right of the screen (the lesson the long title already taught
-  this page).
+- **It IS the app's own `Tabs` primitive, and the tabs stand in the sub-header rather than in
+  a CARD** (`TabsList surface={false}`). A card floating inside a header row is two nested
+  surfaces for one thing, and the row already has its own bottom border. It is a PROP of the
+  primitive rather than a className the caller overrides, for two reasons: `shadow-chip` and
+  `shadow-none` both survive tailwind-merge — a project shadow is not a name it can resolve —
+  so the class list would carry a contradiction; and the choice decides how the CURRENT tab is
+  drawn as well, which is why it travels to the trigger by context. Inside a card the selected
+  tab is a raised tile (`bg-background` plus the shadow); with no card it is the accent wash,
+  because a raised tile needs something to be raised from. The row SCROLLS sideways rather
+  than widening: four labels are wider than a 320 px phone, and a header that grows past its
+  column takes the page's own controls off the right of the screen (the lesson the long title
+  already taught this page).
+- **`aria-controls` is kept TRUE, which is what using the primitive costs.** Every trigger
+  names a panel, so the CONTENT of each page carries that id (`mergeRequestPagePanel`, over
+  the constant base id both halves share) — the Overview's scroller, the Pipelines graph, the
+  page that holds nothing, and whatever the diff page can draw. It resolves inside one
+  document on all four, because
+  each page draws its own strip beside its own content, and a unit test pins the two spellings
+  together. A dangling `aria-controls` is what a `nav` of buttons was chosen to avoid before
+  the primitive was; wiring the panel is the better answer.
 
 `cd web && bun run preview -- --out /tmp/mr --gitlab` captures the strip in both themes, the
 page that holds nothing, and the strip at a phone's width (`openMergeRequestPage` is its
@@ -1181,8 +1271,8 @@ watchable — and the `{kind:"gitlab_mr"}` test hook arms a refusal, a machine w
 and the reset a spec MUST call afterwards. `cd web && bun run preview -- --out /tmp/mr
 --gitlab` captures the tab strip in both of its states (pass `--dpr 4`: the tanuki is 17px),
 the list, the page, the merge armed, the comments, the description folded in both
-themes and opened, the description at a phone's width, a 150-character title at both widths and
-a blocked merge in both themes;
+themes and opened, the description at a phone's width, a 150-character title at both widths,
+the people rows in both of their shapes and a blocked merge in both themes;
 `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
 is the user's own click, in their own app.
@@ -1203,6 +1293,24 @@ and the panel's half is `PipelinePanel` in `gitlab-pane.tsx`.
 It replaced a list of stages with the jobs under each. What that shape cannot say is the one
 thing a reader of a red pipeline asks — WHICH job is holding the rest up — because a list has no
 room for the dependencies between its rows.
+
+**THE STAGE ORDER IS NOT THE ANSWER'S ORDER**, and reading it as one shipped a graph that drew
+every real pipeline backwards. GitLab's jobs endpoint answers NEWEST FIRST — measured on this
+instance: of 25 merge requests, 16 came back in reverse stage order and the other 9 had a single
+stage — so `install` was drawn last, after the tests that wait for it. Three things follow, and
+each is pinned by a test:
+
+- **The order is READ, over the same GraphQL query as the `needs`** (`PipelineShape.stages`,
+  travelling as `PipelineView.stages`). GraphQL named the stages on all 25.
+- **Nothing else trusts the order the jobs arrive in.** `pipelineStages` groups by name and
+  `pipelineGraph` sorts the jobs by id ONCE at the top, because the same reversal also laid every
+  column out newest-first and resolved a retried job's name to the run it replaced. The fallback,
+  for a GitLab whose GraphQL could not be read, is ascending id — a pipeline's jobs are created
+  stage by stage, so creation order IS stage order, except across a retry, which is the one case
+  `stages` answers correctly.
+- **The MOCK answers newest first too.** It used to answer in stage order, which is the one way it
+  could have hidden this: every test passed while the tenant drew backwards. A fixture that is
+  tidier than the real answer is a fixture that lies.
 
 **FOUR COLOURS, and they are a closed vocabulary** (`PipelineTone`, `jobTone`, `jobsTone` in
 `web/src/lib/gitlab-mr.ts`): **green** when the work is done, **red** when it failed and somebody
@@ -1256,7 +1364,15 @@ Eight rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
 - **Pointing at a card answers "what is this waiting for, and what waits for it"**
   (`relatedNodes`), followed the whole way through rather than one step — "what is holding this
   up" is a chain — by drawing everything else faint. It is an ENHANCEMENT and never the only way
-  to read the graph, because there is no hover on a phone.
+  to read the graph, because there is no hover on a phone. Two rules hold the drawing of it:
+  - **The curves are NEUTRAL at rest, and the accent is what a pointer buys** (`edgeIsLit`,
+    whose whole point is that nothing is lit with nothing pointed at). Every wire in the app's
+    accent says every dependency matters, which is the same as saying none does.
+  - **A card's surface stays OPAQUE in every state, and the curves run under it** (the graph's
+    own `isolate` plus the edges' `-z-10`). What fades on a dimmed card is its CONTENT: an
+    `opacity` on the whole card made it translucent, so the wires behind showed through its own
+    name — and `isolate` is load-bearing, because a negative layer with no stacking context here
+    falls behind the PAGE's background and draws no curves at all.
 - **A control is drawn only where it changes something.** A pipeline whose jobs declare no
   dependency the graph can draw gets neither the grouping nor the toggle, and asking for the
   dependency layout on one answers a STAGE layout — a single column holding every job is not a
@@ -1309,11 +1425,13 @@ the 25 newest open merge requests, printing counts and field NAMES and never any
 
     cargo run --example pipeline_needs_recon
 
-Measured 2026-08-06 on `git.sia.partners`: a REST job row carries 25 fields and `needs` is not
+Measured 2026-08-07 on `git.sia.partners`: a REST job row carries 25 fields and `needs` is not
 among them; of 25 pipelines holding 143 jobs, **21 declare dependencies and 0 refused the
 query**; 96 jobs carry a `needs`, 142 edges in all, of which **9 name a job the REST read did not
 carry** (a bridge — the count the summary states); the longest dependency chain is **4** deep and
-the stage counts run from 1 to 8. Run it again rather than widening the parse on a hunch.
+the stage counts run from 1 to 8. And the third fact, the one that cost a shipped bug: GraphQL
+named the stages of all 25, and against the REST order **16 are REVERSED** while the other 9 have
+a single stage — never anything else. Run it again rather than widening a parse on a hunch.
 
 `web/mock/server.ts` reproduces the whole surface with no GitLab and no token: its live pipeline
 declares `needs` (`MOCK_LIVE_PIPELINE_JOBS`, whose shape is deliberate — a job the rest waits
@@ -1553,8 +1671,11 @@ user. Two independent mechanisms enforce that split:
   `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
   and current, the list, the page, its own sub-header of four pages in both themes and at a
   phone's width, the page that holds nothing yet,
-  the merge armed, the comments, the description folded and opened, the description at a phone's
-  width, a 150-character title at both widths and a blocked merge:
+  the merge armed, the comments — one of which carries a pasted PICTURE beside an image on
+  another host — the description folded and opened, the picture the description ends with in
+  both themes, the description at a phone's
+  width, a 150-character title at both widths, the people rows in both of their shapes and a
+  blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt` /
   `openMergeRequestPage` from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
   each of the three files with no patch, the expand control and what it hands over, and both of
@@ -1713,6 +1834,32 @@ an outward action, so it is gated on purpose:
   and its cue (`shouldNotify`, over `chatIsMuted`) — but NOT Web Push: the mute may be
   a local override that only the browser holds, so the backend never sees it and the
   phone still buzzes. The menu that offers the switch says so (see § The chat list).
+- **THE PAGE'S OWN SOUND RIDES THAT SAME POLICY**, and it is one function, in one
+  spelling, on each side: `shouldNotify` (`web/src/lib/protocol.ts`) mirrors
+  `push_policy::notification_for` rule for rule — never our own message, never a system
+  line, never a deletion, never a frame older than `MAX_AGE_MS`, and a channel post only
+  as loud as the user asked Teams to make it. The backend broadcasts EVERY live frame to
+  every page (§ Running the released build beside the staged one says why), so a
+  reaction, an edit and a deletion each arrive as the whole stored message again and a
+  reconnect replays what it missed. The page used to answer "is this news?" with three of
+  those seven rules, so the app chimed at things the user's own phone deliberately stayed
+  quiet about — and they opened it to find nothing new. Measured over one week of this
+  tenant's own store: **226 posts in `mentions_only` channels, mentioning them in none of
+  them, plus 26 system lines** — some 36 sounds a day with nothing behind any of them.
+  Three things hold it, and each is pinned by a test:
+  - **The page adds ONE rule the backend cannot have**: a frame carrying a message this
+    page already holds (`alreadyKnown`, read BEFORE the merge, since after it every frame
+    looks known). It is the client's own better answer to what the delivery path decides
+    with its insert — a reaction on a message already drawn is not news.
+  - **`mentions_me` is resolved by the BACKEND and rides on the message**
+    (`message_json`, over `push_policy::mentions_user`). The page never learns the user's
+    MRI, and a mention's span carries a display name two colleagues may share, so this is
+    the one fact about "is this for me?" it cannot work out. ABSENT — a backend older than
+    the field — reads as a mention, because silence on a real summons is the worse of the
+    two failures.
+  - **Two policies for one question is the bug.** A rule added to either side belongs on
+    both; if it cannot be (an identity, a claimed delivery), the other side is TOLD, as
+    `mentions_me` is.
 
 ## The channel sidebar mirrors Teams, and mirrors it READ-ONLY
 
@@ -2983,7 +3130,7 @@ user's. What changes is only what is asked.
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its five reads (the DIFF
+  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its six reads (the DIFF
   among them, whose unified patch this app writes over GitLab's bare hunks) in
   `src/gitlab_mr.rs` over a durable response cache, what each CI job WAITS FOR in
   `src/gitlab_ci_graph.rs` (the one GraphQL read in this app, and query-only by construction —

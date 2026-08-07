@@ -29,7 +29,7 @@
 //   - **BEST-EFFORT.** A pipeline graph is drawn from the REST read alone; what this adds
 //     is the dependency MODE. So a GitLab too old for the field, a token GraphQL refuses,
 //     an instance with GraphQL switched off and a network failure all cost that one mode
-//     and nothing else — [`attach_needs`] reports them to the journal and leaves the jobs
+//     and nothing else — [`attach`] reports them to the journal and leaves the jobs
 //     as they were. Never make the pipeline panel wait on this.
 //
 // Two decisions inside it are worth the next reader's minute:
@@ -42,7 +42,7 @@
 //   - **A name the graph does not hold is DROPPED.** A `needs` may point at a job outside
 //     what travelled — a bridge (a trigger job, which the REST jobs endpoint omits
 //     altogether) or a job past the REST read's own page cap. An edge to a card that is not
-//     on screen is an edge to nothing, so [`attach_needs`] keeps only the names the jobs
+//     on screen is an edge to nothing, so [`attach`] keeps only the names the jobs
 //     themselves carry.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,13 +75,34 @@ const NEEDS_PER_JOB: usize = 50;
 /// waits for. Keyed by name — see the module header for why an id would be wrong.
 pub type Needs = BTreeMap<String, Vec<String>>;
 
+/// What one query answers: the edges, and the pipeline's own STAGE ORDER.
+///
+/// The two travel together because they come from one request and are needed by one surface.
+/// Either may be empty on its own: a pipeline can declare no dependency and still have five
+/// stages, and a GitLab that refuses the whole query leaves both empty (see [`attach`]).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PipelineShape {
+    pub needs: Needs,
+    /// The stage names, first to last, as the pipeline itself declares them.
+    ///
+    /// It is here rather than derived from the REST answer because **GitLab's jobs endpoint
+    /// answers NEWEST FIRST**, which for one pipeline is reverse stage order — measured on this
+    /// instance: of 12 merge requests, 8 came back reversed and the other 4 had a single stage,
+    /// so reading the answer's order drew every multi-stage pipeline backwards. GraphQL states
+    /// the real order, and this is it.
+    pub stages: Vec<String>,
+}
+
 /// The query. One request for the whole pipeline: a query per job would be 15 round trips
 /// on this tenant's own pipelines, and GraphQL exists precisely so it is one.
-const NEEDS_QUERY: &str = r#"
-query pipelineJobNeeds($fullPath: ID!, $iid: String!) {
+const SHAPE_QUERY: &str = r#"
+query pipelineShape($fullPath: ID!, $iid: String!) {
   project(fullPath: $fullPath) {
     mergeRequest(iid: $iid) {
       headPipeline {
+        stages(first: STAGES_PER_QUERY) {
+          nodes { name }
+        }
         jobs(first: JOBS_PER_QUERY) {
           nodes {
             name
@@ -96,33 +117,38 @@ query pipelineJobNeeds($fullPath: ID!, $iid: String!) {
 }
 "#;
 
-/// Read the dependency edges of one merge request's head pipeline.
+/// How many stages one query asks for. The deepest pipeline on this instance runs 8, so this
+/// is generous and still bounded.
+const STAGES_PER_QUERY: usize = 50;
+
+/// Read the shape of one merge request's head pipeline: its stage order, and its edges.
 ///
 /// The head pipeline is asked for through the MERGE REQUEST rather than by the id the REST
 /// read returned, so nothing has to be threaded between two requests — and a push between
 /// them is harmless, because the edges are matched by name (see the module header).
-pub async fn fetch_needs(
+pub async fn fetch_shape(
     http: &reqwest::Client,
     gitlab_host: &str,
     token: Option<&str>,
     project_path: &str,
     iid: u64,
-) -> Result<Needs> {
+) -> Result<PipelineShape> {
     let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else {
-        anyhow::bail!("reading a pipeline's job dependencies needs a GitLab token");
+        anyhow::bail!("reading a pipeline's shape needs a GitLab token");
     };
     let body = run_query(http, gitlab_host, token, project_path, iid).await?;
-    Ok(needs_from_json(&body))
+    Ok(PipelineShape { needs: needs_from_json(&body), stages: stages_from_json(&body) })
 }
 
-/// Put the dependency edges on the jobs of a pipeline the REST read already answered.
+/// Put the stage order and the dependency edges on a pipeline the REST read already answered.
 ///
 /// BEST-EFFORT by construction: it returns nothing and fails at nothing. Whatever goes
-/// wrong — no token, GraphQL refused, a field this instance does not publish — the jobs
-/// keep the `needs` they arrived with (none), and the graph is grouped by stage instead.
-/// The journal keeps one line, because a mode that quietly stopped working is the failure
-/// nobody would report.
-pub async fn attach_needs(
+/// wrong — no token, GraphQL refused, a field this instance does not publish — the jobs keep
+/// the `needs` they arrived with (none) and the view names no stage order, so the page groups
+/// by stage and orders those stages by the jobs' own ids (see `pipelineStages`). The journal
+/// keeps one line, because a mode that quietly stopped working is the failure nobody would
+/// report.
+pub async fn attach(
     http: &reqwest::Client,
     gitlab_host: &str,
     token: Option<&str>,
@@ -133,11 +159,18 @@ pub async fn attach_needs(
     if view.jobs.is_empty() {
         return;
     }
-    match fetch_needs(http, gitlab_host, token, project_path, iid).await {
-        Ok(needs) if needs.is_empty() => {}
-        Ok(needs) => apply_needs(view, &needs),
+    match fetch_shape(http, gitlab_host, token, project_path, iid).await {
+        Ok(shape) => {
+            apply_needs(view, &shape.needs);
+            // Only the stages this pipeline's own jobs are in, in the order GitLab named them:
+            // a pipeline definition can declare a stage no job ran in, and a column for one
+            // would be an empty column.
+            let held: BTreeSet<&str> = view.jobs.iter().map(|job| job.stage.as_str()).collect();
+            view.stages =
+                shape.stages.iter().filter(|name| held.contains(name.as_str())).cloned().collect();
+        }
         Err(e) => {
-            eprintln!("[gitlab] the pipeline's job dependencies could not be read: {e:#}");
+            eprintln!("[gitlab] the pipeline's shape could not be read: {e:#}");
         }
     }
 }
@@ -178,7 +211,8 @@ async fn run_query(
     iid: u64,
 ) -> Result<serde_json::Value> {
     let endpoint = format!("{}{GRAPHQL_PATH}", gitlab::origin(gitlab_host));
-    let query = NEEDS_QUERY
+    let query = SHAPE_QUERY
+        .replace("STAGES_PER_QUERY", &STAGES_PER_QUERY.to_string())
         .replace("JOBS_PER_QUERY", &JOBS_PER_QUERY.to_string())
         .replace("NEEDS_PER_JOB", &NEEDS_PER_JOB.to_string());
     let resp = http
@@ -198,7 +232,7 @@ async fn run_query(
 
     let status = resp.status();
     if !status.is_success() {
-        anyhow::bail!("{}", crate::gitlab_mr::refusal(status, "the pipeline's job dependencies"));
+        anyhow::bail!("{}", crate::gitlab_mr::refusal(status, "the pipeline's shape"));
     }
     let body: serde_json::Value = resp.json().await.context("gitlab graphql body")?;
     // GraphQL answers 200 with an `errors` array, so the status alone says nothing. The
@@ -220,15 +254,32 @@ fn first_error(body: &serde_json::Value) -> Option<String> {
         .find(|message| !message.is_empty())
 }
 
+/// Read the STAGE ORDER out of one answer. Empty when the field is absent, which is what
+/// `pipelineStages` reads as "order these by the jobs' own ids instead".
+fn stages_from_json(data: &serde_json::Value) -> Vec<String> {
+    head_pipeline(data)
+        .and_then(|pipeline| pipeline.get("stages"))
+        .and_then(|stages| stages.get("nodes"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| node.get("name")?.as_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The head pipeline of the answer, if it holds one.
+fn head_pipeline(data: &serde_json::Value) -> Option<&serde_json::Value> {
+    data.get("project")?.get("mergeRequest")?.get("headPipeline")
+}
+
 /// Read the edges out of one answer. A job with no `needs` is left out of the map entirely,
 /// so an empty map means "this pipeline declares no dependencies" — which is a real and
 /// common shape (a pipeline whose stages are its only ordering).
 fn needs_from_json(data: &serde_json::Value) -> Needs {
     let mut needs = Needs::new();
-    let nodes = data
-        .get("project")
-        .and_then(|project| project.get("mergeRequest"))
-        .and_then(|mr| mr.get("headPipeline"))
+    let nodes = head_pipeline(data)
         .and_then(|pipeline| pipeline.get("jobs"))
         .and_then(|jobs| jobs.get("nodes"))
         .and_then(serde_json::Value::as_array);
@@ -418,6 +469,7 @@ mod tests {
         let mut view = PipelineView {
             pipeline: None,
             jobs: vec![job("build", "build"), job("test", "test")],
+            stages: Vec::new(),
         };
         let needs = needs_from_json(&answer(&[("test", &["build", "trigger-downstream"])]));
         apply_needs(&mut view, &needs);
@@ -427,8 +479,11 @@ mod tests {
 
     #[test]
     fn a_job_never_depends_on_itself_or_twice_on_one_job() {
-        let mut view =
-            PipelineView { pipeline: None, jobs: vec![job("build", "build"), job("test", "test")] };
+        let mut view = PipelineView {
+            pipeline: None,
+            jobs: vec![job("build", "build"), job("test", "test")],
+            stages: Vec::new(),
+        };
         let needs = needs_from_json(&answer(&[("test", &["test", "build", "build"])]));
         apply_needs(&mut view, &needs);
         assert_eq!(view.jobs[1].needs, vec!["build".to_string()]);
@@ -437,7 +492,7 @@ mod tests {
     #[tokio::test]
     async fn a_read_with_no_token_is_refused_before_the_network() {
         let http = reqwest::Client::new();
-        let err = fetch_needs(&http, "gitlab.example.com", None, "acme/app", 42).await.unwrap_err();
+        let err = fetch_shape(&http, "gitlab.example.com", None, "acme/app", 42).await.unwrap_err();
         assert!(err.to_string().contains("needs a GitLab token"), "{err}");
     }
 }

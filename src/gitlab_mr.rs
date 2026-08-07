@@ -40,6 +40,10 @@
 //
 // The DIFF has four measured facts of its own, and they are the sharpest in this file —
 // they are in the section header above [`DiffFile`], with the recon that measured them.
+//
+// The PICTURES a description and a comment carry are the sixth read ([`fetch_upload`]), and
+// they carry a measured fact of the same kind: an upload is served by GitLab's own API route
+// and NOT by the web path its markdown writes. See [`UploadRef::endpoint`].
 
 use std::time::Duration;
 
@@ -337,6 +341,13 @@ pub struct PipelineView {
     pub pipeline: Option<PipelineSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub jobs: Vec<Job>,
+    /// The pipeline's stage names, first to last. **The jobs above are NOT in that order**:
+    /// GitLab's jobs endpoint answers newest first, which for one pipeline is reverse stage
+    /// order (measured — 8 of 12 merge requests on this instance came back reversed, and the
+    /// other 4 had one stage). So the order is read separately, over GraphQL, by
+    /// [`crate::gitlab_ci_graph::attach`], and is empty whenever that read could not be made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<String>,
 }
 
 /// One CI job.
@@ -712,7 +723,7 @@ pub async fn fetch_pipeline(
     let body = read_json(http, &merge_request_api(gitlab_host, project_path, iid), token, "merge request")
         .await?;
     let Some(pipeline) = pipeline_summary(&body) else {
-        return Ok(PipelineView { pipeline: None, jobs: Vec::new() });
+        return Ok(PipelineView { pipeline: None, jobs: Vec::new(), stages: Vec::new() });
     };
 
     let jobs_endpoint = format!(
@@ -734,7 +745,7 @@ pub async fn fetch_pipeline(
             Vec::new()
         }
     };
-    Ok(PipelineView { pipeline: Some(pipeline), jobs })
+    Ok(PipelineView { pipeline: Some(pipeline), jobs, stages: Vec::new() })
 }
 
 /// Every discussion on one merge request, oldest first.
@@ -831,6 +842,151 @@ pub async fn fetch_diff(
         total: total.or(Some(files.len() as u64)),
         files,
     })
+}
+
+/// One picture a description or a comment points at, as it travels to the page.
+pub struct Upload {
+    /// What the BYTES say they are, never what GitLab claimed: this instance answers an
+    /// upload `application/octet-stream` (measured), so the claimed type says nothing.
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// An upload named the way its markdown names it: the project it belongs to, GitLab's own
+/// secret for the file, and the file's name.
+///
+/// The page sends these three PRIMITIVES rather than a URL, so no client can aim the token at
+/// an address this app did not spell — the rail `gitlab_diff_anchor` already holds for a
+/// comment's position. Both halves are shape-checked by [`UploadRef::parse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadRef {
+    pub project_path: String,
+    pub secret: String,
+    pub filename: String,
+}
+
+/// Longest upload this app will carry into a page (bytes). A pasted screenshot is a few
+/// hundred KB (the one measured on this instance is 104 KB at 777x312); the cap is the
+/// composer's own per-picture ceiling, and anything past it is refused with a sentence
+/// rather than buffered whole into a base64 WebSocket frame.
+pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+
+impl UploadRef {
+    /// Check the three parts and keep them, or refuse.
+    ///
+    /// The secret is GitLab's own `SecureRandom.hex(16)` — 32 hex characters on this
+    /// instance — and the filename is one path SEGMENT: neither may carry a slash, a `..` or
+    /// anything else that would let a request address something other than one upload of one
+    /// project.
+    pub fn parse(project_path: &str, secret: &str, filename: &str) -> Result<Self> {
+        let project_path = project_path.trim();
+        let secret = secret.trim();
+        let filename = filename.trim();
+        anyhow::ensure!(!project_path.is_empty(), "an upload names no project");
+        anyhow::ensure!(
+            !secret.is_empty()
+                && secret.len() <= 64
+                && secret.chars().all(|c| c.is_ascii_hexdigit()),
+            "that is not a GitLab upload secret"
+        );
+        anyhow::ensure!(
+            !filename.is_empty()
+                && filename.len() <= 255
+                && !filename.contains('/')
+                && !filename.contains('\\')
+                && filename != ".."
+                && !filename.chars().any(char::is_control),
+            "that is not a GitLab upload filename"
+        );
+        Ok(Self {
+            project_path: project_path.to_string(),
+            secret: secret.to_string(),
+            filename: filename.to_string(),
+        })
+    }
+
+    /// The API endpoint that serves the bytes.
+    ///
+    /// GitLab's own upload API (`GET /projects/:id/uploads/:secret/:filename`) and NOT the web
+    /// path the markdown writes (`/uploads/<secret>/<name>`): measured 2026-08-06 on
+    /// `git.sia.partners` (18.6.4-ee), that web path answers **404** to this app's token in all
+    /// three spellings — the header, the `?private_token=` query and no credential at all —
+    /// while this endpoint answers 200 with the picture. It goes through
+    /// [`gitlab::api_base`] like every other request this crate makes, which is the host
+    /// pinning: the token can only ever reach the host the user configured.
+    pub fn endpoint(&self, gitlab_host: &str) -> String {
+        format!(
+            "{}/projects/{}/uploads/{}/{}",
+            gitlab::api_base(gitlab_host),
+            gitlab::encode_path(&self.project_path),
+            self.secret,
+            urlencoding::encode(&self.filename),
+        )
+    }
+}
+
+/// Fetch one upload — a screenshot somebody pasted into a description or a comment.
+///
+/// This is what makes a picture on the page a picture at all: an upload is served to a SESSION
+/// or a token, so a browser asking for it directly is answered 404 (measured, above) — and
+/// § The GitLab page promises that nothing on it is fetched from GitLab by the browser. So the
+/// bytes travel the way a Teams inline image and a colleague's face already do: the backend
+/// asks with the credential it holds, and the page renders a local blob.
+///
+/// Two rails beyond the host pinning, both mirroring [`crate::sender_icon`]:
+///   - a SIZE CAP, checked against the length GitLab publishes before the bytes are read, and
+///     again on what really arrived;
+///   - the bytes must SNIFF as a raster image (`image_kind`), never on the strength of the
+///     type the server claimed — and never SVG, which is a document rather than a bitmap.
+pub async fn fetch_upload(
+    http: &reqwest::Client,
+    gitlab_host: &str,
+    token: Option<&str>,
+    upload: &UploadRef,
+) -> Result<Upload> {
+    let token = require_token(token)?;
+    let resp = http
+        .get(upload.endpoint(gitlab_host))
+        .header("PRIVATE-TOKEN", token)
+        .header("Accept", "image/*")
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .context("gitlab upload")?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        // Not [`refusal`]: its sentences are built around a noun phrase like "the changes",
+        // and "GitLab has no that picture there" is not a sentence. A picture that cannot be
+        // drawn says so where it would have been, so the words are its own.
+        anyhow::bail!(
+            "{}",
+            match status {
+                reqwest::StatusCode::NOT_FOUND =>
+                    "GitLab no longer holds this picture, or the token cannot see it".to_string(),
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN =>
+                    "GitLab refused this picture to the stored token".to_string(),
+                other => format!("GitLab answered {other} for this picture"),
+            }
+        );
+    }
+    // The published length first, so a huge file costs one header rather than its bytes.
+    if let Some(length) = resp.content_length() {
+        anyhow::ensure!(
+            length as usize <= MAX_UPLOAD_BYTES,
+            "that picture is larger than {} MB",
+            MAX_UPLOAD_BYTES / (1024 * 1024)
+        );
+    }
+    let bytes = resp.bytes().await.context("gitlab upload body")?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_UPLOAD_BYTES,
+        "that picture is larger than {} MB",
+        MAX_UPLOAD_BYTES / (1024 * 1024)
+    );
+    let content_type = crate::sender_icon::image_kind(&bytes)
+        .context("GitLab answered with something that is not a picture")?;
+    Ok(Upload { content_type: content_type.to_string(), bytes: bytes.to_vec() })
 }
 
 /// One changed file from a diff row, or `None` when the row names no file.
@@ -1241,7 +1397,7 @@ fn job_from_json(value: &serde_json::Value) -> Option<Job> {
         web_url: str_field(value, "web_url"),
         finished_at: str_field(value, "finished_at"),
         // Never on a REST job row — measured, and re-measured by
-        // `examples/pipeline_needs_recon.rs`. `gitlab_ci_graph::attach_needs` fills it.
+        // `examples/pipeline_needs_recon.rs`. `gitlab_ci_graph::attach` fills it.
         needs: Vec::new(),
     })
 }
@@ -1411,6 +1567,42 @@ mod tests {
                  writes live in src/gitlab_mr_write.rs, behind their own consent gates."
             );
         }
+    }
+
+    /// An upload is addressed by GitLab's own API route, and every part of it is checked.
+    ///
+    /// The endpoint is the measured one (see [`UploadRef::endpoint`]): the web path the
+    /// markdown writes answers 404 to this app's token, so a request built from it would
+    /// draw a broken picture on every merge request that carries one.
+    #[test]
+    fn an_upload_is_addressed_by_the_api_route_and_its_parts_are_checked() {
+        let upload = UploadRef::parse("group/sub/app", "b37e2830ce128df533186454689df4cd", "image.png")
+            .expect("a real upload reference");
+        assert_eq!(
+            upload.endpoint("git.example.com"),
+            "https://git.example.com/api/v4/projects/group%2Fsub%2Fapp/uploads/\
+             b37e2830ce128df533186454689df4cd/image.png"
+        );
+        // A name with characters a path cannot carry raw is encoded, not refused: GitLab
+        // keeps the name the author's file had.
+        let spaced = UploadRef::parse("app", "abc123", "screen shot (2).png").unwrap();
+        assert!(spaced.endpoint("git.example.com").ends_with("/screen%20shot%20%282%29.png"));
+
+        // Nothing that could address something other than one upload of one project.
+        for (secret, filename) in [
+            ("", "image.png"),
+            ("not-hex-!", "image.png"),
+            ("abc123", ""),
+            ("abc123", "../../../etc/passwd"),
+            ("abc123", "sub/image.png"),
+            ("abc123", ".."),
+        ] {
+            assert!(
+                UploadRef::parse("app", secret, filename).is_err(),
+                "accepted secret {secret:?} filename {filename:?}"
+            );
+        }
+        assert!(UploadRef::parse("", "abc123", "image.png").is_err());
     }
 
     /// A line code is GitLab's own spelling: the SHA-1 of the file path, then the line's
