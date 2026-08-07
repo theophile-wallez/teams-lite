@@ -28,7 +28,10 @@ function message(over: Partial<ChatMessage> = {}): ChatMessage {
   };
 }
 
-function render(msg: ChatMessage, over: { onPanel?: boolean } = {}): string {
+function render(
+  msg: ChatMessage,
+  over: { onPanel?: boolean; onQuoteJump?: () => void } = {},
+): string {
   return renderToStaticMarkup(
     <ControllerProvider url={OFFLINE_URL}>
       <MessageBubble
@@ -38,6 +41,7 @@ function render(msg: ChatMessage, over: { onPanel?: boolean } = {}): string {
         continuesAbove={false}
         continuesBelow={false}
         onPanel={over.onPanel}
+        onQuoteJump={over.onQuoteJump}
         onReply={() => {}}
         onCopy={() => {}}
         onReact={() => {}}
@@ -134,6 +138,56 @@ describe("MessageBubble — forwarded quotes", () => {
     expect(out).toContain("Forwarded");
     expect(out).not.toContain('data-testid="image-mat"');
     expect(out).not.toContain('data-image-only="true"');
+  });
+});
+
+describe("MessageBubble — a quote goes to what it quotes", () => {
+  /** A reply as Teams composes one: the quoted message's id is its ms-epoch compose
+   *  time, and the blockquote repeats it in `itemprop="time"`. */
+  const REPLY =
+    `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1786092366140">` +
+    `<strong itemprop="mri" itemid="8:orgid:abc">Clement BOSLE</strong>` +
+    `<span itemprop="time" itemid="1786092366140"></span>` +
+    `<p itemprop="preview">the original line</p></blockquote><p>my reply</p>`;
+
+  it("offers a reply's quote as a control, because the quote names its target", () => {
+    const out = render(message({ content: REPLY }), { onQuoteJump: () => {} });
+    expect(out).toContain('data-quote-jumpable="true"');
+    expect(out).toContain('aria-label="Go to the quoted message"');
+  });
+
+  it("does not offer a FORWARD, whose payload names nothing to go to", () => {
+    // Teams sends a forward with no author, no time and no id: the message it holds was
+    // said somewhere else, and this app cannot know where.
+    const forward =
+      `<blockquote itemtype="http://schema.skype.com/Forward">` +
+      `<p>For clarification our current issue is they're being logged out.</p>` +
+      `</blockquote>`;
+    const out = render(message({ content: forward }), { onQuoteJump: () => {} });
+    expect(out).toContain('data-testid="message-quote"');
+    expect(out).not.toContain("data-quote-jumpable");
+  });
+
+  it("draws the quote as a plain block on a surface with no history to move", () => {
+    const out = render(message({ content: REPLY }));
+    expect(out).toContain('data-testid="message-quote"');
+    expect(out).not.toContain("data-quote-jumpable");
+  });
+
+  it("clamps a quoted body to three lines, so a wall of text cannot bury the reply", () => {
+    const out = render(message({ content: REPLY }));
+    expect(out).toContain("line-clamp-3");
+    expect(out).toContain("my reply");
+  });
+
+  it("does not clamp a quote that is a picture, which cropping would cut rather than shorten", () => {
+    const imageReply =
+      `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1">` +
+      `<strong itemprop="mri" itemid="8:orgid:abc">Clement BOSLE</strong>` +
+      `<p itemprop="preview">` +
+      `<img src="https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/a/views/imgo" alt="">` +
+      `</p></blockquote><p>my reply</p>`;
+    expect(render(message({ content: imageReply }))).not.toContain("line-clamp-3");
   });
 });
 

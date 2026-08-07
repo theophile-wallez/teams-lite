@@ -217,6 +217,39 @@ measure — `web/e2e/media.spec.ts` reads `naturalWidth` rather than trusting ei
 refusal rides an existing fixture on purpose: one mock process serves the whole run, and a
 picture added to the seeded history moves every row a later spec counts on.
 
+## A quote is a POINTER to a message (click it, and three lines of it)
+
+The recessed block above a reply is not a copy of what somebody said — it is the address of
+it. Clicking it takes the reader to that message, centred and briefly highlighted, and the
+block itself shows at most three lines. `message-bubble.tsx` draws the block and decides
+whether it is a control; `message-pane.tsx` owns the scroll and resolves the target;
+`web/e2e/quote-jump.spec.ts` and `web/src/components/message-bubble.test.tsx` pin both.
+
+- **Jumpability is a property of the PAYLOAD, not of the UI.** Teams composes a reply with
+  the quoted message's id in the blockquote's `itemid` and again in `itemprop="time"`, and
+  that id IS the message's ms-epoch compose time — measured on the real history, `itemid`
+  equals the `itemprop="time"` id in 1174 of 1174 replies, and no stored message has an id
+  that differs from its compose time. A **FORWARD** carries no author, no time and no id
+  (see `seedForwardedMessages` in the mock): the message it holds was said somewhere else,
+  so a forward is never offered as a control and stays the recessed block it always was.
+- **The pane is the only surface that offers it**, because it is the only one with a history
+  to move. `onQuoteJump` is a prop, absent everywhere else, and a bubble without it draws the
+  plain block — no `role`, no focus ring, no pointer.
+- **The loaded id comes first, the compose time second.** `doQuoteJump` looks the quoted
+  message up among the loaded ones by `compose_time` and asks for its real id; only when the
+  message is not loaded does it pass `String(quote.time)`, which the existing deep-link
+  effect then pages older toward (bounded by `MAX_SCROLL_PAGES`). One machine, `requestScrollToMessage`,
+  serves the notification bell and this alike.
+- **A click that already means something keeps meaning it.** A link, a tracker chip, the
+  quoted author's own hover trigger: the guard walks up from the clicked node and stops at
+  the block itself, which the block must exclude — it is a `role="button"` now, so a guard
+  that did not would read every click as somebody else's.
+- **The clamp is CSS only.** `line-clamp-3` shortens what is DRAWN; the whole quoted text
+  stays in the DOM, so copying and find-in-page still see all of it, and the jump is how a
+  reader gets the rest. **A quote that is a PICTURE is not clamped** — cropping would cut a
+  forwarded screenshot rather than shorten it, and the screenshot is often the whole quoted
+  message.
+
 ## The local agent (`@claude` in a thread)
 
 The user can summon a coding agent that runs on this machine from any Teams client —
