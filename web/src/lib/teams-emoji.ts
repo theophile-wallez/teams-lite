@@ -176,7 +176,7 @@ export function canReactWith(emoji: string): boolean {
 /** `🔥` -> `1f525`, `#️⃣` -> `0023-fe0f-20e3`: the emoji's code points as both the
  *  Apple image files and emoji-mart's `unified` name them (lowercase hex padded
  *  to four digits, joined by `-`). */
-export function emojiUnified(emoji: string): string {
+function emojiUnified(emoji: string): string {
   return [...emoji].map((c) => c.codePointAt(0)!.toString(16).padStart(4, "0")).join("-");
 }
 
@@ -213,7 +213,8 @@ const CUSTOM_REACTION_PREFIX = "tlcustom-";
 /**
  * The art a custom reaction key names — a full URL for the media proxy — or `null`
  * when the key is not one of ours, which is how Microsoft's own keys stay untouched.
- * A port of `custom_emoji::custom_reaction_art_url`.
+ * The reading half of `custom_emoji::custom_reaction_key`, whose doc comment holds the
+ * whole argument for the shape, and which must move with it.
  *
  * The key is `tlcustom-<objectUrl>` and carries no NAME: a name may hold digits and
  * hyphens, an AMS id starts with one, and nothing in the name charset could separate

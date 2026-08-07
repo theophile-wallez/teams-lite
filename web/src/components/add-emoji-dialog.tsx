@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ImageUpload01Icon, Loading02Icon } from "@hugeicons/core-free-icons";
-import { COMPOSER_IMAGE_TYPES, loadComposerImage } from "~/lib/composer-image";
+import {
+  COMPOSER_IMAGE_TYPES,
+  loadComposerImage,
+  type ComposerImage,
+} from "~/lib/composer-image";
 import { customEmojiNameError } from "~/lib/custom-emoji";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
@@ -21,27 +25,21 @@ import { Tabs, TabsPanel, TabsList, TabsTrigger } from "./ui/tabs";
 const EMOJI_MAX_BYTES = 128 * 1024;
 const EMOJI_MAX_DIMENSION = 512;
 
-type EmojiImage = {
-  contentType: (typeof COMPOSER_IMAGE_TYPES)[number];
-  width: number;
-  height: number;
-  dataBase64: string;
-  previewUrl: string;
-};
-
-function emojiImageError(file: Pick<File, "size" | "type">): string | null {
-  if (!COMPOSER_IMAGE_TYPES.includes(file.type as (typeof COMPOSER_IMAGE_TYPES)[number])) {
-    return "Select a PNG, JPEG, GIF, or WebP image.";
-  }
+/**
+ * A picture picked for an emoji, held to the EMOJI's own caps.
+ *
+ * Only the two caps are checked here, because only they are the emoji's: the accepted
+ * TYPES are `loadComposerImage`'s own check, in its own sentence, so a copy of it here
+ * would type-check every file twice to say the same thing. The 128 KB and 512 px, on the
+ * other hand, must never become the composer's 10 MB — a glyph is eighty times smaller
+ * than a screenshot, and this is what the backend refuses art with anyway
+ * (`custom_emoji::measure_art`). The dialog checks them so the user is told before they
+ * wait for an upload; the backend's check is the one that holds.
+ */
+async function loadEmojiImage(file: File): Promise<ComposerImage> {
   if (file.size > EMOJI_MAX_BYTES) {
-    return "Select an image that is 128 KB or smaller.";
+    throw new Error("Select an image that is 128 KB or smaller.");
   }
-  return null;
-}
-
-async function loadEmojiImage(file: File): Promise<EmojiImage> {
-  const validation = emojiImageError(file);
-  if (validation) throw new Error(validation);
 
   const loaded = await loadComposerImage(file);
 
@@ -49,13 +47,7 @@ async function loadEmojiImage(file: File): Promise<EmojiImage> {
     throw new Error("an emoji must be 512 pixels or smaller on a side");
   }
 
-  return {
-    contentType: loaded.contentType,
-    width: loaded.width,
-    height: loaded.height,
-    dataBase64: loaded.dataBase64,
-    previewUrl: loaded.previewUrl,
-  };
+  return loaded;
 }
 
 export function AddEmojiDialog(props: {
@@ -67,7 +59,7 @@ export function AddEmojiDialog(props: {
   const controller = useController();
   const [activeTab, setActiveTab] = useState("upload");
   const [name, setName] = useState("");
-  const [image, setImage] = useState<EmojiImage | null>(null);
+  const [image, setImage] = useState<ComposerImage | null>(null);
   const [url, setUrl] = useState("");
   const [packFile, setPackFile] = useState<File | null>(null);
   const [packCount, setPackCount] = useState<number | null>(null);
@@ -150,12 +142,12 @@ export function AddEmojiDialog(props: {
     setError(null);
     try {
       const isFromMessage = props.initialUrl && url === props.initialUrl;
+      // Only the BYTES travel: the backend sniffs the type and reads the dimensions out of
+      // them (`custom_emoji::measure_art`) and never reads what a client claimed, so
+      // sending those three was sending fields nothing on the other side looks at.
       await controller.addCustomEmoji({
         name: trimmedName,
-        content_type: image?.contentType,
         data_base64: image?.dataBase64,
-        width: image?.width,
-        height: image?.height,
         url: isFromMessage ? undefined : url || undefined,
         media_url: isFromMessage ? url : undefined,
         source: isFromMessage ? "message" : url ? "url" : "upload",

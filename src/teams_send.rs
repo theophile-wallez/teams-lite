@@ -554,10 +554,10 @@ async fn upload_image(
 /// the uploaded object. Returns the rewritten HTML and the AMS object ids for
 /// `amsreferences`.
 ///
-/// The upload is injected rather than called here, so the loop below — the dedupe, the
-/// order the ids come out in, and the substitution that follows — is the one the tests
-/// drive too. A second copy of it written inside a test would stay green after the
-/// shipped one lost its dedupe.
+/// The upload is injected rather than called here, so the loop below — the codes it walks,
+/// the order the ids come out in, and the substitution that follows — is the one the tests
+/// drive too. A second copy of it written inside a test would stay green after the shipped
+/// one stopped uploading each code exactly once.
 pub async fn resolve_custom_emoji(
     http: &reqwest::Client,
     session: &Session,
@@ -575,6 +575,9 @@ pub async fn resolve_custom_emoji(
 /// Substitute every code in `html` with the markup for the object its art was uploaded
 /// to, uploading each distinct code exactly once. `upload` takes the emoji's name and
 /// bytes and answers with the AMS object id.
+///
+/// "Exactly once" is `codes_in_body`'s doing — it answers DISTINCT codes, in
+/// first-appearance order — so there is no dedupe here to keep in step with it.
 async fn rewrite_custom_emoji<F, Fut>(
     ams: &str,
     html: &str,
@@ -590,9 +593,6 @@ where
     let mut ids = Vec::new();
 
     for code in codes {
-        if uploaded.contains_key(&code) {
-            continue;
-        }
         if let Some(emoji) = art.iter().find(|e| e.name == code) {
             let id = upload(emoji.name.clone(), emoji.bytes.clone()).await?;
             uploaded.insert(code, ams_object_url(ams, &id));
@@ -1692,8 +1692,7 @@ mod tests {
 
     /// Drive the SHIPPED loop with a stub upload, and report every name it asked for.
     /// The whole point is that no test re-implements `rewrite_custom_emoji`: a copy would
-    /// keep passing after the real one lost its `contains_key` guard and uploaded the
-    /// same art twice.
+    /// keep passing after the real one started uploading the same art twice.
     async fn rewrite_with_stub_upload(
         html: &str,
         art: &[EmojiArt],

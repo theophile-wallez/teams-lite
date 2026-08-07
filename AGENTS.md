@@ -3377,8 +3377,12 @@ feature worth having: a local-only decoration would be a different, smaller feat
     stock Teams reader sees the still frame, exactly as they would for any GIF Teams itself
     uploaded. Getting animation to every client would mean publishing the user's art to a
     public host, which this app does not do — so do not go looking for a rendition or a
-    declaration that fixes it. `examples/custom_emoji_gif_probe.rs` and
-    `examples/custom_emoji_gif_matrix.rs` are where every number above comes from.
+    declaration that fixes it. The numbers above were measured by
+    `examples/custom_emoji_gif_probe.rs`, which stays because it re-checks the one fact code
+    rests on (`original_art_url`), and by a second example that walked every rendition and
+    every declaration in a matrix. That one is deleted: its question is CLOSED — the answer
+    is the paragraph above, no code path depends on any variant it tried, and re-running it
+    could only re-measure a refusal this file already records.
 - **The writes are gated, and why.** `custom_emoji_add` / `custom_emoji_remove` /
   `custom_emoji_import` are `MACHINE_METHODS` entries even though they write only to the
   local store, because the pack decides what art this machine will post under the user's

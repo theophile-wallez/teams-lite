@@ -18,6 +18,10 @@ export type EmojiQuery = {
 /** How long a half-typed emoji code may get before ":" stops meaning an emoji. */
 const MAX_EMOJI_QUERY_LENGTH = 64;
 
+/** How many rows the typeahead offers. Short enough to read at a glance, and the list
+ *  scrolls rather than growing, so this is a reading decision and not a caller's. */
+const MAX_EMOJI_SUGGESTIONS = 10;
+
 /**
  * The `:…` the cursor sits in, or `null` when it sits in ordinary text.
  *
@@ -106,31 +110,31 @@ export function customEmojiNameError(name: string, taken: string[]): string | nu
  * deciding again from the same nodes: the chrome and the size are the same question.
  */
 export function bodyIsOnlyEmoji(nodes: RichNode[]): boolean {
-  if (nodes.length === 0) return false;
-  if (!hasAtLeastOneEmoji(nodes)) return false;
-
-  for (const node of nodes) {
-    if (node.type === "text") {
-      // Whitespace around a lone emoji is still a lone emoji: Teams wraps the body in a
-      // paragraph and a phone keyboard adds a trailing space.
-      if (node.text.trim().length > 0) return false;
-    } else if (node.tag === "customEmoji" || node.tag === "br") {
-      continue;
-    } else if (!bodyIsOnlyEmoji(node.children)) {
-      return false;
+  // "Did I see one?" is answered by the SAME walk, not by a second one. Asking it
+  // separately, per level, was wrong twice over: it re-scanned the whole subtree at every
+  // depth, and — because each recursive call re-applied "this subtree holds an emoji" to a
+  // subtree — one empty inline element beside a lone emoji answered false. Teams' own
+  // markup carries such elements, so a message that IS nothing but emoji silently lost the
+  // large-and-bare treatment.
+  let sawEmoji = false;
+  const onlyEmoji = (level: RichNode[]): boolean => {
+    for (const node of level) {
+      if (node.type === "text") {
+        // Whitespace around a lone emoji is still a lone emoji: Teams wraps the body in a
+        // paragraph and a phone keyboard adds a trailing space.
+        if (node.text.trim().length > 0) return false;
+      } else if (node.tag === "customEmoji") {
+        sawEmoji = true;
+      } else if (node.tag === "br") {
+        continue;
+      } else if (!onlyEmoji(node.children)) {
+        return false;
+      }
     }
-  }
-  return true;
-}
-
-function hasAtLeastOneEmoji(nodes: RichNode[]): boolean {
-  for (const node of nodes) {
-    if (node.type === "element") {
-      if (node.tag === "customEmoji") return true;
-      if (hasAtLeastOneEmoji(node.children)) return true;
-    }
-  }
-  return false;
+    return true;
+  };
+  // An empty body has no emoji to draw large, which `sawEmoji` already says.
+  return onlyEmoji(nodes) && sawEmoji;
 }
 
 /**
@@ -153,7 +157,10 @@ export function emojiSuggestions(
   query: string,
   pack: readonly CustomEmoji[],
   unicode: ReadonlyArray<readonly [string, string]>,
-  limit = 10,
+  // Defaulted rather than fixed: the bound is a reading decision, so the const is the
+  // answer everywhere in the app — but a test needs to prove the bound applies to the
+  // empty query as well as a typed one, and it cannot do that against a hard-coded 10.
+  limit = MAX_EMOJI_SUGGESTIONS,
 ): EmojiSuggestion[] {
   if (query.trim() === "") {
     return pack
@@ -237,9 +244,9 @@ export function extractableCustomEmoji(
   const taken = new Set(pack.map((e) => e.name));
   const emoji = firstCustomEmoji(body);
   if (!emoji) return null;
-  const name = emoji.code.replace(/^:|:$/g, "");
-  if (taken.has(name)) return null;
-  return { src: emoji.src, code: name };
+  // `firstCustomEmoji` already stripped the colons — the code is a bare name here.
+  if (taken.has(emoji.code)) return null;
+  return emoji;
 }
 
 function firstCustomEmoji(nodes: RichNode[]): { src: string; code: string } | null {

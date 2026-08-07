@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import type { EmojiSuggestion } from "~/lib/custom-emoji";
-import { useController } from "./controller-context";
+import { PackEmoji } from "./custom-emoji";
 import { cn } from "~/lib/utils";
 
 /**
@@ -81,27 +81,10 @@ export function EmojiSuggestions(props: {
 
 /** A custom emoji: its art (or a placeholder while loading) and its :name:. */
 function CustomEmojiRow(props: { name: string }) {
-  const controller = useController();
-  const [url, setUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    controller.customEmojiUrl(props.name).then((result: string | null) => {
-      if (active) setUrl(result);
-    });
-    return () => {
-      active = false;
-    };
-  }, [controller, props.name]);
-
   return (
     <>
       <span className="grid size-7 shrink-0 place-items-center">
-        {url ? (
-          <img src={url} alt={`:${props.name}:`} className="h-5 w-auto" />
-        ) : (
-          <span className="text-xs text-text-faint">:{props.name.slice(0, 2)}:</span>
-        )}
+        <PackEmoji name={props.name} className="h-5 w-auto" />
       </span>
       <RowName>{`:${props.name}:`}</RowName>
     </>

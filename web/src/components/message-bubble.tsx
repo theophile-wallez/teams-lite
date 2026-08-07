@@ -478,10 +478,9 @@ function MessageBubbleImpl(props: {
       !parsed.quote &&
       cards.length === 0 &&
       attachments.length === 0 &&
-      bodyParts.some(bodyIsOnlyEmoji) &&
-      // Every part must be emoji or empty: a reply's two halves both come through here,
-      // and words in either of them make this an ordinary message.
-      bodyParts.every((part) => bodyIsOnlyEmoji(part) || !hasVisibleContent(part)),
+      // ONE part can hold anything here: `!parsed.quote` above means the before-quote half
+      // is always empty, so `some` and `every` are the same question.
+      bodyParts.some(bodyIsOnlyEmoji),
     [props.editing, parsed.quote, cards.length, attachments.length, bodyParts],
   );
 

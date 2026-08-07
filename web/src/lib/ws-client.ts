@@ -1081,10 +1081,7 @@ export class Backend {
   customEmojiAdd(params: {
     name: string;
     alias_of?: string;
-    content_type?: string;
     data_base64?: string;
-    width?: number;
-    height?: number;
     url?: string;
     media_url?: string;
     source: string;

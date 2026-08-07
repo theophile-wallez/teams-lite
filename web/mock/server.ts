@@ -2875,6 +2875,91 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
   return [byte(r), byte(g), byte(b)];
 }
 
+/**
+ * What custom emoji art really is, decided the way the backend decides it: the type
+ * sniffed from the BYTES (never from what a client claimed), the dimensions read out of
+ * them, and both caps checked — or it throws the sentence the backend refuses it with.
+ * The mirror of `custom_emoji::measure_art`, over `sender_icon::image_kind`.
+ *
+ * ONE copy, because both ways into the pack go through it. `custom_emoji_add` and
+ * `custom_emoji_import` each held a verbatim copy of this and they had already drifted:
+ * the import branch refused with "not a valid image type" and "file too large", sentences
+ * the backend never says — so a spec reading the mock's refusal was reading words that
+ * exist nowhere else, which is a mock hiding the bug instead of failing a test.
+ *
+ * The one thing it does NOT mirror is JPEG and WebP dimensions: reading those means a real
+ * parser, and no fixture here needs one. They are answered as 20x20, which is inside the
+ * cap — so a mock never refuses a picture the backend would accept.
+ */
+function measureMockEmojiArt(bytes: Buffer): {
+  contentType: string;
+  width: number;
+  height: number;
+} {
+  // Magic-byte sniff, the table `sender_icon::image_kind` holds. The GIF check wants
+  // 'GIF8' (four bytes) and not just 'GIF', because the backend's pattern does.
+  let contentType = "";
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    contentType = "image/png";
+  } else if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    contentType = "image/jpeg";
+  } else if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38
+  ) {
+    contentType = "image/gif";
+  } else if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    contentType = "image/webp";
+  }
+  if (!contentType) {
+    throw new Error("an emoji must be a PNG, JPEG, GIF or WebP image");
+  }
+  if (bytes.length > 128 * 1024) {
+    throw new Error("an emoji must be 128 KB or smaller");
+  }
+
+  let width = 20;
+  let height = 20;
+  if (contentType === "image/png" && bytes.length >= 24) {
+    const ihdr = bytes.subarray(12, 16);
+    if (ihdr[0] === 0x49 && ihdr[1] === 0x48 && ihdr[2] === 0x44 && ihdr[3] === 0x52) {
+      width = (bytes[16]! << 24) | (bytes[17]! << 16) | (bytes[18]! << 8) | bytes[19]!;
+      height = (bytes[20]! << 24) | (bytes[21]! << 16) | (bytes[22]! << 8) | bytes[23]!;
+    }
+  } else if (contentType === "image/gif" && bytes.length >= 10) {
+    width = bytes[6]! | (bytes[7]! << 8);
+    height = bytes[8]! | (bytes[9]! << 8);
+  }
+
+  if (width > 512 || height > 512) {
+    throw new Error("an emoji must be 512 pixels or smaller on a side");
+  }
+  return { contentType, width: width || 20, height: height || 20 };
+}
+
 /** Encode a one-colour truecolour PNG. Written out by hand (header, one deflated
  *  IDAT of unfiltered scanlines, IEND, each chunk CRC'd) because this file takes
  *  no dependency beyond the Bun runtime, and `node:zlib` is part of it. */
@@ -6875,91 +6960,15 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           data_base64: png.toString("base64"),
         });
       } else if (data_base64) {
-        const bytes = Buffer.from(data_base64, "base64");
-        const allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-
-        // Magic-byte sniff: mirrors sender_icon::image_kind in src/sender_icon.rs.
-        // The GIF check requires 'GIF8' (four bytes) not just 'GIF' (three), because
-        // the backend's pattern requires it and this table must match exactly.
-        let detected_type = "";
-        if (
-          bytes.length >= 8 &&
-          bytes[0] === 0x89 &&
-          bytes[1] === 0x50 &&
-          bytes[2] === 0x4e &&
-          bytes[3] === 0x47 &&
-          bytes[4] === 0x0d &&
-          bytes[5] === 0x0a &&
-          bytes[6] === 0x1a &&
-          bytes[7] === 0x0a
-        ) {
-          detected_type = "image/png";
-        } else if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-          detected_type = "image/jpeg";
-        } else if (
-          bytes.length >= 4 &&
-          bytes[0] === 0x47 &&
-          bytes[1] === 0x49 &&
-          bytes[2] === 0x46 &&
-          bytes[3] === 0x38
-        ) {
-          detected_type = "image/gif";
-        } else if (
-          bytes.length >= 12 &&
-          bytes[0] === 0x52 &&
-          bytes[1] === 0x49 &&
-          bytes[2] === 0x46 &&
-          bytes[3] === 0x46 &&
-          bytes[8] === 0x57 &&
-          bytes[9] === 0x45 &&
-          bytes[10] === 0x42 &&
-          bytes[11] === 0x50
-        ) {
-          detected_type = "image/webp";
-        }
-        if (!detected_type || !allowed.includes(detected_type)) {
-          throw new Error("an emoji must be a PNG, JPEG, GIF or WebP image");
-        }
-        if (bytes.length > 128 * 1024) {
-          throw new Error("an emoji must be 128 KB or smaller");
-        }
-
-        // Dimension measurement: mirrors custom_emoji::measure_art, which reads them
-        // from the bytes. The mock measures width and height here instead of accepting
-        // what the client claimed, because the backend does the same and a check the
-        // mock skips is one no UI test can exercise. The dimension cap (512 px) is
-        // enforced, matching MAX_CUSTOM_EMOJI_DIMENSION.
-        let width = 0;
-        let height = 0;
-        if (detected_type === "image/png" && bytes.length >= 24) {
-          const ihdr = bytes.subarray(12, 16);
-          if (ihdr[0] === 0x49 && ihdr[1] === 0x48 && ihdr[2] === 0x44 && ihdr[3] === 0x52) {
-            width = (bytes[16]! << 24) | (bytes[17]! << 16) | (bytes[18]! << 8) | bytes[19]!;
-            height = (bytes[20]! << 24) | (bytes[21]! << 16) | (bytes[22]! << 8) | bytes[23]!;
-          }
-        } else if (detected_type === "image/gif" && bytes.length >= 10) {
-          width = bytes[6]! | (bytes[7]! << 8);
-          height = bytes[8]! | (bytes[9]! << 8);
-        } else if (detected_type === "image/jpeg") {
-          // JPEG dimension parsing is more complex; synthesize a plausible size for the mock.
-          width = 20;
-          height = 20;
-        } else if (detected_type === "image/webp") {
-          // WebP dimension parsing is more complex; synthesize a plausible size for the mock.
-          width = 20;
-          height = 20;
-        }
-
-        if (width > 512 || height > 512) {
-          throw new Error("an emoji must be 512 pixels or smaller on a side");
-        }
-
+        // The bytes are measured rather than believed, because the backend measures them
+        // too and a check the mock skips is one no UI test can exercise.
+        const measured = measureMockEmojiArt(Buffer.from(data_base64, "base64"));
         customEmojiPack.set(name, {
           name,
           alias_of: "",
-          content_type: detected_type,
-          width: width || 20,
-          height: height || 20,
+          content_type: measured.contentType,
+          width: measured.width,
+          height: measured.height,
           source,
           added_ms: Date.now(),
           data_base64,
@@ -7023,85 +7032,16 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           });
           added++;
         } else if (!alias_of && data_base64) {
-          // Art entry: validate bytes, type, size, and dimensions, exactly as custom_emoji_add does.
+          // Art entry: the same measurement `custom_emoji_add` makes, refused the way the
+          // backend refuses a row of a pack file — `<name>: <the sentence>`.
           try {
-            const bytes = Buffer.from(data_base64, "base64");
-            const allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-
-            let detected_type = "";
-            if (
-              bytes.length >= 8 &&
-              bytes[0] === 0x89 &&
-              bytes[1] === 0x50 &&
-              bytes[2] === 0x4e &&
-              bytes[3] === 0x47 &&
-              bytes[4] === 0x0d &&
-              bytes[5] === 0x0a &&
-              bytes[6] === 0x1a &&
-              bytes[7] === 0x0a
-            ) {
-              detected_type = "image/png";
-            } else if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-              detected_type = "image/jpeg";
-            } else if (
-              bytes.length >= 4 &&
-              bytes[0] === 0x47 &&
-              bytes[1] === 0x49 &&
-              bytes[2] === 0x46 &&
-              bytes[3] === 0x38
-            ) {
-              detected_type = "image/gif";
-            } else if (
-              bytes.length >= 12 &&
-              bytes[0] === 0x52 &&
-              bytes[1] === 0x49 &&
-              bytes[2] === 0x46 &&
-              bytes[3] === 0x46 &&
-              bytes[8] === 0x57 &&
-              bytes[9] === 0x45 &&
-              bytes[10] === 0x42 &&
-              bytes[11] === 0x50
-            ) {
-              detected_type = "image/webp";
-            }
-
-            if (!detected_type || !allowed.includes(detected_type)) {
-              errors.push(`${name}: not a valid image type`);
-              continue;
-            }
-
-            if (bytes.length > 128 * 1024) {
-              errors.push(`${name}: file too large`);
-              continue;
-            }
-
-            let width = 0;
-            let height = 0;
-            if (detected_type === "image/png" && bytes.length >= 24) {
-              const ihdr = bytes.subarray(12, 16);
-              if (ihdr[0] === 0x49 && ihdr[1] === 0x48 && ihdr[2] === 0x44 && ihdr[3] === 0x52) {
-                width = (bytes[16]! << 24) | (bytes[17]! << 16) | (bytes[18]! << 8) | bytes[19]!;
-                height = (bytes[20]! << 24) | (bytes[21]! << 16) | (bytes[22]! << 8) | bytes[23]!;
-              }
-            } else if (detected_type === "image/gif" && bytes.length >= 10) {
-              width = bytes[6]! | (bytes[7]! << 8);
-              height = bytes[8]! | (bytes[9]! << 8);
-            } else {
-              width = 20;
-              height = 20;
-            }
-
-            if (width > 512 || height > 512) {
-              errors.push(`${name}: dimensions too large`);
-              continue;
-            }
-
+            const measured = measureMockEmojiArt(Buffer.from(data_base64, "base64"));
             customEmojiPack.set(name, {
               name,
               alias_of: "",
-              content_type: detected_type,
-              width: width || 20,
-              height: height || 20,
+              content_type: measured.contentType,
+              width: measured.width,
+              height: measured.height,
               source: "import",
               added_ms: Date.now(),
               data_base64,

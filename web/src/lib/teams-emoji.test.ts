@@ -4,7 +4,6 @@ import {
   appleEmojiUrl,
   canReactWith,
   customReactionArt,
-  emojiUnified,
   reactionEmoji,
   teamsReactionKey,
   REACTION_PICKER,
@@ -113,11 +112,12 @@ describe("REACTION_PICKER", () => {
 });
 
 describe("Apple emoji images", () => {
+  // Through `appleEmojiUrl` rather than through the code-point helper it is built on: the
+  // URL is what a caller can ask for, and the file names ARE the padding rule.
   it("names an emoji by its code points, padded the way the files are", () => {
-    expect(emojiUnified("🔥")).toBe("1f525");
-    expect(emojiUnified("❤️")).toBe("2764-fe0f");
-    expect(emojiUnified("#️⃣")).toBe("0023-fe0f-20e3");
-    expect(emojiUnified("👍🏼")).toBe("1f44d-1f3fc");
+    expect(appleEmojiUrl("❤️")).toBe("/emoji/apple/64/2764-fe0f.png");
+    expect(appleEmojiUrl("#️⃣")).toBe("/emoji/apple/64/0023-fe0f-20e3.png");
+    expect(appleEmojiUrl("👍🏼")).toBe("/emoji/apple/64/1f44d-1f3fc.png");
   });
 
   it("serves them from our own origin, never a CDN", () => {

@@ -143,6 +143,31 @@ async fn main() -> Result<()> {
         if has_inline_emoji { "yes" } else { "no" }
     );
 
+    // 6. The last link, and the one nothing else proves: fetch the art a READER would
+    // fetch and confirm it still animates. The message names `views/imgo`, which AMS
+    // answers with a single still frame; `custom_emoji::original_art_url` is what turns
+    // that into the original bytes, so this asserts the whole chain rather than the
+    // upload alone — GIF in, GIF out, through the real tenant.
+    let src = body
+        .split("src=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .context("the stored body carried no src to read the art back from")?;
+    let art_url = teams_lite::custom_emoji::original_art_url(src);
+    println!("\nreader fetches: {art_url}");
+    let art = teams_lite::teams_media::fetch_media(&http, &session, &art_url).await?;
+    let animated = art.bytes.starts_with(b"GIF89a") || art.bytes.starts_with(b"GIF87a");
+    println!(
+        "art read back: {} | {} bytes | animated GIF: {}",
+        art.content_type,
+        art.bytes.len(),
+        if animated { "yes" } else { "NO" }
+    );
+    anyhow::ensure!(
+        animated,
+        "the art a reader fetches is not a GIF — the animation is lost somewhere in the chain"
+    );
+
     println!("\nOK — slackmojis custom emoji probe complete");
     // What this run LEAVES BEHIND, said plainly. The pack is the user's own store, not a
     // fixture: this wrote a row into it and nothing here takes it back, so a reader who

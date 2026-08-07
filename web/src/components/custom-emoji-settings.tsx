@@ -8,9 +8,9 @@ import {
   StickerIcon,
 } from "@hugeicons/core-free-icons";
 import type { CustomEmoji } from "~/lib/protocol";
-import { cn } from "~/lib/utils";
 import { AddEmojiDialog } from "./add-emoji-dialog";
 import { useController } from "./controller-context";
+import { PackEmoji } from "./custom-emoji";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
@@ -234,7 +234,7 @@ export function CustomEmojiSettings() {
             return (
               <li key={e.name} data-testid={`custom-emoji-row-${e.name}`}>
                 <div className="flex items-center gap-3 rounded-xl bg-card p-3 shadow-chip">
-                  <EmojiImage name={e.name} className="size-6 shrink-0" />
+                  <PackEmoji name={e.name} className="size-6 shrink-0" />
                   <div className="flex min-w-0 flex-1 flex-col">
                     <span className="truncate text-[13px] font-medium text-foreground">
                       :{e.name}:
@@ -296,47 +296,5 @@ export function CustomEmojiSettings() {
 
       <AddEmojiDialog open={showAddDialog} onClose={() => setShowAddDialog(false)} />
     </section>
-  );
-}
-
-/**
- * A custom emoji rendered at glyph size in the settings list. Fetches the art
- * through the controller and shows a placeholder while loading.
- */
-function EmojiImage(props: { name: string; className?: string }) {
-  const controller = useController();
-  const [url, setUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    controller
-      .customEmojiUrl(props.name)
-      .then((result) => {
-        if (active) setUrl(result);
-      })
-      .catch(() => {
-        if (active) setUrl(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [controller, props.name]);
-
-  if (!url) {
-    return (
-      <span
-        className={cn("grid place-items-center text-[10px] text-text-faint", props.className)}
-      >
-        :{props.name.slice(0, 2)}:
-      </span>
-    );
-  }
-
-  return (
-    <img
-      src={url}
-      alt={`:${props.name}:`}
-      className={cn("object-contain", props.className)}
-    />
   );
 }

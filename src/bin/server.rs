@@ -3447,27 +3447,17 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let store = ctx.store()?;
             let emoji = store.custom_emoji()?;
             let list: Vec<Value> = emoji
-                .into_iter()
+                .iter()
                 .map(|e| {
-                    let data_base64 = if e.alias_of.is_empty() {
+                    export_row(e, |name| {
                         store
-                            .custom_emoji_art(&e.name)
+                            .custom_emoji_art(name)
                             .ok()
                             .flatten()
                             .map(|(_, bytes)| {
                                 base64::engine::general_purpose::STANDARD.encode(&bytes)
                             })
                             .unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    json!({
-                        "name": e.name,
-                        "alias_of": e.alias_of,
-                        "content_type": e.content_type,
-                        "data_base64": data_base64,
-                        "width": e.width,
-                        "height": e.height,
                     })
                 })
                 .collect();
@@ -3694,23 +3684,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // uploaded to AMS. A failed upload propagates: the send fails, the composer
             // shows it, and nothing is posted (CLAUDE.md § Sending messages and the brief
             // § 5.4). The agent's answer passes an empty list, so its words are not our pack.
-            let (content_html, emoji_art) = if let Some(html) = content_html.as_ref() {
-                let codes = custom_emoji::codes_in_body(html);
-                let mut art = Vec::new();
-                if let Ok(store) = ctx.store() {
-                    for code in codes {
-                        if let Ok(Some((content_type, bytes))) = store.custom_emoji_art(&code) {
-                            art.push(teams_send::EmojiArt {
-                                name: code,
-                                content_type,
-                                bytes,
-                            });
-                        }
-                    }
-                }
-                (Some(html.clone()), art)
-            } else {
-                (None, Vec::new())
+            let (content_html, emoji_art) = match content_html.as_ref() {
+                Some(html) => (Some(html.clone()), custom_emoji_art_in(&ctx, html)),
+                None => (None, Vec::new()),
             };
 
             let http = ctx.http.clone();
@@ -3784,19 +3760,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // Custom emoji: the edit path escapes the plain text, then runs the same
             // substitution over it that a send does. So an emoji survives an edit.
             let escaped = teams_send::escape_html(text.trim());
-            let codes = custom_emoji::codes_in_body(&escaped);
-            let mut emoji_art = Vec::new();
-            if let Ok(store) = ctx.store() {
-                for code in codes {
-                    if let Ok(Some((content_type, bytes))) = store.custom_emoji_art(&code) {
-                        emoji_art.push(teams_send::EmojiArt {
-                            name: code,
-                            content_type,
-                            bytes,
-                        });
-                    }
-                }
-            }
+            let emoji_art = custom_emoji_art_in(&ctx, &escaped);
 
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
@@ -3942,17 +3906,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 (session.self_name.to_string(), session.self_mri.to_string())
             };
 
-            // Decide the toggle from what we currently hold: same key -> off.
-            let current_key = ctx
-                .store()
-                .ok()
-                .and_then(|store| store.get_message(&conv, &message_id).ok().flatten())
-                .and_then(|m| teams_lite::store::my_reaction_key(&m.reactions, &self_mri));
-
             // A custom emoji reaction uploads the art first, exactly as a send does, and
             // the key is the object's own URL. Picking from the pack is always an ADD:
             // the key names one upload, so it can never be the key already on the
-            // message — removing is done from the chip, which hands its key back.
+            // message — removing is done from the chip, which hands its key back. Which is
+            // why the toggle is read INSIDE the other branch: on this one it is a store read
+            // whose answer nothing can use.
             let (reaction_key, on) = if let Some(name) = picked_emoji.as_deref() {
                 let (_content_type, bytes) = ctx
                     .store()?
@@ -3979,6 +3938,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     .await?;
                 (custom_emoji::custom_reaction_key(&object_url), true)
             } else {
+                // Decide the toggle from what we currently hold: same key -> off.
+                let current_key = ctx
+                    .store()
+                    .ok()
+                    .and_then(|store| store.get_message(&conv, &message_id).ok().flatten())
+                    .and_then(|m| teams_lite::store::my_reaction_key(&m.reactions, &self_mri));
                 (key.clone(), current_key.as_deref() != Some(key.as_str()))
             };
 
@@ -6661,6 +6626,49 @@ fn import_entry(entry: &Value) -> Option<ImportEntry<'_>> {
 /// of a row it does not use, so "absent" and "empty" mean the same thing here.
 fn nonempty_str<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
     entry.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+}
+
+/// The pack's art for every custom emoji code in `html`, in first-appearance order.
+///
+/// Both outbound paths need it — a send and an edit — and one copy each was one chance
+/// each to drift: an emoji that survives a send but not an edit is exactly what the
+/// code-is-the-wire-format design (AGENTS.md § Custom emoji) exists to prevent. A code the
+/// pack does not hold is simply absent, so `substitute_codes` leaves it as the text it is,
+/// and a store this backend cannot open costs the art and never the message.
+fn custom_emoji_art_in(ctx: &Ctx, html: &str) -> Vec<teams_send::EmojiArt> {
+    let Ok(store) = ctx.store() else {
+        return Vec::new();
+    };
+    custom_emoji::codes_in_body(html)
+        .into_iter()
+        .filter_map(|code| {
+            let (content_type, bytes) = store.custom_emoji_art(&code).ok().flatten()?;
+            Some(teams_send::EmojiArt { name: code, content_type, bytes })
+        })
+        .collect()
+}
+
+/// One row of `custom_emoji_export`, and the only place that shape is spelled.
+///
+/// `art` answers the base64 of the emoji's own bytes, and an ALIAS carries `""` — the
+/// sentinel `import_entry` reads to tell the two kinds apart, which makes the export and
+/// the import two halves of one contract. It is a function rather than an inline `map`
+/// because the test that pins the round trip has to drive THIS shape: it hand-rolled the
+/// mapping once and stayed green while the export dropped the very field the import needs.
+fn export_row(emoji: &custom_emoji::CustomEmoji, art: impl FnOnce(&str) -> String) -> Value {
+    let data_base64 = if emoji.alias_of.is_empty() {
+        art(&emoji.name)
+    } else {
+        String::new()
+    };
+    json!({
+        "name": emoji.name,
+        "alias_of": emoji.alias_of,
+        "content_type": emoji.content_type,
+        "data_base64": data_base64,
+        "width": emoji.width,
+        "height": emoji.height,
+    })
 }
 
 /// A custom emoji pack's entries in the order they can be IMPORTED: art first, aliases
@@ -12424,9 +12432,10 @@ mod tests {
     //   - and every ART row was refused, because the export writes `alias_of: ""` on one and
     //     the handler read that as an alias. Nothing at all imported. This test was green
     //     through it: it decided what each row meant for itself. So it goes through
-    //     `import_entry`, the decision the handler makes, and the rows it reads carry the
-    //     fields `custom_emoji_export` really writes — including the base64 art, which was
-    //     the field whose absence hid the bug.
+    //     `import_entry`, the decision the handler makes, and — since the missing field was
+    //     the whole bug — through `export_row`, the shape the handler WRITES. It hand-rolled
+    //     that mapping until this pass, which left it unable to catch a field dropped from
+    //     the export at all: the half whose absence hid the original failure.
     #[test]
     fn a_pack_survives_being_exported_and_read_back() {
         // A 20x20 PNG as far as everything that reads one goes: the signature `measure_art`
@@ -12442,24 +12451,13 @@ mod tests {
             .unwrap();
         from.set_custom_emoji("ship", None, Some("shipit"), "upload", 101).unwrap();
 
-        // What `custom_emoji_export` writes out, in the order it writes it (by name, so the
-        // alias leads): every row carries both halves, and the one it does not use is `""`.
-        let exported: Vec<Value> = from
-            .custom_emoji()
-            .unwrap()
-            .into_iter()
+        // What `custom_emoji_export` writes out, through the handler's own row builder and in
+        // the order it writes them (by name, so the alias leads).
+        let stored = from.custom_emoji().unwrap();
+        let exported: Vec<Value> = stored
+            .iter()
             .map(|e| {
-                let art = e.alias_of.is_empty();
-                json!({
-                    "name": e.name,
-                    "alias_of": e.alias_of,
-                    "content_type": e.content_type,
-                    "data_base64": if art {
-                        base64::engine::general_purpose::STANDARD.encode(&png)
-                    } else {
-                        String::new()
-                    },
-                })
+                export_row(e, |_| base64::engine::general_purpose::STANDARD.encode(&png))
             })
             .collect();
         assert_eq!(exported[0]["name"], "ship", "the export leads with the alias");

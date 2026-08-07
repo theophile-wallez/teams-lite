@@ -25,7 +25,7 @@ pub const MAX_CUSTOM_EMOJI_DIMENSION: u32 = 512;
 /// MIME types accepted for custom emoji. Slack's set, copied deliberately. SVG is
 /// excluded because an emoji is a bitmap, not a document — these bytes come back out
 /// of this app inside an `<img>`.
-pub const CUSTOM_EMOJI_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const CUSTOM_EMOJI_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// One custom emoji held in the pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,17 +208,19 @@ enum Segment<'a> {
 /// how a body is traversed, so `codes_in_body` and `substitute_codes` can never disagree about
 /// where a code is.
 fn walk(html: &str) -> impl Iterator<Item = Segment<'_>> {
-    WalkIter {
-        html,
-        pos: 0,
-        skip_depth: vec![0; SKIPPED_TAGS.len()],
-    }
+    WalkIter { html, pos: 0, skipping: None }
 }
 
 struct WalkIter<'a> {
     html: &'a str,
     pos: usize,
-    skip_depth: Vec<usize>,
+    /// Which of `SKIPPED_TAGS` we are inside, when we are. Never more than one, and never
+    /// deeper than one: opening a skipped tag yields that tag immediately, and the very
+    /// next step consumes the whole region through its own close tag — where
+    /// `find_close_tag` already counts the nesting. So a count per tag was a heap
+    /// allocation, on every send and every edit, for a value that is only ever set or
+    /// unset.
+    skipping: Option<usize>,
 }
 
 impl<'a> Iterator for WalkIter<'a> {
@@ -231,11 +233,11 @@ impl<'a> Iterator for WalkIter<'a> {
 
         let bytes = self.html.as_bytes();
 
-        if let Some(skip_idx) = self.skip_depth.iter().position(|&d| d > 0) {
+        if let Some(skip_idx) = self.skipping {
             if let Some(close_start) = find_close_tag(&bytes[self.pos..], SKIPPED_TAGS[skip_idx]) {
                 let segment_start = self.pos;
                 let segment_end = self.pos + close_start + SKIPPED_TAGS[skip_idx].len() + 3;
-                self.skip_depth[skip_idx] -= 1;
+                self.skipping = None;
                 self.pos = segment_end;
                 return Some(Segment::Raw(&self.html[segment_start..segment_end]));
             } else {
@@ -260,7 +262,7 @@ impl<'a> Iterator for WalkIter<'a> {
                             || tag_content.as_bytes()[skip_tag.len()].is_ascii_whitespace()
                             || tag_content.as_bytes()[skip_tag.len()] == b'>')
                     {
-                        self.skip_depth[i] += 1;
+                        self.skipping = Some(i);
                         break;
                     }
                 }

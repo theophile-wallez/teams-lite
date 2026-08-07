@@ -69,7 +69,10 @@ export const CustomEmojiNode = Node.create({
    *  that reaches Teams is the bare `:shipit:` and nothing else. An alias serializes to
    *  its target here, which is how `:ship:` becomes `:shipit:` in the body. */
   renderHTML({ node, HTMLAttributes }) {
-    const target = String(node.attrs.target ?? node.attrs.name ?? "").trim();
+    // A string in every case: the attribute defaults to `""` and its `parseHTML` returns
+    // `element.textContent ?? ""`, so there is nothing to coerce and nothing to fall back
+    // to — a `?? node.attrs.name` here would name the alias where the target is wanted.
+    const target: string = node.attrs.target.trim();
     return ["span", HTMLAttributes, target ? `:${target}:` : ""];
   },
 
@@ -77,7 +80,7 @@ export const CustomEmojiNode = Node.create({
    *  persisted as. The target, verbatim: a draft cannot survive a reload as a node, and
    *  `:shipit:` is both what it says and what the backend substitutes when sent. */
   renderText({ node }) {
-    const target = String(node.attrs.target ?? node.attrs.name ?? "").trim();
+    const target: string = node.attrs.target.trim();
     return target ? `:${target}:` : "";
   },
 

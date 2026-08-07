@@ -5001,25 +5001,15 @@ export class TeamsController {
    *  later retry. Returns `null` when the emoji has no art. */
   customEmojiUrl(name: string): Promise<string | null> {
     if (!name) return Promise.resolve(null);
-    return this.cacheCustomEmoji(name, async () => {
-      const res = await this.backend.customEmojiImage(name);
-      return res.data_base64 ? res : null;
-    });
-  }
-
-  /** Deduplicates concurrent fetches: two components rendering the same emoji in
-   *  one frame (the normal case in a virtualized history) return the same promise,
-   *  so the bytes are requested once. */
-  private cacheCustomEmoji(
-    name: string,
-    fetch: () => Promise<{ content_type?: string; data_base64?: string } | null>,
-  ): Promise<string | null> {
+    // Concurrent fetches are deduplicated: two components drawing the same emoji in one
+    // frame (the normal case in a virtualized history) get the same promise, so the bytes
+    // are requested once.
     const cached = this.customEmojiCache.get(name);
     if (cached) return cached;
 
     const pending = (async () => {
-      const res = await fetch();
-      if (!res || !res.data_base64) return null;
+      const res = await this.backend.customEmojiImage(name);
+      if (!res.data_base64) return null;
       const blob = new Blob([base64ToArrayBuffer(res.data_base64)], {
         type: res.content_type || "application/octet-stream",
       });
@@ -5034,14 +5024,16 @@ export class TeamsController {
   }
 
   /** Add one emoji to the pack. The name must be valid and available, and exactly
-   *  one source must be present. Rejects with the backend's own reason on failure. */
+   *  one source must be present. Rejects with the backend's own reason on failure.
+   *
+   *  A picture travels as BYTES and nothing else: the backend sniffs the type and reads
+   *  the dimensions out of them (`custom_emoji::measure_art`) rather than believing a
+   *  client, so a `content_type`, `width` or `height` here would be a field nothing on
+   *  the other side reads. */
   async addCustomEmoji(params: {
     name: string;
     alias_of?: string;
-    content_type?: string;
     data_base64?: string;
-    width?: number;
-    height?: number;
     url?: string;
     media_url?: string;
     source: string;

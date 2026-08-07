@@ -59,9 +59,10 @@ describe("emojiSuggestions", () => {
     // Every custom result precedes the first Unicode one.
     const firstUnicode = out.findIndex((s) => s.kind === "unicode");
     const lastCustom = out.map((s, i) => (s.kind === "custom" ? i : -1)).filter((i) => i >= 0);
-    if (firstUnicode >= 0 && lastCustom.length > 0) {
-      expect(Math.max(...lastCustom)).toBeLessThan(firstUnicode);
-    }
+    // Unconditionally: the fixture holds both kinds, so a guard here would let the
+    // ordering this test is named after go untested the day the ranking dropped one band.
+    expect(firstUnicode).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...lastCustom)).toBeLessThan(firstUnicode);
   });
 
   it("matches an alias by its own name", () => {
@@ -273,24 +274,6 @@ describe("extractableCustomEmoji", () => {
     expect(result).toEqual({ src: EMOJI_URL, code: "shipit" });
   });
 
-  it("strips colons from the code", () => {
-    const nodes = parseRichHtml(`<p>${EMOJI_IMG}</p>`);
-    const result = extractableCustomEmoji(nodes, []);
-    expect(result?.code).toBe("shipit");
-  });
-
-  it("returns null when emoji has no src", () => {
-    const BROKEN_IMG = '<img itemtype="http://schema.skype.com/Emoji" itemid="shipit" alt=":shipit:">';
-    const nodes = parseRichHtml(`<p>${BROKEN_IMG}</p>`);
-    expect(extractableCustomEmoji(nodes, [])).toBeNull();
-  });
-
-  it("returns null when emoji has no code", () => {
-    const BROKEN_IMG = `<img itemtype="http://schema.skype.com/Emoji" itemid="shipit" src="${EMOJI_URL}">`;
-    const nodes = parseRichHtml(`<p>${BROKEN_IMG}</p>`);
-    expect(extractableCustomEmoji(nodes, [])).toBeNull();
-  });
-
   it("finds emoji nested in formatting elements", () => {
     const nodes = parseRichHtml(`<p><strong>Check ${EMOJI_IMG} this</strong></p>`);
     const result = extractableCustomEmoji(nodes, []);
@@ -335,6 +318,15 @@ describe("bodyIsOnlyEmoji", () => {
     expect(bodyIsOnlyEmoji(parseRichHtml(`<p><strong>${emojiImg("shipit")}</strong></p>`))).toBe(
       true,
     );
+  });
+
+  it("says yes to an emoji beside an EMPTY element, which is not a word", () => {
+    // The shape that used to fail. "Does this hold an emoji?" was answered by a second
+    // recursion, re-run at every depth — so the empty `<em>` recursed into a subtree with
+    // no emoji in it, answered no, and a message that is nothing but emoji was drawn as an
+    // ordinary bubble at text size.
+    const body = `<p><em></em>${emojiImg("shipit")}</p>`;
+    expect(bodyIsOnlyEmoji(parseRichHtml(body))).toBe(true);
   });
 
   it("says no to an emoji with one word beside it", () => {

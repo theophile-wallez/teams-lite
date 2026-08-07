@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
 import { NodeViewWrapper, type ReactNodeViewProps } from "@tiptap/react";
-import { useController } from "./controller-context";
+import { PackEmoji } from "./custom-emoji";
 
 /**
  * A custom emoji chip in the composer: the art inline with the text, drawn from the
@@ -10,37 +9,20 @@ import { useController } from "./controller-context";
  * server-side, so what travels on the wire is the bare `:shipit:` text the node's
  * `renderHTML` emits (custom-emoji-extension.ts). The art this shows is the preview;
  * what the reader gets is the markup the backend already renders.
+ *
+ * It is the one pack-art surface that keeps the WHOLE code as its placeholder: it sits in
+ * a line of text rather than in a glyph-sized box, and the code is what the user just
+ * typed.
  */
 export function CustomEmojiChipView(props: ReactNodeViewProps) {
-  const controller = useController();
   const name = String(props.node.attrs.name ?? "");
-  const [url, setUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    controller.customEmojiUrl(name).then((result: string | null) => {
-      if (active) setUrl(result);
-    });
-    return () => {
-      active = false;
-    };
-  }, [controller, name]);
-
-  if (!url) {
-    return (
-      <NodeViewWrapper as="span" className="custom-emoji-node">
-        <span className="text-text-dim">:{name}:</span>
-      </NodeViewWrapper>
-    );
-  }
 
   return (
     <NodeViewWrapper as="span" className="custom-emoji-node">
-      <img
-        src={url}
-        alt={`:${name}:`}
-        className="inline-block h-[1.2em] w-auto align-middle"
-        data-emoji-name={name}
+      <PackEmoji
+        name={name}
+        className="h-[1.2em] w-auto align-middle"
+        placeholder={<span className="text-text-dim">:{name}:</span>}
       />
     </NodeViewWrapper>
   );
