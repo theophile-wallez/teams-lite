@@ -50,6 +50,35 @@ pub struct Media {
     pub bytes: Vec<u8>,
 }
 
+/// What a server says when it is declining to name a type.
+const OPAQUE_CONTENT_TYPE: &str = "application/octet-stream";
+
+/// The type to report for fetched bytes: what the server said, or what the bytes are when
+/// it said nothing useful.
+///
+/// AMS serves an emoji's original art from `content/imgpsh` as `application/octet-stream`
+/// (measured by `examples/custom_emoji_gif_probe.rs`), and the UI builds its Blob with
+/// whatever type arrives — so an animated GIF handed over as octet-stream is a coin-flip
+/// for animating in a browser. The bytes themselves are unambiguous, and
+/// [`sender_icon::image_kind`] is already the one sniffer in this crate — the emoji upload
+/// validates with it — so it decides here too rather than a second copy of the same table.
+///
+/// A type the server really did state always wins, even where the bytes disagree: a sniff
+/// that overruled a declared type would be this proxy deciding it knows the endpoint's
+/// content better than the endpoint does. And bytes that are not a raster image at all —
+/// a shared PDF, a zip — keep the opaque type, which is the honest answer for them.
+fn reported_content_type(declared: &str, bytes: &[u8]) -> String {
+    // Compare the media type alone; a `; charset=…` parameter says nothing about whether
+    // the type itself was stated.
+    let media_type = declared.split(';').next().unwrap_or("").trim();
+    if !media_type.is_empty() && !media_type.eq_ignore_ascii_case(OPAQUE_CONTENT_TYPE) {
+        return declared.trim().to_string();
+    }
+    crate::sender_icon::image_kind(bytes)
+        .unwrap_or(OPAQUE_CONTENT_TYPE)
+        .to_string()
+}
+
 /// Extract the lowercased host from an `https://` URL, without pulling in a URL
 /// crate. Returns `None` for anything that is not a plain `https` URL (we never
 /// proxy `http`, `data:`, `file:`, etc.). Strips any `userinfo@` and `:port`.
@@ -117,11 +146,11 @@ pub async fn fetch_media(http: &reqwest::Client, session: &Session, url: &str) -
         .context("hosted-content media request")?;
 
     let status = resp.status();
-    let content_type = resp
+    let declared = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
+        .unwrap_or_default()
         .to_string();
 
     if !status.is_success() {
@@ -136,7 +165,7 @@ pub async fn fetch_media(http: &reqwest::Client, session: &Session, url: &str) -
     );
 
     Ok(Media {
-        content_type,
+        content_type: reported_content_type(&declared, &bytes),
         bytes: bytes.to_vec(),
     })
 }
@@ -217,11 +246,11 @@ pub async fn fetch_sharepoint_media(
         .context("graph shares content request")?;
 
     let status = resp.status();
-    let content_type = resp
+    let declared = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
+        .unwrap_or_default()
         .to_string();
 
     if !status.is_success() {
@@ -236,7 +265,7 @@ pub async fn fetch_sharepoint_media(
     );
 
     Ok(Media {
-        content_type,
+        content_type: reported_content_type(&declared, &bytes),
         bytes: bytes.to_vec(),
     })
 }
@@ -332,6 +361,42 @@ mod tests {
         assert!(is_sharepoint_url(sp) && !is_allowed_media_url(sp));
         let ams = "https://eu-api.asm.skype.com/v1/objects/x/views/imgo";
         assert!(is_allowed_media_url(ams) && !is_sharepoint_url(ams));
+    }
+
+    #[test]
+    fn an_opaque_content_type_is_resolved_from_the_bytes() {
+        // The measured case: AMS serves an emoji's original art as octet-stream, and a
+        // browser handed those bytes under that type may draw one frame and stop.
+        let gif = b"GIF89a\x14\x00\x14\x00\x00";
+        assert_eq!(
+            reported_content_type("application/octet-stream", gif),
+            "image/gif"
+        );
+        // A server that names no type at all, and one that names it with a parameter.
+        assert_eq!(
+            reported_content_type("", b"\x89PNG\r\n\x1a\n rest"),
+            "image/png"
+        );
+        assert_eq!(
+            reported_content_type("application/octet-stream; charset=binary", gif),
+            "image/gif"
+        );
+
+        // A type the server really stated wins, even where the bytes disagree: this proxy
+        // does not overrule an endpoint about its own content.
+        assert_eq!(reported_content_type("image/jpeg", gif), "image/jpeg");
+        assert_eq!(
+            reported_content_type("text/html; charset=utf-8", gif),
+            "text/html; charset=utf-8"
+        );
+
+        // And bytes that are no raster image keep the opaque type — a shared zip or PDF is
+        // exactly what octet-stream is the honest answer for.
+        assert_eq!(
+            reported_content_type("application/octet-stream", b"PK\x03\x04 zip"),
+            "application/octet-stream"
+        );
+        assert_eq!(reported_content_type("", b""), "application/octet-stream");
     }
 
     #[test]

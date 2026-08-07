@@ -132,6 +132,31 @@ export function emojiSuggestions(
 }
 
 /**
+ * An AMS object URL asking for the art as it was UPLOADED, where the given one asks for
+ * Teams' own rendition of it. Every other URL comes back byte-identical.
+ *
+ * Measured against the tenant on 2026-08-06 by `examples/custom_emoji_gif_probe.rs`, on an
+ * animated GIF: `…/v1/objects/<id>/views/imgo` answers a 2 731-byte static `image/jpeg`,
+ * while `…/v1/objects/<id>/content/imgpsh` answers the original `GIF89a` bytes, animation
+ * intact. So an animated custom emoji reached the reader as one frame.
+ *
+ * The message is deliberately left alone: `views/imgo` is the Teams-native rendition and
+ * what every other client fetches, and the whole promise of this feature is that the art
+ * travels in the message and renders everywhere. This is the FETCH asking for more, and
+ * nothing about what goes out changes — stock Teams draws exactly what it drew before.
+ *
+ * The rewrite is deliberately narrow, matching a whole URL and only the one rendition the
+ * probe measured. A personal-expressions CDN glyph, a mail image, one of our own blob URLs
+ * and anything unrecognised are all returned as they came.
+ */
+export function originalArtUrl(src: string): string {
+  return src.replace(
+    /^(https:\/\/[^/]+\/v1\/objects\/[^/]+)\/views\/imgo$/,
+    "$1/content/imgpsh",
+  );
+}
+
+/**
  * Custom emoji from a message body that the pack does not already hold.
  *
  * Teams delivers each custom emoji as real markup carrying its own art URL and code.

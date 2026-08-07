@@ -5,6 +5,7 @@ import {
   emojiQueryBefore,
   extractableCustomEmoji,
   insertedEmojiName,
+  originalArtUrl,
 } from "./custom-emoji";
 import { parseRichHtml } from "./rich-text";
 
@@ -121,6 +122,41 @@ describe("insertedEmojiName", () => {
 
   it("returns the suggestion name when the emoji is absent from the pack", () => {
     expect(insertedEmojiName({ name: "unknown" }, [])).toBe("unknown");
+  });
+});
+
+describe("originalArtUrl", () => {
+  it("asks AMS for the bytes as uploaded, not for Teams' static rendition", () => {
+    expect(
+      originalArtUrl("https://eu-api.asm.skype.com/v1/objects/0-eu-d1-abc/views/imgo"),
+    ).toBe("https://eu-api.asm.skype.com/v1/objects/0-eu-d1-abc/content/imgpsh");
+    // Teams rewrites the host at storage, so the rule cannot key on one.
+    expect(
+      originalArtUrl(
+        "https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-fr-d2-x/views/imgo",
+      ),
+    ).toBe("https://fr-prod.asyncgw.teams.microsoft.com/v1/objects/0-fr-d2-x/content/imgpsh");
+  });
+
+  it("leaves every other URL byte-identical", () => {
+    const same = [
+      // A glyph from Teams' own personal-expressions CDN — no object store in sight.
+      "https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/x.png",
+      // One of our own blob URLs, which the pack hands over already loaded.
+      "blob:http://127.0.0.1:19440/2f1c-4a",
+      // A rendition this app has not measured, and the plain object.
+      "https://eu-api.asm.skype.com/v1/objects/0-a/views/imgpsh",
+      "https://eu-api.asm.skype.com/v1/objects/0-a/content/imgpsh",
+      "https://eu-api.asm.skype.com/v1/objects/0-a",
+      // Not an object URL at all, and not the whole URL either.
+      "https://eu-api.asm.skype.com/v2/objects/0-a/views/imgo",
+      "https://eu-api.asm.skype.com/v1/objects/0-a/views/imgo/thumb",
+      "https://eu-api.asm.skype.com/v1/objects/0-a/views/imgo?v=2",
+      // http is never proxied, so it is never rewritten either.
+      "http://eu-api.asm.skype.com/v1/objects/0-a/views/imgo",
+      "",
+    ];
+    for (const url of same) expect(originalArtUrl(url)).toBe(url);
   });
 });
 

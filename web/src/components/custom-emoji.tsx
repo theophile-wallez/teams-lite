@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { originalArtUrl } from "~/lib/custom-emoji";
 import { mediaNeedsProxy } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
@@ -15,6 +16,11 @@ import { useController } from "./controller-context";
  * no longer be a stranger's server: `rich-text.ts` refuses to make a custom emoji node
  * out of a src the proxy would not carry, so an emoji `<img>` pointing off-tenant
  * collapses to its text before it ever reaches this component.
+ *
+ * What is FETCHED is `originalArtUrl(src)` rather than the src itself, which is what makes
+ * an animated GIF animate here: AMS serves the rendition a message names as a static
+ * frame. The message keeps the src it always carried — see that function for the
+ * measurement, and for why the two must not be the same URL.
  */
 export function CustomEmoji(props: {
   src: string;
@@ -25,20 +31,20 @@ export function CustomEmoji(props: {
   className?: string;
 }) {
   const controller = useController();
-  const proxied = mediaNeedsProxy(props.src);
-  const [objectUrl, setObjectUrl] = useState<string | null>(proxied ? null : props.src);
+  const src = originalArtUrl(props.src);
+  const proxied = mediaNeedsProxy(src);
+  const [objectUrl, setObjectUrl] = useState<string | null>(proxied ? null : src);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     if (!proxied) {
-      setObjectUrl(props.src);
+      setObjectUrl(src);
       setFailed(false);
       return;
     }
     let cancelled = false;
     setObjectUrl(null);
     setFailed(false);
-    const src = props.src;
     controller.retainMedia(src);
     controller
       .loadMedia(src)
@@ -52,7 +58,7 @@ export function CustomEmoji(props: {
       cancelled = true;
       controller.releaseMedia(src);
     };
-  }, [controller, props.src, proxied]);
+  }, [controller, src, proxied]);
 
   const onError = useCallback(() => setFailed(true), []);
 
