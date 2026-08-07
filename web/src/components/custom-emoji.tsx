@@ -28,6 +28,10 @@ export function CustomEmoji(props: {
    *  neutral phrase where the key names only art. Used as `alt`, `title`, and as the
    *  text drawn in its place when the bytes cannot be fetched. */
   label: string;
+  /** Draw it large, for a message that is nothing but emoji. The bubble decides this and
+   *  drops its own chrome in the same breath (see `bodyIsOnlyEmoji`) — a large glyph still
+   *  inside a padded bubble reads as an uploaded picture, which is the thing to avoid. */
+  jumbo?: boolean;
   className?: string;
 }) {
   const controller = useController();
@@ -81,7 +85,7 @@ export function CustomEmoji(props: {
       onError={onError}
       className={cn(
         "inline-block select-none object-contain align-[-0.15em]",
-        props.className ?? "size-[1.15em]",
+        props.className ?? (props.jumbo ? "size-[2.75em]" : "size-[1.15em]"),
       )}
     />
   );

@@ -72,7 +72,7 @@ import { PersonHoverCard } from "./person-card";
 import { Emoji } from "./emoji";
 import { useAppState, useController } from "./controller-context";
 import { useMessageGestures } from "./use-message-gestures";
-import { extractableCustomEmoji } from "~/lib/custom-emoji";
+import { bodyIsOnlyEmoji, extractableCustomEmoji } from "~/lib/custom-emoji";
 import { AddEmojiDialog } from "./add-emoji-dialog";
 
 // emoji-mart and its dataset are ~1.5 MB and only needed once someone reaches
@@ -431,6 +431,25 @@ function MessageBubbleImpl(props: {
     !bodyHasContent &&
     recordingAttachments.length === attachments.length;
 
+  // A message that is nothing but custom emoji. It joins the family above — link-, image-,
+  // card- and recording-only all drop the bubble chrome — and for the same reason: the
+  // content IS the surface. A lone emoji inside a padded bubble reads as a small uploaded
+  // picture, which is exactly what it must not look like. Dropping the chrome and drawing
+  // it large (`jumbo`, passed to the body below) is one decision, made here, so the two
+  // halves cannot disagree.
+  const emojiOnly = useMemo(
+    () =>
+      !props.editing &&
+      !parsed.quote &&
+      cards.length === 0 &&
+      attachments.length === 0 &&
+      bodyParts.some(bodyIsOnlyEmoji) &&
+      // Every part must be emoji or empty: a reply's two halves both come through here,
+      // and words in either of them make this an ordinary message.
+      bodyParts.every((part) => bodyIsOnlyEmoji(part) || !hasVisibleContent(part)),
+    [props.editing, parsed.quote, cards.length, attachments.length, bodyParts],
+  );
+
   // A message the sender has deleted on Teams. It always renders as a plain
   // bubble (a muted "message deleted" placeholder), never as a bare image/link/
   // recording surface — so the media-only treatments are suppressed below. It is
@@ -472,7 +491,8 @@ function MessageBubbleImpl(props: {
   // placeholder is the body. An agent's reply keeps one too: its mark and its status
   // line belong to a bubble, and an answer that happens to be one link is still an
   // answer.
-  const bare = !isDeleted && !agent && (linkOnly || imageOnly || recordingOnly || cardOnly);
+  const bare =
+    !isDeleted && !agent && (linkOnly || imageOnly || recordingOnly || cardOnly || emojiOnly);
 
   // An answer is being written into this message. Two ways to know, and both count:
   // this app is watching the run (`agentRun`), or the message itself says its answer is
@@ -652,6 +672,7 @@ function MessageBubbleImpl(props: {
       hiddenHrefs={hiddenHrefs}
       mentions={mentions}
       cardShownSeparately={cardAttachments.length > 0}
+      jumbo={emojiOnly}
       agentTags={agentTags}
     />
   ) : null;
@@ -669,6 +690,7 @@ function MessageBubbleImpl(props: {
           hiddenHrefs={hiddenHrefs}
           mentions={mentions}
           cardShownSeparately={cardAttachments.length > 0}
+          jumbo={emojiOnly}
           // A trigger's prefix opens the message, and the backend reads the body with
           // every quoted block removed — so this part opens it only when nothing of the
           // author's words came before the quote.

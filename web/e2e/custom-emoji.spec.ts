@@ -9,7 +9,8 @@ import type { Locator, Page } from "@playwright/test";
  *  1. a code the pack holds becomes art in a sent message; one it does not hold stays text;
  *  2. an inbound custom emoji is drawn from the message's OWN art, never from the pack;
  *  3. a code inside `<code>` and a code inside a reply quote both stay text;
- *  4. an emoji-only message renders at TEXT size, the size stock Teams draws it at;
+ *  4. an emoji among words is text-sized, and a message that is NOTHING but emoji is drawn
+ *     large with the bubble chrome dropped — one decision, so both halves are asserted;
  *  4b. the reaction row offers the pack's own art, and the chip that lands IS that art;
  *  5. the `:` list offers custom emoji above the Unicode ones, and Enter inserts the chip;
  *  6. a taken name is refused with Slack's own sentence;
@@ -211,49 +212,61 @@ test.describe("custom emoji", () => {
     await expect(reply.locator(SHIPIT_ART)).toHaveCount(1);
   });
 
-  test("an emoji-only message renders at text size, matching stock Teams", async ({ page }) => {
+  test("an emoji-only message is drawn large and loses the bubble chrome", async ({ page }) => {
     const field = await openEmojiThread(page);
 
-    // A mixed message: emoji among words.
+    // A mixed message: emoji among words. It stays text-sized, because it is punctuation in
+    // a sentence and a glyph twice the height of the line it sits on is not readable.
     await page.keyboard.type("inline :shipit: here");
     const inline = await sendAndAwaitEcho(page);
     const inlineImg = inline.locator(SHIPIT_ART);
     await expect(inlineImg).toBeVisible();
 
-    // An emoji-only message: stock Teams draws it at text size, so this app does too.
-    // It used to render jumbo (2.5em), copied from Slack, which made teams-lite the
-    // only client in a thread showing something different from everyone else.
+    // A message that is nothing but emoji. Here the content IS the surface, so it is drawn
+    // large and the bubble's own fill and padding go — the treatment link-, image-, card-
+    // and recording-only messages already get.
     await field.click();
     await page.keyboard.type(":shipit:");
     const alone = await sendAndAwaitEcho(page);
     const aloneImg = alone.locator(SHIPIT_ART);
     await expect(aloneImg).toBeVisible();
 
-    // Check the computed width/height style of the images - this is what determines
-    // the actual rendered size based on the className.
-    const inlineSize = await inlineImg.evaluate((el) => {
-      const style = window.getComputedStyle(el);
-      return { width: style.width, height: style.height };
-    });
-    const aloneSize = await aloneImg.evaluate((el) => {
-      const style = window.getComputedStyle(el);
-      return { width: style.width, height: style.height };
-    });
-
-    // Both should have the same computed size (1.15em in pixels), not jumbo (2.5em).
-    // Stock Teams renders emoji at text size, so this app matches that behavior.
-    expect(inlineSize).toEqual(aloneSize);
-
-    // And both are under a bound that says neither is jumbo. At a 14px bubble font,
-    // 1.15em is 16.09px, while the 2.5em this app used to draw was exactly 35px.
+    // BOTH halves are asserted because either one alone is a bug that shipped on the way
+    // here: a large emoji still inside a padded bubble reads as an uploaded picture in a
+    // frame, and a text-sized one inside a bare row reads as a mistake.
     //
-    // 35px HERE means the page under test is not this build: no source in the tree spells
-    // 2.5em any more, so that number can only come from a web server another run left
-    // listening, whose SSR handler still holds the module graph it imported before the
-    // jumbo path was removed (`reuseExistingServer` then adopts it — see § Automation
-    // safety on checking the port). Look at what is serving 19468 before looking here.
-    const heightPx = parseFloat(aloneSize.height);
-    expect(heightPx).toBeLessThan(25);
+    // Half one — the size. Measured as a RATIO of the two rendered heights rather than
+    // against a pixel count, which the bubble's font size would move. The classes are
+    // 1.15em against 2.75em, so the real ratio is ~2.4; 1.5 is the loosest bound that
+    // still fails if the two ever draw at one size.
+    const inlineBox = await inlineImg.boundingBox();
+    const aloneBox = await aloneImg.boundingBox();
+    expect(inlineBox).not.toBeNull();
+    expect(aloneBox).not.toBeNull();
+    expect(aloneBox!.height).toBeGreaterThan(inlineBox!.height * 1.5);
+
+    // Half two — the chrome. The bubble's fill is what says "this is a message body", and an
+    // emoji-only message drops it: the `bare` flag `emojiOnly` feeds skips the whole
+    // rounded/padded/filled block. Read as a computed colour, so it fails the moment
+    // `emojiOnly` stops reaching `bare` — a class-name assertion would not, since the
+    // classes are composed conditionally and a stale one would still read as present.
+    const bubbleFill = (bubble: Locator) =>
+      bubble.evaluate((el) => window.getComputedStyle(el).backgroundColor);
+    // The message with words in it has a real colour behind it.
+    const inlineFill = await bubbleFill(inline);
+    expect(inlineFill).not.toBe("transparent");
+    expect(inlineFill).not.toMatch(/rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/);
+    // The emoji-only one has nothing behind it at all.
+    const aloneFill = await bubbleFill(alone);
+    expect(aloneFill === "transparent" || /rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/.test(aloneFill)).toBe(
+      true,
+    );
+
+    // If BOTH heights come back equal, suspect the server before the code: a web server
+    // another run left listening is adopted by `reuseExistingServer`, and its SSR handler
+    // still holds the module graph it imported — which may predate this rule entirely. That
+    // has already been misread as a code fault twice. Check what is serving the web port
+    // (see § Automation safety on checking the port) before looking here.
   });
 
   test("the reaction row offers the pack's art, and the chip that lands is that art", async ({

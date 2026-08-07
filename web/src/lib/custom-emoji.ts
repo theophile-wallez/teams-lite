@@ -85,6 +85,45 @@ export function customEmojiNameError(name: string, taken: string[]): string | nu
   return null;
 }
 
+/**
+ * Is this body nothing but custom emoji?
+ *
+ * Such a message is drawn the way every messenger draws a lone emoji: LARGE, and with the
+ * bubble chrome dropped, so it reads as an emoji rather than as a small picture in a frame.
+ * The two halves are one decision and must stay one — a big emoji still inside a padded
+ * bubble looks like an uploaded image, and a text-sized one inside it looks like a mistake.
+ * Both were tried on the way here.
+ *
+ * The bubble computes this once and passes it down (`jumbo`), rather than the renderer
+ * deciding again from the same nodes: the chrome and the size are the same question.
+ */
+export function bodyIsOnlyEmoji(nodes: RichNode[]): boolean {
+  if (nodes.length === 0) return false;
+  if (!hasAtLeastOneEmoji(nodes)) return false;
+
+  for (const node of nodes) {
+    if (node.type === "text") {
+      // Whitespace around a lone emoji is still a lone emoji: Teams wraps the body in a
+      // paragraph and a phone keyboard adds a trailing space.
+      if (node.text.trim().length > 0) return false;
+    } else if (node.tag === "customEmoji" || node.tag === "br") {
+      continue;
+    } else if (!bodyIsOnlyEmoji(node.children)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasAtLeastOneEmoji(nodes: RichNode[]): boolean {
+  for (const node of nodes) {
+    if (node.type === "element") {
+      if (node.tag === "customEmoji") return true;
+      if (hasAtLeastOneEmoji(node.children)) return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Rank emoji suggestions for a typeahead query. Custom emoji come first,

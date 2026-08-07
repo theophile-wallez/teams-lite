@@ -69,6 +69,11 @@ export function RichContent(props: {
   mentions?: Map<number, MessageMention>;
   format?: BodyFormat;
   cardShownSeparately?: boolean;
+  /** The message is nothing but custom emoji, so its glyphs are drawn large. The
+   *  bubble decides it and drops its own chrome at the same time — see
+   *  {@link bodyIsOnlyEmoji}. Passed down rather than derived here, so the size and
+   *  the chrome can never disagree. */
+  jumbo?: boolean;
   agentTags?: readonly AgentCandidate[];
   /** Render each word in its own span, so a body that is still being written animates
    *  its new words in. Only the streamed agent reply passes this — see
@@ -93,6 +98,7 @@ export function RichContent(props: {
       className={cn("whitespace-pre-wrap", props.className)}
       mentions={props.mentions}
       cardShownSeparately={props.cardShownSeparately}
+      jumbo={props.jumbo}
       tokens={props.tokens}
     />
   );
@@ -115,6 +121,8 @@ export function RichNodes(props: {
   className?: string;
   mentions?: Map<number, MessageMention>;
   cardShownSeparately?: boolean;
+  /** See {@link RichContent}'s `jumbo`. */
+  jumbo?: boolean;
   /** See {@link RichContent}'s `tokens`. */
   tokens?: boolean;
 }) {
@@ -129,6 +137,7 @@ export function RichNodes(props: {
         renderNode(node, i, {
           mentions: props.mentions,
           cardShownSeparately: props.cardShownSeparately,
+          jumbo: props.jumbo,
           tokens: props.tokens,
         }),
       )}
@@ -298,6 +307,7 @@ type RenderContext = {
   verbatim?: boolean;
   inPre?: boolean;
   cardShownSeparately?: boolean;
+  jumbo?: boolean;
   tokens?: boolean;
 };
 
@@ -315,6 +325,9 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
     verbatim: ctx.verbatim || node.tag === "code" || node.tag === "pre",
     inPre: ctx.inPre || node.tag === "pre",
     cardShownSeparately: ctx.cardShownSeparately,
+    // Carried into children or it would die at the first `<p>`: Teams wraps a body in one,
+    // so every emoji this flag exists for is a child rather than a top-level node.
+    jumbo: ctx.jumbo,
     tokens: ctx.tokens,
   };
   const children = node.children.map((child, i) => renderNode(child, i, childCtx));
@@ -599,6 +612,7 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
           key={key}
           src={node.attrs.src ?? ""}
           label={node.attrs.code ?? ""}
+          jumbo={ctx.jumbo}
         />
       );
     default:

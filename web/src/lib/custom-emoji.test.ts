@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  bodyIsOnlyEmoji,
   customEmojiNameError,
   emojiSuggestions,
   emojiQueryBefore,
@@ -228,5 +229,52 @@ describe("extractableCustomEmoji", () => {
     const nodes = parseRichHtml(`<ul><li>${EMOJI_IMG}</li></ul>`);
     const result = extractableCustomEmoji(nodes, []);
     expect(result).toEqual({ src: EMOJI_URL, code: "shipit" });
+  });
+});
+
+describe("bodyIsOnlyEmoji", () => {
+  const EMOJI_URL = "https://eu-api.asm.skype.com/v1/objects/0-a/views/imgo";
+  const emojiImg = (code: string) =>
+    `<img itemtype="http://schema.skype.com/Emoji" itemid="${code}" alt=":${code}:" src="${EMOJI_URL}" width="20" height="20">`;
+
+  it("says yes to one emoji on its own", () => {
+    expect(bodyIsOnlyEmoji(parseRichHtml(emojiImg("shipit")))).toBe(true);
+  });
+
+  it("says yes to an emoji inside the paragraph Teams really sends", () => {
+    // Teams wraps a body in `<p>`, so the emoji is never a top-level node in practice —
+    // the paragraph is the shape every real message arrives in.
+    expect(bodyIsOnlyEmoji(parseRichHtml(`<p>${emojiImg("shipit")}</p>`))).toBe(true);
+  });
+
+  it("says yes to two emoji and the whitespace between and after them", () => {
+    // Whitespace is why this is a walk and not an equality check. Teams wraps the body in a
+    // paragraph and indents what it wraps, and a phone keyboard commits a trailing space
+    // when the send key is pressed — so a message the user typed as nothing but emoji
+    // arrives with blanks around them, and reading those as words would draw it as an
+    // ordinary bubble.
+    const body = `<p> ${emojiImg("shipit")} ${emojiImg("partyparrot")} </p>`;
+    expect(bodyIsOnlyEmoji(parseRichHtml(body))).toBe(true);
+  });
+
+  it("says yes to an emoji nested inside formatting", () => {
+    // The recursion is the half that breaks silently: a body that stops being emoji-only
+    // one element deeper still renders, just with the wrong chrome and the wrong size.
+    expect(bodyIsOnlyEmoji(parseRichHtml(`<p><strong>${emojiImg("shipit")}</strong></p>`))).toBe(
+      true,
+    );
+  });
+
+  it("says no to an emoji with one word beside it", () => {
+    expect(bodyIsOnlyEmoji(parseRichHtml(`<p>${emojiImg("shipit")} ship</p>`))).toBe(false);
+  });
+
+  it("says no to words alone", () => {
+    expect(bodyIsOnlyEmoji(parseRichHtml("<p>ship it</p>"))).toBe(false);
+  });
+
+  it("says no to an empty body, which has no emoji to draw large", () => {
+    expect(bodyIsOnlyEmoji([])).toBe(false);
+    expect(bodyIsOnlyEmoji(parseRichHtml("<p> </p>"))).toBe(false);
   });
 });

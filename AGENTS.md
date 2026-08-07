@@ -2926,13 +2926,53 @@ feature worth having: a local-only decoration would be a different, smaller feat
   two because Slack does not render an emoji in code either; the third because a quote
   holds a colleague's own words and substituting our art into them would rewrite what they
   wrote — the same reason `agent_policy` strips quoted blocks before reading a trigger.
-- **A custom emoji is always drawn at text size**, never jumbo. The 2026-08-05 tenant probe
-  established that stock Teams renders an emoji-only message at text size, so drawing one
-  larger here would make teams-lite the only client in a thread showing something different
-  from everyone else. The design already treats an emoji as a glyph — inline, no lightbox,
-  no zoom — and text-sized at all times is the natural end of that. Slack renders emoji-only
-  messages at 2.5em; this app does not, because parity with Microsoft Teams is what matters
-  in a Teams thread.
+- **An emoji among words is TEXT-SIZED; a message that is nothing but emoji drops the bubble
+  chrome and draws them LARGE.** Among words an emoji is punctuation in a sentence, and a
+  glyph twice the height of the line it sits on is not readable — but a message whose whole
+  body is emoji has no sentence to sit in, and there the content IS the surface. That is the
+  argument the link-, image-, card- and recording-only messages already make in
+  `web/src/components/message-bubble.tsx`, and `emojiOnly` joins that family and feeds the
+  same `bare` flag: no fill, no padding, no rounded corners, just the art. **The two halves
+  are ONE decision and must stay one** — a large emoji still inside a padded bubble reads as
+  an uploaded picture in a frame, and a text-sized one inside a bare row reads as a mistake.
+  Both were built on the way here and both were wrong, which is why the flag is computed
+  once, in the bubble, and the size travels down from it (`jumbo`, threaded through
+  `RichContent` to `CustomEmoji`) rather than being decided a second time from the same
+  nodes. `jumbo` is carried through `childCtx` in `rich-content.tsx` for a reason worth
+  keeping: Teams wraps a body in a `<p>`, so every emoji this flag exists for is a child
+  rather than a top-level node, and a flag that did not descend would die at the paragraph.
+  `bodyIsOnlyEmoji` (`web/src/lib/custom-emoji.ts`) is the walk that answers it — whitespace
+  is skipped, because Teams indents what it wraps and a phone keyboard commits a trailing
+  space as the send key is pressed. `web/src/lib/custom-emoji.test.ts` pins the walk and
+  `web/e2e/custom-emoji.spec.ts` pins both halves in one test, on purpose: either assertion
+  alone would pass over one of the two shipped mistakes.
+- **An animated GIF animates for a teams-lite reader and not for a stock Teams one, and
+  that is Teams' own limitation rather than ours.** Measured 2026-08-07, and worth writing
+  down because it is a day's work to rediscover:
+  - **AMS transcodes the rendition a message body references.** An uploaded GIF's
+    `views/imgo` — the view the markup names — is answered as `image/jpeg`, a single still
+    frame. `content/imgpsh` answers the original `GIF89a`: 61 300 bytes, 17 frames,
+    `NETSCAPE2.0`. So this app fetches `content/imgpsh` (`originalArtUrl` /
+    `original_art_url`), and that one change is the whole of the animation. The object's own
+    metadata lists its contents as `imgo` (4 508 bytes), `imgpsh` (61 300), `img_small` and
+    `imgpsh_thumbnail_sx`; `views/imgpsh`, `views/original` and `views/img_small` are all
+    REFUSED, and `views/imgpsh_thumbnail_sx` answers a still PNG.
+  - **Declaring the format does not help, and every way of declaring it was tried**: a
+    `.gif` filename, a `contentType` field, an `originalContentType` field, an `image/gif`
+    content-type on the upload PUT, and the object types `pish/gif`, `pish/animatedImage`
+    and `pish/video` — each either refused or still transcoded.
+  - **Teams' own client has the same limitation, and that is the fact that settles it.** A
+    Tenor GIF that real Teams uploaded is served from `views/imgo` as `image/jpeg`, its
+    markup declares `itemscope="png"`, it carries no animation attribute of any kind, and
+    its `content/imgpsh` is already 404. Teams shows an animated GIF only when the body
+    references a PUBLIC url — a `media1.giphy.com/….gif` — which is exactly why a giphy
+    pick animates for everyone and an uploaded file does not.
+  - So a teams-lite reader sees the animation because this app fetches the original, and a
+    stock Teams reader sees the still frame, exactly as they would for any GIF Teams itself
+    uploaded. Getting animation to every client would mean publishing the user's art to a
+    public host, which this app does not do — so do not go looking for a rendition or a
+    declaration that fixes it. `examples/custom_emoji_gif_probe.rs` and
+    `examples/custom_emoji_gif_matrix.rs` are where every number above comes from.
 - **The writes are gated, and why.** `custom_emoji_add` / `custom_emoji_remove` /
   `custom_emoji_import` are `MACHINE_METHODS` entries even though they write only to the
   local store, because the pack decides what art this machine will post under the user's
