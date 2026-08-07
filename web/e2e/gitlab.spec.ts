@@ -965,8 +965,8 @@ test.describe.serial("the GitLab merge-request page", () => {
   /** Press "Review the changes" and wait for the diff page's FILES to be drawn.
    *
    *  The files are what every width opens on — both columns on a wide screen, that column alone
-   *  on a phone — so this is the one wait that holds everywhere. A patch is a separate wait
-   *  (`waitForPatch`) because on a phone there is not one until the reader picks a file. */
+   *  on a phone — so this is the one wait that holds everywhere. The feed is a separate wait
+   *  (`waitForFeed`) because on a phone there is not one until the reader picks a file. */
   async function openDiffPage(page: Page) {
     await page.locator('[data-testid="gitlab-review-changes"]').scrollIntoViewIfNeeded();
     await page.locator('[data-testid="gitlab-review-changes"]').click();
@@ -974,26 +974,58 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-diff-tree"]')).toBeVisible({ timeout: 25_000 });
   }
 
-  /** Wait for a patch to be highlighted. Generous, because what takes the time is the lazy
-   *  chunk and then Shiki resolving that file's own grammar. */
-  async function waitForPatch(page: Page) {
-    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toBeVisible({
-      timeout: 25_000,
-    });
+  /** Wait for the FEED to hold a drawn file. Generous, because what takes the time is the lazy
+   *  chunk and then Shiki resolving the first files' own grammars.
+   *
+   *  ATTACHED rather than visible: each file's header carries a sentinel of this app's that is
+   *  DATA — a file with nothing to say beside its name draws no ink at all, which is most files. */
+  async function waitForFeed(page: Page) {
+    await expect(
+      page.locator('[data-testid="gitlab-diff-feed"] [data-testid="gitlab-diff-file"]').first(),
+    ).toBeAttached({ timeout: 25_000 });
   }
 
-  /** Show one file by pressing its row in the tree.
+  /** One FILE of the feed, as the renderer's own element.
+   *
+   *  It carries no path of its own, so it is found by the header slot this app renders into it —
+   *  a light-DOM child of that element. Scoping to it is what makes a line number mean one file,
+   *  which in a feed is the whole difference between commenting on the code the reader means and
+   *  on line 42 of something else. */
+  function feedFile(page: Page, path: string) {
+    return page
+      .locator(`diffs-container:has([data-testid="gitlab-diff-file"][data-path="${path}"])`)
+      .first();
+  }
+
+  /** What one file's own header says beside its name: why there is no code under it. */
+  function fileNotice(page: Page, path: string) {
+    return page.locator(`[data-testid="gitlab-diff-file-notice"][data-path="${path}"]`);
+  }
+
+  /** Bring one file to the top of the feed by pressing its row in the tree.
    *
    *  Pierre's tree renders into a shadow root and Playwright's CSS engine pierces an open one,
    *  so this drives the row a reader would press. The assertion is on the PANE's own statement
-   *  of what it holds, which is present whatever draws that file's name — pierre's header over
-   *  a patch, this app's over a sentence. */
+   *  of which file the reader is AT, which is what the press moves. */
   async function pickFile(page: Page, path: string) {
     await page.locator(`[data-item-path="${path}"]`).first().click();
     await expect(page.locator('[data-testid="gitlab-diff-pane"]')).toHaveAttribute(
       "data-path",
       path,
     );
+    // The feed has just scrolled, and the renderer mounts what the scroll reached, resolves its
+    // grammars and re-measures over the next frame or two. A gesture driven into that window
+    // reads a line's box and presses where the box no longer is — which only a script is fast
+    // enough to do (`pickDiffFile` in web/scripts/preview.ts makes the same allowance).
+    await page.waitForTimeout(400);
+  }
+
+  /** Scroll the feed the way a reader does — the wheel over the code — and let the renderer
+   *  settle: it mounts what the scroll reached, resolves its grammars and re-measures. */
+  async function scrollFeed(page: Page, by: number) {
+    await page.locator('[data-testid="gitlab-diff-feed"]').hover();
+    await page.mouse.wheel(0, by);
+    await page.waitForTimeout(700);
   }
 
   test("states what changed on the merge request, and draws no diff there", async ({ page }) => {
@@ -1010,10 +1042,10 @@ test.describe.serial("the GitLab merge-request page", () => {
       "href",
       /\/diffs$/,
     );
-    // And nothing of the diff itself is on this page: no tree, no patch, so no highlighter on
+    // And nothing of the diff itself is on this page: no tree, no feed, so no highlighter on
     // the path of a merge request somebody opened to read the description.
     await expect(page.locator('[data-testid="gitlab-diff-tree"]')).toHaveCount(0);
-    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="gitlab-diff-feed"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="gitlab-review-changes"]')).toBeVisible();
   });
 
@@ -1021,7 +1053,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
     await openDiffPage(page);
-    await waitForPatch(page);
+    await waitForFeed(page);
 
     // The URL is what makes it a place rather than a piece of state — it can be sent to
     // somebody, and it survives a reload.
@@ -1029,7 +1061,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-diff-title"]')).toContainText("HA replicas");
     await page.reload();
     await expect(page.locator('[data-testid="gitlab-diff-page"]')).toBeVisible();
-    await waitForPatch(page);
+    await waitForFeed(page);
 
     // It takes the WHOLE screen: the app's own sidebar is not drawn beside it, because the page
     // is already two columns and a third of chat rows would leave neither enough room.
@@ -1041,57 +1073,86 @@ test.describe.serial("the GitLab merge-request page", () => {
     expect(page.url()).not.toMatch(/\/diff$/);
   });
 
-  test("opens on a file with something to read, and follows the row pressed", async ({ page }) => {
+  test("holds every changed file in ONE feed, in GitLab's own order", async ({ page }) => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
     await openDiffPage(page);
-    await waitForPatch(page);
+    await waitForFeed(page);
 
-    // Nothing was picked, so the page opens on the first file that HAS a patch — never on a
+    // A review is read by scrolling, so the files are not behind a press each: the first ones
+    // are drawn one under another, and the tree lists them all.
+    await expect(feedFile(page, "charts/user-facing/values.yaml")).toBeVisible();
+    await expect(feedFile(page, "charts/user-facing/templates/pdb.yaml")).toBeVisible();
+
+    // Nothing was picked, so the reader is AT the first file that has a patch — never at a
     // sentence explaining there is nothing to see, which reads as a failed load.
     await expect(page.locator('[data-testid="gitlab-diff-pane"]')).toHaveAttribute(
-      "data-change",
-      "changed",
+      "data-path",
+      "charts/user-facing/values.yaml",
     );
     await expect(page.locator('[data-testid="gitlab-diff-tree"]')).toBeVisible();
-
-    await pickFile(page, "src/server/health.ts");
-    await waitForPatch(page);
   });
 
-  test("tells the files with no patch apart", async ({ page }) => {
+  test("the tree follows the reader down the feed, and a press moves the feed", async ({
+    page,
+  }) => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
     await openDiffPage(page);
-    await waitForPatch(page);
-    const notice = page.locator('[data-testid="gitlab-diff-file-notice"]');
+    await waitForFeed(page);
+    const pane = page.locator('[data-testid="gitlab-diff-pane"]');
+    await expect(pane).toHaveAttribute("data-path", "charts/user-facing/values.yaml");
+
+    // SCROLLING is the gesture: the file at the top of the screen changes, and the row the tree
+    // lights changes with it. That pairing is the whole feature, and it is driven through the
+    // pointer because the reader's own wheel is what it has to answer.
+    await scrollFeed(page, 700);
+    await expect(pane).not.toHaveAttribute("data-path", "charts/user-facing/values.yaml");
+    // The row lighting itself must never read as a press: doing so threw a reader scrolling the
+    // feed back to the top of the diff every few files.
+    const reached = await pane.getAttribute("data-path");
+    await scrollFeed(page, 200);
+    const stillGoing = await pane.getAttribute("data-path");
+    expect([reached, stillGoing]).not.toContain("charts/user-facing/values.yaml");
+
+    // And a press in the tree is the other direction: that file comes to the top at once, with
+    // nothing to load — the whole diff was read with the merge request.
+    await pickFile(page, "charts/user-facing/values.yaml");
+    await expect(feedFile(page, "charts/user-facing/values.yaml")).toBeVisible();
+  });
+
+  test("tells the files with no patch apart, in the feed", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await waitForFeed(page);
+
+    // Every one of them is IN the feed — the tree lists them, so a feed that skipped one would
+    // make the tree lie about where the reader is — and each says something different in its own
+    // header, because the reader's next move differs for each.
+    await pickFile(page, "src/server/drain.ts");
 
     // A pure RENAME: no hunks by definition, and its patch IS the header stating the move — so
     // pierre draws that header and this page explains NOTHING. It must never read as a file
     // GitLab collapsed, which is what GitLab's own `collapsed: true` on those rows would have
     // made it.
-    await pickFile(page, "src/server/drain.ts");
-    await expect(page.locator('[data-testid="gitlab-diff-pane"]')).toHaveAttribute(
-      "data-change",
-      "renamed",
-    );
-    await expect(notice).toHaveCount(0);
-    await waitForPatch(page);
+    await expect(fileNotice(page, "src/server/drain.ts")).toHaveCount(0);
+    await expect(feedFile(page, "src/server/drain.ts")).toBeVisible();
 
     // A BINARY file: GitLab describes it with one sentence rather than hunks, and this page says
     // so instead of running that prose through a code renderer.
-    await pickFile(page, "docs/diagrams/rollout.png");
-    await expect(notice).toHaveAttribute("data-state", "binary");
-    await expect(notice).toContainText(/binary/i);
-    await expect(page.locator('[data-testid="gitlab-diff-patch"]')).toHaveCount(0);
+    const binary = fileNotice(page, "docs/diagrams/rollout.png");
+    await expect(binary).toHaveAttribute("data-state", "binary");
+    await expect(binary).toContainText(/binary/i);
 
-    // A file GitLab COLLAPSED — the one state a second read can mend. It carries this app's own
-    // heading, because pierre draws none where there is no patch, and it says GENERATED,
+    // A file GitLab COLLAPSED — the one state a second read can mend — and it says GENERATED,
     // because a surprising change hides in one.
-    await pickFile(page, "bun.lock");
-    await expect(notice).toHaveAttribute("data-state", "collapsed");
-    await expect(notice).toContainText(/did not expand/i);
-    await expect(page.locator('[data-testid="gitlab-diff-file"]')).toContainText("generated");
+    const collapsed = fileNotice(page, "bun.lock");
+    await expect(collapsed).toHaveAttribute("data-state", "collapsed");
+    await expect(collapsed).toContainText(/did not expand/i);
+    await expect(
+      page.locator('[data-testid="gitlab-diff-generated"][data-path="bun.lock"]'),
+    ).toContainText("generated");
   });
 
   test("offers the expanded read once, names what it costs, then stops offering", async ({
@@ -1100,7 +1161,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
     await openDiffPage(page);
-    await waitForPatch(page);
+    await waitForFeed(page);
 
     // At the foot of the FILES column, because what GitLab withheld is a fact about that list.
     const expand = page.locator(
@@ -1114,15 +1175,17 @@ test.describe.serial("the GitLab merge-request page", () => {
 
     // The collapsed file carries no patch until the reader asks.
     await pickFile(page, "bun.lock");
-    await expect(page.locator('[data-testid="gitlab-diff-file-notice"]')).toHaveAttribute(
-      "data-state",
-      "collapsed",
-    );
+    await expect(fileNotice(page, "bun.lock")).toHaveAttribute("data-state", "collapsed");
 
     await expand.click();
-    // Now it does, and the sentence about it is gone.
-    await waitForPatch(page);
-    await expect(page.locator('[data-testid="gitlab-diff-file-notice"]')).toHaveCount(0);
+    // Now it does — the item the feed holds for that file has to be handed over again, which is
+    // what its version is for: a file that came back with a patch under the same path went on
+    // being drawn as the sentence that stood in for it.
+    await pickFile(page, "bun.lock");
+    await expect(
+      page.locator('[data-testid="gitlab-diff-file"][data-path="bun.lock"]'),
+    ).toHaveAttribute("data-state", "patch", { timeout: 25_000 });
+    await expect(fileNotice(page, "bun.lock")).toHaveCount(0);
     // Offered ONCE: a second press would pay half a megabyte for the same answer, and the
     // expanded read does not always expand everything either.
     await expect(expand).toHaveCount(0);
@@ -1141,10 +1204,11 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(diffPage).toHaveAttribute("data-column", "files");
     await expect(page.locator('[data-testid="gitlab-diff-pane"]')).toHaveCount(0);
 
-    // A pick is a navigation into the file.
+    // A pick is a navigation into the feed, opened AT that file.
     await pickFile(page, "src/server/health.ts");
     await expect(diffPage).toHaveAttribute("data-column", "patch");
-    await waitForPatch(page);
+    await waitForFeed(page);
+    await expect(feedFile(page, "src/server/health.ts")).toBeVisible();
     // And the files are gone: one column at a time.
     await expect(page.locator('[data-testid="gitlab-diff-files"]')).toHaveCount(0);
 
@@ -1210,14 +1274,24 @@ test.describe.serial("the GitLab merge-request page", () => {
   // another. Both are driven here the way a reader makes them — through the pointer, over
   // pierre's own gutter — because a store call would pin the plumbing and not the gesture.
 
-  /** One line number in the gutter of the open patch.
+  /** The file every gesture below is made in. In a feed a line number names nothing on its own —
+   *  line 5 is in most of these files — so the file travels with it, which is the rule the app
+   *  itself follows. */
+  const HEALTH = "src/server/health.ts";
+
+  /** One line number in the gutter of one FILE of the feed.
    *
-   *  The number AND the side, because in a unified diff an old line and a new line can wear the
-   *  same number: three lines into a change block, `3` is both the line that went and the one
-   *  that came. `data-column-number` and `data-line-type` are pierre's own attributes on a
-   *  gutter cell, inside the shadow root Playwright pierces; everything asserted afterwards is
-   *  this app's own `data-testid`. */
-  function gutterLine(page: Page, line: number, side: "additions" | "deletions" = "additions") {
+   *  The file, the number AND the side. The side because in a unified diff an old line and a new
+   *  line can wear the same number: three lines into a change block, `3` is both the line that
+   *  went and the one that came. `data-column-number` and `data-line-type` are pierre's own
+   *  attributes on a gutter cell, inside the shadow root Playwright pierces; everything asserted
+   *  afterwards is this app's own `data-testid`. */
+  function gutterLine(
+    page: Page,
+    path: string,
+    line: number,
+    side: "additions" | "deletions" = "additions",
+  ) {
     const types =
       side === "additions"
         ? ["context", "addition", "change-addition"]
@@ -1225,15 +1299,15 @@ test.describe.serial("the GitLab merge-request page", () => {
     const selector = types
       .map((type) => `[data-column-number="${line}"][data-line-type="${type}"]`)
       .join(", ");
-    return page.locator(`[data-testid="gitlab-diff-patch"] :is(${selector})`).first();
+    return feedFile(page, path).locator(`:is(${selector})`).first();
   }
 
   /** Drag down the gutter from one line number to another. The STEPS matter: a jump straight
    *  from one point to the other fires no move between them, and pierre would report one line. */
-  async function dragLines(page: Page, from: number, to: number) {
-    const start = await gutterLine(page, from).boundingBox();
-    const end = await gutterLine(page, to).boundingBox();
-    if (!start || !end) throw new Error(`no gutter line ${from} or ${to}`);
+  async function dragLines(page: Page, path: string, from: number, to: number) {
+    const start = await gutterLine(page, path, from).boundingBox();
+    const end = await gutterLine(page, path, to).boundingBox();
+    if (!start || !end) throw new Error(`no gutter line ${from} or ${to} in ${path}`);
     await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
     await page.mouse.down();
     await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 10 });
@@ -1244,9 +1318,9 @@ test.describe.serial("the GitLab merge-request page", () => {
     await openGitLab(page);
     await openMergeRequest(page, 596);
     await openDiffPage(page);
-    await waitForPatch(page);
-    await pickFile(page, "src/server/health.ts");
-    await waitForPatch(page);
+    await waitForFeed(page);
+    await pickFile(page, HEALTH);
+    await expect(feedFile(page, HEALTH)).toBeVisible();
   }
 
   test("a press on a line number opens a comment box under that line", async ({ page }) => {
@@ -1255,7 +1329,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     // Nothing is open until the reader asks: a box drawn by default would be a comment nobody
     // started.
     await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toHaveCount(0);
-    await gutterLine(page, 5).click();
+    await gutterLine(page, HEALTH, 5).click();
 
     const composer = page.locator('[data-testid="gitlab-diff-composer"]');
     await expect(composer).toBeVisible();
@@ -1276,19 +1350,19 @@ test.describe.serial("the GitLab merge-request page", () => {
     // Downwards, and then UPWARDS over the same lines: GitLab hangs a thread on the LAST line
     // of a range, so a pair left in pointer order would file an upward drag at the top of the
     // block and name the span backwards. Both gestures must say the same thing.
-    await dragLines(page, 3, 6);
+    await dragLines(page, HEALTH, 3, 6);
     const composer = page.locator('[data-testid="gitlab-diff-composer"]');
     await expect(composer).toHaveAttribute("data-lines", "Lines 3–6");
 
     await page.locator('[data-testid="gitlab-diff-comment-cancel"]').click();
-    await dragLines(page, 6, 3);
+    await dragLines(page, HEALTH, 6, 3);
     await expect(composer).toHaveAttribute("data-lines", "Lines 3–6");
     await page.locator('[data-testid="gitlab-diff-comment-cancel"]').click();
   });
 
   test("the comment lands as a thread on the lines it was written about", async ({ page }) => {
     await openHealthFile(page);
-    await dragLines(page, 3, 5);
+    await dragLines(page, HEALTH, 3, 5);
     await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toBeVisible();
 
     await page
@@ -1339,7 +1413,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     page,
   }) => {
     await openHealthFile(page);
-    await gutterLine(page, 5).click();
+    await gutterLine(page, HEALTH, 5).click();
     await page.locator('[data-testid="gitlab-diff-comment-input"]').fill("Refused, this one.");
 
     await setMergeRequestControl(page, {
@@ -1445,7 +1519,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     await openHealthFile(page);
     // A comment on a diff line is filed as a discussion, which is what makes it resolvable —
     // unlike a plain comment on the merge request, which GitLab answers 400 for.
-    await gutterLine(page, 5).click();
+    await gutterLine(page, HEALTH, 5).click();
     await page.locator('[data-testid="gitlab-diff-comment-input"]').fill("Worth settling.");
     await page.locator('[data-testid="gitlab-diff-comment-send"]').click();
 
@@ -1463,22 +1537,35 @@ test.describe.serial("the GitLab merge-request page", () => {
 
   test("offers no comment on a file with no line to point at", async ({ page }) => {
     await openHealthFile(page);
-    // A binary file has no patch, so there is nothing to press and nothing to place a comment
-    // against. The control is not drawn at all rather than drawn dead.
+    // A binary file has no patch, so it has no line to press and nothing to place a comment
+    // against. Its own item in the feed holds no gutter at all, rather than one drawn dead.
+    const binary = feedFile(page, "docs/diagrams/rollout.png");
     await pickFile(page, "docs/diagrams/rollout.png");
-    await expect(page.locator('[data-testid="gitlab-diff-file-notice"]')).toBeVisible();
-    await expect(page.locator('[data-testid="gitlab-diff-comment-affordance"]')).toHaveCount(0);
+    await expect(fileNotice(page, "docs/diagrams/rollout.png")).toBeVisible();
+    await expect(binary.locator("[data-column-number]")).toHaveCount(0);
+    await expect(binary.locator('[data-testid="gitlab-diff-comment-affordance"]')).toHaveCount(0);
   });
 
-  test("takes a half-written comment away with the file it was about", async ({ page }) => {
+  test("keeps a half-written comment where its own code is", async ({ page }) => {
     await openHealthFile(page);
-    await gutterLine(page, 5).click();
-    await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toBeVisible();
+    await gutterLine(page, HEALTH, 5).click();
+    const composer = page.locator('[data-testid="gitlab-diff-composer"]');
+    await expect(composer).toBeVisible();
+    await page.locator('[data-testid="gitlab-diff-comment-input"]').fill("Worth a note.");
 
-    // Walking to another file leaves the code the comment was about, so the box goes with it:
-    // a composer left open over unrelated code would name a line it is not about.
+    // The reader never LEAVES a file in a feed: pressing another row moves the feed, and the box
+    // stays under the line it is about, with the words still in it. It used to be thrown away,
+    // which was right while the page drew one file at a time and would now cost a half-written
+    // comment to a scroll.
     await pickFile(page, "charts/user-facing/values.yaml");
-    await expect(page.locator('[data-testid="gitlab-diff-composer"]')).toHaveCount(0);
+    await expect(composer).toHaveAttribute("data-lines", "Line 5");
+    await expect(page.locator('[data-testid="gitlab-diff-comment-input"]')).toHaveValue(
+      "Worth a note.",
+    );
+
+    // It goes when the reader says so, which is the one thing that takes it away.
+    await page.locator('[data-testid="gitlab-diff-comment-cancel"]').click();
+    await expect(composer).toHaveCount(0);
   });
 
   // ---- the pipeline is a GRAPH, and a page of its own ----------------------

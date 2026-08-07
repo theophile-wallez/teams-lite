@@ -1208,14 +1208,69 @@ helper); the Pipelines one has its own capture under § The pipeline is a GRAPH.
 
 ### The DIFF is a PAGE of its own (`/mr/<id>/diff`)
 
-The diff takes the WHOLE screen: the changed files down an inner left sidebar, one of them read
-on the right. It is the one part of this app drawn by somebody else's renderer —
-**`@pierre/trees`** for the tree ([trees.software](https://trees.software)) and
-**`@pierre/diffs`** for the patch ([diffs.com](https://diffs.com), Shiki underneath) — and the
+The diff takes the WHOLE screen: the changed files down an inner left sidebar, and every one of
+them read on the right as one FEED. It is the one part of this app drawn by somebody else's
+renderer — **`@pierre/trees`** for the tree ([trees.software](https://trees.software)) and
+**`@pierre/diffs`** for the patches ([diffs.com](https://diffs.com), Shiki underneath) — and the
 seam is where all the care is. `src/gitlab_mr.rs` holds the read and WRITES the patch,
 `web/src/lib/gitlab-diff.ts` every pure decision, `web/src/components/gitlab-diff-page.tsx` the
 page, `gitlab-changes.tsx` the one-line summary and the way in on the merge request above it,
 and `gitlab-diff-view.tsx` the whole of this app's contact with either package.
+
+**A review is READ BY SCROLLING, and the tree says where the reader is.** The right column holds
+every changed file one after another — GitLab's own shape — because a reviewer's question is "what
+does this branch do", which is answered by reading the files in order rather than by pressing a
+row for each. The two columns are a PAIR, and the two directions between them are what make it
+one: the row of the file at the top of the feed is lit (`activeDiffFeedFile`, over the renderer's
+own measured layout), and a press on a row brings that file to the top at once. Neither fetches
+anything — the whole diff arrives with the merge request, so a press is a scroll. The one
+exception to "the file at the top" is the file the reader ASKED for while the feed is pinned at
+its END: the last screenful holds several files and the scroll runs out before any of them
+reaches the top, so without it a press on any but one of them would light a row nobody pressed.
+Six rules hold the pair, and `web/e2e/gitlab.spec.ts` pins each:
+
+- **The FEED is the vendor's own `CodeView`, and choosing it over a virtualizer of this app's is
+  the whole design decision.** The room a file needs cannot be known before that file is
+  highlighted, which is what makes a hand-rolled virtual list wrong here: it would reserve a
+  guessed height, mount the file, measure it, and correct the scroll under the reader, once per
+  file, for 149 files. `CodeView` was built for this list — it reserves room from the line counts
+  its own parser read, mounts only what the viewport can hold, pools the elements it unmounts,
+  anchors the scroll while a measurement corrects a row above, and pre-warms the highlighter of a
+  file somebody jumped to. What stays this app's is the MEANING: which file the reader is at, and
+  when an item has really changed. The metrics it reserves room WITH are app.css's own
+  (`DIFF_FEED_METRICS`, measured against the rendered rows) — a stylesheet that changed the type
+  and left them behind would have every file measure differently from its estimate, and the
+  scrollbar would jump under the reader.
+- **A file with NO patch is still IN the feed** — a binary file, one GitLab collapsed. The tree
+  lists it, so a feed that skipped it would make the tree lie about where the reader is. It
+  becomes an item with no hunks, which is exactly what pierre's own parser returns for a pure
+  rename, and its header states why there is nothing under it (`FileHeaderNote`, in the
+  `renderHeaderMetadata` slot). Nothing here invents a patch to draw one with: writing git's own
+  header is the backend's job and happens in exactly one place.
+- **A REFLECTION is not a press, and in a feed that rule earns its keep every few seconds.** The
+  tree reports the row lighting itself and the row a reader pressed through one callback, so the
+  two are told apart by what the report SAYS: a press names exactly one row, and never the row
+  the page already says is current. Read wrong, the row lighting itself as the reader scrolled
+  came back as a press and threw them to the top of the diff every few files — and before that it
+  made the page unreachable on a phone (Back showed the files, mounting the tree reflected the
+  selection, and the patch took the screen again in the same frame). Exactly ONE row is lit, which
+  is why the old one is deselected first: the item's own `select()` ADDS, and an accumulating
+  selection is what reported that stale first path.
+- **An item is handed to the renderer again only when that file really CHANGED**
+  (`diffFeedVersions`, over `sameDiffFile`). Both halves of that bargain were got wrong once: a
+  version that does not move when the file did left the expanded read drawing the sentence that
+  stood in for the code, and a version that moves for nothing hands the renderer all 149 files
+  again — for one comment box, or for a background read that changed nothing. Every read is fresh
+  JSON several times a minute, so the comparison is by CONTENT.
+- **The feed is put where it opens once the renderer has DRAWN something** (`onPostRender`), at
+  the file the reader was last at on this merge request — and never at the first file, because a
+  feed already opens there. A programmatic scroll is HELD by the renderer until it can carry it
+  out, so one asked for too early is applied against a layout nothing has measured, and the
+  correction that follows puts the reader back at the top: a press that looks like it did nothing.
+- **A comment being written STAYS where its code is.** The reader never leaves a file in a feed,
+  so pressing another row moves the feed and leaves the box under the line it is about, with the
+  words still in it. It used to be thrown away, which was right while the page drew one file at a
+  time and would now cost a half-written comment to a scroll.
 
 **It is a page rather than a panel, and that shape is the point.** The diff was a section inside
 the merge request's scrolling article first, and that was wrong twice over: a 149-file tree and a
@@ -1231,33 +1286,28 @@ each:
   (`onDiffRoute` in `components/app.tsx`) rather than over them, so there is no overlay to
   dismiss and no third column competing with its own two.
 - **Each column scrolls ITSELF, and the page never scrolls.** The header stays, the tree keeps
-  its place while a patch is read, and a file picked after ten minutes of scrolling does not put
+  its place while the feed is read, and a file picked after ten minutes of scrolling does not put
   the reader back at the top of anything. That is what the `h-full` / `min-h-0` chain down both
   columns is for.
 - **A narrow screen is ONE column at a time** (`diffPageColumns`, at the app's own `md`
-  breakpoint): the files, then the file, with the header's own Back between them — the
+  breakpoint): the files, then the feed, with the header's own Back between them — the
   list-then-detail shape every other surface in this app takes below `md`. It OPENS on the files,
-  because that is the question a diff asks first. Narrowing a window mid-read keeps the PATCH,
+  because that is the question a diff asks first. Narrowing a window mid-read keeps the FEED,
   because taking away what somebody is reading is the one thing a resize must not do.
-- **ONE header names the file, and it is pierre's over a patch.** Theirs is inside the scroller,
-  sticky, and it already shows both names of a renamed file — the first capture of this page had
-  two headers three centimetres apart saying the same thing. What theirs cannot know, GitLab's
-  own `generated_file`, goes into the `renderHeaderMetadata` slot they publish for it (the REACT
-  prop — the `options` key of that name returns a DOM node). A file with NO patch has no header
-  of theirs at all, so the page draws its own over the sentence that stands in for the code.
-  `disableFileHeader: true` was tried the other way round and collapses their container to
-  nothing.
-- **The PANE states which file it holds** (`data-path` on `gitlab-diff-pane`), whatever draws
-  that file's name. One place to read "what is on screen" from — the sentinel discipline the
-  composer already follows for its conversation, and what every test and capture waits on.
-
-**A reflection is not a press, and that is what made the page reachable on a phone.** Lighting
-the row of the file already shown is a UI reflection; a reader pressing a row is a navigation —
-and pierre reports both through one `onSelectionChange`, off a store subscription that can fire a
-tick later. So the tree remembers the one path it selected itself and consumes it once
-(`reflected` in `gitlab-diff-view.tsx`); a synchronous flag would miss it. Without that guard
-Back showed the files, mounting the tree reflected the selection, the reflection came back as a
-press, and the patch took the screen again in the same frame — the files were unreachable.
+- **ONE header names each file, and it is pierre's.** Theirs is inside the scroller and STICKY,
+  which in a feed is what says whose code is under the reader's eye — and it already shows both
+  names of a renamed file. The first capture of this page had two headers three centimetres apart
+  saying the same thing, so this app draws none of its own: what theirs cannot know goes into the
+  `renderHeaderMetadata` slot they publish for it (the REACT prop — the `options` key of that name
+  returns a DOM node), which is GitLab's own `generated_file`, why a file has no code under it,
+  and WHICH file the item is (the element carries no path, and these slots are its own light-DOM
+  children, so it is the only place that can say). `disableFileHeader: true` was tried the other
+  way round and collapses their container to nothing.
+- **The PANE states which file the reader is AT** (`data-path` on `gitlab-diff-pane`) — the one
+  at the top of the feed, whose row the tree has lit. One place to read "where am I" from — the
+  sentinel discipline the composer already follows for its conversation, and what every test and
+  capture waits on. Each file's own header carries the same answer for itself
+  (`gitlab-diff-file[data-path]`), which is what scopes a line number to one file.
 
 **Every fact below was measured against the real instance** by
 `examples/merge_request_diff_recon.rs` — READ-ONLY, over 508 files on the 25 newest open merge
@@ -1352,8 +1402,9 @@ page names that file — so a comment on a line the diff does not show is never 
 which holds a patch, a pure rename, a binary file, a file GitLab collapsed and a generated one
 over several languages, plus `refuse_diff` on the `{kind:"gitlab_mr"}` hook — a spec MUST clear
 it). `cd web && bun run preview -- --out /tmp/diff --diff` captures the way in on the merge
-request, the page in both themes, the split layout, all three files with no patch, the expand
-control and what it hands over, and both of its columns at a phone's width. **No diff has been rendered from the real instance yet**:
+request, the page in both themes, the split layout, the feed SCROLLED with the tree's lit row
+following it, all three files with no patch, the expand control and what it hands over, and both
+of its columns at a phone's width. **No diff has been rendered from the real instance yet**:
 the reads are measured (above) and the surface is pinned against the mock, so what is untested
 is the pairing — one open of a real merge request in the user's own app.
 
@@ -1672,6 +1723,12 @@ act; what it does need is the rails below, because a position is a claim about W
   starts a selection only from the line-number gutter and follows the pointer to another number,
   so a press is one line and a drag is a span. Nothing here reimplements it. What this app adds
   is the MEANING of the answer, which is the one thing a diff renderer cannot know (below).
+- **Every gesture names its FILE**, because the diff is a feed of all of them: line 42 exists in
+  most of these files, so a range with no file would light one line in each and file the comment
+  against whichever the reader happened to be at. The item's id travels with the live selection
+  (`DiffLineSelection`), with the end of the gesture, and with the gutter's own press — which is
+  the shape the renderer's own `CodeViewLineSelection` takes, for that same reason — and the box
+  keeps that file until it is sent or cancelled, however far the reader has scrolled meanwhile.
 - **The box opens when the gesture ENDS, never during it.** A card drawn mid-drag inserts a row
   into the patch and moves the line numbers out from under the reader's own pointer — measured:
   it cut a drag from line 3 to line 6 short at line 4. So `onLineSelectionChange` only lights
@@ -1887,15 +1944,17 @@ user. Two independent mechanisms enforce that split:
   width, a 150-character title at both widths, the people rows in both of their shapes and a
   blocked merge:
   `bun run preview -- --out /tmp/mr --gitlab`, or `openGitLabTab` / `openMergeRequestAt` /
-  `openMergeRequestPage` from the same file. For its DIFF PAGE — the way in, the page in both themes, the split layout,
-  each of the three files with no patch, the expand control and what it hands over, and both of
-  its columns at a phone's width:
-  `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` from the same
-  file. For a COMMENT on a diff line — the affordance in the gutter, the box on one line, the
-  span a drag covers, the thread it lands as, a comment being rewritten and the fold a resolved
-  thread takes:
+  `openMergeRequestPage` from the same file. For its DIFF PAGE — the way in, the FEED in both
+  themes, the split layout, the feed scrolled with the tree's lit row following it, each of the
+  three files with no patch, the expand control and what it hands over, and both of its columns at
+  a phone's width:
+  `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` /
+  `scrollDiffFeed` / `diffFileItem` from the same file. For a COMMENT on a diff line — the
+  affordance in the gutter, the box on one line, the span a drag covers, the thread it lands as, a
+  comment being rewritten and the fold a resolved thread takes:
   `bun run preview -- --out /tmp/dc --diff-comment`, or `diffGutterLine` / `dragDiffLines` from
-  the same file (the drag is driven with the pointer, because the drag IS the feature).
+  the same file — each of which names the FILE it is about, because in a feed a line number does
+  not (the drag is driven with the pointer, because the drag IS the feature).
   For one JOB's LOG — the card that opens it, the page in both themes, every section folded, the
   filter, a cut log, a job that has not run, a live one and a refused read:
   `bun run preview -- --out /tmp/log --job-log`, or `openJobLog` from the same file.

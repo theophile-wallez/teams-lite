@@ -74,6 +74,13 @@ export type PierreLineRange = {
   endSide?: PierreSide;
 };
 
+/** The lines lit right now, and the FILE they are lit in.
+ *
+ *  The path is not decoration: the diff is a feed of every changed file, so line 42 exists in
+ *  several of them at once — a range with no file would light one line in each. It is also the
+ *  shape the renderer's own `CodeViewLineSelection` takes, for that same reason. */
+export type DiffLineSelection = { path: string; range: PierreLineRange };
+
 /** What the reader picked: the file, and the two ends in reading order. One line is both. */
 export type DiffCommentTarget = {
   /** The file's own path, as the tree and the diff pane key it. */
@@ -245,6 +252,20 @@ export function diffCommentsAvailable(
   return !!file?.patch && !!refs;
 }
 
+/** Which files of the FEED can carry a comment, by path.
+ *
+ *  The feed draws them all at once, so the question above has to be asked of each: a file with no
+ *  patch is offered no control at all rather than one drawn dead, and a diff whose commits this
+ *  page never read offers none anywhere. Empty is the honest answer for both. */
+export function diffCommentableFiles(
+  files: GitLabDiffFile[] | null | undefined,
+  refs: DiffRefs | null | undefined,
+): Set<string> {
+  const paths = new Set<string>();
+  for (const file of files ?? []) if (diffCommentsAvailable(file, refs)) paths.add(file.path);
+  return paths;
+}
+
 // ---- what the reader is told ------------------------------------------------
 
 /** The number one line wears in the gutter: its new-file one, or its old-file one when that
@@ -409,6 +430,29 @@ export function threadResolveAction(
         hint: "Mark this thread settled — everybody watching the merge request is told",
         resolved: true,
       };
+}
+
+/** What one card IS, in one string.
+ *
+ *  The feed hands a file to the renderer again only when that file's cards changed (see
+ *  `diffFeedVersions`), so this names everything a card DRAWS: which line it hangs on, the
+ *  conversation inside it, and whether that conversation is settled. A note is named by its id
+ *  AND by the moment it was last written, because a comment can be rewritten from its own card
+ *  (`noteWasEdited`) — an id alone would leave the reader looking at the words it replaced. */
+export function diffAnnotationKey(card: DiffAnnotationCard): string {
+  if (card.kind === "composer") {
+    const anchor = diffCommentAnchor(card.target);
+    return `composer:${anchor.side}:${anchor.lineNumber}:${card.target.first.row}`;
+  }
+  const thread = card.thread;
+  return [
+    "thread",
+    thread.discussionId,
+    thread.side,
+    thread.lineNumber,
+    thread.resolved ? "resolved" : "open",
+    thread.notes.map((note) => `${note.id}@${note.updated_at ?? note.created_at}`).join(","),
+  ].join(":");
 }
 
 /** Where an annotation for one PICKED range hangs: the anchor line, in the renderer's own

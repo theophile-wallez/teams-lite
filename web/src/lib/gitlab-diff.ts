@@ -225,6 +225,16 @@ export function expandDiffHint(diff: GitLabDiff | null): { label: string; hint: 
  *  they need no install of their own and the code and its chrome match by construction. */
 export const DIFF_THEMES = { light: "pierre-light", dark: "pierre-dark" } as const;
 
+/** What a row and a file header of a diff MEASURE, for the feed to reserve room with.
+ *
+ *  The renderer virtualizes the feed, so it has to know a file's height before that file is
+ *  mounted — and it can only know it from these numbers. They are `web/src/styles/app.css`'s
+ *  own (`--diffs-line-height`, and the header that font size and the padding make), which is
+ *  why they live beside {@link DIFF_THEMES} rather than inside the renderer's seam: a stylesheet
+ *  that changed the type and left these behind would leave a 900-line file reserving the wrong
+ *  room, and the scrollbar would jump under the reader as each file was measured. */
+export const DIFF_FEED_METRICS = { lineHeight: 19, diffHeaderHeight: 43, spacing: 8 } as const;
+
 /** How a diff is laid out. Pierre's own two words, kept as its own type because the choice
  *  is the reader's and is remembered per browser. */
 export type DiffLayout = "unified" | "split";
@@ -239,6 +249,118 @@ export const SPLIT_MIN_WIDTH = 900;
 
 export function effectiveDiffLayout(preferred: DiffLayout, width: number): DiffLayout {
   return width < SPLIT_MIN_WIDTH ? "unified" : preferred;
+}
+
+// ---- the FEED ---------------------------------------------------------------
+//
+// Every changed file is drawn one after another in one scroller, so a review is read by
+// scrolling rather than by pressing a row per file. Two facts about it are decisions rather
+// than plumbing, and both live here because both have to be testable without the renderer:
+// WHICH file the reader is at, and WHEN an item has to be handed to the renderer again.
+
+/** How far past the top of the viewport a file may start and still be the one being read.
+ *
+ *  A few pixels, because the file at the top of the screen IS the answer and a fractional
+ *  scroll position must not hand it to the file above. */
+export const DIFF_FEED_TOLERANCE = 8;
+
+/** Where one file of the feed begins, measured by the renderer. */
+export type DiffFeedTop = { path: string; top: number };
+
+/**
+ * The file the reader is at: the last one that begins at or above the top of the viewport.
+ *
+ * That is the file whose code fills the top of the screen, which is what the tree then lights —
+ * and it is the same answer a sticky file header gives, so the row and the header agree.
+ *
+ * **A file the feed CANNOT bring to the top is the one exception**, and it is what keeps a press
+ * honest. The last screenful of a diff holds several files at once, and the scroll runs out before
+ * any of them reaches the top — so the rule above would answer with whichever one happens to
+ * start above the fold, and a press on any of the others would light a row the reader did not
+ * press. While the feed is pinned at its end, a file the reader ASKED for and can see is the file
+ * they are at; scrolling away from it hands the question back to the rule above.
+ */
+export function activeDiffFeedFile(
+  tops: DiffFeedTop[],
+  scrollTop: number,
+  viewportHeight: number,
+  scrollHeight: number,
+  asked: string | null = null,
+): string | null {
+  if (tops.length === 0) return null;
+  // Within a pixel of the end: a scroll position is fractional on a device-pixel display.
+  const pinnedAtEnd = viewportHeight > 0 && scrollTop + viewportHeight >= scrollHeight - 1;
+  if (pinnedAtEnd && asked) {
+    const index = tops.findIndex((entry) => entry.path === asked);
+    // One file's room runs to where the next one begins, and the last one's to the end.
+    const top = index < 0 ? 0 : tops[index]!.top;
+    const bottom = index < 0 ? 0 : (tops[index + 1]?.top ?? scrollHeight);
+    if (index >= 0 && top < scrollTop + viewportHeight && bottom > scrollTop) return asked;
+  }
+  let current = tops[0]!.path;
+  for (const entry of tops) {
+    if (entry.top > scrollTop + DIFF_FEED_TOLERANCE) break;
+    current = entry.path;
+  }
+  return current;
+}
+
+/** Whether two reads describe the same file in the same state — every field that decides what is
+ *  drawn, the patch included.
+ *
+ *  It is a CONTENT comparison because a read is fresh JSON every time: a background refresh, a
+ *  poll, or a write's own re-read hands the page objects nobody has seen before, and almost all of
+ *  them say exactly what the last ones said. */
+export function sameDiffFile(a: GitLabDiffFile, b: GitLabDiffFile): boolean {
+  return (
+    a.path === b.path &&
+    a.old_path === b.old_path &&
+    a.change === b.change &&
+    a.patch === b.patch &&
+    a.additions === b.additions &&
+    a.deletions === b.deletions &&
+    a.binary === b.binary &&
+    a.collapsed === b.collapsed &&
+    a.generated === b.generated
+  );
+}
+
+/** What one file of the feed was last handed to the renderer as: the file itself, the cards on
+ *  it, and how many times either has changed. */
+export type DiffFeedVersion = { file: GitLabDiffFile; cards: string; version: number };
+
+/**
+ * The version number each file's item carries, moved for the files that really CHANGED.
+ *
+ * `@pierre/diffs`' own `CodeView` keeps the item snapshot it holds while the version is
+ * unchanged — which is what lets it hold a mounted, highlighted file still while the list around
+ * it is rebuilt. Both halves of that bargain matter, and each was got wrong once:
+ *
+ *   - a version that does NOT move when the file did leaves the renderer drawing the old file.
+ *     That is what the expanded read is: a file GitLab withheld comes back WITH its patch, under
+ *     the same path, and the feed went on showing the sentence explaining there was nothing to
+ *     see.
+ *   - a version that moves when nothing did hands the renderer all 149 files again — for one
+ *     comment box, or for a refresh that changed nothing.
+ *
+ * `cards` is what hangs under the file's lines, as one string (see `diffAnnotationKey`); the
+ * number is only ever the count of changes, because that is all the renderer compares.
+ */
+export function diffFeedVersions(
+  previous: Map<string, DiffFeedVersion>,
+  entries: { file: GitLabDiffFile; cards: string }[],
+): Map<string, DiffFeedVersion> {
+  const next = new Map<string, DiffFeedVersion>();
+  for (const entry of entries) {
+    const held = previous.get(entry.file.path);
+    const same = !!held && held.cards === entry.cards && sameDiffFile(held.file, entry.file);
+    next.set(entry.file.path, {
+      file: entry.file,
+      cards: entry.cards,
+      version: same ? held!.version : (held?.version ?? 0) + 1,
+    });
+  }
+  return next;
 }
 
 // ---- the page's own two columns ---------------------------------------------

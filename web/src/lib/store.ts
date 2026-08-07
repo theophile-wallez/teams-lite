@@ -118,7 +118,6 @@ import {
 } from "./call-failure";
 import {
   canExpandDiff,
-  selectDiffFile,
   type DiffDepth,
   type DiffLayout,
   type GitLabDiff,
@@ -128,6 +127,7 @@ import {
   diffCommentTarget,
   diffCommentsAvailable,
   type DiffCommentTarget,
+  type DiffLineSelection,
   type PierreLineRange,
 } from "./gitlab-diff-comment";
 import { jobLogIsLive } from "./gitlab-job-log";
@@ -598,8 +598,10 @@ export type AppState = {
   /** Reported inside the section rather than on the page: a diff that could not be read
    *  costs the Changes panel and nothing else, exactly as the comments do. */
   gitlabDiffError: string | null;
-  /** Which file the section is showing, or null for "whichever `selectDiffFile` picks".
-   *  Per merge request, so walking away and back keeps the file the reader was on. */
+  /** Which file the reader is AT in the diff's feed, or null for "whichever `selectDiffFile`
+   *  picks". It is what the file tree lights, and it moves two ways: a press on a row, and the
+   *  reader scrolling the feed past the top of another file. Per merge request, so walking away
+   *  and back opens where they stopped reading. */
   gitlabDiffPath: string | null;
   /** Whether the reader has asked for the expanded read of THIS merge request. Their ask,
    *  their merge request: it is not a preference, because the cost is per diff. */
@@ -613,8 +615,11 @@ export type AppState = {
    *  Kept apart from the composer below, and the split is load-bearing: the box has to open at
    *  the END of a gesture rather than during it. A card drawn mid-drag inserts a row into the
    *  patch, which moves the line numbers under the reader's own pointer — measured, and it cut
-   *  a drag from line 3 to line 6 short at line 4. */
-  gitlabDiffSelection: PierreLineRange | null;
+   *  a drag from line 3 to line 6 short at line 4.
+   *
+   *  It names its FILE, because the diff is a feed of all of them: a bare range would light line
+   *  42 of every file that has one. */
+  gitlabDiffSelection: DiffLineSelection | null;
   /** WHERE on the diff the reader is writing a comment: the file and the line — or the two
    *  ends of the range they dragged over — and null when they are not writing one. Set when a
    *  gesture ENDS. */
@@ -3573,29 +3578,31 @@ export class TeamsController {
     }
   }
 
-  /** Show one file of the open diff. */
+  /**
+   * The file the reader is at in the open diff — the row the tree lights, and where the page
+   * opens next time.
+   *
+   * It is written by a press on a row AND by the feed scrolling past the top of another file, so
+   * it must be cheap and it must touch nothing else: a comment being written stays where it is,
+   * because in a feed the reader never leaves the file it is about. It used to clear that
+   * composer, which was right while the page drew one file at a time and would now throw away a
+   * half-written comment for scrolling.
+   */
   setGitLabDiffFile(path: string): void {
+    if (this.get().gitlabDiffPath === path) return;
     const key = this.get().openMergeRequest;
     if (key) this.gitlabDiffPathCache.set(mergeRequestId(key), path);
-    // A comment being written is about a line of the file being left, so walking to another
-    // file takes it away. Keeping it would leave a composer open over code it is not about.
-    this.set({
-      gitlabDiffPath: path,
-      gitlabDiffSelection: null,
-      gitlabDiffComment: null,
-      gitlabDiffCommentDraft: "",
-      gitlabDiffCommentError: null,
-    });
+    this.set({ gitlabDiffPath: path });
   }
 
   // ---- a comment on a diff line ---------------------------------------------
 
-  /** The file the diff page is showing, which every rule about a comment on it is relative
-   *  to. One place to ask, so the store and the page can never disagree about which file a
-   *  line number belongs to. */
-  private openDiffFile() {
-    const state = this.get();
-    return selectDiffFile(state.gitlabDiff, state.gitlabDiffPath);
+  /** One file of the open diff, by its own path. Every rule about a comment is relative to the
+   *  file the GESTURE was made in — which in a feed is not the file the reader is at — so the
+   *  path travels with the gesture and this is the one place it is resolved. */
+  private diffFileAt(path: string | null | undefined) {
+    if (!path) return null;
+    return this.get().gitlabDiff?.files.find((file) => file.path === path) ?? null;
   }
 
   /**
@@ -3606,13 +3613,13 @@ export class TeamsController {
    * ({@link openGitLabDiffComment}), because a card drawn mid-drag inserts a row into the patch
    * and moves the line numbers under the reader's own pointer.
    */
-  setGitLabDiffSelection(range: PierreLineRange | null): void {
+  setGitLabDiffSelection(path: string, range: PierreLineRange | null): void {
     if (!range) {
       this.closeGitLabDiffComment();
       return;
     }
-    if (!diffCommentsAvailable(this.openDiffFile(), this.get().gitlabDetail?.diff_refs)) return;
-    this.set({ gitlabDiffSelection: range });
+    if (!diffCommentsAvailable(this.diffFileAt(path), this.get().gitlabDetail?.diff_refs)) return;
+    this.set({ gitlabDiffSelection: { path, range } });
   }
 
   /**
@@ -3626,14 +3633,15 @@ export class TeamsController {
    * A range that resolves to the lines already open is left alone, draft and all: a reader
    * dragging over the same lines twice has not asked for their words to be thrown away.
    */
-  openGitLabDiffComment(range: PierreLineRange | null): void {
+  openGitLabDiffComment(path: string, range: PierreLineRange | null): void {
     if (!range) {
       this.closeGitLabDiffComment();
       return;
     }
     const state = this.get();
-    if (!diffCommentsAvailable(this.openDiffFile(), state.gitlabDetail?.diff_refs)) return;
-    const target = diffCommentTarget(this.openDiffFile(), range);
+    const file = this.diffFileAt(path);
+    if (!diffCommentsAvailable(file, state.gitlabDetail?.diff_refs)) return;
+    const target = diffCommentTarget(file, range);
     if (!target) return;
     const open = state.gitlabDiffComment;
     if (
@@ -3645,7 +3653,7 @@ export class TeamsController {
       return;
     }
     this.set({
-      gitlabDiffSelection: range,
+      gitlabDiffSelection: { path, range },
       gitlabDiffComment: target,
       gitlabDiffCommentDraft: "",
       gitlabDiffCommentError: null,
@@ -3690,9 +3698,15 @@ export class TeamsController {
     // A reply lands in the thread it answers, which already hangs where it hangs; only a NEW
     // comment carries a position. Sending both is refused by the backend, so the page must
     // not build both.
+    // The file the COMMENT is about, never the one the reader has since scrolled to: the box
+    // stays open while the feed moves under it.
     const position = discussionId
       ? null
-      : diffCommentPosition(this.openDiffFile(), state.gitlabDetail?.diff_refs, state.gitlabDiffComment);
+      : diffCommentPosition(
+          this.diffFileAt(state.gitlabDiffComment?.path),
+          state.gitlabDetail?.diff_refs,
+          state.gitlabDiffComment,
+        );
     if (!discussionId && !position) {
       this.set({
         gitlabDiffCommentError: {

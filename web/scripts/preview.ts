@@ -537,11 +537,11 @@ export async function setPipelineGrouping(page: Page, grouping: "stage" | "needs
   await page.waitForTimeout(250);
 }
 
-/** Scroll the Changes section into view and wait for its diff to be drawn.
+/** Scroll the Changes section into view and wait for the diff FEED to be drawn.
  *
- *  The wait is for the PATCH rather than the section: the section paints from the read, and
- *  what takes time after that is the lazy chunk (`@pierre/diffs` carries Shiki) and then the
- *  grammar for the file's own language. A shot taken before both is a shot of the
+ *  The wait is for a file's own header rather than the feed's box: the box paints from the read,
+ *  and what takes time after that is the lazy chunk (`@pierre/diffs` carries Shiki) and then the
+ *  grammar for the first files' languages. A shot taken before both is a shot of the
  *  "Highlighting…" placeholder. */
 export async function openChanges(page: Page): Promise<void> {
   await page.locator('[data-testid="gitlab-review-changes"]').scrollIntoViewIfNeeded();
@@ -549,48 +549,83 @@ export async function openChanges(page: Page): Promise<void> {
   await page.waitForSelector('[data-testid="gitlab-diff-page"]', {
     timeout: APP_READY_TIMEOUT_MS,
   });
-  await page.waitForSelector('[data-testid="gitlab-diff-patch"]', {
+  // ATTACHED rather than visible: the header's sentinel is data — a file with nothing to say
+  // beside its name draws no ink at all, which is most files.
+  await page.waitForSelector('[data-testid="gitlab-diff-feed"] [data-testid="gitlab-diff-file"]', {
+    state: "attached",
     timeout: APP_READY_TIMEOUT_MS,
   });
-  // The highlighter resolves its grammar and theme asynchronously, so the element exists
-  // before it holds any code. One frame past that is what makes a capture readable.
+  // The highlighter resolves its grammar and theme asynchronously, so the rows exist before
+  // they hold any code. One frame past that is what makes a capture readable.
   await page.waitForTimeout(800);
 }
 
-/** Show one file of the open diff by clicking its row in the tree.
+/** Bring one file of the feed to the top by clicking its row in the tree.
  *
  *  The tree renders inside a shadow root, and Playwright's CSS engine pierces an open one — so
  *  this drives the row a reader would press rather than the store behind it. `data-item-path`
- *  is `@pierre/trees`' own attribute per row; the WAIT is on this app's own heading, which is
- *  what proves the click reached the page rather than only the tree.
+ *  is `@pierre/trees`' own attribute per row; the WAIT is on the PANE's own statement of which
+ *  file the reader is at, which is what proves the click reached the page rather than only the
+ *  tree.
  *
  *  What is asserted afterwards is always the app's own `[data-testid]`s. Reaching further into
  *  a vendor's markup would be a test of their release notes. */
 export async function pickDiffFile(page: Page, path: string): Promise<void> {
   await page.locator(`[data-item-path="${path}"]`).first().click();
-  // The PANE's own statement of what it holds, which is present whatever draws the file's name
-  // — pierre's header over a patch, this app's over a sentence.
   await page.waitForSelector(`[data-testid="gitlab-diff-pane"][data-path="${path}"]`, {
     timeout: APP_READY_TIMEOUT_MS,
   });
-  // A file whose language the highlighter has not loaded yet resolves one more grammar.
+  // A file whose language the highlighter has not loaded yet resolves one more grammar, and the
+  // feed has just scrolled to it.
   await page.waitForTimeout(600);
 }
 
 /**
- * One line NUMBER in the gutter of the open diff — where the comment gesture starts.
+ * Scroll the diff's feed the way a reader does — the wheel over the code.
  *
- * The number and the SIDE together, because in a unified diff an old line and a new line can
- * wear the same number: three lines down a change block, `3` is both the line that went and the
- * line that came. So the side is not decoration, and the default is the new one, which is what
- * a reviewer comments on.
+ * Through the pointer rather than by writing `scrollTop`, because the feed is virtualized: the
+ * renderer mounts what the viewport reaches, measures it, and holds the scroll anchored while it
+ * does. A capture taken after a scripted assignment can be a capture of a frame no reader ever
+ * sees.
+ */
+export async function scrollDiffFeed(page: Page, by: number): Promise<void> {
+  const feed = page.locator('[data-testid="gitlab-diff-feed"]');
+  await feed.hover();
+  await page.mouse.wheel(0, by);
+  // The renderer settles over a frame or two: it mounts the files the scroll reached, resolves
+  // their grammars and corrects the layout it had only estimated.
+  await page.waitForTimeout(900);
+}
+
+/**
+ * One FILE of the feed, as the renderer's own element.
+ *
+ * The element carries no path of its own, so it is found by the header slot this app renders
+ * into it (`gitlab-diff-file`, a light-DOM child of that element). It is what scopes a line
+ * number to one file, which in a feed of 149 files is the whole difference between commenting on
+ * the code the reader means and on line 42 of something else.
+ */
+export function diffFileItem(page: Page, path: string) {
+  return page
+    .locator(`diffs-container:has([data-testid="gitlab-diff-file"][data-path="${path}"])`)
+    .first();
+}
+
+/**
+ * One line NUMBER in the gutter of one file of the feed — where the comment gesture starts.
+ *
+ * The FILE, the number and the SIDE together. The file because the feed holds them all; the side
+ * because in a unified diff an old line and a new line can wear the same number: three lines
+ * down a change block, `3` is both the line that went and the line that came. So neither is
+ * decoration, and the side's default is the new one, which is what a reviewer comments on.
  *
  * `data-column-number` and `data-line-type` are `@pierre/diffs`' own attributes on a gutter
  * cell, and Playwright's CSS engine pierces the open shadow root they live in. Everything
- * ASSERTED afterwards is this app's own `[data-testid]` — the same line `pickDiffFile` draws.
+ * ASSERTED afterwards is this app's own `[data-testid]`.
  */
 export function diffGutterLine(
   page: Page,
+  path: string,
   line: number,
   side: "additions" | "deletions" = "additions",
 ) {
@@ -601,7 +636,7 @@ export function diffGutterLine(
   const selector = types
     .map((type) => `[data-column-number="${line}"][data-line-type="${type}"]`)
     .join(", ");
-  return page.locator(`[data-testid="gitlab-diff-patch"] :is(${selector})`).first();
+  return diffFileItem(page, path).locator(`:is(${selector})`).first();
 }
 
 /**
@@ -614,12 +649,13 @@ export function diffGutterLine(
  */
 export async function dragDiffLines(
   page: Page,
+  path: string,
   from: number,
   to: number,
   side: "additions" | "deletions" = "additions",
 ): Promise<void> {
-  const start = await diffGutterLine(page, from, side).boundingBox();
-  const end = await diffGutterLine(page, to, side).boundingBox();
+  const start = await diffGutterLine(page, path, from, side).boundingBox();
+  const end = await diffGutterLine(page, path, to, side).boundingBox();
   if (!start || !end) throw new Error(`[preview] no gutter line ${from} or ${to} to drag between`);
   await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
   await page.mouse.down();
@@ -2370,8 +2406,15 @@ if (import.meta.main) {
         await page.locator('[data-testid="gitlab-diff-layout-unified"]').click();
         await page.waitForTimeout(300);
 
+        // The FEED, scrolled: the reader is reading, and the tree's lit row followed them into
+        // whichever file the top of the screen now holds. That pairing is the whole feature, so
+        // the shot is the page — both columns — rather than either one of them.
+        await scrollDiffFeed(page, 2400);
+        await shot(`${out}-scrolled-light.png`);
+
         // The three files with NO patch, each of which says something different. The shot is
-        // the PATCH column, because the point of these three is the sentence in place of code.
+        // the FEED column, because the point of these three is the sentence in place of code —
+        // and each is reached the way a reader reaches it, by pressing its row.
         for (const [name, path] of [
           ["rename", "src/server/drain.ts"],
           ["binary", "docs/diagrams/rollout.png"],
@@ -2385,7 +2428,14 @@ if (import.meta.main) {
         // files column because that is a fact about that list.
         await shot(`${out}-expand-light.png`, '[data-testid="gitlab-diff-files"]');
         await page.locator('[data-testid="gitlab-diff-expand"]').click();
-        await page.waitForSelector('[data-testid="gitlab-diff-patch"]', { timeout: 15_000 });
+        // The file that was withheld now has a patch, and the way to look at it is the way a
+        // reader looks at any file: press its row. A file the feed has not reached is not in the
+        // page at all — that is what virtualized means — so the press is what brings it there.
+        await pickDiffFile(page, "bun.lock");
+        await page.waitForSelector(
+          '[data-testid="gitlab-diff-file"][data-path="bun.lock"][data-state="patch"]',
+          { state: "attached", timeout: 15_000 },
+        );
         await page.waitForTimeout(600);
         await shot(`${out}-expanded-light.png`);
 
@@ -2405,7 +2455,8 @@ if (import.meta.main) {
 
         console.log(
           `[preview] wrote ${out}-entry-light.png, ${out}-{light,dark}.png, ` +
-            `${out}-split-light.png, ${out}-{rename,binary,collapsed}-light.png, ` +
+            `${out}-split-light.png, ${out}-scrolled-light.png, ` +
+            `${out}-{rename,binary,collapsed}-light.png, ` +
             `${out}-expand-light.png, ${out}-expanded-light.png and ` +
             `${out}-mobile-{files,patch}-light.png`,
         );
@@ -2422,12 +2473,15 @@ if (import.meta.main) {
   // makes it: pressing a line number, and dragging from one line number to another. Both go
   // through the mock like every other write in this suite — nothing reaches a GitLab.
   if (args.includes("--diff-comment")) {
+    // The one file every gesture below is made in. In a feed a line number names nothing on its
+    // own, so the file travels with it — the rule the app itself follows.
+    const HEALTH_FILE = "src/server/health.ts";
     await withPreview(
       async ({ page, shot, setTheme }) => {
         await openGitLabTab(page);
         await openMergeRequestAt(page, 0);
         await openChanges(page);
-        await pickDiffFile(page, "src/server/health.ts");
+        await pickDiffFile(page, HEALTH_FILE);
 
         // The THREAD already on this file, and its span. It is a comment on lines 8–10 by a
         // colleague with the user's own reply under it, so the deletion that makes commenting
@@ -2440,12 +2494,12 @@ if (import.meta.main) {
 
         // The AFFORDANCE: hovering a line reveals the control that says a comment can go
         // there. It is pierre's own gutter slot, wearing this app's glyph.
-        await diffGutterLine(page, 5).hover();
+        await diffGutterLine(page, HEALTH_FILE, 5).hover();
         await page.waitForTimeout(200);
-        await shot(`${out}-affordance-light.png`, '[data-testid="gitlab-diff-patch"]');
+        await shot(`${out}-affordance-light.png`, '[data-testid="gitlab-diff-pane"]');
 
         // ONE LINE: a press on its number opens the box under it.
-        await diffGutterLine(page, 5).click();
+        await diffGutterLine(page, HEALTH_FILE, 5).click();
         await page.waitForSelector('[data-testid="gitlab-diff-composer"][data-lines="Line 5"]', {
           timeout: 10_000,
         });
@@ -2453,7 +2507,7 @@ if (import.meta.main) {
 
         // SEVERAL: a drag from one line number down to another, which is the half of the
         // gesture nobody discovers by looking — hence the hint on the control.
-        await dragDiffLines(page, 3, 6);
+        await dragDiffLines(page, HEALTH_FILE, 3, 6);
         await page.waitForSelector('[data-testid="gitlab-diff-composer"][data-lines="Lines 3–6"]', {
           timeout: 10_000,
         });
@@ -2508,7 +2562,7 @@ if (import.meta.main) {
         // And on a PHONE, where the box shares the screen with the code it is about.
         await page.setViewportSize({ width: 390, height: 844 });
         await page.waitForTimeout(600);
-        await diffGutterLine(page, 5).click();
+        await diffGutterLine(page, HEALTH_FILE, 5).click();
         await page.waitForSelector('[data-testid="gitlab-diff-composer"]', { timeout: 10_000 });
         await shot(`${out}-mobile-light.png`);
         await page.setViewportSize(VIEWPORT);

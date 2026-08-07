@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
@@ -10,36 +10,33 @@ import {
   Loading02Icon,
 } from "@hugeicons/core-free-icons";
 import {
-  diffFileNotice,
-  diffFileState,
   diffPageColumns,
   diffSummary,
   diffTruncationNotice,
   effectiveDiffLayout,
   expandDiffHint,
-  formatDiffStat,
   selectDiffFile,
   SPLIT_MIN_WIDTH,
   type DiffColumn,
   type DiffLayout,
-  type GitLabDiffFile,
 } from "~/lib/gitlab-diff";
 import {
   diffCommentAnchor,
-  diffCommentsAvailable,
+  diffCommentableFiles,
   diffThreadsFor,
 } from "~/lib/gitlab-diff-comment";
 import { mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
-import type { DiffAnnotation } from "./gitlab-diff-view";
+import type { DiffAnnotation, DiffFeedHandle } from "./gitlab-diff-view";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
 import { DiffLineComposer, DiffLineThread } from "./gitlab-diff-comments";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
 
-// The DIFF PAGE: the whole screen, the changed files down the left, one of them read on the
-// right. It is its own route (`/mr/<id>/diff` — see routes/_app.mr.$mergeRequestId.diff.tsx),
-// and the shell draws it over the app's own sidebar as well as its pane.
+// The DIFF PAGE: the whole screen, the changed files down the left, and every one of them read
+// on the right as one FEED. It is its own route (`/mr/<id>/diff` — see
+// routes/_app.mr.$mergeRequestId.diff.tsx), and the shell draws it over the app's own sidebar as
+// well as its pane.
 //
 // **It is a page rather than a panel, and that is the whole design.** The diff used to be a
 // section inside the merge request's scrolling article, which is the wrong shape for the one
@@ -49,13 +46,23 @@ import { MergeRequestPageStrip } from "./gitlab-mr-pages";
 // to a piece of component state: it survives a reload, it can be sent to a colleague, and the
 // browser's own Back leaves it.
 //
-// Six rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
+// **A review is read by SCROLLING, and the tree says where the reader is.** The right column
+// holds every changed file one after another — the shape GitLab's own diff page has — because a
+// reviewer's question is "what does this branch do", which is answered by reading the files in
+// order rather than by pressing a row for each. The two directions are what make it a pair
+// rather than two lists: the row of the file at the top of the feed is LIT
+// (`activeDiffFeedFile`, over the renderer's own measured layout), and a press on a row brings
+// that file to the top at once. Nothing is loaded per press — the whole diff is already read
+// (see § The DIFF is a PAGE), so the press is a scroll and the renderer holds the room for what
+// it has not highlighted yet.
+//
+// Seven rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
 //
 //   - **Each column scrolls ITSELF, and the page does not scroll at all.** The header stays,
-//     the tree keeps its place while a patch is read, and a file picked after ten minutes of
+//     the tree keeps its place while the feed is read, and a file picked after ten minutes of
 //     scrolling does not put the reader back at the top of a page. That is what the height
 //     chain is for: `h-full` and `min-h-0` down both columns, never a page that grows.
-//   - **A narrow screen is one column at a time** (`diffPageColumns`): the files, then the file
+//   - **A narrow screen is one column at a time** (`diffPageColumns`): the files, then the feed
 //     — the list-then-detail shape every other surface in this app takes below `md`, with the
 //     header's own Back between them. A tree beside a patch at 390 px is neither.
 //   - **The renderer is a LAZY chunk.** Shiki carries a grammar per language, so
@@ -69,17 +76,18 @@ import { MergeRequestPageStrip } from "./gitlab-mr-pages";
 //     in the FILES column, because it is a fact about that list.
 //   - **A diff that cannot be read says so and offers GitLab's own**, which is the one thing
 //     left: this page has no other content to fall back on.
+//   - **The PANE states which file the reader is at** (`data-path`), which is now the file the
+//     feed is scrolled to rather than the only one drawn. One place to read "what is on screen"
+//     from — the sentinel discipline the composer already follows for its conversation.
 
-// The tree and the patch: the only two things here that need a renderer, and the only two
+// The tree and the feed: the only two things here that need a renderer, and the only two
 // imports of the chunk that carries Shiki. Two `lazy` calls over ONE module is deliberate — the
 // bundler memoizes `import()`, so the second resolves out of the module registry rather than
 // asking for the chunk twice, and each column gets to suspend on its own.
 const DiffFileTree = lazy(() =>
   import("./gitlab-diff-view").then((m) => ({ default: m.DiffFileTree })),
 );
-const DiffFilePatch = lazy(() =>
-  import("./gitlab-diff-view").then((m) => ({ default: m.DiffFilePatch })),
-);
+const DiffFeed = lazy(() => import("./gitlab-diff-view").then((m) => ({ default: m.DiffFeed })));
 
 /** Everything the page reads out of the store, in one place. */
 function useDiffState() {
@@ -115,27 +123,51 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
   const effective = effectiveDiffLayout(layout, width);
   const expand = expandDiffHint(diff);
 
-  // What hangs under a line of this file: every thread already there, and the composer for the
-  // comment being written. One list, because the renderer takes one — and the composer is put
-  // LAST so that a reader who picks the line a thread is already on gets the box under it
-  // rather than above it.
-  const commentable = diffCommentsAvailable(file, detail?.diff_refs);
-  const threads = useMemo(() => diffThreadsFor(file, notes), [file, notes]);
-  const openComment = comment && file && comment.path === file.path ? comment : null;
+  // What hangs under a line, per file: every thread already there, and the composer for the
+  // comment being written. Per FILE because the feed holds them all, and one list per file
+  // because the renderer takes one per item — with the composer LAST, so a reader who picks the
+  // line a thread is already on gets the box under it rather than above it.
+  const commentable = useMemo(
+    () => diffCommentableFiles(diff?.files, detail?.diff_refs),
+    [diff, detail?.diff_refs],
+  );
   const annotations = useMemo(() => {
-    const rows: DiffAnnotation[] = threads.map((thread) => ({
-      side: thread.side,
-      lineNumber: thread.lineNumber,
-      metadata: { kind: "thread", thread },
-    }));
-    if (openComment) {
-      rows.push({
-        ...diffCommentAnchor(openComment),
-        metadata: { kind: "composer", target: openComment },
-      });
+    const byPath = new Map<string, DiffAnnotation[]>();
+    for (const file of diff?.files ?? []) {
+      const rows: DiffAnnotation[] = diffThreadsFor(file, notes).map((thread) => ({
+        side: thread.side,
+        lineNumber: thread.lineNumber,
+        metadata: { kind: "thread", thread },
+      }));
+      if (comment && comment.path === file.path) {
+        rows.push({
+          ...diffCommentAnchor(comment),
+          metadata: { kind: "composer", target: comment },
+        });
+      }
+      if (rows.length > 0) byPath.set(file.path, rows);
     }
-    return rows;
-  }, [threads, openComment]);
+    return byPath;
+  }, [diff, notes, comment]);
+
+  // A press in the tree: the row is lit at once, and the feed is TOLD to bring that file up.
+  // Telling it is an event rather than a piece of state — see `DiffFeedHandle`. On a narrow screen
+  // the feed is not mounted while the reader is in the files column, so there is nothing to tell:
+  // it opens at the file this press just made the current one (`openAt` below).
+  const feed = useRef<DiffFeedHandle | null>(null);
+  const showFile = useCallback(
+    (picked: string) => {
+      controller.setGitLabDiffFile(picked);
+      feed.current?.showFile(picked);
+    },
+    [controller],
+  );
+  // The file the reader scrolled to. It moves the tree's own highlight and the pane's sentinel,
+  // and it is remembered per merge request — so coming back opens where they stopped reading.
+  const noteActiveFile = useCallback(
+    (active: string) => controller.setGitLabDiffFile(active),
+    [controller],
+  );
 
   return (
     <section
@@ -233,9 +265,10 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
                       diff={diff}
                       selected={file?.path ?? null}
                       onPick={(picked) => {
-                        controller.setGitLabDiffFile(picked);
-                        // On a narrow screen a pick is a navigation: the file the reader chose
-                        // takes the screen, exactly as opening a chat does.
+                        // The feed scrolls to it. On a narrow screen the pick is also a
+                        // navigation: the file the reader chose takes the screen, exactly as
+                        // opening a chat does.
+                        showFile(picked);
                         setColumn("patch");
                       }}
                     />
@@ -274,12 +307,11 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
               </div>
             )}
 
-            {/* THE PATCH. Its own column and its own scroll, so the tree beside it never moves
-                while a nine-hundred-line file is read. */}
-            {/* The pane STATES which file it holds, whatever draws that file's name — pierre's own
-                header over a patch, this app's over a sentence. One place to read "what is on
-                screen" from, which is the sentinel discipline the composer already follows for its
-                conversation. */}
+            {/* THE FEED. Its own column and its own scroll, so the tree beside it never moves
+                while nine hundred lines are read. */}
+            {/* The pane STATES which file the reader is AT — the one at the top of the feed, whose
+                row the tree has lit. One place to read "what is on screen" from, which is the
+                sentinel discipline the composer already follows for its conversation. */}
             {columns.patch && (
               <div
                 data-testid="gitlab-diff-pane"
@@ -287,34 +319,30 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
                 data-change={file?.change}
                 className="flex min-h-0 min-w-0 flex-1 flex-col"
               >
-                {/* A file with a PATCH is named by pierre's own header, inside the scroller and
-                    sticky — see `DiffFilePatch`. One with no patch has no header of theirs at
-                    all, so this app draws one over the sentence that stands in for the code. */}
-                {file?.patch ? (
-                  <div className="min-h-0 flex-1 overflow-auto">
-                    <Suspense fallback={<DiffLoading label="Highlighting…" />}>
-                      <DiffFilePatch
-                        patch={file.patch}
-                        layout={effective}
-                        theme={theme}
-                        generated={file.generated}
-                        commentable={commentable}
-                        selection={selection}
-                        onSelectionChange={(range) => controller.setGitLabDiffSelection(range)}
-                        onSelectionEnd={(range) => controller.openGitLabDiffComment(range)}
-                        annotations={annotations}
-                        renderAnnotation={renderDiffAnnotation}
-                      />
-                    </Suspense>
-                  </div>
-                ) : (
-                  file && (
-                    <div className="min-h-0 flex-1 overflow-auto">
-                      <FileHeading file={file} />
-                      <FileNotice file={file} />
-                    </div>
-                  )
-                )}
+                {/* Every file is named by pierre's own header, inside the scroller and sticky, so
+                    the name above the code is always the code's own — see `DiffFeed`. */}
+                <div className="min-h-0 flex-1">
+                  <Suspense fallback={<DiffLoading label="Highlighting…" />}>
+                    <DiffFeed
+                      diff={diff}
+                      layout={effective}
+                      theme={theme}
+                      commentable={commentable}
+                      selection={selection}
+                      onSelectionChange={(path, range) =>
+                        controller.setGitLabDiffSelection(path, range)
+                      }
+                      onSelectionEnd={(path, range) =>
+                        controller.openGitLabDiffComment(path, range)
+                      }
+                      annotations={annotations}
+                      renderAnnotation={renderDiffAnnotation}
+                      onActiveFile={noteActiveFile}
+                      openAt={file?.path ?? null}
+                      ref={feed}
+                    />
+                  </Suspense>
+                </div>
               </div>
             )}
           </div>
@@ -336,53 +364,6 @@ function renderDiffAnnotation(annotation: DiffAnnotation) {
     <DiffLineThread thread={metadata.thread} />
   ) : (
     <DiffLineComposer target={metadata.target} />
-  );
-}
-
-/** Which file is on screen, and what it costs in lines.
- *
- *  A rename says both of its names, because "what happened to this file" is the one thing a
- *  moved file's patch header states and a tree row cannot. */
-function FileHeading(props: { file: GitLabDiffFile | null }) {
-  const file = props.file;
-  if (!file) return null;
-  const stat = formatDiffStat(file);
-  return (
-    <p
-      data-testid="gitlab-diff-file"
-      data-path={file.path}
-      data-change={file.change}
-      className="flex shrink-0 flex-wrap items-baseline gap-x-2 border-b border-border-subtle px-4 py-2 font-mono text-[12px] text-text-dim"
-    >
-      {file.old_path && (
-        <span className="text-text-faint">
-          <span className="line-through">{file.old_path}</span> →
-        </span>
-      )}
-      <span className="min-w-0 break-all text-foreground">{file.path}</span>
-      {stat && <span className="tabular-nums text-text-faint">{stat}</span>}
-      {file.generated && (
-        <span className="rounded bg-element px-1.5 py-px font-sans text-[10px] text-text-faint">
-          generated
-        </span>
-      )}
-    </p>
-  );
-}
-
-/** Why a file has no patch, when that is the case. Nothing for a rename — a rename's patch IS
- *  its header, so the renderer draws it and there is nothing to explain. */
-function FileNotice(props: { file: GitLabDiffFile }) {
-  const notice = diffFileNotice(props.file);
-  if (!notice) return null;
-  return (
-    <p
-      data-testid="gitlab-diff-file-notice"
-      data-state={diffFileState(props.file)}
-      className="p-6 text-[13px] text-text-faint"
-    >
-      {notice}
-    </p>
   );
 }
 
