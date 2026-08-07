@@ -4628,6 +4628,142 @@ function mockDiscussionList(mr: MockMergeRequest): Record<string, unknown> {
   return { discussions: mr.discussions, truncated: false };
 }
 
+// ---- one job's LOG ----------------------------------------------------------
+//
+// The page a job card opens (§ A job's LOG is a page). The fixture below is written the way the
+// RUNNER writes one, because that is the whole of what the page has to read: the marker with its
+// carriage return and erase, sections that NEST (a project's own `pnpm_section` inside
+// `step_script`), a progress line rewritten in place, and SGR colour — every one of them measured
+// by `examples/job_trace_recon.rs` (48 of 58 logs carry sections, 48 of 48 a bare carriage return,
+// 35 856 SGR sequences in all).
+//
+// Four states are reachable here, because each says something different on screen: a FAILED job
+// with a rich log, a RUNNING one whose log grows on every read (which is what makes "following"
+// reviewable with no CI at all), a `manual` one with NO log, and a log too big to travel whole.
+
+const ESC = "\u001b";
+/** One line the way the runner writes a section marker: the marker, a return, the erase, and then
+ *  the section's own heading. */
+function mockSection(kind: "start" | "end", at: number, name: string, heading = ""): string {
+  return `section_${kind}:${at}:${name}\r${ESC}[0K${heading}`;
+}
+
+/** The log of the job that FAILED. Everything the renderer has to draw, once. */
+const MOCK_FAILED_TRACE = [
+  mockSection("start", 1_754_400_000, "prepare_executor", `${ESC}[0;mPreparing the "docker" executor`),
+  `Using Docker executor with image ${ESC}[1mnode:22-alpine${ESC}[0m`,
+  "Pulling docker image node:22-alpine ...",
+  mockSection("end", 1_754_400_009, "prepare_executor"),
+  mockSection("start", 1_754_400_009, "get_sources", `${ESC}[32;1m$ git fetch --depth 50${ESC}[0;m`),
+  "Checking out e2607442 as detached HEAD...",
+  mockSection("end", 1_754_400_013, "get_sources"),
+  mockSection("start", 1_754_400_013, "step_script", `${ESC}[32;1m$ pnpm install --frozen-lockfile${ESC}[0;m`),
+  mockSection("start", 1_754_400_014, "pnpm_section", "Resolving 812 packages"),
+  // One line rewritten in place, which is what a progress bar is: only the last of these shows.
+  `Progress: 12%\rProgress: 48%\r${ESC}[0KProgress: 100%`,
+  `${ESC}[38;5;208mwarn${ESC}[0m two peer dependencies are unmet`,
+  mockSection("end", 1_754_400_061, "pnpm_section"),
+  mockSection("start", 1_754_400_061, "unit_tests_section", `${ESC}[32;1m$ pnpm vitest run${ESC}[0;m`),
+  " ✓ src/lib/gitlab-mr.test.ts (34 tests) 118ms",
+  " ✓ src/lib/gitlab-diff.test.ts (41 tests) 204ms",
+  ` ${ESC}[31m✗${ESC}[0m src/lib/gitlab-job-log.test.ts (19 tests | 1 failed)`,
+  `   ${ESC}[31;1mAssertionError${ESC}[0m: expected 4 to be 26`,
+  `    at ${ESC}[36msrc/lib/gitlab-job-log.test.ts:54:11${ESC}[0m`,
+  mockSection("end", 1_754_400_142, "unit_tests_section"),
+  mockSection("end", 1_754_400_142, "step_script"),
+  mockSection("start", 1_754_400_142, "upload_artifacts_on_failure", "Uploading artifacts..."),
+  "coverage/: found 214 matching artifact files and directories",
+  mockSection("end", 1_754_400_148, "upload_artifacts_on_failure"),
+  mockSection("start", 1_754_400_148, "cleanup_file_variables", "Cleaning up project directory"),
+  mockSection("end", 1_754_400_149, "cleanup_file_variables"),
+  `${ESC}[31;1mERROR: Job failed: exit code 1${ESC}[0;m`,
+  "",
+].join("\n");
+
+/** The log of the RUNNING job, as the lines it has written so far. Each read of it adds one, so
+ *  the page can be watched following a live log with no CI anywhere. */
+const MOCK_RUNNING_LINES = [
+  mockSection("start", 1_754_400_200, "prepare_executor", `${ESC}[0;mPreparing the "docker" executor`),
+  "Using Docker executor with image node:22-alpine",
+  mockSection("end", 1_754_400_206, "prepare_executor"),
+  mockSection("start", 1_754_400_206, "step_script", `${ESC}[32;1m$ pnpm vitest run${ESC}[0;m`),
+  " ✓ src/lib/protocol.test.ts (52 tests) 96ms",
+  " ✓ src/lib/rich-text.test.ts (88 tests) 141ms",
+  " ✓ src/lib/agent-run.test.ts (26 tests) 88ms",
+  " ✓ src/lib/call-stage.test.ts (31 tests) 74ms",
+  ` ${ESC}[32m✓${ESC}[0m src/lib/gitlab-pipeline-graph.test.ts (23 tests) 61ms`,
+];
+
+/** How many lines of the running job's log have been handed out so far. It only ever grows, like
+ *  a real one — and the `{kind:"gitlab_mr", clear:true}` hook puts it back, because one mock
+ *  process serves the whole run. */
+let mockRunningLogLines = 5;
+
+/** When set, the JOB LOG read fails with this sentence. Its own switch beside the diff's, for the
+ *  same reason: this page IS that read, so a refusal has to be reachable on its own. */
+let mockGitLabJobLogRefusal: string | null = null;
+
+/** When set, the JOB answers in full and its LOG does not — the shape GitLab takes when a trace
+ *  file is gone (404 on the trace, 200 on the job). Its own switch, because the page must say that
+ *  rather than "this job printed nothing": one is a fact about the job, the other about this app. */
+let mockGitLabTraceRefusal: string | null = null;
+
+/** When true, the job log answers as the TAIL of something much bigger — the state a reader has to
+ *  be told about, because the top of the log is missing and no Range read can ask for it. */
+let mockGitLabJobLogTruncated = false;
+
+function resetMockJobLogs(): void {
+  mockRunningLogLines = 5;
+  mockGitLabJobLogRefusal = null;
+  mockGitLabTraceRefusal = null;
+  mockGitLabJobLogTruncated = false;
+}
+
+/** One job's log, the way the backend answers it (`gitlab_mr::JobLog`). */
+function mockJobLog(mr: MockMergeRequest, jobId: number): Record<string, unknown> {
+  const job = mr.pipeline?.jobs.find((candidate) => candidate.id === jobId);
+  if (!job) throw new Error("GitLab has no job there, or the token cannot see it");
+  const finished = job.status === "success" || job.status === "failed" || job.status === "canceled";
+  const trace =
+    job.status === "failed"
+      ? MOCK_FAILED_TRACE
+      : job.status === "running"
+        ? `${MOCK_RUNNING_LINES.slice(0, Math.min(mockRunningLogLines++, MOCK_RUNNING_LINES.length)).join("\n")}\n`
+        : job.status === "success"
+          ? `${MOCK_RUNNING_LINES.join("\n")}\n${ESC}[32;1mJob succeeded${ESC}[0;m\n`
+          : // `manual`, `created`, `skipped`: GitLab answers 200 with an empty body, and the page
+            // says WHY rather than drawing a blank screen.
+            "";
+  return {
+    job: {
+      id: job.id,
+      name: job.name,
+      stage: job.stage,
+      status: job.status,
+      allow_failure: job.allow_failure,
+      ...(job.duration === undefined ? {} : { duration: job.duration }),
+      ...(finished || job.status === "running"
+        ? {
+            queued_duration: 2.7,
+            started_at: agoIso(6),
+            runner: "shared-runner-04 (docker)",
+          }
+        : {}),
+      ...(finished ? { finished_at: agoIso(3) } : {}),
+      ...(job.status === "failed" ? { failure_reason: "script_failure" } : {}),
+      created_at: agoIso(8),
+      web_url: `${mockMergeRequestUrl(mr)}/jobs/${job.id}`,
+      pipeline_id: mr.pipeline?.id,
+    },
+    trace: mockGitLabTraceRefusal ? "" : trace,
+    // GitLab's own byte count, which is bigger than what travelled whenever a log was cut.
+    bytes: mockGitLabJobLogTruncated ? 4_194_304 : trace.length,
+    truncated: mockGitLabJobLogTruncated && trace.length > 0 && !mockGitLabTraceRefusal,
+    complete: finished,
+    ...(mockGitLabTraceRefusal ? { trace_error: mockGitLabTraceRefusal } : {}),
+  };
+}
+
 // ---- the diff ---------------------------------------------------------------
 //
 // The Changes section reads what a merge request changed, and the mock has to reproduce every
@@ -7475,6 +7611,18 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     // unknown name is refused here too rather than quietly read as the cheap one — a page
     // served the plain diff for the expanded read it asked for would report the files GitLab
     // withheld as files GitLab withheld twice.
+    // ONE job's LOG, for the page a job card opens. The biggest read on this surface, and the one
+    // whose freshness the ANSWER decides: `complete` is what the page polls on.
+    case "gitlab_mr_job_log": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const jobId = requireNumber(params, "job_id");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabJobLogRefusal) throw new Error(mockGitLabJobLogRefusal);
+      return mockJobLog(mr, jobId);
+    }
+
     case "gitlab_mr_diff": {
       const projectPath = requireString(params, "project_path");
       const iid = requireNumber(params, "iid");
@@ -8812,6 +8960,9 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         mockGitLabTokenMissing = false;
         mockGitLabDiffRefusal = null;
         mockGitLabUploadRefusal = null;
+        // Every job log goes back too: the running one's length grows on each read, so a spec
+        // that wants to watch a live log has to start from a known number of lines.
+        resetMockJobLogs();
         // The live pipeline goes back to its first frame too: every read moves it on, so a
         // spec that wants to WATCH it move has to start from a known one.
         resetMockLivePipeline();
@@ -8822,6 +8973,10 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       mockGitLabDiffRefusal = typeof body.refuse_diff === "string" ? body.refuse_diff : null;
       mockGitLabUploadRefusal =
         typeof body.refuse_upload === "string" ? body.refuse_upload : null;
+      mockGitLabJobLogRefusal =
+        typeof body.refuse_job_log === "string" ? body.refuse_job_log : null;
+      mockGitLabTraceRefusal = typeof body.refuse_trace === "string" ? body.refuse_trace : null;
+      mockGitLabJobLogTruncated = body.truncate_job_log === true;
       return Response.json(
         {
           ok: true,
@@ -8829,6 +8984,9 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           no_token: mockGitLabTokenMissing,
           refuse_diff: mockGitLabDiffRefusal,
           refuse_upload: mockGitLabUploadRefusal,
+          refuse_job_log: mockGitLabJobLogRefusal,
+          refuse_trace: mockGitLabTraceRefusal,
+          truncate_job_log: mockGitLabJobLogTruncated,
         },
         { status: 200 },
       );

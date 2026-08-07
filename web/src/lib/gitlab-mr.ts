@@ -101,6 +101,55 @@ export type GitLabPipelineView = {
   stages?: string[];
 };
 
+/** Mirrors `gitlab_mr::JobDetail`: one job in full, as the log page's header states it.
+ *
+ *  Wider than `GitLabJob`, which is a card in a graph. Every field GitLab omits until a job has
+ *  really run is optional here for the same reason it is there — a `manual` job carries no
+ *  runner, no timing and no reason, and drawing "0s" over one would state something GitLab did
+ *  not say (measured: 48 of 58 jobs carried a runner and its timings, 2 a failure reason). */
+export type GitLabJobDetail = {
+  id: number;
+  name: string;
+  stage: string;
+  status: string;
+  allow_failure: boolean;
+  duration?: number;
+  /** How long the job waited for a runner — the difference between a slow job and a busy fleet. */
+  queued_duration?: number;
+  web_url?: string;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  /** GitLab's own word for why it failed: `script_failure`, `job_execution_timeout`,
+   *  `runner_system_failure`. The one thing a log cannot always say for itself — a job killed for
+   *  taking too long ends mid-sentence with nothing to explain it. */
+  failure_reason?: string;
+  /** What ran it, as the runner describes itself. */
+  runner?: string;
+  /** When somebody ERASED the log, which is why a finished job can have none. */
+  erased_at?: string;
+  pipeline_id?: number;
+};
+
+/** Mirrors `gitlab_mr::JobLog`: one job's log, with the job it belongs to. */
+export type GitLabJobLog = {
+  job: GitLabJobDetail;
+  /** The log as the runner wrote it — ANSI and section markers included. The page parses both
+   *  (`lib/gitlab-job-log.ts`); empty when the job produced none. */
+  trace: string;
+  /** How many bytes GitLab holds, which is more than `trace` when it was cut. */
+  bytes: number;
+  /** Whether `trace` is the TAIL of a longer log. */
+  truncated: boolean;
+  /** Whether the job has finished, so its log will never change again. It decides whether the
+   *  page keeps re-reading — see `jobLogIsLive`. */
+  complete: boolean;
+  /** Why the LOG could not be read, when the job itself could. It is the difference between
+   *  "this job printed nothing" and "this app does not know what it printed" — see
+   *  `jobLogUnreadable`. */
+  trace_error?: string;
+};
+
 /** Mirrors `gitlab_mr::MergeRequestDetail`. */
 export type MergeRequestDetail = {
   project_path: string;

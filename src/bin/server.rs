@@ -14,7 +14,7 @@
 //          | get_settings | set_settings | set_always_available | enrich_link
 //          | gitlab_approvals | gitlab_set_approval
 //          | gitlab_mr_list | gitlab_mr_detail | gitlab_mr_notes | gitlab_mr_pipeline
-//          | gitlab_mr_diff | gitlab_mr_upload
+//          | gitlab_mr_diff | gitlab_mr_upload | gitlab_mr_job_log
 //          | gitlab_mr_merge | gitlab_mr_comment | gitlab_mr_delete_comment
 //          | gitlab_mr_edit_comment | gitlab_mr_resolve_thread | gitlab_mr_set_state
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
@@ -86,7 +86,7 @@
 //
 // The `gitlab_mr_*` methods are the MERGE-REQUEST PAGE (see `gitlab_mr` for the reads,
 // `gitlab_mr_write` for the writes, and AGENTS.md § The GitLab page). The reads — `list`,
-// `detail`, `notes`, `pipeline`, `diff` — are open like every other read and answer from a durable
+// `detail`, `notes`, `pipeline`, `diff`, `job_log` — are open like every other read and answer from a durable
 // response cache (`gitlab_reads`) before they ask GitLab, so the page paints from disk and
 // refreshes behind itself. `upload` is the sixth read and the one that carries BYTES: a picture
 // a description or a comment points at, fetched with the token the browser does not hold, so
@@ -5423,6 +5423,25 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }))
         }
 
+        // ONE job's LOG, for the page a job card opens. The biggest read here and the one whose
+        // freshness swings widest: while the job runs it is polled like the pipeline, and the
+        // moment it stops it never changes again — which is why its window is decided by the
+        // answer rather than stated here (see `GitLabTtl`). The job is addressed by its own id,
+        // as GitLab addresses one; the merge request travels so the entry sits under its prefix.
+        "gitlab_mr_job_log" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let job_id = gitlab_job_id(params)?;
+            let refresh = params.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            gitlab_cached(
+                ctx,
+                gitlab_mr::cache_key(&project_path, iid, &gitlab_mr::job_cache_kind(job_id)),
+                GitLabTtl::JobLog,
+                refresh,
+                GitLabRead::JobLog { project_path, iid, job_id },
+            )
+            .await
+        }
+
         // ---- the merge-request page: the four writes -------------------------
         //
         // Each is an `OUTWARD_METHODS` entry: the write token, refused by a read-only
@@ -6832,6 +6851,54 @@ const GITLAB_PIPELINE_TTL: Duration = Duration::from_secs(5);
 /// either way: a push moves the `sha` the detail carries within 30 s, and the reader's own
 /// Reload asks for a fresh one.
 const GITLAB_DIFF_TTL: Duration = Duration::from_secs(120);
+/// A job's log while the job is still RUNNING: the live one, beside the pipeline's own and for
+/// its reason — a reader watching a job work wants the line that just arrived.
+const GITLAB_JOB_LOG_LIVE_TTL: Duration = Duration::from_secs(5);
+/// A job's log once the job has FINISHED. A settled log never changes again — a retry is a new
+/// job with a new id, so it is a different cache entry — which is why this window is a day
+/// rather than a minute: re-opening a red job costs nothing, and this is the biggest read on
+/// the page (up to 1 MiB, against a diff's half). Only an ERASE can falsify it, which is a
+/// manual act on GitLab's side, and the reader's own Reload asks again.
+const GITLAB_JOB_LOG_SETTLED_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long a cached GitLab answer stays fresh.
+///
+/// Four of the six reads have a window that is a constant, and they say so by being one
+/// ([`From<Duration>`]). A job's LOG is the one whose window depends on the answer itself: the
+/// same read is the liveliest on the page while a job runs and final the moment it stops, and
+/// only the payload knows which. Deciding it from a client's claim would be the same answer
+/// with a way to get it wrong.
+#[derive(Clone, Copy)]
+enum GitLabTtl {
+    Fixed(Duration),
+    JobLog,
+}
+
+impl From<Duration> for GitLabTtl {
+    fn from(window: Duration) -> Self {
+        Self::Fixed(window)
+    }
+}
+
+impl GitLabTtl {
+    /// The window this cached answer is fresh for.
+    ///
+    /// A payload that does not say whether its job finished is read as UNFINISHED — the live
+    /// window — because an answer from an older build must not be cached for a day on the
+    /// strength of a field it never carried.
+    fn window(self, cached: &Value) -> Duration {
+        match self {
+            Self::Fixed(window) => window,
+            Self::JobLog => {
+                if cached.get("complete").and_then(Value::as_bool).unwrap_or(false) {
+                    GITLAB_JOB_LOG_SETTLED_TTL
+                } else {
+                    GITLAB_JOB_LOG_LIVE_TTL
+                }
+            }
+        }
+    }
+}
 
 /// One read of the merge-request page, and everything needed to make it again.
 ///
@@ -6846,6 +6913,10 @@ enum GitLabRead {
     Notes { project_path: String, iid: u64 },
     Pipeline { project_path: String, iid: u64 },
     Diff { project_path: String, iid: u64, depth: gitlab_mr::DiffDepth },
+    /// ONE job's log. The merge request travels for the cache prefix alone — GitLab addresses a
+    /// job by its own id — so a write to the merge request drops its jobs' logs with everything
+    /// else about it.
+    JobLog { project_path: String, iid: u64, job_id: u64 },
 }
 
 impl GitLabRead {
@@ -6893,6 +6964,11 @@ impl GitLabRead {
                         .await?
                 )
             }
+            Self::JobLog { project_path, job_id, .. } => {
+                json!(
+                    gitlab_mr::fetch_job_log(&ctx.http, host, token, project_path, *job_id).await?
+                )
+            }
         })
     }
 
@@ -6930,6 +7006,13 @@ impl GitLabRead {
                     "kind": depth.cache_kind(),
                 }),
             ),
+            // WHICH job is in the payload's own `job.id`, so the kind names the READ. A page
+            // watching one job's log ignores a frame about another for that reason, exactly as
+            // the list ignores a frame about another filter.
+            Self::JobLog { project_path, iid, .. } => (
+                "gitlab_mr_updated",
+                json!({ "project_path": project_path, "iid": iid, "kind": "job" }),
+            ),
         }
     }
 }
@@ -6945,10 +7028,11 @@ impl GitLabRead {
 async fn gitlab_cached(
     ctx: &Ctx,
     key: String,
-    ttl: Duration,
+    ttl: impl Into<GitLabTtl>,
     refresh: bool,
     read: GitLabRead,
 ) -> Result<Value> {
+    let ttl = ttl.into();
     let mut value = None;
     if !refresh {
         let cached = {
@@ -6959,7 +7043,7 @@ async fn gitlab_cached(
         // shape must not serve the old one for a minute.
         if let Some((payload, age)) = cached {
             if let Ok(parsed) = serde_json::from_str::<Value>(&payload) {
-                if age > ttl.as_millis() as i64 {
+                if age > ttl.window(&parsed).as_millis() as i64 {
                     let ctx_bg = ctx.clone();
                     let key_bg = key.clone();
                     let read_bg = read.clone();
@@ -7188,6 +7272,19 @@ fn gitlab_merge_request_params(params: &Value) -> Result<(String, u64)> {
         .filter(|iid| *iid > 0)
         .context("`iid` must be the merge request's number")?;
     Ok((project_path, iid))
+}
+
+/// WHICH job a log read is about, checked for shape.
+///
+/// A job id becomes a path segment, so it is read as a NUMBER rather than forwarded as a
+/// string: the rule the iid above already follows, and what stops a client from steering this
+/// read at another endpoint of the project it names.
+fn gitlab_job_id(params: &Value) -> Result<u64> {
+    params
+        .get("job_id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)
+        .context("`job_id` must be the job's own id")
 }
 
 /// Refuse a note that is not the user's OWN, before anything is written to it.
@@ -10680,6 +10777,7 @@ mod tests {
             "gitlab_mr_notes",
             "gitlab_mr_pipeline",
             "gitlab_mr_diff",
+            "gitlab_mr_job_log",
         ] {
             assert_eq!(write_class(read), None, "{read} is a read");
             assert!(check_write_allowed(read, &json!({}), None).is_ok(), "{read}");
@@ -10777,6 +10875,49 @@ mod tests {
         // cost one request between them rather than two.
         assert!(GITLAB_PIPELINE_TTL >= Duration::from_secs(2));
         assert!(GITLAB_PIPELINE_TTL <= Duration::from_secs(10));
+    }
+
+    /// A job's LOG is the one read whose window the ANSWER decides: it is polled like the
+    /// pipeline while the job runs, and never changes again the moment the job stops.
+    ///
+    /// The unfinished window is what an unanswered `complete` reads as, because an answer from
+    /// an older build must not be cached for a day on the strength of a field it never carried.
+    #[test]
+    fn a_job_logs_window_is_the_pipelines_until_the_job_stops() {
+        let live = GitLabTtl::JobLog;
+        assert_eq!(live.window(&json!({ "complete": true })), GITLAB_JOB_LOG_SETTLED_TTL);
+        assert_eq!(live.window(&json!({ "complete": false })), GITLAB_JOB_LOG_LIVE_TTL);
+        assert_eq!(live.window(&json!({})), GITLAB_JOB_LOG_LIVE_TTL);
+        assert_eq!(live.window(&json!({ "complete": "yes" })), GITLAB_JOB_LOG_LIVE_TTL);
+
+        // A running job's log is as live as the pipeline that holds it — one window, so a
+        // reader watching a job work is never served a staler line than the card that sent
+        // them there — and a finished one is the longest-lived answer on the page.
+        assert_eq!(GITLAB_JOB_LOG_LIVE_TTL, GITLAB_PIPELINE_TTL);
+        assert!(GITLAB_JOB_LOG_SETTLED_TTL > GITLAB_DIFF_TTL);
+
+        // Every other read still says its window by BEING one, so this type cannot quietly
+        // change what the four constants mean.
+        assert_eq!(GitLabTtl::from(GITLAB_LIST_TTL).window(&json!({})), GITLAB_LIST_TTL);
+    }
+
+    /// A job is addressed by its own id, read as a number.
+    ///
+    /// The id becomes a path segment, so a string would be a way to steer this read at another
+    /// endpoint of the project — the rule the merge request's own iid already follows.
+    #[test]
+    fn a_job_log_is_addressed_by_the_jobs_own_number() {
+        assert_eq!(gitlab_job_id(&json!({ "job_id": 1_284_501 })).unwrap(), 1_284_501);
+        for bad in [
+            json!({}),
+            json!({ "job_id": 0 }),
+            json!({ "job_id": -3 }),
+            json!({ "job_id": "1284501" }),
+            json!({ "job_id": "1284501/artifacts" }),
+            json!({ "job_id": null }),
+        ] {
+            assert!(gitlab_job_id(&bad).is_err(), "{bad} must be refused");
+        }
     }
 
     /// A list read is a closed set on both axes, and its default is the sidebar's own.

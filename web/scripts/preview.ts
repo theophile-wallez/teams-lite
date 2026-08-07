@@ -40,6 +40,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/pipe --pipeline    # its pipeline graph
 //   bun run web/scripts/preview.ts --out /tmp/diff --diff       # the Changes section
 //   bun run web/scripts/preview.ts --out /tmp/dc --diff-comment # a comment on a diff line
+//   bun run web/scripts/preview.ts --out /tmp/log --job-log     # one CI job's log
 //   bun run web/scripts/preview.ts --out /tmp/links --links      # Linear + GitLab link cards
 //   bun run web/scripts/preview.ts --out /tmp/img --image       # the picture lightbox
 //   bun run web/scripts/preview.ts --out /tmp/pics --compose-images # several pending images
@@ -486,6 +487,24 @@ export async function openMergeRequestPage(
   await page.waitForSelector(`[data-testid="gitlab-mr-pages"][data-page="${name}"]`, {
     timeout: APP_READY_TIMEOUT_MS,
   });
+}
+
+/**
+ * Open one JOB's LOG from the pipeline page, by the job's own name, and wait for its lines.
+ *
+ * A card is a LINK (the graph holds no buttons — see `gitlab-pipeline-graph.tsx`), so this is a
+ * navigation: what it waits for is the log page's own container plus a first row, because the read
+ * is a round trip and a capture taken before it lands is a capture of "Reading the log…".
+ */
+export async function openJobLog(page: Page, jobName: string): Promise<void> {
+  await page.locator(`[data-testid="gitlab-pipeline-job"][data-name="${jobName}"]`).click();
+  await page.waitForSelector('[data-testid="gitlab-job-log-page"]', {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  await page
+    .locator('[data-testid="gitlab-job-log-line"], [data-testid="gitlab-job-log-empty"]')
+    .first()
+    .waitFor({ timeout: APP_READY_TIMEOUT_MS });
 }
 
 /** Open the PIPELINE page of the open merge request, and wait for its graph.
@@ -2201,6 +2220,114 @@ if (import.meta.main) {
           `[preview] wrote ${out}-panel-{light,dark}.png, ${out}-needs-{light,dark}.png, ` +
             `${out}-focused-light.png, ${out}-stage-light.png, ${out}-stage-plain-light.png, ` +
             `${out}-jobs-light.png, ${out}-mobile-light.png and ${out}-failed-{light,dark}.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // ONE JOB's LOG: the page a job card opens. Everything the renderer has to draw is in the
+  // mock's own trace — sections that NEST, ANSI colour over 16 names and the 256-colour cube, a
+  // progress line rewritten in place — plus the three states that are not a log at all: a job
+  // that has not run, a log too big to travel whole, and a read that was refused.
+  if (args.includes("--job-log")) {
+    await withPreview(
+      async ({ page, shot, setTheme, emit }) => {
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 1);
+        await openPipelinePage(page);
+
+        // The way IN: a card in the graph, which is a link to the log rather than a trip out to
+        // GitLab. Cropped to one card — pass `--dpr 4` to read its own words.
+        const card = '[data-testid="gitlab-pipeline-job"][data-status="failed"]';
+        await page.locator(card).first().hover();
+        await page.waitForTimeout(250);
+        await shot(`${out}-card-light.png`, card);
+
+        // THE PAGE, on the job that failed: the sections the runner wrote, the colours it wrote
+        // them in, and what the job cost above them.
+        await page.mouse.move(4, 4);
+        const failed = (await page.locator(card).first().getAttribute("data-name")) ?? "";
+        await openJobLog(page, failed);
+        await page.waitForTimeout(300);
+        await shot(`${out}-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`);
+        await setTheme("light");
+
+        // FOLDED: every section shut, which is the shape a reader scans a long run in — each row
+        // says what its section is called and what it cost.
+        await page.locator('[data-testid="gitlab-job-log-fold-all"]').click();
+        await page.waitForTimeout(250);
+        await shot(`${out}-folded-light.png`);
+        await page.locator('[data-testid="gitlab-job-log-fold-all"]').click();
+        await page.waitForTimeout(250);
+
+        // FILTERED: the lines that say `error`, each keeping the log's own line number — which is
+        // what takes the reader back into the log in place.
+        await page.locator('[data-testid="gitlab-job-log-search"]').fill("error");
+        await page.waitForTimeout(300);
+        await shot(`${out}-filtered-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-filtered-dark.png`);
+        await setTheme("light");
+        await page.locator('[data-testid="gitlab-job-log-search-clear"]').click();
+
+        // A PHONE: one column, sideways scrolling for a long line, and the header's own controls
+        // still on screen.
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(400);
+        await shot(`${out}-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+        await page.waitForTimeout(400);
+
+        // A log too big to travel whole: what is on screen is its END, and the whole of it is in
+        // GitLab — this instance refuses a Range read, so there is nothing here to ask with.
+        await emit({ kind: "gitlab_mr", truncate_job_log: true });
+        await page.locator('[data-testid="gitlab-job-log-reload"]').click();
+        await page.waitForSelector('[data-testid="gitlab-job-log-truncated"]');
+        await shot(`${out}-truncated-light.png`);
+        await emit({ kind: "gitlab_mr", clear: true });
+
+        // A job that has not RUN: its empty log is a state, and the page says which one rather
+        // than drawing a blank screen.
+        await page.goBack();
+        await page.waitForSelector('[data-testid="gitlab-pipeline-page"]');
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 0);
+        await openPipelinePage(page);
+        await page.mouse.move(4, 4);
+        await openJobLog(page, "🚀 deploy staging");
+        await shot(`${out}-empty-light.png`);
+
+        // A LIVE one: the log is followed as its lines arrive, and the page says it is.
+        await page.goBack();
+        await page.waitForSelector('[data-testid="gitlab-pipeline-page"]');
+        await openJobLog(page, "🧪 unit");
+        await page.waitForTimeout(400);
+        await shot(`${out}-live-light.png`);
+
+        // And a read that was REFUSED: this page IS that read, so the failure is the whole screen
+        // and it offers the one thing left.
+        await emit({
+          kind: "gitlab_mr",
+          refuse_job_log: "GitLab refused: this account may not read the job's log",
+        });
+        await page.locator('[data-testid="gitlab-job-log-reload"]').click();
+        await page.waitForTimeout(600);
+        await page.reload();
+        await page.waitForSelector('[data-testid="gitlab-job-log-error"]', {
+          timeout: APP_READY_TIMEOUT_MS,
+        });
+        await shot(`${out}-refused-light.png`);
+        await emit({ kind: "gitlab_mr", clear: true });
+
+        console.log(
+          `[preview] wrote ${out}-card-light.png, ${out}-{light,dark}.png, ` +
+            `${out}-folded-light.png, ${out}-filtered-{light,dark}.png, ` +
+            `${out}-mobile-light.png, ${out}-truncated-light.png, ${out}-empty-light.png, ` +
+            `${out}-live-light.png and ${out}-refused-light.png`,
         );
       },
       { deviceScaleFactor: dpr },

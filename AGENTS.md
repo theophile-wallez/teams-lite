@@ -701,16 +701,18 @@ real GitLab project**: doing that is the user's own click, in their own app.
 The sidebar's fifth tab is GitLab: the merge requests that are **not merged**, and one of
 them in full — its description, its live pipeline, its approvals, its comments — with the actions
 GitLab's own page offers, and its **diff** on a full-screen page of its own (§ The DIFF is a PAGE).
-One merge request is FOUR pages, named by a sub-header (§ The four PAGES of a merge request).
+One merge request is FOUR pages, named by a sub-header (§ The four PAGES of a merge request), and
+one JOB of its pipeline is a fifth surface under them (§ A job's LOG is a page of its own).
 `src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs` the six writes,
 `web/src/lib/gitlab-mr.ts` the pure decisions the surface is built from (`gitlab-diff.ts` the
-diff's own, `gitlab-mr-pages.ts` the page set's, and `gitlab-pipeline-graph.ts` the pipeline
-graph's), and `web/src/components/gitlab-sidebar.tsx` / `gitlab-pane.tsx` draw it.
+diff's own, `gitlab-mr-pages.ts` the page set's, `gitlab-pipeline-graph.ts` the pipeline graph's,
+and `gitlab-job-log.ts` a job log's), and `web/src/components/gitlab-sidebar.tsx` /
+`gitlab-pane.tsx` draw it.
 
 **The split between the two backend modules is the whole safety story**, and it is the one
 in § The trackers: reading a tracker is what the feature is for, and writing to one is the
-user's own click. The six reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`,
-`_upload`) are open like every other read; the six writes (`gitlab_mr_merge`, `_comment`,
+user's own click. The seven reads (`gitlab_mr_list`, `_detail`, `_notes`, `_pipeline`, `_diff`,
+`_upload`, `_job_log`) are open like every other read; the six writes (`gitlab_mr_merge`, `_comment`,
 `_edit_comment`, `_delete_comment`, `_resolve_thread`, `_set_state`) are `OUTWARD_METHODS`
 entries — the write token, refused read-only, and the automation hook refuses a command line, a
 script or a cargo example that names their endpoints. `_comment` covers three shapes of ONE act
@@ -1110,9 +1112,10 @@ one page at a time without moving anything the reader has learned. Six rules hol
   to a `useState`: a page survives a reload, it can be sent to a colleague, and the browser's
   own Back leaves it. That is the rule the diff already earned its own route with, applied to
   all four — so `/mr/<id>` IS the Overview, and the other three hang off it.
-- **The strip is on ALL FOUR, the full-screen diff included.** A sub-header that named the
+- **The strip is on ALL FOUR, the full-screen diff included** — and on a JOB's log, which hangs
+  under Pipelines and keeps it current (§ A job's LOG is a page). A sub-header that named the
   pages of a merge request and then vanished on one of them would leave the reader with a Back
-  button where they wanted a Commits tab. It is one component drawn twice, so there is one
+  button where they wanted a Commits tab. It is one component drawn everywhere, so there is one
   spelling of the four routes.
 - **It is drawn as soon as a merge request is OPEN, before its detail arrives.** The URL
   already says which merge request the pages belong to, and a strip that waited on a read
@@ -1430,10 +1433,14 @@ Eight rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
   dependency layout on one answers a STAGE layout — a single column holding every job is not a
   graph, and the reader asked to see structure. `canGroupByNeeds` resolves the names for that
   reason: a `needs` naming a bridge is a dependency nothing can be drawn for.
+- **A card OPENS THAT JOB'S LOG** (§ A job's LOG is a page), which is the one thing anybody wants
+  after a red card. It stays an `<a>` with a real address, so the rule below holds and a modified
+  click still opens a second window; GitLab's own job page is one press further, in the log's own
+  header.
 - **NOTHING here writes.** GitLab's own graph puts a RETRY on every card; this app reads
   trackers, and the writes it offers are elsewhere behind their own consent gates
-  (§ The trackers). A card is a link to the job in GitLab and holds no control at all — the spec
-  counts the buttons inside the graph and expects none.
+  (§ The trackers). So a card is a LINK and holds no control at all — the spec counts the buttons
+  inside the graph and expects none.
 - **JOBS are a second view of one read, not a second surface.** The graph answers "what is the
   shape of this run"; the list answers "what took four minutes", down one column with no
   sideways scroll — which is the better one on a phone. The old stage list therefore still
@@ -1495,6 +1502,105 @@ both groupings, the curves off, one job pointed at, the jobs list, a phone's wid
 run in both themes. **The graph has never been drawn from the real instance**: the reads are
 measured above and the surface is pinned against the mock, so what is untested is the pairing —
 one open of a real merge request in the user's own app.
+
+### A job's LOG is a page of its own (`/mr/<id>/jobs/<jobId>`)
+
+Pressing a job card on the Pipelines page opens **that job's log**, full screen: the sections the
+runner wrote, the colours it wrote them in, and what each part cost. A red card says a job failed,
+and the only thing anybody wants next is why — which used to be a trip out to GitLab.
+`src/gitlab_mr.rs` holds the read (`fetch_job_log`), `web/src/lib/gitlab-job-log.ts` every pure
+decision, and `web/src/components/gitlab-job-log-page.tsx` draws it.
+
+**It is a page for the diff's own reasons.** A log measured 4 238 lines and 510 KB here, with one
+line 22 129 bytes wide: that has no room in a column which also carries a description, a pipeline,
+the actions and a conversation — and reading a red job is somewhere a reader STAYS. So it is a
+ROUTE, and the three things that come with one are not available to a piece of state: it survives a
+reload, it can be sent to whoever is asking why CI is red, and the browser's own Back leaves it. It
+hangs UNDER the Pipelines page rather than joining the strip of four — a job is a detail of a run,
+so the sub-header keeps Pipelines current and Back leaves the log for the run.
+
+**Every fact this rests on is MEASURED** by `examples/job_trace_recon.rs` — READ-ONLY, over 58 jobs
+of the 12 newest open merge requests, printing counts, field names and byte sizes and never
+anybody's log:
+
+    cargo run --example job_trace_recon
+
+Measured 2026-08-07 on `git.sia.partners`, and each number decides something:
+
+- **The trace is `text/plain` with a length on every answer** (58/58), so it is the one read here
+  that is not JSON and has a reader of its own (`read_text`).
+- **A RANGE READ IS REFUSED**: no `accept-ranges` anywhere, and a `Range` request was answered
+  `200` with the whole log 48 times out of 48. So a log too big to travel cannot be asked for in
+  pieces — the only choice is WHICH end travels, and it is the **TAIL** (`tail_of`, cut on a line
+  boundary because half a line is half an escape sequence). `MAX_TRACE_BYTES` is 1 MiB, twice the
+  largest measured, and a cut log SAYS it is showing its end with GitLab's own page one press away.
+- **It is small until it is not**: median 11 KB, p90 148 KB, largest 510 KB; median 192 lines,
+  largest 4 238. That is why the rows are virtualized — over `@tanstack/react-virtual`, the one the
+  chat history, the mail list and the merge-request sidebar already use, because a second
+  virtualization library for the fifth list in this app is the icon-set mistake in another
+  vocabulary.
+- **A job with NO log answers 200 with an empty body** (10 of 58, all `manual` or `created`), never
+  a 404 — so an empty log is a STATE, and the page says which one (`emptyJobLogReason`): a job that
+  has not started will have a log later, an ERASED one never will, and one that ran and printed
+  nothing is a third thing again. **A log this app could not READ is none of those**: the job and
+  the trace are two requests and only the second can fail on its own (GitLab answers 404 for a
+  trace file it has dropped), so the reason travels beside the job (`trace_error`,
+  `jobLogUnreadable`) and is stated instead. "This job printed nothing" is a claim about the job,
+  and this app must not make it on the strength of a read that failed.
+- **`failure_reason` is present only on a job that failed** (2 of 58), and `runner`, `started_at`,
+  `finished_at` and `queued_duration` only once a job has run (48 of 58). Every one is optional, and
+  a `manual` job is drawn without them rather than with a zero.
+
+Nine rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
+
+- **The window is decided by the ANSWER, not by the caller.** The same read is the liveliest on this
+  page while a job runs and final the moment it stops, so `GitLabTtl::JobLog` reads `complete` off
+  the payload: 5 s (the pipeline's own window) while the job is unfinished, 24 h once it is — a
+  retry is a new job with a new id, so a settled log can never be stale. An answer that does not say
+  is read as UNFINISHED, because an older build's payload must not be cached for a day on the
+  strength of a field it never carried.
+- **The page polls exactly while the job has not finished** (`jobLogIsLive`), and it FOLLOWS the
+  newest line only while the reader is at the bottom — the rule the agent transcript already holds.
+  Leaving the page stops the poll, so a log nobody is looking at asks GitLab nothing.
+- **A MARKER IS READ BEFORE THE CARRIAGE RETURN THAT FOLLOWS IT.** The runner writes
+  `section_start:<ts>:<name>`, then `\r`, then an erase, then the section's own heading — so a parse
+  that resolved the rewrite first erases the marker with it and finds no sections at all. Order is
+  the whole of that bug, and a test pins it.
+- **Sections NEST, and a fold takes the whole subtree.** 48 of 58 logs carry 5 to 9 sections, and
+  `step_script` holds sections a project's own `.gitlab-ci.yml` emitted — so the parse keeps a
+  STACK, and `visibleLogLines` climbs to the OUTERMOST folded ancestor: a child left visible under a
+  folded parent is a row with nothing above it to place it. A folded section keeps its opening line
+  and states what it COST, from the two markers' own timestamps.
+- **A bare carriage return means the runner rewrote the line in place** (48 of 48 logs), so a line
+  shows its last segment and the progress bar before it is gone. Only two escape kinds exist here —
+  35 856 SGR and 1 444 erase-line, and no cursor move at all — so nothing here models a screen.
+- **The ANSI is `anser`'s** (MIT, no dependencies), asked for `use_classes`: WHAT a colour means
+  belongs to `app.css`, so each theme keeps a palette a reader can read and a terminal's own
+  `#000000` never lands on a white page. Only the 256-colour cube and truecolor resolve to a value
+  in the component, because neither can be a class. It is parsed per VISIBLE row: sixty rows on
+  screen against four thousand in the log.
+- **It never WRAPS, and the line numbers never leave.** A 22 KB line wrapped is 200 rows of one
+  line, which makes every row's height a measurement and the scrollbar a guess — so the page scrolls
+  SIDEWAYS like a terminal and the gutter is sticky against it.
+- **A search FILTERS.** "Which lines say `error`" is the question in 4 000 lines, and scrolling to a
+  tinted word is not an answer to it. Every kept row carries the log's OWN line number, the count is
+  stated (a filter that found nothing looks exactly like a log that arrived empty), and pressing a
+  row's number clears the filter and takes the reader to that line in place.
+- **Nothing here writes.** GitLab's own job page offers Retry, Cancel and Erase; this app reads
+  trackers, and the writes it offers are elsewhere behind their own consent gates (§ The trackers).
+  So the card that opens this page stays an `<a>` — the graph holds no button at all, and its spec
+  counts them — and GitLab's own job page is one press further, in this page's header.
+
+`web/mock/server.ts` reproduces the whole surface with no GitLab and no token: its trace is written
+the way the runner writes one (nested sections, a progress line rewritten in place, 16-colour and
+256-colour SGR), the RUNNING job's log grows by a line on every read — which is what makes
+"following" reviewable with no CI anywhere — a `manual` job answers an empty one, and the
+`{kind:"gitlab_mr"}` hook arms `truncate_job_log` and `refuse_job_log` (a spec MUST clear it, since
+one mock process serves the whole run). `cd web && bun run preview -- --out /tmp/log --job-log`
+captures the card, the page in both themes, every section folded, the filter in both themes, a
+phone's width, a cut log, a job that has not run, a live one and a refused read. **No real log has
+been drawn from the instance yet**: the reads are measured above and the surface is pinned against
+the mock, so what is untested is the pairing — one press on a job card in the user's own app.
 
 ### A comment on a diff LINE (a press on a line number, or a drag over several)
 
@@ -1739,6 +1845,9 @@ user. Two independent mechanisms enforce that split:
   thread takes:
   `bun run preview -- --out /tmp/dc --diff-comment`, or `diffGutterLine` / `dragDiffLines` from
   the same file (the drag is driven with the pointer, because the drag IS the feature).
+  For one JOB's LOG — the card that opens it, the page in both themes, every section folded, the
+  filter, a cut log, a job that has not run, a live one and a refused read:
+  `bun run preview -- --out /tmp/log --job-log`, or `openJobLog` from the same file.
   For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
@@ -3183,8 +3292,9 @@ user's. What changes is only what is asked.
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
-  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its six reads (the DIFF
-  among them, whose unified patch this app writes over GitLab's bare hunks) in
+  `src/gitlab.rs` and `src/linear.rs`), the merge-request PAGE — its seven reads (the DIFF
+  among them, whose unified patch this app writes over GitLab's bare hunks, and one JOB's LOG,
+  whose cache window the answer itself decides — see § A job's LOG is a page) in
   `src/gitlab_mr.rs` over a durable response cache, what each CI job WAITS FOR in
   `src/gitlab_ci_graph.rs` (the one GraphQL read in this app, and query-only by construction —
   see § The pipeline is a GRAPH) and its six writes in `src/gitlab_mr_write.rs`, plus who a

@@ -19,6 +19,7 @@ import { Route as AppMrMergeRequestIdIndexRouteImport } from './routes/_app.mr.$
 import { Route as AppMrMergeRequestIdCommitsRouteImport } from './routes/_app.mr.$mergeRequestId.commits'
 import { Route as AppMrMergeRequestIdDiffRouteImport } from './routes/_app.mr.$mergeRequestId.diff'
 import { Route as AppMrMergeRequestIdPipelinesRouteImport } from './routes/_app.mr.$mergeRequestId.pipelines'
+import { Route as AppMrMergeRequestIdJobsJobIdRouteImport } from './routes/_app.mr.$mergeRequestId.jobs.$jobId'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -72,6 +73,12 @@ const AppMrMergeRequestIdPipelinesRoute =
     path: '/pipelines',
     getParentRoute: () => AppMrMergeRequestIdRoute,
   } as any)
+const AppMrMergeRequestIdJobsJobIdRoute =
+  AppMrMergeRequestIdJobsJobIdRouteImport.update({
+    id: '/jobs/$jobId',
+    path: '/jobs/$jobId',
+    getParentRoute: () => AppMrMergeRequestIdRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -83,6 +90,7 @@ export interface FileRoutesByFullPath {
   '/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
   '/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
   '/mr/$mergeRequestId/': typeof AppMrMergeRequestIdIndexRoute
+  '/mr/$mergeRequestId/jobs/$jobId': typeof AppMrMergeRequestIdJobsJobIdRoute
 }
 export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
@@ -93,6 +101,7 @@ export interface FileRoutesByTo {
   '/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
   '/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
   '/mr/$mergeRequestId': typeof AppMrMergeRequestIdIndexRoute
+  '/mr/$mergeRequestId/jobs/$jobId': typeof AppMrMergeRequestIdJobsJobIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -106,6 +115,7 @@ export interface FileRoutesById {
   '/_app/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
   '/_app/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
   '/_app/mr/$mergeRequestId/': typeof AppMrMergeRequestIdIndexRoute
+  '/_app/mr/$mergeRequestId/jobs/$jobId': typeof AppMrMergeRequestIdJobsJobIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -119,6 +129,7 @@ export interface FileRouteTypes {
     | '/mr/$mergeRequestId/diff'
     | '/mr/$mergeRequestId/pipelines'
     | '/mr/$mergeRequestId/'
+    | '/mr/$mergeRequestId/jobs/$jobId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/settings'
@@ -129,6 +140,7 @@ export interface FileRouteTypes {
     | '/mr/$mergeRequestId/diff'
     | '/mr/$mergeRequestId/pipelines'
     | '/mr/$mergeRequestId'
+    | '/mr/$mergeRequestId/jobs/$jobId'
   id:
     | '__root__'
     | '/_app'
@@ -141,6 +153,7 @@ export interface FileRouteTypes {
     | '/_app/mr/$mergeRequestId/diff'
     | '/_app/mr/$mergeRequestId/pipelines'
     | '/_app/mr/$mergeRequestId/'
+    | '/_app/mr/$mergeRequestId/jobs/$jobId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -219,6 +232,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppMrMergeRequestIdPipelinesRouteImport
       parentRoute: typeof AppMrMergeRequestIdRoute
     }
+    '/_app/mr/$mergeRequestId/jobs/$jobId': {
+      id: '/_app/mr/$mergeRequestId/jobs/$jobId'
+      path: '/jobs/$jobId'
+      fullPath: '/mr/$mergeRequestId/jobs/$jobId'
+      preLoaderRoute: typeof AppMrMergeRequestIdJobsJobIdRouteImport
+      parentRoute: typeof AppMrMergeRequestIdRoute
+    }
   }
 }
 
@@ -227,6 +247,7 @@ interface AppMrMergeRequestIdRouteChildren {
   AppMrMergeRequestIdDiffRoute: typeof AppMrMergeRequestIdDiffRoute
   AppMrMergeRequestIdPipelinesRoute: typeof AppMrMergeRequestIdPipelinesRoute
   AppMrMergeRequestIdIndexRoute: typeof AppMrMergeRequestIdIndexRoute
+  AppMrMergeRequestIdJobsJobIdRoute: typeof AppMrMergeRequestIdJobsJobIdRoute
 }
 
 const AppMrMergeRequestIdRouteChildren: AppMrMergeRequestIdRouteChildren = {
@@ -234,6 +255,7 @@ const AppMrMergeRequestIdRouteChildren: AppMrMergeRequestIdRouteChildren = {
   AppMrMergeRequestIdDiffRoute: AppMrMergeRequestIdDiffRoute,
   AppMrMergeRequestIdPipelinesRoute: AppMrMergeRequestIdPipelinesRoute,
   AppMrMergeRequestIdIndexRoute: AppMrMergeRequestIdIndexRoute,
+  AppMrMergeRequestIdJobsJobIdRoute: AppMrMergeRequestIdJobsJobIdRoute,
 }
 
 const AppMrMergeRequestIdRouteWithChildren =

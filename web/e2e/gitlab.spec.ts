@@ -1666,10 +1666,13 @@ test.describe.serial("the GitLab merge-request page", () => {
       "failed",
     );
 
-    // GitLab's own graph puts a RETRY on every card. This app reads trackers: a card is a link
-    // to the job and nothing else, so there is no control inside one at all.
+    // GitLab's own graph puts a RETRY on every card. This app reads trackers: a card is a LINK
+    // and nothing else, so there is no control inside one at all.
     await expect(graph.locator("button")).toHaveCount(0);
-    await expect(job("🧪 unit")).toHaveAttribute("target", "_blank");
+    // And what it links to is this app's own page for that job's LOG — the one thing anybody
+    // wants after a red card — rather than a trip out to GitLab.
+    await expect(job("🧪 unit")).toHaveAttribute("href", /\/jobs\/\d+$/);
+    await expect(job("🧪 unit")).not.toHaveAttribute("target", "_blank");
   });
 
   test("drops the controls where they would change nothing, and lists the jobs instead", async ({
@@ -1719,6 +1722,213 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-pipeline-view"]')).toBeVisible();
 
     await page.setViewportSize({ width: 1280, height: 900 });
+  });
+
+  // ---- one job's LOG, on a page of its own ---------------------------------
+  //
+  // Where a job card goes. Everything below runs against the mock's own trace, which is written
+  // the way the RUNNER writes one — nested sections, a progress line rewritten in place, ANSI
+  // colour — because that is the whole of what this page has to read (see
+  // `web/src/lib/gitlab-job-log.ts` for the measured facts, and `mockJobLog` for the fixture).
+
+  /** Open one job's log from the pipeline page, by the job's own name. */
+  async function openJobLog(page: Page, jobName: string) {
+    await page.locator(`[data-testid="gitlab-pipeline-job"][data-name="${jobName}"]`).click();
+    await expect(page.locator('[data-testid="gitlab-job-log-page"]')).toBeVisible();
+  }
+
+  test("a job's log is a PLACE: its own URL, reloadable, and Back leaves it", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 595);
+    await openPipeline(page);
+    await openJobLog(page, "🧪 unit");
+
+    // The URL names the job by its OWN id, which is how GitLab addresses one — never by its
+    // place in the pipeline, which changes with every push.
+    expect(page.url()).toMatch(/\/jobs\/\d+$/);
+    await expect(page.locator('[data-testid="gitlab-job-log-line"]').first()).toBeVisible();
+    // The strip is still there, with PIPELINES current: a job is a detail of that run, so a
+    // reader inside one is inside the run — and the other three pages stay one press away.
+    await expect(page.locator('[data-testid="gitlab-mr-pages"]')).toHaveAttribute(
+      "data-page",
+      "pipelines",
+    );
+
+    // A reload lands on the same log, which is what makes it something to send to a colleague.
+    await page.reload();
+    await expect(page.locator('[data-testid="gitlab-job-log-page"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-job-log-line"]').first()).toBeVisible();
+
+    // And the browser's own Back leaves it for the pipeline it came from.
+    await page.goBack();
+    await expect(page.locator('[data-testid="gitlab-pipeline-page"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-job-log-page"]')).toHaveCount(0);
+
+    // The header's own Back does the same thing, because "back" means one thing to a reader.
+    await openJobLog(page, "🧪 unit");
+    await page.locator('[data-testid="gitlab-job-back"]').click();
+    await expect(page.locator('[data-testid="gitlab-pipeline-page"]')).toBeVisible();
+  });
+
+  test("draws the runner's own sections, what each cost, and folds them", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 595);
+    await openPipeline(page);
+    await openJobLog(page, "🧪 unit");
+
+    const lines = page.locator('[data-testid="gitlab-job-log-line"]');
+    const before = await lines.count();
+    expect(before).toBeGreaterThan(10);
+
+    // The marker itself is never a row: it is the fold, and the heading the runner wrote after it
+    // is that row's own text. A page showing `section_start:…` would be one that read nothing.
+    await expect(page.locator('[data-testid="gitlab-job-log"]')).not.toContainText("section_start");
+    await expect(page.locator('[data-testid="gitlab-job-log"]')).not.toContainText("section_end");
+
+    // A progress line rewritten in place shows only what the terminal would have been showing.
+    await expect(page.locator('[data-testid="gitlab-job-log"]')).toContainText("Progress: 100%");
+    await expect(page.locator('[data-testid="gitlab-job-log"]')).not.toContainText("Progress: 12%");
+
+    // What a section COST is on its own row, which is the number a reader of a slow run came for.
+    const step = page.locator('[data-testid="gitlab-job-log-section"]').filter({ hasText: "Step script" });
+    await expect(step).toContainText("2m 9s");
+
+    // Folding it takes everything under it — the NESTED section's own opening line included,
+    // because a child left visible under a folded parent is a row with nothing to place it.
+    await step.click();
+    await expect(step).toHaveAttribute("data-folded", "true");
+    await expect(lines.count()).resolves.toBeLessThan(before);
+    await expect(page.locator('[data-testid="gitlab-job-log"]')).not.toContainText("Pnpm section");
+    await expect(page.locator('[data-testid="gitlab-job-log"]')).not.toContainText("AssertionError");
+    // And what is OUTSIDE the fold is untouched.
+    await expect(page.locator('[data-testid="gitlab-job-log"]')).toContainText("Job failed");
+
+    // One control folds every section, and the same one opens them all again.
+    await page.locator('[data-testid="gitlab-job-log-fold-all"]').click();
+    await expect(page.locator('[data-testid="gitlab-job-log-section"][data-folded="true"]')).toHaveCount(
+      await page.locator('[data-testid="gitlab-job-log-section"]').count(),
+    );
+    await page.locator('[data-testid="gitlab-job-log-fold-all"]').click();
+    await expect(lines).toHaveCount(before);
+  });
+
+  test("filters to the lines that match, and a line number goes back to the log", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 595);
+    await openPipeline(page);
+    await openJobLog(page, "🧪 unit");
+
+    await page.locator('[data-testid="gitlab-job-log-search"]').fill("error");
+    // The count is STATED: a filter that answered nothing looks exactly like a log that arrived
+    // empty, and the reader would go looking for the wrong fault.
+    await expect(page.locator('[data-testid="gitlab-job-log-matches"]')).toContainText("lines");
+    const rows = page.locator('[data-testid="gitlab-job-log-line"]');
+    await expect(rows).toHaveCount(2);
+    // Every row that stayed says what was searched for, and keeps the log's OWN line number —
+    // which is what places it in the run.
+    const first = rows.first();
+    await expect(first).toContainText("AssertionError");
+    const number = await first.getAttribute("data-line");
+    expect(Number(number)).toBeGreaterThan(1);
+
+    // A query nothing matches says so rather than drawing an empty page.
+    await page.locator('[data-testid="gitlab-job-log-search"]').fill("nothing-matches-this");
+    await expect(page.locator('[data-testid="gitlab-job-log-matches"]')).toContainText("no line");
+    await expect(rows).toHaveCount(0);
+
+    // The clear puts the whole log back, and pressing a filtered row's number does the same and
+    // takes the reader to that line in place.
+    await page.locator('[data-testid="gitlab-job-log-search"]').fill("AssertionError");
+    await expect(rows).toHaveCount(1);
+    await page.locator('[data-testid="gitlab-job-log-number"]').first().click();
+    await expect(page.locator('[data-testid="gitlab-job-log-search"]')).toHaveValue("");
+    await expect(rows.count()).resolves.toBeGreaterThan(2);
+  });
+
+  test("a job that has not run says so, rather than drawing a blank page", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openPipeline(page);
+    // A `manual` job: GitLab answers 200 with an empty body (measured — 10 of 58 jobs), and the
+    // reader's next move depends on WHY there is nothing, so the page says which reason it is.
+    await openJobLog(page, "🚀 deploy staging");
+    await expect(page.locator('[data-testid="gitlab-job-log-empty"]')).toContainText(
+      "has not been started",
+    );
+    await expect(page.locator('[data-testid="gitlab-job-log-line"]')).toHaveCount(0);
+    // The controls that act on lines are not drawn where there are none.
+    await expect(page.locator('[data-testid="gitlab-job-log-search"]')).toHaveCount(0);
+  });
+
+  test("follows a live job, and states what it is", async ({ page }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openPipeline(page);
+    await openJobLog(page, "🧪 unit");
+
+    // A running job is a log to follow: the page says so, and the store's poll is armed exactly
+    // while the job has not finished.
+    await expect(page.locator('[data-testid="gitlab-job-log-page"]')).toHaveAttribute(
+      "data-live",
+      "true",
+    );
+    await expect(page.locator('[data-testid="gitlab-job-log-live"]')).toBeVisible();
+    const rows = page.locator('[data-testid="gitlab-job-log-line"]');
+    const first = await rows.count();
+    // The mock's running log grows by a line on every read, so the poll shows itself.
+    await page.locator('[data-testid="gitlab-job-log-reload"]').click();
+    await expect(rows.count()).resolves.toBeGreaterThan(first);
+    // A FINISHED job is not followed: nothing about its log can change again.
+    await page.locator('[data-testid="gitlab-job-back"]').click();
+    await openJobLog(page, "🔎 lint");
+    await expect(page.locator('[data-testid="gitlab-job-log-live"]')).toHaveCount(0);
+  });
+
+  test("says what a log that did not travel whole is missing, and what a refusal costs", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 595);
+    await openPipeline(page);
+
+    // A log too big to travel: what is on screen is its END, because a job fails at the end of
+    // its log and this instance refuses a Range read — so there is nothing to ask for the rest
+    // with, and the page says so with GitLab's own page one press away.
+    await setMergeRequestControl(page, { truncate_job_log: true });
+    await openJobLog(page, "🧪 unit");
+    await expect(page.locator('[data-testid="gitlab-job-log-truncated"]')).toContainText("end");
+    await expect(page.locator('[data-testid="gitlab-job-log-truncated"]')).toContainText("MB");
+    await expect(page.locator('[data-testid="gitlab-job-log-line"]').first()).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-job-link"]')).toBeVisible();
+
+    // The JOB answered and its LOG did not, which is what GitLab does with a trace file it has
+    // dropped. "This job printed nothing" would be a claim about the job that nothing supports, so
+    // the reason is stated instead.
+    await setMergeRequestControl(page, { refuse_trace: "GitLab has no log for this job any more" });
+    await page.reload();
+    await expect(page.locator('[data-testid="gitlab-job-log-error"]')).toContainText(
+      "no log for this job",
+    );
+    await expect(page.locator('[data-testid="gitlab-job-log-empty"]')).toHaveCount(0);
+    // The job's own facts are still stated above it: the read that failed is the log's, not the
+    // job's.
+    await expect(page.locator('[data-testid="gitlab-job-facts"]')).toBeVisible();
+    await setMergeRequestControl(page, { clear: true });
+
+    // A read that FAILED ALTOGETHER is the whole screen, because this page has no other content to
+    // fall back on — and it offers the one thing left.
+    await setMergeRequestControl(page, {
+      refuse_job_log: "GitLab refused: this account may not read the job's log",
+    });
+    await page.reload();
+    await expect(page.locator('[data-testid="gitlab-job-log-error"]')).toContainText("refused");
+    await expect(page.locator('[data-testid="gitlab-job-log-error-link"]')).toBeVisible();
+    // And the header never says it is still reading over a refusal.
+    await expect(page.locator('[data-testid="gitlab-job-summary"]')).not.toContainText("Reading");
+
+    await setMergeRequestControl(page, { clear: true });
   });
 
   test("merges, and the merge request leaves the list for good", async ({ page }) => {

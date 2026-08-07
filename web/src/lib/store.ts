@@ -129,12 +129,14 @@ import {
   type DiffCommentTarget,
   type PierreLineRange,
 } from "./gitlab-diff-comment";
+import { jobLogIsLive } from "./gitlab-job-log";
 import {
   isNotMerged,
   mergeRequestId,
   pipelineIsLive,
   sameMergeRequest,
   type GitLabDiscussionList,
+  type GitLabJobLog,
   type GitLabPipelineView,
   type MergeRequestDetail,
   type MergeRequestKey,
@@ -569,6 +571,18 @@ export type AppState = {
   /** Its comments, and its pipeline with jobs. */
   gitlabNotes: GitLabDiscussionList | null;
   gitlabPipeline: GitLabPipelineView | null;
+  /** ONE job's log, for the page a job card opens (`/mr/<id>/jobs/<jobId>`), or null when no job
+   *  is open. It is not cached across opens for the pipeline's own reason: the backend holds a
+   *  finished log for a day, so re-opening one is a local round trip, while a stale log of a
+   *  RUNNING job is the one thing here that would be read as current. */
+  gitlabJobLog: GitLabJobLog | null;
+  /** Which job the URL asks for, whether or not its log has arrived. It is what a frame about
+   *  another job is checked against, and what the header names while the read is travelling. */
+  gitlabJobId: number | null;
+  gitlabJobLogLoading: boolean;
+  /** Why the log could not be read. This page IS that read, so a failure it never stated would
+   *  be "Reading the log…" for ever — the rule the pipeline page already holds. */
+  gitlabJobLogError: string | null;
   /** Why the pipeline could not be read, when nothing of it is on screen. The PANEL can fall
    *  back on the rest of the page, but the pipeline PAGE is that read and nothing else — so a
    *  failure it never stated would be "Reading the pipeline…" for ever. */
@@ -703,6 +717,14 @@ const RETAINED_MERGE_REQUESTS = 8;
 // to stay short enough that a job turning green is seen while the reader is still looking.
 // Only ever armed while something is actually in flight (see `pipelineIsLive`).
 const GITLAB_PIPELINE_POLL_MS = 6000;
+// How often a LIVE job's log is re-read while its page is open.
+//
+// The pipeline's own interval, for the pipeline's own reasons: it sits above the backend's cache
+// window for a running log (5 s) so a poll is never served the same answer twice, and it is short
+// enough that a line arriving is seen while the reader is looking at it. Armed only while the job
+// has not finished (see `jobLogIsLive`), so a red job nobody is going to touch again costs
+// nothing.
+const GITLAB_JOB_LOG_POLL_MS = 6000;
 // Where the locally-chosen visible calendars are persisted (client-only, like the
 // channel-pin overrides).
 const VISIBLE_CALENDARS_KEY = "teams-lite:visible-calendars";
@@ -851,6 +873,10 @@ function initialState(): AppState {
     gitlabNotes: null,
     gitlabPipeline: null,
     gitlabPipelineError: null,
+    gitlabJobLog: null,
+    gitlabJobId: null,
+    gitlabJobLogLoading: false,
+    gitlabJobLogError: null,
     gitlabDiff: null,
     gitlabDiffLoading: false,
     gitlabDiffError: null,
@@ -1522,6 +1548,16 @@ export class TeamsController {
         // arm it.
         if (pipelineIsLive(view)) this.schedulePipelinePoll(key);
         else this.stopPipelinePolling();
+      } else if (d.kind === "job") {
+        // WHICH job is in the payload's own `job.id`: a page watching one job's log ignores a
+        // frame about another, exactly as the sidebar ignores a frame about another filter.
+        const log = d as unknown as GitLabJobLog;
+        if (typeof log.job?.id !== "number" || log.job.id !== this.get().gitlabJobId) return;
+        this.set({ gitlabJobLog: log, gitlabJobLogError: null });
+        // A refresh that arrived from somewhere else still decides whether this page keeps
+        // polling: a job that has just finished must stop the timer.
+        if (jobLogIsLive(log)) this.scheduleJobLogPoll(key, log.job.id);
+        else this.stopJobLogPolling();
       } else if (d.kind === "stale") {
         void this.reloadMergeRequest();
       }
@@ -3267,6 +3303,9 @@ export class TeamsController {
   /** The pipeline poll of the OPEN merge request, and nothing else: a page polls the one
    *  pipeline it is showing, and closing the page stops it. */
   private gitlabPipelineTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The log poll of the OPEN job, and nothing else. Leaving the page stops it, so a job log
+   *  nobody is looking at asks GitLab nothing — the rule the pipeline poll already holds. */
+  private gitlabJobLogTimer: ReturnType<typeof setTimeout> | null = null;
 
   private refreshGitLabList = coalesce(() => this.loadMergeRequests(false));
 
@@ -3397,8 +3436,15 @@ export class TeamsController {
       ?? this.gitlabDiffCache.get(this.gitlabDiffKey(id, "listed"))
       ?? null;
     this.stopPipelinePolling();
+    // A job belongs to ONE merge request's pipeline, so opening another takes its log away — the
+    // rule a diff comment already follows.
+    this.stopJobLogPolling();
     this.set({
       openMergeRequest: key,
+      gitlabJobLog: null,
+      gitlabJobId: null,
+      gitlabJobLogLoading: false,
+      gitlabJobLogError: null,
       gitlabDetail: detail,
       gitlabDetailLoading: !detail,
       gitlabDetailError: null,
@@ -3828,10 +3874,96 @@ export class TeamsController {
     this.gitlabPipelineTimer = null;
   }
 
+  /** Open ONE job's log — the page a job card opens.
+   *
+   *  It is read on its own rather than with the merge request: a pipeline holds up to fifteen
+   *  jobs and each log is up to a megabyte, so reading them with the page would be the biggest
+   *  read here made fifteen times over for the one card the reader might press. The job the URL
+   *  names is put in the state FIRST, so the header can say which job is being read while the
+   *  read is still travelling. */
+  async openJobLog(key: MergeRequestKey, jobId: number): Promise<void> {
+    this.stopJobLogPolling();
+    // A different job's log must never be left on screen under a new job's header, so the old
+    // one goes at once — the rule the pipeline follows across merge requests.
+    if (this.get().gitlabJobId !== jobId) {
+      this.set({ gitlabJobLog: null, gitlabJobLogError: null });
+    }
+    this.set({ gitlabJobId: jobId, gitlabJobLogLoading: !this.get().gitlabJobLog });
+    await this.loadJobLog(key, jobId, false);
+  }
+
+  /** Re-read the open job's log at the user's own asking. */
+  async reloadJobLog(): Promise<void> {
+    const key = this.get().openMergeRequest;
+    const jobId = this.get().gitlabJobId;
+    if (!key || jobId === null) return;
+    this.set({ gitlabJobLogLoading: true });
+    await this.loadJobLog(key, jobId, true);
+  }
+
+  private async loadJobLog(
+    key: MergeRequestKey,
+    jobId: number,
+    refresh: boolean,
+  ): Promise<void> {
+    // BOTH halves are checked on the way back, because both can change while a megabyte is
+    // travelling: the reader can walk to another job, or to another merge request entirely.
+    const open = () =>
+      sameMergeRequest(this.get().openMergeRequest, key) && this.get().gitlabJobId === jobId;
+    try {
+      const log = await this.backend.gitlabJobLog(key, jobId, refresh);
+      if (!open()) return;
+      this.set({ gitlabJobLog: log, gitlabJobLogError: null });
+      if (jobLogIsLive(log)) this.scheduleJobLogPoll(key, jobId);
+      else this.stopJobLogPolling();
+    } catch (e) {
+      // A log that cannot be read leaves whatever is on screen standing and stops polling:
+      // hammering a refusal would earn the token a rate limit. The reason is kept for a page
+      // that has nothing else to draw, which is this one whenever no log has arrived.
+      if (open() && !this.get().gitlabJobLog) this.set({ gitlabJobLogError: errText(e) });
+      this.stopJobLogPolling();
+    } finally {
+      if (open()) this.set({ gitlabJobLogLoading: false });
+    }
+  }
+
+  private scheduleJobLogPoll(key: MergeRequestKey, jobId: number): void {
+    this.stopJobLogPolling();
+    this.gitlabJobLogTimer = setTimeout(() => {
+      this.gitlabJobLogTimer = null;
+      if (sameMergeRequest(this.get().openMergeRequest, key) && this.get().gitlabJobId === jobId) {
+        void this.loadJobLog(key, jobId, false);
+      }
+    }, GITLAB_JOB_LOG_POLL_MS);
+  }
+
+  private stopJobLogPolling(): void {
+    if (this.gitlabJobLogTimer === null) return;
+    clearTimeout(this.gitlabJobLogTimer);
+    this.gitlabJobLogTimer = null;
+  }
+
+  /** Leave the job-log page. The merge request stays open underneath, because the reader came
+   *  from it and is going back to it. */
+  closeJobLog(): void {
+    this.stopJobLogPolling();
+    this.set({
+      gitlabJobLog: null,
+      gitlabJobId: null,
+      gitlabJobLogLoading: false,
+      gitlabJobLogError: null,
+    });
+  }
+
   closeMergeRequestPage(): void {
     this.stopPipelinePolling();
+    this.stopJobLogPolling();
     this.set({
       openMergeRequest: null,
+      gitlabJobLog: null,
+      gitlabJobId: null,
+      gitlabJobLogLoading: false,
+      gitlabJobLogError: null,
       gitlabDetail: null,
       gitlabDetailError: null,
       gitlabNotes: null,

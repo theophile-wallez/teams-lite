@@ -15,6 +15,7 @@ import type { DiffDepth, GitLabDiff } from "./gitlab-diff";
 import type { WireDiffPosition } from "./gitlab-diff-comment";
 import type {
   GitLabDiscussionList,
+  GitLabJobLog,
   GitLabPipelineView,
   MergeOutcome,
   MergeRequestDetail,
@@ -1316,6 +1317,26 @@ export class Backend {
     return this.request<GitLabPipelineView>("gitlab_mr_pipeline", {
       project_path: key.projectPath,
       iid: key.iid,
+      refresh,
+    });
+  }
+
+  /** ONE job's log, for the page a job card opens.
+   *
+   *  The biggest read on this surface (up to 1 MiB) and the one whose freshness swings widest:
+   *  the backend polls it like the pipeline while the job runs, and caches it for a day the
+   *  moment the job stops — because a finished job's log never changes again, and a retry is a
+   *  new job with a new id. Nothing here says which of the two it is: the ANSWER does (see
+   *  `GitLabTtl` in src/bin/server.rs), so a page cannot ask for the wrong one. */
+  gitlabJobLog(
+    key: MergeRequestKey,
+    jobId: number,
+    refresh = false,
+  ): Promise<GitLabJobLog> {
+    return this.request<GitLabJobLog>("gitlab_mr_job_log", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      job_id: jobId,
       refresh,
     });
   }

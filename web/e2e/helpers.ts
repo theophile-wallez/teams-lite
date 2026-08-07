@@ -573,6 +573,15 @@ export async function setMergeRequestControl(
     no_token?: boolean;
     refuse_diff?: string;
     refuse_upload?: string;
+    /** Make the JOB LOG read fail with this sentence. Its own switch beside the diff's, because
+     *  the log page IS that read: a refusal there is the whole screen. */
+    refuse_job_log?: string;
+    /** Answer the JOB in full and refuse its LOG with this sentence — the shape GitLab takes when
+     *  a trace file is gone. The page must state it rather than "this job printed nothing". */
+    refuse_trace?: string;
+    /** Answer the job log as the TAIL of a much bigger one, which is the state the page has to
+     *  tell the reader about. */
+    truncate_job_log?: boolean;
     clear?: boolean;
   },
 ): Promise<void> {
