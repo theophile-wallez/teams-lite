@@ -779,11 +779,6 @@ function MessageBubbleImpl(props: {
           props.highlighted &&
             "ring-2 ring-primary/70 ring-offset-2 ring-offset-background transition-shadow",
         )}
-        onContextMenu={(e) => {
-          if (inert) return; // nothing to act on
-          e.preventDefault();
-          setMenuOpen(true);
-        }}
       >
         {/* The bubble's own hairline catches the light for as long as the answer is being
             written into it (see {@link AgentBubbleShine}). */}

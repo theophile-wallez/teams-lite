@@ -55,10 +55,10 @@ const naturalOf = (img: HTMLImageElement | null): Size => ({
  *   returns to fit when zoomed in, and Escape closes.
  * - Two fingers pinch and one finger pans; at fit, a drag down closes. The app is
  *   used from a phone, so touch is not an afterthought.
- * - The picture can be SAVED from here, which is the only place it can be: the
- *   browser's own "Save image" never reaches a chat image (the message behind the
- *   thumbnail takes the right-click and the long press, and the gestures in here
- *   capture every pointer).
+ * - The picture can be SAVED from here, and on a phone this is the only place it can
+ *   be: the long press on the thumbnail opens the message's actions menu, and the
+ *   gestures in here capture every pointer. On a fine pointer the browser's own "Save
+ *   image" reaches the thumbnail and the open picture alike.
  */
 export function ImageLightbox(props: {
   src: string;
@@ -314,12 +314,13 @@ export function ImageLightbox(props: {
    *
    * The dialog is portaled to `<body>`, but React propagates along its OWN tree —
    * where this component is still a child of the message that holds the thumbnail. So
-   * every handler on that bubble saw the input made in here, and the right-click was
-   * the one that showed: the bubble cancels `contextmenu` to open its actions menu, so
+   * every handler on that bubble saw the input made in here. The right-click was the
+   * one that showed: the bubble cancelled `contextmenu` to open its actions menu, so
    * the browser's "Save image" never appeared and the menu opened behind the picture
-   * instead. A modal in the top layer has nothing above it and nothing behind it to
-   * inform; stopping the events here rather than teaching the bubble about portals
-   * keeps that one fact in the one component that knows it.
+   * instead. That handler is gone, and this boundary stays: a modal in the top layer
+   * has nothing above it and nothing behind it to inform, so stopping the events here
+   * rather than teaching the bubble about portals keeps that one fact in the one
+   * component that knows it.
    */
   const stopLeak = (e: React.SyntheticEvent) => e.stopPropagation();
 
@@ -348,10 +349,9 @@ export function ImageLightbox(props: {
         e.preventDefault();
         close();
       }}
-      // The picture's own context menu, which the message behind used to take: no
-      // preventDefault, so the browser offers "Save image as…" over the picture. The
-      // click rides along — same tree, same leak, and nothing behind a modal is the
-      // reader's to hit.
+      // The picture's own context menu: no preventDefault, so the browser offers
+      // "Save image as…" over the picture. The click rides along — same tree, same
+      // leak, and nothing behind a modal is the reader's to hit.
       onContextMenu={stopLeak}
       onClick={stopLeak}
       onPointerDown={onPointerDown}
@@ -383,11 +383,10 @@ export function ImageLightbox(props: {
           cursor: view.zoom > 1 ? "grab" : "zoom-out",
         }}
       />
-      {/* Saving the picture. The browser's own "Save image" is out of reach here: on
-          the thumbnail the message behind it takes the right-click and the long press
-          (its actions menu), and in here every pointer is captured for the pan and
-          pinch gestures. The bytes are already a local blob, so this is a plain
-          download link — no fetch, no proxy call. */}
+      {/* Saving the picture. The browser's own "Save image" is out of reach on a phone:
+          the thumbnail's long press opens the message's actions menu, and in here every
+          pointer is captured for the pan and pinch gestures. The bytes are already a
+          local blob, so this is a plain download link — no fetch, no proxy call. */}
       <a
         href={props.src}
         // The alt is the attachment's own filename for a shared image and a description
