@@ -9,7 +9,7 @@ import type { Locator, Page } from "@playwright/test";
  *  1. a code the pack holds becomes art in a sent message; one it does not hold stays text;
  *  2. an inbound custom emoji is drawn from the message's OWN art, never from the pack;
  *  3. a code inside `<code>` and a code inside a reply quote both stay text;
- *  4. an emoji-only message renders jumbo;
+ *  4. an emoji-only message renders at TEXT size, the size stock Teams draws it at;
  *  4b. the reaction row offers the pack's own art, and the chip that lands IS that art;
  *  5. the `:` list offers custom emoji above the Unicode ones, and Enter inserts the chip;
  *  6. a taken name is refused with Slack's own sentence;
@@ -244,8 +244,14 @@ test.describe("custom emoji", () => {
     // Stock Teams renders emoji at text size, so this app matches that behavior.
     expect(inlineSize).toEqual(aloneSize);
 
-    // And both are under a bound that says neither is jumbo. At 14pt base font,
-    // 1.15em ~= 16px, while 2.5em would be ~35px.
+    // And both are under a bound that says neither is jumbo. At a 14px bubble font,
+    // 1.15em is 16.09px, while the 2.5em this app used to draw was exactly 35px.
+    //
+    // 35px HERE means the page under test is not this build: no source in the tree spells
+    // 2.5em any more, so that number can only come from a web server another run left
+    // listening, whose SSR handler still holds the module graph it imported before the
+    // jumbo path was removed (`reuseExistingServer` then adopts it — see § Automation
+    // safety on checking the port). Look at what is serving 19468 before looking here.
     const heightPx = parseFloat(aloneSize.height);
     expect(heightPx).toBeLessThan(25);
   });
