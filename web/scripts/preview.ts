@@ -1960,6 +1960,16 @@ if (import.meta.main) {
         await openMergeRequestAt(page, 0);
         await shot(`${out}-light.png`);
 
+        // The HEADER, cropped: the two decisions this page is opened to make — the approval and
+        // the merge — stand at its right, before the reload and the way out to GitLab. Both
+        // themes, because the merge is the one control here drawn in the accent and a wrong
+        // token shows as a flat tile.
+        const paneHeader = '[data-testid="gitlab-pane"] > header';
+        await shot(`${out}-actions-light.png`, paneHeader);
+        await setTheme("dark");
+        await shot(`${out}-actions-dark.png`, paneHeader);
+        await setTheme("light");
+
         // The SUB-HEADER: the four pages of this merge request, in GitLab's own order, with
         // the Overview current. Cropped, because what is worth reading here is which pill is
         // lit and that the four fit — pass `--dpr 4` for the labels.
@@ -1991,11 +2001,18 @@ if (import.meta.main) {
         await page.waitForTimeout(400);
         await openMergeRequestPage(page, "overview");
 
-        // The merge ARMED — the second click is the one that lands the branch, and the
-        // sentence under it is what says so before anybody presses it.
+        // The merge ARMED — the second click is the one that lands the branch. The control says
+        // so on itself, and the page brings the sentence naming both branches to the reader,
+        // because the press was made in a header that does not scroll. The whole page for that
+        // pair, then the header cropped in both themes: armed it is the one destructive control
+        // on this surface.
         await page.locator('[data-testid="gitlab-merge"]').click();
         await page.locator('[data-testid="gitlab-merge-confirm"]').waitFor();
         await shot(`${out}-merge-armed-light.png`);
+        await shot(`${out}-merge-armed-header-light.png`, paneHeader);
+        await setTheme("dark");
+        await shot(`${out}-merge-armed-header-dark.png`, paneHeader);
+        await setTheme("light");
         await page.locator('[data-testid="gitlab-merge-cancel"]').click();
 
         // The conversation: a standalone comment, a thread with a code comment on it and the
@@ -2089,9 +2106,11 @@ if (import.meta.main) {
         console.log(
           `[preview] wrote ${out}-tabs-{rest,current}-{light,dark}.png, ` +
             `${out}-list-light.png, ${out}-light.png, ` +
+            `${out}-actions-{light,dark}.png, ` +
             `${out}-pages-{light,dark,mobile-light}.png, ` +
             `${out}-commits-{light,dark}.png, ${out}-pipelines-light.png, ` +
-            `${out}-merge-armed-light.png, ${out}-comments-light.png, ` +
+            `${out}-merge-armed-light.png, ` +
+            `${out}-merge-armed-header-{light,dark}.png, ${out}-comments-light.png, ` +
             `${out}-description-picture-{light,dark}.png, ` +
             `${out}-description-mobile-light.png, ` +
             `${out}-long-title-{light,mobile-light}.png, ` +

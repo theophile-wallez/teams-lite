@@ -617,6 +617,72 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(approve).toHaveText("Approve");
   });
 
+  test("keeps the approval and the merge in the header, and only where they can be reported", async ({
+    page,
+  }) => {
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+
+    // The two decisions this page is opened to make live in its HEADER, so they are reachable
+    // without reading down to them — and each is drawn ONCE, because a reader must never have
+    // to choose which copy of a write to press.
+    const header = page.locator('[data-testid="gitlab-pane"] > header');
+    await expect(header.locator('[data-testid="gitlab-mr-actions"]')).toBeVisible();
+    await expect(header.locator('[data-testid="gitlab-approve"]')).toBeVisible();
+    await expect(header.locator('[data-testid="gitlab-merge"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-approve"]')).toHaveCount(1);
+    await expect(page.locator('[data-testid="gitlab-merge"]')).toHaveCount(1);
+
+    // The header does not scroll, which is the whole point of moving them into it: the merge is
+    // still on screen at the foot of the conversation, where the old panel was long gone.
+    await page.locator('[data-testid="gitlab-comments"]').scrollIntoViewIfNeeded();
+    await expect(header.locator('[data-testid="gitlab-merge"]')).toBeInViewport();
+
+    // The WORDS stay in the article — GitLab's reason for refusing, what the armed press costs,
+    // and what GitLab answered — because a header row is wide enough for a control and never
+    // for a sentence.
+    await expect(page.locator('[data-testid="gitlab-actions"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-merge-hint"]')).toHaveCount(1);
+
+    // So the writes are offered on the page that carries those words and nowhere else: an
+    // outward action must not be taken where its outcome cannot be reported.
+    await pageTab(page, "pipelines").click();
+    await expect(page.locator('[data-testid="gitlab-mr-actions"]')).toHaveCount(0);
+    await pageTab(page, "overview").click();
+    await expect(page.locator('[data-testid="gitlab-mr-actions"]')).toBeVisible();
+
+    // And the row costs the header no width at any size: the controls hold theirs and the
+    // TITLE is what gives way, on a phone as on a desktop (the long-title lesson).
+    for (const width of [1200, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      const paneBox = (await page.locator('[data-testid="gitlab-pane"]').boundingBox())!;
+      const actions = (await page.locator('[data-testid="gitlab-mr-actions"]').boundingBox())!;
+      expect(actions.x + actions.width).toBeLessThanOrEqual(paneBox.x + paneBox.width + 1);
+      expect(paneBox.x + paneBox.width).toBeLessThanOrEqual(width + 1);
+    }
+
+    // Armed, it says on the button that the next press cannot be undone — the short spelling of
+    // it on a phone, where the same sentence is under the page in full.
+    await page.locator('[data-testid="gitlab-merge"]').click();
+    const confirm = page.locator('[data-testid="gitlab-merge-confirm"]');
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText("Confirm merge");
+    // And the page brings that sentence to the reader, because the press it explains was made
+    // in a header that does not scroll: the words may have been a screen away.
+    await expect(page.locator('[data-testid="gitlab-merge-hint"]')).toBeInViewport();
+    const armedBox = (await confirm.boundingBox())!;
+    const armedPane = (await page.locator('[data-testid="gitlab-pane"]').boundingBox())!;
+    expect(armedBox.x + armedBox.width).toBeLessThanOrEqual(armedPane.x + armedPane.width + 1);
+    await page.setViewportSize({ width: 1200, height: 900 });
+
+    // A walk through the strip takes the arming back: a destructive control left armed behind a
+    // page the reader went to and returned from is one they have forgotten they armed.
+    await pageTab(page, "pipelines").click();
+    await pageTab(page, "overview").click();
+    await expect(page.locator('[data-testid="gitlab-merge"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-merge-confirm"]')).toHaveCount(0);
+  });
+
   test("draws a colleague the app's own Teams knows as that colleague", async ({ page }) => {
     await openGitLab(page);
 

@@ -716,6 +716,35 @@ of the undo it cannot have. Each is pinned by a test:
   (`gitlab-action-error`). An outward action that failed must never be left looking like it
   worked.
 
+**The MERGE and the APPROVAL stand in the page's own HEADER**, at its right, before the reload
+and the way out to GitLab (`MergeRequestActions` in `web/src/components/gitlab-pane.tsx`). They
+are the two decisions a reader opens a merge request to make, so they are what the page states
+first rather than what it states four panels down — and the header does not scroll, so the merge
+is still there at the foot of a long conversation. Nothing about either gate moves with them:
+they are the same two writes, behind the same write token, and each is drawn ONCE. What the move
+costs is that a header row is wide enough for a control and never for a sentence, so five rules
+hold it and `web/e2e/gitlab.spec.ts` pins each:
+
+- **The WORDS stay in the article** (`ActionPanel`, still `gitlab-actions`): GitLab's reason for
+  refusing before the press, what the armed press costs, and GitLab's own answer after it. That
+  panel keeps the CLOSE too, because a close is what is left to do to a merge request rather
+  than a decision the page is opened for.
+- **The page brings those words to the reader at the two moments they are owed.** The press is
+  made in a header that does not scroll, so the sentence explaining it may be a screen away: the
+  panel scrolls ITSELF into view when the merge is armed and when GitLab has answered one of the
+  panel's own writes — `nearest`, so nothing moves when the words are already readable, and
+  never for a comment's failure, which is reported at the box the words are still in.
+- **They are offered on the OVERVIEW alone.** Commits and Pipelines carry neither sentence, and
+  an outward action must not be taken where its outcome cannot be reported. The other pages are
+  one press away on the strip.
+- **The armed press says what it costs ON the button** — the short spelling of it below `md`,
+  where the same sentence stands under the page in full.
+- **The row never widens the header.** The controls hold their width and the TITLE is what gives
+  way (the lesson § A long TITLE already taught this page), and the approval's WORD goes below
+  `sm` rather than the control: a phone's header already carries a back button, a title and two
+  icons, and a label that squeezed the title to nothing would cost the reader which merge
+  request they are on.
+
 The other five are ordinary gated writes because each has an undo, on the same page: a comment
 is deleted by `gitlab_mr_delete_comment`, a close is undone by a reopen, a resolution by opening
 the thread again. **The EDIT is the one with an asterisk** — `gitlab_mr_edit_comment` can be
@@ -1270,8 +1299,9 @@ pipeline that advances one step per read, which is what makes "the panel follows
 watchable — and the `{kind:"gitlab_mr"}` test hook arms a refusal, a machine with no token,
 and the reset a spec MUST call afterwards. `cd web && bun run preview -- --out /tmp/mr
 --gitlab` captures the tab strip in both of its states (pass `--dpr 4`: the tanuki is 17px),
-the list, the page, the merge armed, the comments, the description folded in both
-themes and opened, the description at a phone's width, a 150-character title at both widths,
+the list, the page, its HEADER cropped in both themes — where the approval and the merge stand —
+the merge armed and that header armed in both themes, the comments, the description folded in
+both themes and opened, the description at a phone's width, a 150-character title at both widths,
 the people rows in both of their shapes and a blocked merge in both themes;
 `web/e2e/gitlab.spec.ts` pins every rule above. **No WRITE on this page has ever
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
@@ -1669,9 +1699,10 @@ user. Two independent mechanisms enforce that split:
   `openCalendarView` / `openFirstEvent`. For the team → channel tree:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
   `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
-  and current, the list, the page, its own sub-header of four pages in both themes and at a
+  and current, the list, the page, its header's own approval and merge in both themes, its own
+  sub-header of four pages in both themes and at a
   phone's width, the page that holds nothing yet,
-  the merge armed, the comments — one of which carries a pasted PICTURE beside an image on
+  the merge armed and that header armed in both themes, the comments — one of which carries a pasted PICTURE beside an image on
   another host — the description folded and opened, the picture the description ends with in
   both themes, the description at a phone's
   width, a 150-character title at both widths, the people rows in both of their shapes and a

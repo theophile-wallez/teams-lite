@@ -122,6 +122,18 @@ export function GitLabPane(props: {
   // Which of the four pages the URL asks for. `diffs` never reaches here — the shell draws
   // that one over this pane, full screen — so this pane holds the three that live in it.
   const page = useMergeRequestPage();
+  // Whether the MERGE is armed. It lives here rather than beside either control because the
+  // two halves of that one question are drawn in two places: the button is in the header
+  // (`MergeRequestActions`) and the sentence naming what the second press costs is in the
+  // article (`ActionPanel`). One state, so a header that says "this cannot be undone" and a
+  // page that says which branches it lands can never disagree.
+  const [armed, setArmed] = useState(false);
+  const openId = open ? mergeRequestId(open) : null;
+  // ANOTHER merge request opens unarmed, and so does another PAGE of this one. This pane is not
+  // re-created when either changes, so nothing else would take the arming back — and a merge
+  // left armed behind a walk through the strip is a destructive control the reader has
+  // forgotten they armed.
+  useEffect(() => setArmed(false), [openId, page]);
 
   if (!open) return <GitLabEmptyState />;
 
@@ -149,6 +161,20 @@ export function GitLabPane(props: {
             {detail ? ` · ${detail.reference}` : ""}
           </p>
         </div>
+        {/* The two decisions this page is opened to make — the APPROVAL and the MERGE — in the
+            header, where they are reachable without reading down to them. They sit before the
+            reload and the way out to GitLab so those two keep the right edge they have always
+            had: a header is a row of controls the reader aims at, and moving one of them would
+            cost that aim on every other section of the app.
+
+            They are drawn on the OVERVIEW alone, because their sentences are: the reason a
+            merge is refused, the consequence the armed press carries and GitLab's own answer
+            all live in `ActionPanel` below, and an outward action must never be taken where
+            its outcome cannot be reported (§ The trackers). The other pages of this merge
+            request are one press away on the strip. */}
+        {detail && page === "overview" && (
+          <MergeRequestActions detail={detail} armed={armed} onArm={setArmed} />
+        )}
         <button
           type="button"
           data-testid="gitlab-detail-reload"
@@ -228,7 +254,7 @@ export function GitLabPane(props: {
                 />
                 <PipelinePanel onOpenPipeline={props.onOpenPipeline ?? (() => {})} />
                 <ApprovalPanel />
-                <ActionPanel detail={detail} />
+                <ActionPanel detail={detail} armed={armed} />
                 <ChangesPanel detail={detail} onOpenDiff={props.onOpenDiff ?? (() => {})} />
                 <DiscussionPanel />
               </>
@@ -674,32 +700,57 @@ function PipelinePanel(props: { onOpenPipeline: () => void }) {
   );
 }
 
-/** Who has approved, and the user's own approval as a toggle.
+/** The APPROVAL and the MERGE, in the header of the merge request they act on.
  *
- *  The same read and the same write a chat message's menu uses (`gitlab_approvals` /
- *  `gitlab_set_approval`), so there is one approval path in this app and not two — and the
- *  same reason it is offered at all: `approved: false` is GitLab's own undo. */
-function ApprovalPanel() {
+ *  They are the two things a reader opens this page to decide, so they are the two controls the
+ *  page states at the top of itself rather than four panels down. Everything about how each one
+ *  is gated is unchanged — `setOpenMergeRequestApproval` and `mergeOpenMergeRequest` are the
+ *  same two writes, behind the same write token — and so is every sentence around them, which
+ *  stays in the article (`ApprovalPanel` for who has approved, `ActionPanel` for what a merge
+ *  costs and what GitLab answered).
+ *
+ *  Three rules hold this row, and `web/e2e/gitlab.spec.ts` pins each:
+ *
+ *  - **The APPROVAL is its own undo**, so it is one press either way and the control says which
+ *    way it goes — GitLab publishes `/unapprove`, which is the whole reason this write exists.
+ *  - **The MERGE asks twice, and it arms in place.** The first press turns this button into the
+ *    confirmation, so the second press is made on the same target the first one was: a
+ *    confirmation somewhere else on the screen is a second thing to find at the one moment
+ *    nothing should be hunted for.
+ *  - **It is only ever offered where GitLab would take it.** A merge request GitLab refuses
+ *    leaves the button disabled carrying GitLab's own reason, which the article states in
+ *    words beside it — a state this app has not heard of is never read as a green light. */
+function MergeRequestActions(props: {
+  detail: MergeRequestDetail;
+  armed: boolean;
+  onArm: (armed: boolean) => void;
+}) {
+  const detail = props.detail;
   const approval = useAppState((s) => s.gitlabApproval);
   const acting = useAppState((s) => s.gitlabActing);
   const controller = useController();
-  if (!approval) return null;
 
-  const busy = acting === "approve" || acting === "unapprove";
+  const verdict = mergeVerdict(detail);
+  const approving = acting === "approve" || acting === "unapprove";
+  const merging = acting === "merge";
+  const mergeable = detail.state === "opened";
+  // No state means no row, exactly as it does in a message's own menu: a merge request on
+  // another host, a machine with no token or a project the token cannot see offers nothing.
+  if (!approval && !mergeable) return null;
+
   return (
-    <Panel
-      title="Approvals"
-      testId="gitlab-approvals"
-      right={
+    <div data-testid="gitlab-mr-actions" className="flex shrink-0 items-center gap-1.5">
+      {approval && (
         <button
           type="button"
           data-testid="gitlab-approve"
           data-mine={approval.mine ? "true" : undefined}
           disabled={!!acting}
+          title={approval.mine ? "Revoke your approval on GitLab" : "Approve on GitLab"}
           data-cuelume-toggle=""
           onClick={() => void controller.setOpenMergeRequestApproval(!approval.mine)}
           className={cn(
-            "flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12px] font-medium transition-colors",
+            "flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium transition-colors",
             approval.mine
               ? "bg-element text-text-dim hover:text-foreground"
               : "bg-primary/12 text-primary hover:bg-primary/20",
@@ -707,14 +758,88 @@ function ApprovalPanel() {
           )}
         >
           <HugeiconsIcon
-            icon={busy ? Loading02Icon : Tick02Icon}
-            className={cn("size-3.5", busy && "animate-spin")}
+            icon={approving ? Loading02Icon : Tick02Icon}
+            className={cn("size-3.5 shrink-0", approving && "animate-spin")}
             strokeWidth={1.8}
           />
-          {approval.mine ? "Revoke approval" : "Approve"}
+          {/* The word goes below `sm`, never the control: a phone's header already carries a
+              back button, the title and two icons, and a label that squeezed the title to
+              nothing would cost the reader which merge request they are on. */}
+          <span className="hidden sm:inline">
+            {approval.mine ? "Revoke approval" : "Approve"}
+          </span>
         </button>
-      }
-    >
+      )}
+
+      {mergeable && (
+        <button
+          type="button"
+          data-testid={props.armed ? "gitlab-merge-confirm" : "gitlab-merge"}
+          data-armed={props.armed ? "true" : undefined}
+          disabled={!verdict.can || !!acting}
+          title={verdict.reason}
+          data-cuelume-press=""
+          onClick={() => {
+            if (!props.armed) {
+              props.onArm(true);
+              return;
+            }
+            props.onArm(false);
+            void controller.mergeOpenMergeRequest();
+          }}
+          className={cn(
+            "flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium transition-colors",
+            props.armed
+              ? "bg-destructive text-white hover:bg-destructive/90"
+              : "bg-primary text-primary-foreground hover:bg-primary/90",
+            (!verdict.can || !!acting) && "cursor-not-allowed opacity-50",
+          )}
+        >
+          <HugeiconsIcon
+            icon={merging ? Loading02Icon : GitMergeIcon}
+            className={cn("size-4 shrink-0", merging && "animate-spin")}
+            strokeWidth={1.8}
+          />
+          {props.armed ? (
+            <>
+              {/* The armed press says what it costs ON the button, because that is where the
+                  reader is looking. A phone gets the short spelling of it and the same
+                  sentence in the article under the page. */}
+              <span className="hidden md:inline">Merge — this cannot be undone</span>
+              <span className="md:hidden">Confirm merge</span>
+            </>
+          ) : (
+            "Merge"
+          )}
+        </button>
+      )}
+
+      {props.armed && (
+        <button
+          type="button"
+          data-testid="gitlab-merge-cancel"
+          onClick={() => props.onArm(false)}
+          className="flex h-8 items-center rounded-lg px-2 text-[12px] text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Who has approved. The user's own approval is the header's business (see
+ *  `MergeRequestActions`); this panel is the FACTS behind it — how many more GitLab wants, and
+ *  who has given theirs.
+ *
+ *  The same read a chat message's menu uses (`gitlab_approvals`), so there is one approval path
+ *  in this app and not two. */
+function ApprovalPanel() {
+  const approval = useAppState((s) => s.gitlabApproval);
+  if (!approval) return null;
+
+  return (
+    <Panel title="Approvals" testId="gitlab-approvals">
       <div className="flex flex-col gap-1 text-[12px] text-text-dim">
         {approval.approvals_left != null && approval.approvals_left > 0 ? (
           <p data-testid="gitlab-approvals-left">
@@ -737,75 +862,67 @@ function ApprovalPanel() {
   );
 }
 
-/** The two writes that change what a merge request IS: the merge, and the close.
+/** What is left to do to a merge request, and what happened when it was done: the CLOSE, the
+ *  sentence the merge carries, and GitLab's own answer to either.
  *
- *  The merge asks twice — it is the one action here that no later click takes back — and the
- *  close does not, because a reopen undoes it from the same row. */
-function ActionPanel(props: { detail: MergeRequestDetail }) {
+ *  The merge and the approval are in the header (see `MergeRequestActions`) — the two decisions
+ *  a reader comes for. Their WORDS stay here, and that split is deliberate: a header row is
+ *  wide enough for a control and never for a sentence, and both of these sentences are ones the
+ *  reader has to be able to read on a phone.
+ *
+ *  - **The reason a merge is refused** is GitLab's own, stated before the press rather than
+ *    after it.
+ *  - **The consequence of the armed press** takes that line's place while it is armed, because
+ *    that is the moment it matters.
+ *  - **GitLab's answer** is reported here whichever of these writes was made: a failure must
+ *    never be left looking like a success, nor left to the eleven pixels of the status line.
+ *
+ *  The close asks once, because the reopen that replaces it is its undo. */
+function ActionPanel(props: {
+  detail: MergeRequestDetail;
+  /** Whether the header's merge is armed. The sentence below is then the WARNING. */
+  armed: boolean;
+}) {
   const detail = props.detail;
+  const armed = props.armed;
   const acting = useAppState((s) => s.gitlabActing);
   const error = useAppState((s) => s.gitlabActionError);
   const done = useAppState((s) => s.gitlabActionDone);
   const controller = useController();
-  const [armed, setArmed] = useState(false);
 
   const verdict = mergeVerdict(detail);
   const change = stateChangeFor(detail);
-  const merging = acting === "merge";
   const changing = acting === change;
+
+  // The merge is pressed in the header, which does not scroll — so both of its sentences can be
+  // asked for while this panel is far down the page, and neither may go unread: the ARMED press
+  // is the one moment the consequence matters, and a refusal nobody is shown is the outcome an
+  // outward action must never have. So the panel brings ITSELF to the reader at those two
+  // moments. `nearest` is the smallest move that makes the words readable — nothing happens at
+  // all when they already are — and the outcome half is armed by this panel's own writes only:
+  // a comment's failure is reported at the box the words are still in, and yanking the page
+  // there would take them off it.
+  const panel = useRef<HTMLDivElement | null>(null);
+  const mine = useRef(false);
+  if (acting === "merge" || (change && acting === change)) mine.current = true;
+  useEffect(() => {
+    if (armed) panel.current?.scrollIntoView({ block: "nearest" });
+  }, [armed]);
+  useEffect(() => {
+    if (!error && !done) return;
+    if (!mine.current) return;
+    mine.current = false;
+    panel.current?.scrollIntoView({ block: "nearest" });
+  }, [error, done]);
 
   return (
     <Panel title="Actions" testId="gitlab-actions">
-      <div className="flex flex-col gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          {/* MERGE. Two clicks: the first arms, the second lands the branch. The sentence
-              under it names what that costs, so nobody presses the second one to find out.
-              Disabled — with GitLab's own reason on it — wherever GitLab would refuse. */}
-          {detail.state === "opened" && (
-            <button
-              type="button"
-              data-testid={armed ? "gitlab-merge-confirm" : "gitlab-merge"}
-              data-armed={armed ? "true" : undefined}
-              disabled={!verdict.can || !!acting}
-              title={verdict.reason}
-              data-cuelume-press=""
-              onClick={() => {
-                if (!armed) {
-                  setArmed(true);
-                  return;
-                }
-                setArmed(false);
-                void controller.mergeOpenMergeRequest();
-              }}
-              className={cn(
-                "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors",
-                armed
-                  ? "bg-destructive text-white hover:bg-destructive/90"
-                  : "bg-primary text-primary-foreground hover:bg-primary/90",
-                (!verdict.can || !!acting) && "cursor-not-allowed opacity-50",
-              )}
-            >
-              <HugeiconsIcon
-                icon={merging ? Loading02Icon : GitMergeIcon}
-                className={cn("size-4", merging && "animate-spin")}
-                strokeWidth={1.8}
-              />
-              {armed ? "Merge — this cannot be undone" : "Merge"}
-            </button>
-          )}
-
-          {armed && (
-            <button
-              type="button"
-              data-testid="gitlab-merge-cancel"
-              onClick={() => setArmed(false)}
-              className="rounded-lg px-2.5 py-1.5 text-[12px] text-text-dim transition-colors hover:bg-accent hover:text-foreground"
-            >
-              Cancel
-            </button>
-          )}
-
-          {change && !armed && (
+      <div ref={panel} className="flex flex-col gap-2">
+        {/* The CLOSE, and nothing else: the merge is the header's, and the header does not
+            scroll — so that control is on screen whatever the reader has scrolled to, and a
+            second cancel down here would be a second spelling of one press. */}
+        {change && !armed && (
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               data-testid={change === "close" ? "gitlab-close" : "gitlab-reopen"}
@@ -824,8 +941,8 @@ function ActionPanel(props: { detail: MergeRequestDetail }) {
               />
               {change === "close" ? "Close" : "Reopen"}
             </button>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* What the state of things is, in one line. While armed it is the WARNING, because
             that is the moment the sentence matters. */}
