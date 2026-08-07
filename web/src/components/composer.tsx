@@ -12,7 +12,9 @@ import type { AgentAnswer } from "~/lib/agent-answer";
 import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
 import {
   composerImageAccept,
+  composerImagesBytes,
   COMPOSER_IMAGE_MAX_COUNT,
+  imageBatchError,
   loadComposerImage,
   sendImage,
   type ComposerImage,
@@ -50,13 +52,7 @@ function draftToHtml(text: string): string {
  *  screenshots is three pictures, not the first one. Empty when the paste carries none,
  *  which is what keeps an ordinary text paste an ordinary text paste. */
 function clipboardImages(event: ClipboardEvent): File[] {
-  const files: File[] = [];
-  for (const item of event.clipboardData.items) {
-    if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
-    const file = item.getAsFile();
-    if (file) files.push(file);
-  }
-  return files;
+  return Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
 }
 
 /**
@@ -156,17 +152,21 @@ export function Composer(props: {
     return controller.onCustomEmojiChange(loadPack);
   }, [controller, loadPack]);
 
-  imagesRef.current = images;
-
   // An image belongs to the conversation it was picked in, so switching away drops
   // it rather than carrying it into somebody else's chat.
+  //
+  // The decode counter is deliberately NOT reset here: a batch still decoding decrements
+  // itself when it finishes, and zeroing it under one would let the NEXT batch's
+  // decrement take the count to zero while that batch's picture is still missing — Send
+  // enabled, Enter posts the message without it. What the reset would buy is Send
+  // enabled a moment earlier in the new conversation; what it costs is a message short
+  // of a picture.
   useEffect(() => {
     selectionVersion.current += 1;
     sendVersion.current += 1;
     imagesRef.current = [];
     setImages([]);
     setImageError(null);
-    setLoadingImages(0);
     sendingRef.current = false;
     setSending(false);
   }, [openId]);
@@ -190,9 +190,12 @@ export function Composer(props: {
    *  order; a conversation change makes the whole batch stale and drops it — a removal
    *  does not, because the others are separate pictures.
    *
-   *  The ceiling is stated here as well as at the backend, so an eleventh picture is
-   *  refused before a send rather than by one — and a batch that crosses it keeps the
-   *  pictures that fit, which is most of what the user asked for. */
+   *  BOTH ceilings are stated here as well as at the backend, so an eleventh picture — or
+   *  one that would take the batch over what a message may weigh — is refused before a
+   *  send rather than by one, and a batch that crosses either keeps the pictures that fit.
+   *  The weight is the one that must not be left to the backend alone: the request would
+   *  be a frame the socket refuses to read, which drops the connection instead of
+   *  answering, and a dropped connection is reported as an unreachable backend. */
   const addImages = async (files: File[]) => {
     if (files.length === 0) return;
     const version = selectionVersion.current;
@@ -203,6 +206,11 @@ export function Composer(props: {
         if (selectionVersion.current !== version) return;
         if (imagesRef.current.length >= COMPOSER_IMAGE_MAX_COUNT) {
           setImageError(`A message carries at most ${COMPOSER_IMAGE_MAX_COUNT} images.`);
+          return;
+        }
+        const tooHeavy = imageBatchError(composerImagesBytes(imagesRef.current), file);
+        if (tooHeavy) {
+          setImageError(tooHeavy);
           return;
         }
         try {

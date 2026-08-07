@@ -209,11 +209,30 @@ pub fn new_client_message_id() -> String {
     ms.to_string()
 }
 
-/// Parse and validate the optional `images` list carried by the send RPC.
+/// The pictures a `send` carries, read out of its whole params object.
 ///
-/// A message carries as many pictures as the user pasted, in the order they picked
-/// them, and both ceilings are enforced here rather than at the composer: the client is
-/// what a mis-paste happens in, and the bytes are what this machine then uploads.
+/// It reads the params rather than one field so it can refuse the SINGLE-`image` shape a
+/// page from before this feature sends. That page exists in practice: a backend restart
+/// swaps the bundle while an open tab keeps its old JavaScript (see AGENTS.md
+/// § Automation safety), and `images` being absent would otherwise mean "no pictures" —
+/// so the caption would go out alone, answered `sent: true`, with the screenshot the user
+/// staged dropped and nothing anywhere saying so.
+pub fn parse_send_images(params: &Value) -> Result<Vec<ImageUpload>> {
+    anyhow::ensure!(
+        params.get("image").is_none_or(Value::is_null),
+        "this page is too old to send pictures — reload it and try again"
+    );
+    match params.get("images") {
+        Some(value) => parse_images(value),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Parse and validate the `images` list itself.
+///
+/// A message carries as many pictures as the user pasted, in the order they picked them.
+/// Both ceilings are enforced here — the composer states them too, but a client is what a
+/// mis-paste happens in and the bytes are what this machine then uploads.
 pub fn parse_images(value: &Value) -> Result<Vec<ImageUpload>> {
     let list = value.as_array().context("images must be a list")?;
     anyhow::ensure!(
@@ -374,9 +393,19 @@ pub async fn send_message(
     // In the order the user picked them, one upload at a time: the message body names
     // them in that order, and a failure here happens before the message POST — so
     // nothing is posted and what did upload is an unreferenced AMS blob.
+    //
+    // Which picture failed travels with the error. With ten of them, "the send failed" on
+    // its own leaves the reader removing pictures at random to find the one the tenant
+    // refused.
     let mut ams_images = Vec::with_capacity(images.len());
-    for image in images {
-        ams_images.push(upload_image(http, session, ic3, conversation_id, image).await?);
+    for (index, image) in images.iter().enumerate() {
+        ams_images.push(
+            upload_image(http, session, ic3, conversation_id, image)
+                .await
+                .with_context(|| {
+                    format!("image {} of {} ({})", index + 1, images.len(), image.name)
+                })?,
+        );
     }
     let body = build_body(
         &cmid,
@@ -835,7 +864,7 @@ fn message_content(
         escape_html(text)
     };
 
-    images.iter().fold(body, |body, image| format!("{body}{}", image_markup(image)))
+    body + &images.iter().map(image_markup).collect::<String>()
 }
 
 fn image_markup(image: &AmsImage) -> String {
@@ -1224,6 +1253,25 @@ mod tests {
         // One bad entry refuses the whole message rather than silently dropping a
         // picture the user watched themselves add.
         assert!(parse_images(&json!([one.clone(), { "name": "x.svg", "content_type": "image/svg+xml", "data_base64": "AQ==" }])).is_err());
+    }
+
+    // A page from before this feature sends `image`, not `images`. Reading `images` alone
+    // would call that "no pictures" and post the caption by itself — answered `sent: true`,
+    // with the screenshot dropped and nothing anywhere saying so. An open tab keeps its old
+    // JavaScript across a backend restart, so that page is a real one.
+    #[test]
+    fn an_older_pages_single_image_is_refused_rather_than_dropped() {
+        let bytes = image_bytes("image/png");
+        let one = image_value("image/png", &bytes);
+
+        let refused = parse_send_images(&json!({ "text": "look", "image": one.clone() }));
+        let message = refused.unwrap_err().to_string();
+        assert!(message.contains("reload"), "says what to do: {message}");
+
+        // The shapes that are not that page: the list, an explicit null, and no key at all.
+        assert_eq!(parse_send_images(&json!({ "images": [one] })).unwrap().len(), 1);
+        assert!(parse_send_images(&json!({ "image": Value::Null })).unwrap().is_empty());
+        assert!(parse_send_images(&json!({ "text": "hi" })).unwrap().is_empty());
     }
 
     #[test]

@@ -5,6 +5,17 @@ export const COMPOSER_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
  *  half that says so before the user presses Send. */
 export const COMPOSER_IMAGE_MAX_COUNT = 10;
 
+/** What all the pictures of one message may weigh together — `MAX_IMAGES_TOTAL_BYTES`.
+ *
+ *  It is mirrored HERE and not only at the backend because the three ceilings have to
+ *  close: ten pictures of just under 10 MiB each pass the other two, and the request
+ *  they build is ~133 MiB of base64 — over the socket's own read limit
+ *  (`MAX_REQUEST_BYTES`), which is a protocol error rather than a refusal. The
+ *  connection drops, and the composer then says the backend is unreachable, which is
+ *  both wrong and unactionable. Stated here, the batch is refused with a sentence that
+ *  names what to do, and no frame this app builds can reach that limit. */
+export const COMPOSER_IMAGE_MAX_TOTAL_BYTES = 30 * 1024 * 1024;
+
 export const COMPOSER_IMAGE_TYPES = [
   "image/png",
   "image/jpeg",
@@ -22,11 +33,14 @@ export type ComposerImage = {
   contentType: ComposerImageType;
   width: number;
   height: number;
+  /** The file's own size, which is what the ceilings are counted in — the backend adds
+   *  up the same decoded bytes (`parse_images`), so both sides refuse the same batch. */
+  bytes: number;
   dataBase64: string;
   previewUrl: string;
 };
 
-export type SendImage = Omit<ComposerImage, "previewUrl" | "id">;
+export type SendImage = Omit<ComposerImage, "previewUrl" | "id" | "bytes">;
 
 const ACCEPTED_TYPES = new Set<string>(COMPOSER_IMAGE_TYPES);
 
@@ -42,6 +56,28 @@ export function imageFileError(file: Pick<File, "size" | "type">): string | null
     return "Select an image that is 10 MiB or smaller.";
   }
   return null;
+}
+
+const MIB = 1024 * 1024;
+
+/** Why `file` cannot join pictures already weighing `stagedBytes`, or null when it can.
+ *
+ *  Checked on the file rather than on the decoded picture, so the batch is refused before
+ *  anything is read — and the sentence names the one thing left to do, because a message
+ *  that cannot get smaller by waiting has to say so. */
+export function imageBatchError(
+  stagedBytes: number,
+  file: Pick<File, "size">,
+): string | null {
+  if (stagedBytes + file.size > COMPOSER_IMAGE_MAX_TOTAL_BYTES) {
+    return `Those images add up to more than ${COMPOSER_IMAGE_MAX_TOTAL_BYTES / MIB} MiB. Remove one and try again.`;
+  }
+  return null;
+}
+
+/** What the pending pictures weigh together. */
+export function composerImagesBytes(images: Pick<ComposerImage, "bytes">[]): number {
+  return images.reduce((total, image) => total + image.bytes, 0);
 }
 
 function readAsDataUrl(file: File): Promise<string> {
@@ -89,6 +125,7 @@ export async function loadComposerImage(file: File): Promise<ComposerImage> {
     contentType: file.type as ComposerImageType,
     width: dimensions.width,
     height: dimensions.height,
+    bytes: file.size,
     dataBase64: previewUrl.slice(markerIndex + marker.length),
     previewUrl,
   };

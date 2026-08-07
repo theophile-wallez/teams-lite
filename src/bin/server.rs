@@ -2620,7 +2620,7 @@ async fn main() -> Result<()> {
 /// Ceiling on ONE request frame read off a UI socket, and the same number the relay in
 /// web/server.ts uses for the traffic it forwards. tungstenite's own defaults are 16 MiB
 /// per frame and 64 MiB per message, which a send carrying pictures walks straight into:
-/// a single 10 MiB image is already 13.4 MiB once base64-encoded, and a message's whole
+/// a single 10 MiB image is already 13.33 MiB once base64-encoded, and a message's whole
 /// allowance (`teams_send::MAX_IMAGES_TOTAL_BYTES`, 30 MiB) is 40 MiB. A frame over the
 /// limit is a protocol error, so the connection would be DROPPED rather than the send
 /// refused with a sentence — which is the failure the caps in `teams_send::parse_images`
@@ -3672,12 +3672,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             // Every picture the composer holds, in the order the user pasted them. The
-            // count and the combined size are refused here, before anything is uploaded.
-            let images = params
-                .get("images")
-                .map(teams_send::parse_images)
-                .transpose()?
-                .unwrap_or_default();
+            // count and the combined size are refused here, before anything is uploaded —
+            // and so is the single-`image` shape an older page sends, because dropping it
+            // silently would post the caption alone and answer that it worked.
+            let images = teams_send::parse_send_images(params)?;
             // Who the message @mentions. The body carries an index per mention and this
             // list says who each index names, so Teams notifies them (see
             // `teams_send::Mention`). Validated before anything leaves this machine.

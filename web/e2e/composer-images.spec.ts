@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import {
   test,
   expect,
@@ -12,6 +13,9 @@ import {
 const PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nAAAAABJRU5ErkJggg==";
 const PNG = Buffer.from(PNG_BASE64, "base64");
+/** A picture with real pixels — the app's own icon, 192px tall, so a height cap on the
+ *  thumbnail is something a box can be measured against. */
+const TALL_PNG = fileURLToPath(new URL("../public/icons/icon-192.png", import.meta.url));
 const IMAGE_INPUT = '[data-testid="composer-image-input"]';
 const IMAGE_PREVIEW = '[data-testid="composer-image-preview"]';
 
@@ -90,6 +94,24 @@ test.describe("composer images", () => {
     await expect
       .poll(() => pendingImageNames(page))
       .toEqual(["first.png", "second.png", "third.png"]);
+  });
+
+  // Several are drawn smaller than one: ten thumbnails at the height a single one gets is
+  // a composer that has eaten the conversation.
+  //
+  // It measures a picture TALLER than either cap — the app's own 192px icon, not the 1x1
+  // pixel the rest of this file uses, whose intrinsic height is below both `max-h` values
+  // and so proves nothing about them.
+  test("draws several pictures smaller than a single one", async ({ page }) => {
+    await openComposer(page);
+    await page.locator(IMAGE_INPUT).setInputFiles(TALL_PNG);
+    await expect(page.locator(IMAGE_PREVIEW)).toHaveCount(1);
+    const thumbnail = page.locator(`${IMAGE_PREVIEW} img`).first();
+    const alone = (await thumbnail.boundingBox())!.height;
+
+    await page.locator(IMAGE_INPUT).setInputFiles(TALL_PNG);
+    await expect(page.locator(IMAGE_PREVIEW)).toHaveCount(2);
+    await expect.poll(async () => (await thumbnail.boundingBox())!.height).toBeLessThan(alone);
   });
 
   test("takes several images from one paste and sends them in order", async ({ page }) => {

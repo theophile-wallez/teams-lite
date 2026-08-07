@@ -114,32 +114,54 @@ and uploaded by the backend as part of the same `send` (`teams_send::send_messag
 The second paste used to REPLACE the first, which made a message meant to carry three
 screenshots carry the last one.
 
-- **THREE ceilings, and they are one set.** Ten pictures per message
-  (`teams_send::MAX_IMAGES`, mirrored by `COMPOSER_IMAGE_MAX_COUNT` and by the mock), 10
-  MiB each (`MAX_IMAGE_BYTES`), 30 MiB for all of them (`MAX_IMAGES_TOTAL_BYTES`) — and
-  the socket's own read limit above every one of them (`MAX_REQUEST_BYTES` in
-  src/bin/server.rs, the number the relay in web/server.ts already used). That last one is
-  why they move together: tungstenite's defaults are 16 MiB per frame and one 10 MiB image
-  is 13.4 MiB once base64-encoded, so a send carrying two of them was already over the
-  limit — and a frame over the limit is a PROTOCOL error, which drops the connection
-  instead of refusing the send with a sentence. Raise a count without raising that and the
-  failure stops being something the user can read.
-- **The composer states the count, the backend enforces it.** A batch that crosses ten
-  keeps the ten that fit and says so beside the pictures, so the eleventh is refused before
-  a send rather than by one. One bad file in a batch costs that file and nothing else.
+- **THREE ceilings, and they must CLOSE.** Ten pictures per message
+  (`teams_send::MAX_IMAGES`), 10 MiB each (`MAX_IMAGE_BYTES`), 30 MiB for all of them
+  (`MAX_IMAGES_TOTAL_BYTES`) — and above every one of them the socket's own read limit
+  (`MAX_REQUEST_BYTES` in src/bin/server.rs, the number the relay in web/server.ts already
+  used). Closing means the largest batch the first two admit cannot build a frame the
+  socket refuses to READ: tungstenite's defaults are 16 MiB per frame and one 10 MiB image
+  is 13.33 MiB once base64-encoded, so a send carrying two was already over — and a frame
+  over the limit is a PROTOCOL error, which DROPS the connection instead of answering. The
+  page then reports an unreachable backend, which is both wrong and unactionable, so the
+  set is what makes a refusal readable at all. It nearly did not close: ten pictures of 10
+  MiB are 133 MiB encoded against a 128 MiB limit, and the third ceiling was the backend's
+  alone — enforced after the frame is read, which is too late to state anything.
+  `composer-image.test.ts` now pins the arithmetic; move one of these numbers and it fails.
+- **The composer states all three, the backend enforces them.** A batch that crosses the
+  count or the weight keeps the pictures that fit and says so beside them
+  (`COMPOSER_IMAGE_MAX_COUNT` and `COMPOSER_IMAGE_MAX_TOTAL_BYTES`, over
+  `imageBatchError`), so the eleventh — and the one that would make the request unsendable
+  — is refused before a send rather than by one. One bad file in a batch costs that file
+  and nothing else. The mock mirrors every refusal (`parseSendImages`), because a mock that
+  accepts what the backend refuses hides the bug instead of failing a test.
+- **A page too old to carry pictures is REFUSED, never quietly emptied.** The RPC took a
+  single `image` before it took `images`, and an open tab keeps its old JavaScript across a
+  backend restart (§ Automation safety). Reading `images` alone would call that page's
+  screenshot "no pictures" and post the caption by itself, answered `sent: true` — so
+  `parse_send_images` reads the whole params object and refuses the old shape with a
+  sentence that says to reload.
 - **One AMS upload per picture, in the order they were added**, and that order is what the
   body's `<img>` tags carry. `amsreferences` was ALREADY an array, so nothing about the
   Teams shape is invented here. An upload that fails happens before the message POST, so
-  nothing is posted and what did upload is an unreferenced blob.
+  nothing is posted and what did upload is an unreferenced blob — and the failure names
+  WHICH picture (its position and its name), because with ten of them "the send failed"
+  leaves the reader removing pictures at random to find the one the tenant refused.
 - **A send takes back exactly the pictures that left**, matched by the id the pending list
   keys on — the rule `removeSentWords` follows for the words. Clearing the box would erase
   a screenshot pasted while the request was travelling; clearing nothing would leave the
   ones that left sitting there, so the next Enter posts them twice.
 - **Several are drawn SMALLER than one.** Ten thumbnails at the height a single one gets is
   a composer that has eaten the conversation.
+- **The decode counter is never reset, only decremented.** A batch still reading files
+  decrements itself when it ends, so switching conversation must not zero the count under
+  it: the next batch's own decrement would then take it to zero while that batch's picture
+  is still missing, which enables Send and posts a message one picture short. What a reset
+  would buy is Send enabled a moment earlier in the new conversation.
 - `cd web && bun run preview -- --out /tmp/pics --compose-images` captures the row in both
   themes and the sentence a full box earns; `web/e2e/composer-images.spec.ts` pins every
-  rule above. That spec deliberately does NOT send its ten-picture message: one mock
+  rule above except the two that are cheaper to pin without a browser — the combined weight
+  and the arithmetic that closes the set live in `web/src/lib/composer-image.test.ts`, and
+  the old page's refusal in `teams_send::tests`. That spec deliberately does NOT send its ten-picture message: one mock
   process serves the whole run, and a message ten pictures tall is shared state — it makes
   the deep-link scroll in `notifications.spec.ts` time out, which is a fragility of the
   virtualized history worth its own look and NOT something a test should hide.

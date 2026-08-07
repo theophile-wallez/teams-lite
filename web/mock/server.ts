@@ -232,9 +232,12 @@ type SendImage = {
   height?: number;
 };
 
-/** How many pictures one message carries — `teams_send::MAX_IMAGES`. Mirrored so the
- *  refusal is reachable with no tenant. */
+/** How many pictures one message carries — `teams_send::MAX_IMAGES` — and what they may
+ *  weigh together, `MAX_IMAGES_TOTAL_BYTES`. Mirrored so each refusal is reachable with
+ *  no tenant: a mock that accepts what the backend refuses hides the bug rather than
+ *  failing a test. */
 const MAX_SEND_IMAGES = 10;
+const MAX_SEND_IMAGES_TOTAL_BYTES = 30 * 1024 * 1024;
 
 type CapturedSend = {
   conversation: string;
@@ -5055,13 +5058,30 @@ function parseReplyTo(value: unknown): ReplyTo | undefined {
   };
 }
 
-/** Parse the optional `images` list the way the real backend does: every entry a whole
- *  image, and at most `MAX_SEND_IMAGES` of them (`teams_send::MAX_IMAGES`). */
-function parseSendImages(value: unknown): SendImage[] {
+/** Parse the optional `images` list the way the real backend's `parse_send_images` does:
+ *  every entry a whole image, at most `MAX_SEND_IMAGES` of them, weighing no more than
+ *  `MAX_SEND_IMAGES_TOTAL_BYTES` together — and never the single-`image` shape a page from
+ *  before this feature sends, which must be refused rather than silently dropped. */
+function parseSendImages(params: Record<string, unknown>): SendImage[] {
+  if (params.image !== undefined && params.image !== null) {
+    throw new Error("this page is too old to send pictures — reload it and try again");
+  }
+  const value = params.images;
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new Error("invalid images param");
   if (value.length > MAX_SEND_IMAGES) throw new Error("too many images in one message");
-  return value.map(parseSendImage);
+  const images = value.map(parseSendImage);
+  const bytes = images.reduce((total, image) => total + decodedBytes(image.data_base64), 0);
+  if (bytes > MAX_SEND_IMAGES_TOTAL_BYTES) {
+    throw new Error("those images add up to more than 30 MiB");
+  }
+  return images;
+}
+
+/** How many bytes a base64 payload decodes to, without decoding it. */
+function decodedBytes(base64: string): number {
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
 }
 
 /** Parse one image of that list strictly, so protocol drift fails a test instead of
@@ -6189,7 +6209,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const replyTo = parseReplyTo(input.reply_to);
       const rawHtml = input.content_html;
       const contentHtml = typeof rawHtml === "string" && rawHtml.length > 0 ? rawHtml : undefined;
-      const images = parseSendImages(input.images);
+      const images = parseSendImages(input);
       const mentions = parseSendMentions(input.mentions);
       if (TEST_HOOKS) {
         capturedSends.push({
