@@ -89,13 +89,39 @@ describe("emojiSuggestions", () => {
     ]);
   });
 
-  it("offers nothing at all for an empty query on an empty pack", () => {
-    expect(emojiSuggestions("", [], [["smile", "😄"]])).toEqual([]);
+  it("sorts the empty query's rows by name, whatever order the pack arrived in", () => {
+    // The store orders them (`ORDER BY name ASC`) and the mock does not, so the menu must
+    // not depend on which backend answered.
+    const pack = [emoji("shipit"), emoji("partyparrot"), emoji("ship")];
+    expect(emojiSuggestions("", pack, []).map((s) => s.name)).toEqual([
+      "partyparrot",
+      "ship",
+      "shipit",
+    ]);
   });
 
-  it("holds an empty query's list to the same bound as a typed one", () => {
-    const pack = Array.from({ length: 25 }, (_, i) => emoji(`e${i}`));
-    expect(emojiSuggestions("", pack, [])).toHaveLength(10);
+  it("leaves Unicode out of the empty query, whose first rows would be `:100:` and `:1234:`", () => {
+    // The index is in generated order, not alphabetical, so its head is noise in front of
+    // the rows the user opened the menu for. One typed letter brings the band back.
+    const unicode: [string, string][] = [
+      ["100", "💯"],
+      ["1234", "🔢"],
+    ];
+    expect(emojiSuggestions("", [], unicode)).toEqual([]);
+    expect(emojiSuggestions("1", [], unicode)).toEqual([
+      { kind: "unicode", name: "100", native: "💯" },
+      { kind: "unicode", name: "1234", native: "🔢" },
+    ]);
+  });
+
+  it("holds the empty query to the same limit as any other", () => {
+    const pack = Array.from({ length: 30 }, (_, i) => emoji(`art-${i}`));
+    expect(emojiSuggestions("", pack, []).length).toBe(10);
+    expect(emojiSuggestions("", pack, [], 3).length).toBe(3);
+  });
+
+  it("offers nothing for an empty query on a machine with no pack", () => {
+    expect(emojiSuggestions("", [], [["smile", "😄"]])).toEqual([]);
   });
 });
 
@@ -124,17 +150,22 @@ describe("emojiQueryBefore", () => {
 
   it("makes a lone colon after a space a query too", () => {
     expect(emojiQueryBefore("ok :")).toEqual({ query: "", at: 3 });
+    expect(emojiQueryBefore("look at this :")).toEqual({ query: "", at: 13 });
   });
 
   it("returns null once a space follows the colon, because that is prose", () => {
     expect(emojiQueryBefore(": ")).toBeNull();
+    expect(emojiQueryBefore(":  ")).toBeNull();
     expect(emojiQueryBefore("note: ")).toBeNull();
+    expect(emojiQueryBefore(":ship it")).toBeNull();
   });
 
-  it("still returns null for a colon glued to a word", () => {
+  it("still returns null for a colon glued to a word — a time, and prose", () => {
     // The rule that keeps "note:" out is the character BEFORE the colon, and a lone
     // colon must not weaken it.
     expect(emojiQueryBefore("note:")).toBeNull();
+    expect(emojiQueryBefore("18:")).toBeNull();
+    expect(emojiQueryBefore("18:30")).toBeNull();
     expect(emojiQueryBefore("https:")).toBeNull();
   });
 });

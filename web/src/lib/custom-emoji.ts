@@ -23,7 +23,7 @@ const MAX_EMOJI_QUERY_LENGTH = 64;
  *
  * `text` is the plain text of the current block up to the cursor. An emoji code starts
  * at the beginning of a block or after whitespace — never inside a word — so "note: this"
- * does not trigger.
+ * does not trigger, and neither does "18:30".
  *
  * A LONE ":" is a query too, and it offers the pack. Somebody who has just added their
  * first emoji does not know its name yet, so "type a letter to see what you have" is
@@ -40,6 +40,7 @@ export function emojiQueryBefore(text: string): EmojiQuery | null {
   const query = text.slice(at + 1);
   if (query.length > MAX_EMOJI_QUERY_LENGTH) return null;
   // Whitespace ENDS a query, an empty one included: ": " is prose, and the list closes.
+  // That also covers a query which is only whitespace, where `trim()` would be needed.
   if (/[\n\r\s]/.test(query)) return null;
   return { query, at };
 }
@@ -138,8 +139,15 @@ function hasAtLeastOneEmoji(nodes: RichNode[]): boolean {
  *
  * An EMPTY query — a lone ":" — offers the pack, and only the pack: the whole point of
  * opening on the colon is "show me what I have", and every Unicode shortcode matches an
- * empty prefix, so including them would bury the pack under whichever 10 come first
- * alphabetically. A Unicode emoji is reached by naming it, which is how it always was.
+ * empty prefix, so including them would bury the pack under whichever 10 come first.
+ * The index is in generated order, so those 10 would be `:100:` and `:1234:` — noise in
+ * front of the rows the user came for. A Unicode emoji is reached by naming it, which is
+ * how it always was, and one typed letter brings the band back.
+ *
+ * That list is sorted by name HERE rather than trusted from the caller: the store's own
+ * query orders it (`store.rs`: `ORDER BY name ASC`), a Map-backed mock returned insertion
+ * order, and a menu whose order depends on which backend answered is a menu no spec can
+ * pin.
  */
 export function emojiSuggestions(
   query: string,
@@ -148,7 +156,10 @@ export function emojiSuggestions(
   limit = 10,
 ): EmojiSuggestion[] {
   if (query.trim() === "") {
-    return pack.slice(0, limit).map((emoji) => ({ kind: "custom", name: emoji.name }));
+    return pack
+      .map((emoji): EmojiSuggestion => ({ kind: "custom", name: emoji.name }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, limit);
   }
 
   const lower = query.toLowerCase();

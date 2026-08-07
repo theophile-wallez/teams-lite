@@ -13,6 +13,7 @@ import type { Locator, Page } from "@playwright/test";
  *     large with the bubble chrome dropped — one decision, so both halves are asserted;
  *  4b. the reaction row offers the pack's own art, and the chip that lands IS that art;
  *  5. the `:` list offers custom emoji above the Unicode ones, and Enter inserts the chip;
+ *  5b. a LONE `:` opens the pack alone, Tab picks from it, and Enter still SENDS;
  *  6. a taken name is refused with Slack's own sentence;
  *  7. delete asks twice, and the confirming label is "Delete Emoji";
  *  8. one Backspace removes a whole chip.
@@ -336,18 +337,22 @@ test.describe("custom emoji", () => {
     // EVERY custom row sits above every Unicode one — the user's own emoji are what they
     // meant, and a Unicode shortcode that happens to share the name must not outrank them.
     expect(kinds.lastIndexOf("custom")).toBeLessThan(kinds.indexOf("unicode"));
-    await expect(rows.first()).toHaveAttribute("data-testid", "emoji-suggestion-shipit");
+    // Within the band, the pack's own order — which is BY NAME, because that is how the
+    // store hands it back (`ORDER BY name ASC`). So the alias `ship` precedes `shipit`.
+    await expect(rows.first()).toHaveAttribute("data-testid", "emoji-suggestion-ship");
 
     // Enter takes the active row, and what lands in the composer is the CHIP, not the code.
+    // The chip carries the name of the row that was PICKED — `ship` — while the body it
+    // serializes to holds the alias target `:shipit:`, which is the backend's business.
     await page.keyboard.press("Enter");
-    await expect(packArt(page, "shipit")).toBeVisible();
+    await expect(packArt(page, "ship")).toBeVisible();
     await expect(field).not.toContainText(":ship");
 
     await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.press("Backspace");
   });
 
-  test("a lone : offers the pack, and only the pack", async ({ page }) => {
+  test("a lone : offers the pack, in order, and Tab takes a row from it", async ({ page }) => {
     const field = await openEmojiThread(page);
 
     // Nothing typed after the colon. Somebody who has just added their first emoji does
@@ -359,11 +364,12 @@ test.describe("custom emoji", () => {
     const rows = list.locator('[role="option"]');
     // The mock seeds three emoji, and every row is one of them: a Unicode shortcode
     // matches an empty prefix too, so all 1800 of them would otherwise be the list.
-    // Asserted as a SET, because the order is the pack's own and this test is not about it.
     await expect(rows).toHaveCount(3);
     await expect(list.locator('[data-kind="unicode"]')).toHaveCount(0);
+    // Sorted BY NAME, which is how the store hands the pack back (`ORDER BY name ASC`) and
+    // how `emojiSuggestions` sorts it whatever the backend gave: partyparrot, ship, shipit.
     const names = await rows.evaluateAll((nodes) =>
-      nodes.map((node) => node.getAttribute("data-testid")).sort(),
+      nodes.map((node) => node.getAttribute("data-testid")),
     );
     expect(names).toEqual([
       "emoji-suggestion-partyparrot",
@@ -371,13 +377,9 @@ test.describe("custom emoji", () => {
       "emoji-suggestion-shipit",
     ]);
 
-    // Enter still inserts the chip, so the colon alone is a whole path to an emoji.
-    const first = (await rows.first().getAttribute("data-testid"))!.replace(
-      "emoji-suggestion-",
-      "",
-    );
-    await page.keyboard.press("Enter");
-    await expect(packArt(page, first)).toBeVisible();
+    // TAB picks here, and Enter does not — see the test below for why.
+    await page.keyboard.press("Tab");
+    await expect(packArt(page, "partyparrot")).toBeVisible();
 
     // A space after the colon is prose, not a query: "note: " closes the list again.
     await page.keyboard.press("ControlOrMeta+a");
@@ -388,6 +390,23 @@ test.describe("custom emoji", () => {
     await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.press("Backspace");
     await expect(field).toHaveText("");
+  });
+
+  test("Enter SENDS a sentence that ends in a colon, rather than picking an emoji", async ({
+    page,
+  }) => {
+    // French writes a space before a colon, so "voici :" is an ordinary sentence with the
+    // menu standing open over it. Enter must post the words. One typed letter hands the key
+    // back to the list, which is the case the test above covers.
+    await openEmojiThread(page);
+
+    await page.keyboard.type("les emojis custom, ça marche comme ça :");
+    await expect(page.locator('[data-testid="emoji-suggestions"]')).toBeVisible();
+
+    const sent = await sendAndAwaitEcho(page);
+    await expect(sent).toContainText("comme ça :");
+    // No art anywhere in it: nothing was picked.
+    await expect(sent.locator('img[itemtype="http://schema.skype.com/Emoji"]')).toHaveCount(0);
   });
 
   test("a taken name is refused with Slack's own sentence", async ({ page }) => {

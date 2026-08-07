@@ -3275,11 +3275,31 @@ feature worth having: a local-only decoration would be a different, smaller feat
   have" is backwards — the colon is the ask. An empty query therefore returns the pack from
   `emojiSuggestions`, and **no Unicode shortcode**: every one of the ~1800 matches an empty
   prefix, so including them would bury the user's own art under whichever ten sort first.
-  A Unicode emoji is still reached by naming it, exactly as before. The two rules that keep
-  prose out are untouched and each has its own test: the colon must open the line or follow
-  whitespace (so `note:` and `https:` are words), and whitespace ENDS a query (so `: ` closes
-  the list again). Pinned in `web/src/lib/custom-emoji.test.ts` and by "a lone : offers the
-  pack, and only the pack" in `web/e2e/custom-emoji.spec.ts`.
+  The index is in generated order, so those ten would be `:100:` and `:1234:`. A Unicode
+  emoji is still reached by naming it, exactly as before, and one typed letter brings the
+  band back. The two rules that keep prose out are untouched and each has its own test: the
+  colon must open the line or follow whitespace (so `note:`, `18:30` and `https:` are
+  words), and whitespace ENDS a query (so `: ` closes the list again). Three details of
+  that list are load-bearing:
+  - **The rows are sorted by name in `emojiSuggestions`, not trusted from the caller.** The
+    store orders them (`store.rs`: `ORDER BY name ASC`) and a Map-backed mock did not, so a
+    menu whose order depends on which backend answered is a menu no spec can pin. The mock
+    sorts now too, and the unit test asserts the sort on a deliberately unsorted pack.
+  - **Enter SENDS on a lone colon, and PICKS once a letter is typed** (`handleKeyDown` in
+    `web/src/components/rich-editor.tsx`). French puts a space before a colon — "voici :" —
+    so a message ending in one is an ordinary sentence, and stealing its Enter would post an
+    emoji nobody asked for instead of the words. Tab picks in both cases: it means "complete
+    this" and it sends nothing.
+  - **A row is activated on `mousemove`, never on `mouseenter`**
+    (`web/src/components/emoji-suggestions.tsx`). The list opens right over the field the
+    reader just clicked, so a row appearing beneath a STATIONARY cursor fired `mouseenter`
+    and took the active row away from the keyboard. That broke rule 5's own test before it
+    was found. `mousemove` is the honest "the reader moved the mouse here" signal.
+  - The chip carries the name of the row that was PICKED, so an alias chip is
+    `data-emoji-name="ship"` while the body it serializes to holds `:shipit:`. A spec that
+    types `:ship` and then asserts on `shipit` art is asserting on the wire, not the chip.
+  Pinned in `web/src/lib/custom-emoji.test.ts` and by rules 5 and 5b in
+  `web/e2e/custom-emoji.spec.ts`.
 - **This was measured, not assumed.** Two probes established the shape against the real
   tenant on 2026-08-05. `examples/custom_emoji_send_probe.rs` posted a message with two
   inline `<img itemtype="http://schema.skype.com/Emoji">` images mid-sentence, and read it

@@ -407,7 +407,12 @@ export function RichEditor(props: {
             setEmojiActive((emojiActiveIndexRef.current + step + count) % count);
             return true;
           }
-          if (event.key === "Enter" || event.key === "Tab") {
+          // Enter PICKS while the reader is typing a code, and SENDS while the list merely
+          // stands open on a lone ":". French writes a space before a colon — "voici :" —
+          // so a message ending in one is an ordinary sentence, and stealing its Enter
+          // would post an emoji nobody asked for instead of the words. Tab picks in both
+          // cases: it means "complete this" and it sends nothing.
+          if (event.key === "Tab" || (event.key === "Enter" && emojiRef.current?.query !== "")) {
             event.preventDefault();
             const suggestion = emojiRankedRef.current[emojiActiveIndexRef.current];
             if (suggestion) pickEmoji(suggestion);

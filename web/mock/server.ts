@@ -6731,15 +6731,21 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     // ---- custom emoji ------------------------------------------------------
 
     case "custom_emoji": {
-      const emoji = [...customEmojiPack.values()].map((e) => ({
-        name: e.name,
-        alias_of: e.alias_of,
-        content_type: e.content_type,
-        width: e.width,
-        height: e.height,
-        source: e.source,
-        added_ms: e.added_ms,
-      }));
+      // Sorted by name, as the real backend hands the pack back (`store.rs`: `FROM
+      // custom_emoji ORDER BY name ASC`). A Map iterates in INSERTION order, so without
+      // this the mock's pack came back in seeding order — and the `:` menu, which shows
+      // the pack in the order it is given, listed it differently here than in the app.
+      const emoji = [...customEmojiPack.values()]
+        .map((e) => ({
+          name: e.name,
+          alias_of: e.alias_of,
+          content_type: e.content_type,
+          width: e.width,
+          height: e.height,
+          source: e.source,
+          added_ms: e.added_ms,
+        }))
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       return { emoji };
     }
 
