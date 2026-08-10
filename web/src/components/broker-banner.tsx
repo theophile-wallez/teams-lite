@@ -17,7 +17,6 @@ import { useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Loading02Icon, SecurityIcon } from "@hugeicons/core-free-icons";
 import { Button } from "./ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { useAppState, useController } from "./controller-context";
 import { brokerNeedsAttention } from "~/lib/protocol";
 
@@ -91,29 +90,33 @@ export function BrokerBanner() {
               "Repair sign-in"
             )}
           </Button>
-          <p className="text-[11px] leading-snug text-text-faint">
+          <p data-testid="broker-repair-hint" className="text-[11px] leading-snug text-text-faint">
             {busy
               ? "Restarting the Intune container. The app goes quiet for about a minute, then reconnects on its own."
               : "This restarts the Intune container, which holds the sign-in keyring."}
           </p>
         </div>
       ) : (
-        // Keep the button visible but inert, and say why — the same pattern the
-        // deliberately-unanswerable call button uses. A missing button would read as
-        // "nothing can be done" without saying so.
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span tabIndex={0}>
-              <Button size="sm" disabled data-testid="broker-repair" className="pointer-events-none">
-                Repair sign-in
-              </Button>
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>
-            Restarting the Intune container won't fix this one — it needs you to sign in to
-            Intune again.
-          </TooltipContent>
-        </Tooltip>
+        // Keep the button visible but inert, and say why IN FLOW, in the same sentence
+        // slot the repairable branch above uses. A missing button would read as
+        // "nothing can be done" without ever saying so — but the words used to be a
+        // HOVER TOOLTIP, and on a phone that is a sentence which does not exist: this
+        // is the one broker failure whose remedy is the reader's own (go and sign in to
+        // Intune again), and a touch screen showed them a dead button and nothing else.
+        // Being in flow also puts it inside this banner's `aria-live` region, so it is
+        // read out with the rest rather than only on a focus.
+        <div className="flex flex-col gap-1.5">
+          <Button size="sm" disabled data-testid="broker-repair" className="pointer-events-none">
+            Repair sign-in
+          </Button>
+          {/* `text-dim` rather than the footnote's `text-faint` above: that one explains
+              a button which already says what it does, and this one IS the remedy — the
+              only line on this banner the reader can act on. */}
+          <p data-testid="broker-repair-hint" className="text-[11px] leading-snug text-text-dim">
+            Restarting the Intune container won't fix this one — it needs you to sign in to Intune
+            again.
+          </p>
+        </div>
       )}
 
       {repair.kind === "error" && (

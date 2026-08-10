@@ -69,6 +69,13 @@ test.describe("broker banner", () => {
     // Present but disabled: a missing button would read as "nothing can be done"
     // without ever saying so.
     await expect(banner.getByTestId("broker-repair")).toBeDisabled();
+    // And the remedy is ON SCREEN with no hover and no focus. This sentence was a
+    // tooltip once, which is a sentence a phone does not have — and this is the one
+    // broker failure the reader has to act on themselves, so it is the one that must
+    // never be behind a pointer.
+    const hint = banner.getByTestId("broker-repair-hint");
+    await expect(hint).toBeVisible();
+    await expect(hint).toContainText("sign in to Intune again");
   });
 
   test("says something when the chat list is empty", async ({ page }) => {

@@ -4375,6 +4375,17 @@ and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
   therefore says the history on screen is what this machine stored, and that nothing
   arrives or leaves until sign-in works — it used to claim the app could read nothing,
   which was the sentence that made a stale app read as a broken one.
+- **What a restart cannot fix says so IN FLOW, never behind a hover.** Only
+  `Disconnected` is repairable here (`BrokerFailure::is_repairable`); `Refused` and
+  `NoAccount` need the user to sign in to Intune again, which is the one remedy on this
+  banner that is theirs to carry out. The button stays visible and inert — a missing one
+  would read as "nothing can be done" without saying so — and the sentence beside it sits
+  in the same slot the repairable branch puts its own footnote in
+  (`broker-repair-hint`), because it was a Radix TOOLTIP once and this app is read from a
+  PHONE: no hover there, so the state whose whole answer is "go and sign in" showed a dead
+  button and no words at all. In flow it also lands inside the banner's `aria-live` region
+  rather than waiting for a focus. `web/e2e/broker-banner.spec.ts` pins that the words are
+  visible with no pointer anywhere near them.
 
 ## Conventions
 
