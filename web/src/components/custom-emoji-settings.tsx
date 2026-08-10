@@ -8,8 +8,9 @@ import {
   StickerIcon,
 } from "@hugeicons/core-free-icons";
 import type { CustomEmoji } from "~/lib/protocol";
+import { cn } from "~/lib/utils";
 import { AddEmojiDialog } from "./add-emoji-dialog";
-import { useController } from "./controller-context";
+import { useAppState, useController } from "./controller-context";
 import { PackEmoji } from "./custom-emoji";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -39,6 +40,24 @@ export function CustomEmojiSettings() {
   // way a message's own Delete does (message-bubble.tsx) and for the same reason: an
   // emoji is used in messages that are already sent, and nothing here brings it back.
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  // Whether a colleague's emoji joins this pack as their message arrives. It lives here
+  // rather than in a section of its own because it is a fact about THIS list: what the
+  // switch decides is what the rows below fill up with.
+  const autoImport = useAppState((s) => s.settings.emoji_auto_import);
+  const [autoImportBusy, setAutoImportBusy] = useState(false);
+  const [autoImportError, setAutoImportError] = useState<string | null>(null);
+
+  const toggleAutoImport = async () => {
+    setAutoImportBusy(true);
+    setAutoImportError(null);
+    try {
+      await controller.saveSettings({ emojiAutoImport: !autoImport });
+    } catch (e) {
+      setAutoImportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAutoImportBusy(false);
+    }
+  };
 
   const reload = useCallback(() => {
     controller
@@ -120,6 +139,47 @@ export function CustomEmojiSettings() {
           </p>
         </div>
       </div>
+
+      <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4 shadow-chip">
+        <div className="flex min-w-0 flex-col">
+          <span className="text-[13px] font-medium text-foreground">
+            Keep the emoji people send you
+          </span>
+          <span className="text-[11px] text-text-faint">
+            {autoImport
+              ? "On — a colleague's emoji joins this pack under the name they gave it, so you can type it too. One you already have is never replaced: theirs arrives as :name-2:."
+              : "Off — a colleague's emoji is drawn in their message only. Take one with “Add to my emoji” in the message's own menu."}
+          </span>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoImport}
+          aria-label="Keep the emoji people send you"
+          data-testid="emoji-auto-import-toggle"
+          disabled={autoImportBusy}
+          onClick={() => void toggleAutoImport()}
+          className={cn(
+            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+            autoImportBusy && "opacity-60",
+            autoImport ? "bg-primary" : "bg-element",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+              autoImport ? "translate-x-[22px]" : "translate-x-0.5",
+            )}
+          />
+        </button>
+      </div>
+
+      {autoImportError && (
+        <span data-testid="emoji-auto-import-error" className="text-xs text-destructive">
+          {autoImportError}
+        </span>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Button

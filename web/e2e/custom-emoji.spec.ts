@@ -480,6 +480,31 @@ test.describe("custom emoji", () => {
     await expect(dialog).toHaveCount(0);
   });
 
+  test("keeping the emoji people send is ON, and the switch is the way back", async ({
+    page,
+  }) => {
+    const section = await openEmojiSettings(page);
+    const toggle = section.locator('[data-testid="emoji-auto-import-toggle"]');
+
+    // ON out of the box, like the backend's own default: a colleague's emoji that has to
+    // be picked out of a menu one at a time is a pack nobody fills. A switch drawn `off`
+    // for the moment before the settings land would say the opposite of what is happening.
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
+    await expect(section).toContainText("theirs arrives as :name-2:");
+
+    // The one thing the switch is for: the pack decides what `:shipit:` posts under the
+    // user's own name, so they get to say whether their threads may fill it.
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+    // Off, the manual row in a message's own menu is what is left, and the copy says so.
+    await expect(section).toContainText("Add to my emoji");
+    await expect(section.locator('[data-testid="emoji-auto-import-error"]')).toHaveCount(0);
+
+    // Back on, because one mock process serves the whole run and this is shared state.
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
+  });
+
   test("delete asks twice, and the confirming label is Delete Emoji", async ({ page }) => {
     const section = await openEmojiSettings(page);
 

@@ -840,6 +840,10 @@ function initialState(): AppState {
       // must not read "off" for the moment before the settings land, or the user would
       // be told no icon is fetched while one is.
       sender_icons: true,
+      // On, like the backend's own default (see `emoji_auto_import_enabled`), for the
+      // reason the line above gives: a switch that read "off" until the settings land
+      // would tell the user no emoji is being taken while one is.
+      emoji_auto_import: true,
     },
     linearWorkspace: null,
     push: INITIAL_PUSH_STATE,

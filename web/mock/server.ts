@@ -3271,6 +3271,12 @@ const mockSettings = {
   // src/bin/server.rs). Here it reaches no domain either: `mockSenderIcon` draws the
   // mark, so the whole surface is exercised with nothing leaving the machine.
   sender_icons: true,
+  // ON, like the real backend's default (see `emoji_auto_import_enabled` in
+  // src/bin/server.rs). Here it is only a flag: the import itself happens as a live
+  // message is INGESTED, which is a backend act with no surface of its own — the policy
+  // that decides it is pure Rust (`custom_emoji::take_as`) and pinned there. What this
+  // mock owes the UI is the switch's own state.
+  emoji_auto_import: true,
 };
 
 /** Devices that "subscribed" to push notifications, keyed by endpoint (the real
@@ -3868,6 +3874,7 @@ function settingsView(): {
   ghost_mode: boolean;
   always_available: boolean;
   sender_icons: boolean;
+  emoji_auto_import: boolean;
 } {
   const host = mockSettings.gitlab_host.trim() || "gitlab.com";
   return {
@@ -3877,6 +3884,7 @@ function settingsView(): {
     ghost_mode: mockSettings.ghost_mode,
     always_available: mockSettings.always_available,
     sender_icons: mockSettings.sender_icons,
+    emoji_auto_import: mockSettings.emoji_auto_import,
   };
 }
 
@@ -7531,6 +7539,9 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       if (typeof o.linear_token === "string") mockSettings.linear_token = o.linear_token.trim();
       if (typeof o.ghost_mode === "boolean") mockSettings.ghost_mode = o.ghost_mode;
       if (typeof o.sender_icons === "boolean") mockSettings.sender_icons = o.sender_icons;
+      if (typeof o.emoji_auto_import === "boolean") {
+        mockSettings.emoji_auto_import = o.emoji_auto_import;
+      }
       return settingsView();
     }
 

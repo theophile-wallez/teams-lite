@@ -180,6 +180,17 @@ const SETTING_ALWAYS_AVAILABLE: &str = "always_available";
 /// stops every such request at the dispatch point, and a read-only backend never makes
 /// one whatever the setting says.
 const SETTING_SENDER_ICONS: &str = "sender_icons";
+/// Whether a custom emoji somebody SENDS is taken into this machine's pack as the message
+/// arrives (see [`import_emoji_from_message`]). ON by default, because a colleague's
+/// emoji that has to be picked out of a menu one at a time is a pack nobody fills.
+///
+/// It is a setting because of the one thing the pack decides: what art `:shipit:` posts
+/// under the user's own name on the next send. Everything else about it is bounded by code
+/// — a name the user already holds is never overwritten (`custom_emoji::take_as`), the
+/// bytes must pass the same caps as an upload, and the art must come from a Teams host.
+/// What the switch buys is the user's own answer to "may the people in my threads put
+/// pictures in my pack at all".
+const SETTING_EMOJI_AUTO_IMPORT: &str = "emoji_auto_import";
 /// The id of the presence endpoint this store's backends register, generated on first
 /// use and then kept. Stable ON PURPOSE, twice over: re-registering the same id is the
 /// same endpoint refreshed rather than a second one, so neither the heartbeat nor the
@@ -4273,6 +4284,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             if let Some(icons) = params.get("sender_icons").and_then(Value::as_bool) {
                 store.set_setting(SETTING_SENDER_ICONS, if icons { "1" } else { "0" })?;
             }
+            // Auto-import: whether a colleague's custom emoji joins the pack as its
+            // message arrives. Stored and read the same way — on unless turned off.
+            if let Some(auto) = params.get("emoji_auto_import").and_then(Value::as_bool) {
+                store.set_setting(SETTING_EMOJI_AUTO_IMPORT, if auto { "1" } else { "0" })?;
+            }
             settings_json(&store)
         }
 
@@ -6821,6 +6837,7 @@ fn settings_json(store: &Store) -> Result<Value> {
         "ghost_mode": ghost_mode(store)?,
         "always_available": always_available(store)?,
         "sender_icons": sender_icons_enabled(store)?,
+        "emoji_auto_import": emoji_auto_import_enabled(store)?,
     }))
 }
 
@@ -6949,6 +6966,13 @@ fn sender_icon_json(icon: Option<&teams_media::Media>) -> Value {
 /// than a flag they would have to find first.
 fn sender_icons_enabled(store: &Store) -> Result<bool> {
     Ok(store.get_setting(SETTING_SENDER_ICONS)?.as_deref() != Some("0"))
+}
+
+/// Is the emoji auto-import on? On unless the stored value is exactly `"0"`, the same
+/// reading `sender_icons_enabled` takes and for the same reason — the user asked for the
+/// behaviour, and what bounds it is the code around it (see [`SETTING_EMOJI_AUTO_IMPORT`]).
+fn emoji_auto_import_enabled(store: &Store) -> Result<bool> {
+    Ok(store.get_setting(SETTING_EMOJI_AUTO_IMPORT)?.as_deref() != Some("0"))
 }
 
 /// Is Ghost mode on? Off unless the stored value is exactly `"1"`, so a missing,
@@ -8684,6 +8708,127 @@ fn push_live_message(
 /// user who never turned notifications on pays one count per message.
 fn push_subscriptions_exist(store: &Store) -> bool {
     store.count_push_subscriptions().map(|count| count > 0).unwrap_or(false)
+}
+
+/// Take every custom emoji a freshly-arrived message carries into this machine's pack,
+/// under the name its sender gave it.
+///
+/// The art already travels with the message — that is what lets a reader SEE a colleague's
+/// emoji without holding it — but seeing one and being able to USE one were two different
+/// things: the code had to be picked out of the message's own "…" menu, one emoji at a
+/// time, before `:shipit:` would post anything. So the pack fills itself here, which is
+/// where every other "this message is new" reaction already lives (beside
+/// [`push_live_message`] and [`agent_live_message`], on a fresh insert only).
+///
+/// Six things bound it, and each one is deliberate:
+///
+/// - **The user's own switch** ([`SETTING_EMOJI_AUTO_IMPORT`]), which is what a store that
+///   cannot be read reads as OFF: a write made on somebody's behalf needs their answer, and
+///   a failed read is not one.
+/// - **A read-only backend never writes**, before the network rather than at the dispatch
+///   gate — a live frame passes through no gate.
+/// - **The art must come from a Teams host** (`teams_media::is_allowed_media_url`), which is
+///   the same rail `custom_emoji_add` holds and the thing that keeps Teams' OWN emoji out:
+///   theirs is served from the personal-expressions CDN, which is not on that list.
+/// - **The bytes are measured, never believed** (`custom_emoji::measure_art`) — the type,
+///   the weight and the dimensions, exactly as an upload from the dialog is.
+/// - **A name the user already holds is never overwritten** (`custom_emoji::take_as`). Their
+///   `:shipit:` keeps posting their own art; a colleague's arrives as `shipit-2`, and art
+///   the pack already holds under any name is not taken twice — which is what stops `-3`,
+///   `-4` … on every later message, since each send re-uploads to a fresh URL.
+/// - **One backend does it**, claimed in the store like a push: this machine runs two
+///   send-capable backends against one store, and both ingest every frame.
+///
+/// `ponytail:` one authenticated GET of at most 128 KB per distinct emoji per claimed
+/// message, including for art the pack already holds — only the bytes can answer that, and
+/// they have to be here to be compared. Remember resolved object URLs if it ever matters.
+fn import_emoji_from_message(ctx: &Ctx, store: &Store, message: &Message) {
+    if read_only() {
+        return;
+    }
+    // The cheapest test first: nearly every message carries no emoji at all, and this is
+    // one pass over the body against a settings read and a claim.
+    let art = custom_emoji::art_in_body(&message.content);
+    if art.is_empty() {
+        return;
+    }
+    if !emoji_auto_import_enabled(store).unwrap_or(false) {
+        return;
+    }
+    let claim = format!("emoji/{}/{}", message.conversation_id, message.id);
+    match store.claim_once(&claim, now_ms()) {
+        Ok(true) => {}
+        // The other backend on this store is already fetching these.
+        Ok(false) => return,
+        Err(e) => {
+            eprintln!("[emoji] could not claim {claim}: {e}");
+            return;
+        }
+    }
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut added = 0;
+        for emoji in art {
+            match take_emoji_into_pack(&ctx, &emoji).await {
+                Ok(Some(name)) => {
+                    eprintln!("[emoji] took :{name}: into the pack from a message");
+                    added += 1;
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("[emoji] could not take :{}: from a message: {e:#}", emoji.name),
+            }
+        }
+        // Once, whatever the message carried: the pack is a list, and a page re-reads all
+        // of it on the event. This is also what takes "Add to my emoji" off the menu for a
+        // code the pack now holds, with no reload.
+        if added > 0 {
+            ctx.emit("custom_emoji_changed", json!({}));
+        }
+    });
+}
+
+/// Fetch one inbound emoji's art and store it, answering the name it was stored under —
+/// or `None` when the pack was deliberately left alone. See [`import_emoji_from_message`]
+/// for what each step is guarding against.
+async fn take_emoji_into_pack(
+    ctx: &Ctx,
+    emoji: &custom_emoji::InboundEmoji,
+) -> Result<Option<String>> {
+    anyhow::ensure!(
+        teams_media::is_allowed_media_url(&emoji.src),
+        "its art is not served from a Teams host"
+    );
+    let session = ctx.session().await?;
+    // The bytes as they were UPLOADED, not the rendition the message names: AMS answers
+    // `views/imgo` for an animated GIF with a single still frame, and a pack entry outlives
+    // the message it came from (the same reason `custom_emoji_add` does this).
+    let art_url = custom_emoji::original_art_url(&emoji.src);
+    let media = teams_media::fetch_media(&ctx.http, &session, &art_url).await?;
+    let (content_type, width, height) = custom_emoji::measure_art(&media.bytes)?;
+
+    // Read the pack AFTER the fetch, so the window between deciding a name is free and
+    // taking it is as short as it can be. It is not zero: two backends could each find
+    // `shipit` free in the same instant. Both would then write the same bytes from the same
+    // message, which is why that race costs nothing worth a second claim.
+    let store = ctx.store()?;
+    let taken: Vec<String> = store
+        .custom_emoji()?
+        .into_iter()
+        .flat_map(|held| [held.name, held.alias_of])
+        .filter(|name| !name.is_empty())
+        .collect();
+    let already_named = store.custom_emoji_named_by_bytes(&media.bytes)?;
+    let Some(name) = custom_emoji::take_as(&emoji.name, &taken, already_named.as_deref()) else {
+        return Ok(None);
+    };
+    store.set_custom_emoji(
+        &name,
+        Some((content_type, &media.bytes, width, height)),
+        None,
+        "message",
+        now_ms(),
+    )?;
+    Ok(Some(name))
 }
 
 // ---- the local agent (see src/agent.rs and src/agent_policy.rs) ---------------
@@ -10544,6 +10689,15 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
                         // that means "this message is new", and the trigger is claimed in
                         // the store so two backends answer it once.
                         agent_live_message(&ctx_msgs, store, &row, from_me, &self_mri);
+                        // …and take the custom emoji it carries into the pack, so a
+                        // colleague's `:shipit:` is one the user can type rather than one
+                        // they have to pick out of a menu first. Same place for the same
+                        // reason: a fresh insert is the one event that means "this message
+                        // is new", and the work is claimed so two backends do it once.
+                        // Not gated on `from_me`: a message the user sent from ANOTHER
+                        // install carries art this pack may not hold, and one sent from
+                        // this pack is skipped on its bytes.
+                        import_emoji_from_message(&ctx_msgs, store, &row);
                     }
                 }
                 if activity_changed {
@@ -13697,6 +13851,56 @@ mod lifecycle_tests {
         assert!(!sender_icons_enabled(&store).unwrap());
         store.set_setting(SETTING_SENDER_ICONS, "1").unwrap();
         assert!(sender_icons_enabled(&store).unwrap());
+    }
+
+    /// On until it is turned off, and published so the switch can draw the truth: a page
+    /// that read `false` for the moment before the settings land would tell the user no
+    /// emoji is being taken while one is.
+    #[test]
+    fn the_emoji_auto_import_is_on_until_it_is_turned_off() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(emoji_auto_import_enabled(&store).unwrap(), "unset reads as on");
+        assert_eq!(settings_json(&store).unwrap()["emoji_auto_import"], json!(true));
+        store.set_setting(SETTING_EMOJI_AUTO_IMPORT, "0").unwrap();
+        assert!(!emoji_auto_import_enabled(&store).unwrap());
+        assert_eq!(settings_json(&store).unwrap()["emoji_auto_import"], json!(false));
+        store.set_setting(SETTING_EMOJI_AUTO_IMPORT, "1").unwrap();
+        assert!(emoji_auto_import_enabled(&store).unwrap());
+    }
+
+    /// The pack learns from a message, so the two rails that decide WHETHER it may have to
+    /// be in the function that does it — a live frame passes through no dispatch gate, and
+    /// a store this app cannot read has not given an answer either way.
+    #[test]
+    fn taking_an_emoji_from_a_message_checks_the_switch_and_the_lock() {
+        let source = include_str!("server.rs");
+        /// One function's own source, from its signature to the `}` in column one that
+        /// ends it. A fixed window of bytes was tried and is worse: it silently stops
+        /// short, so the test fails for its own reason rather than the code's.
+        fn body_of<'a>(source: &'a str, signature: &str) -> &'a str {
+            let start = source.find(signature).unwrap_or_else(|| panic!("{signature} exists"));
+            let end = source[start..].find("\n}\n").expect("the function ends");
+            &source[start..start + end]
+        }
+
+        let body = body_of(source, "fn import_emoji_from_message(");
+        assert!(body.contains("if read_only()"), "a read-only backend writes nothing");
+        assert!(
+            body.contains("emoji_auto_import_enabled(store).unwrap_or(false)"),
+            "an unreadable store is not consent"
+        );
+        assert!(body.contains("claim_once"), "two backends share this store");
+
+        let take_body = body_of(source, "async fn take_emoji_into_pack(");
+        assert!(
+            take_body.contains("teams_media::is_allowed_media_url"),
+            "the session token reaches Teams hosts only"
+        );
+        assert!(
+            take_body.contains("custom_emoji::measure_art"),
+            "the bytes are measured, never believed"
+        );
+        assert!(take_body.contains("custom_emoji::take_as"), "a held name is never overwritten");
     }
 
     #[test]

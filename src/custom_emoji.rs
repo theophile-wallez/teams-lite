@@ -191,6 +191,123 @@ pub fn substitute_codes(html: &str, art: &dyn Fn(&str) -> Option<String>) -> Str
     out
 }
 
+/// The `itemtype` Teams marks an inline emoji with, in both directions: written by
+/// [`substitute_codes`] and read back by [`art_in_body`].
+const EMOJI_ITEMTYPE: &str = "http://schema.skype.com/Emoji";
+
+/// One custom emoji found in a body somebody else wrote: the name they gave it and the
+/// address of its art.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundEmoji {
+    pub name: String,
+    pub src: String,
+}
+
+/// Every custom emoji in a RECEIVED body, distinct by name, in first-appearance order.
+///
+/// The inbound twin of [`substitute_codes`], and the reason the pack can fill itself: the
+/// markup this app writes carries the NAME in `itemid` beside the art in `src`, so a
+/// colleague's emoji arrives complete — nothing about it has to be guessed at or asked
+/// for. `web/src/lib/rich-text.ts` reads the same tag to DRAW one; this is what takes it.
+///
+/// Three things are left alone, and each one matters:
+///
+/// - **A region [`walk`] skips.** `code`, `pre` and a REPLY QUOTE arrive as one raw blob
+///   rather than as a tag, so the `<img` test below drops what is inside them — which is
+///   the rule the outbound direction already holds. A quote is a copy of words said
+///   earlier, so its emoji came with the message it quotes.
+/// - **Teams' OWN emoji.** Theirs wears this same `itemtype` with a valid-looking
+///   `itemid` (`smile`), and what tells them apart is the host: theirs is served from the
+///   personal-expressions CDN, which is not in [`crate::teams_media`]'s allowlist. The
+///   caller checks that before it fetches anything, exactly as `custom_emoji_add` does.
+/// - **A name that is not a name.** `is_valid_name` is the store's own rule, so a tag
+///   carrying something else is not offered to a caller that would only be refused.
+pub fn art_in_body(html: &str) -> Vec<InboundEmoji> {
+    let mut seen = std::collections::HashSet::new();
+    let mut found = Vec::new();
+    for segment in walk(html) {
+        let Segment::Raw(tag) = segment else { continue };
+        if tag.len() < 4 || !tag.as_bytes()[..4].eq_ignore_ascii_case(b"<img") {
+            continue;
+        }
+        // ONE tag, not a blob. A skipped region arrives as a single Raw segment beginning
+        // just after its opening tag — so a quote whose first child is an emoji starts with
+        // `<img`, and reading attributes out of it would take the emoji this walk exists to
+        // skip. A lone tag holds no second `<` and ends at its own `>`.
+        if !tag.ends_with('>') || tag[1..].contains('<') {
+            continue;
+        }
+        if tag_attr(tag, "itemtype").as_deref() != Some(EMOJI_ITEMTYPE) {
+            continue;
+        }
+        let (Some(name), Some(src)) = (tag_attr(tag, "itemid"), tag_attr(tag, "src")) else {
+            continue;
+        };
+        if !is_valid_name(&name) || src.is_empty() {
+            continue;
+        }
+        if seen.insert(name.clone()) {
+            found.push(InboundEmoji { name, src });
+        }
+    }
+    found
+}
+
+/// The value of `name="…"` on one tag, with `&amp;` undone.
+///
+/// The match requires whitespace before the attribute name, so `itemid` is never read out
+/// of `data-itemid`.
+fn tag_attr(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let mut from = 0;
+    while let Some(offset) = tag[from..].find(&needle) {
+        let at = from + offset;
+        let preceded_by_space = tag[..at].chars().next_back().is_some_and(char::is_whitespace);
+        let value_start = at + needle.len();
+        if preceded_by_space {
+            let end = value_start + tag[value_start..].find('"')?;
+            return Some(tag[value_start..end].replace("&amp;", "&"));
+        }
+        from = value_start;
+    }
+    None
+}
+
+/// The most a colleague's name may be suffixed before this app gives up on finding it a
+/// free one. Nine is already a pack holding nine different pictures under one word.
+const MAX_TAKEN_SUFFIX: u32 = 9;
+
+/// The name to store a colleague's emoji under, or `None` to leave the pack alone.
+///
+/// `taken` is every name the pack answers to, aliases included. `already_named` is the
+/// name of the entry holding these exact BYTES, when there is one.
+///
+/// The bytes are what make this terminate, and that is the whole reason they are looked
+/// up: every send re-uploads the art to a fresh AMS object
+/// (`teams_send::resolve_custom_emoji`), so the URL is different in every message and
+/// cannot say whether the pack already holds a picture. Without the byte check the second
+/// `:shipit:` message would mint `shipit-2`, the third `shipit-3`, and a busy thread would
+/// fill the pack with copies of one glyph.
+///
+/// A name that is FREE is used as it stands, which is the point of the feature — the
+/// reader types what the sender typed. A name that is taken is never overwritten: the
+/// user's own `:shipit:` keeps posting the user's own art, and the colleague's arrives as
+/// `shipit-2`. Both pictures exist, under two words.
+pub fn take_as(name: &str, taken: &[String], already_named: Option<&str>) -> Option<String> {
+    if already_named.is_some() {
+        return None;
+    }
+    let is_taken = |candidate: &str| taken.iter().any(|held| held == candidate);
+    if !is_taken(name) {
+        return Some(name.to_string());
+    }
+    // A 64-character name has no room for a suffix, so `is_valid_name` is what refuses
+    // rather than a length check written a second time here.
+    (2..=MAX_TAKEN_SUFFIX)
+        .map(|n| format!("{name}-{n}"))
+        .find(|candidate| is_valid_name(candidate) && !is_taken(candidate))
+}
+
 /// A region the substitution never enters, and why: `code`/`pre` because Slack does not
 /// render an emoji inside code either, and a REPLY QUOTE because it holds a colleague's
 /// own words — substituting our art into them would rewrite what they wrote.
@@ -427,6 +544,114 @@ mod tests {
     fn everything_around_a_code_is_byte_identical() {
         let body = "<p>a &amp; b <strong>c</strong> :nope: <a href=\"http://x/:shipit:\">l</a></p>";
         assert_eq!(substitute_codes(body, &art), body, "no code the pack holds, no change");
+    }
+
+    fn emoji_tag(name: &str, src: &str) -> String {
+        format!(
+            r#"<img itemtype="http://schema.skype.com/Emoji" itemid="{name}" alt=":{name}:" src="{src}" width="20" height="20">"#
+        )
+    }
+
+    /// The pin that keeps the two directions together: what `substitute_codes` WRITES is
+    /// what `art_in_body` reads back. Either one changing alone breaks this.
+    #[test]
+    fn what_is_written_is_what_is_read_back() {
+        let body = substitute_codes("<p>ship :shipit: now</p>", &art);
+        assert_eq!(
+            art_in_body(&body),
+            vec![InboundEmoji {
+                name: "shipit".into(),
+                src: "https://ams.example/v1/objects/0-a/views/imgo".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_received_emoji_is_read_by_name_and_address() {
+        let body = format!("<p>a {} b</p>", emoji_tag("shipit", "https://ams.example/x"));
+        assert_eq!(
+            art_in_body(&body),
+            vec![InboundEmoji { name: "shipit".into(), src: "https://ams.example/x".into() }]
+        );
+
+        // Distinct by name, in first-appearance order — one upload per glyph, and a
+        // message using one emoji twice is one entry.
+        let body = format!(
+            "<p>{}{}{}</p>",
+            emoji_tag("party", "https://ams.example/p"),
+            emoji_tag("shipit", "https://ams.example/s"),
+            emoji_tag("party", "https://ams.example/p2"),
+        );
+        let names: Vec<String> = art_in_body(&body).into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["party", "shipit"]);
+
+        // `&amp;` in an attribute is undone, or the address would not resolve.
+        let body = emoji_tag("shipit", "https://ams.example/x?a=1&amp;b=2");
+        assert_eq!(art_in_body(&body)[0].src, "https://ams.example/x?a=1&b=2");
+    }
+
+    #[test]
+    fn a_tag_that_is_not_a_custom_emoji_is_left_alone() {
+        // An ordinary picture somebody pasted.
+        assert_eq!(art_in_body(r#"<img src="https://ams.example/x" alt="a shot">"#), vec![]);
+        // Teams' own emoji wears the same itemtype with a name-shaped itemid. It is read,
+        // and the CALLER's host allowlist is what refuses the personal-expressions CDN —
+        // so what this asserts is that the name and address arrive intact for that check.
+        let stock = emoji_tag("smile", "https://statics.teams.cdn.office.net/x/smile/20_f.png");
+        assert_eq!(art_in_body(&stock).len(), 1, "the host is the caller's rail, not ours");
+        // A name the store would refuse is not offered to a caller at all.
+        assert_eq!(art_in_body(&emoji_tag("Ship It", "https://ams.example/x")), vec![]);
+        // `data-itemid` is not `itemid`.
+        let body = r#"<img itemtype="http://schema.skype.com/Emoji" data-itemid="shipit" src="https://ams.example/x">"#;
+        assert_eq!(art_in_body(body), vec![]);
+    }
+
+    #[test]
+    fn a_quoted_emoji_came_with_the_message_it_quotes() {
+        let quoted = format!(
+            r#"<blockquote itemtype="http://schema.skype.com/Reply">{}</blockquote><p>{}</p>"#,
+            emoji_tag("quoted", "https://ams.example/q"),
+            emoji_tag("mine", "https://ams.example/m"),
+        );
+        let names: Vec<String> = art_in_body(&quoted).into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["mine"], "a quote is words said earlier");
+        // And the same for code, which is where somebody explains the markup.
+        let coded = format!("<pre><code>{}</code></pre>", emoji_tag("shipit", "https://ams.example/x"));
+        assert_eq!(art_in_body(&coded), vec![]);
+    }
+
+    #[test]
+    fn a_colleagues_emoji_keeps_its_name_unless_the_name_is_ours() {
+        let taken = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+        // The point of the feature: a free name is used as the sender spelled it.
+        assert_eq!(take_as("shipit", &taken(&[]), None), Some("shipit".into()));
+
+        // Art the pack ALREADY holds is never taken again, whatever it is named there.
+        // This is what stops `-2`, `-3`, `-4` … on every later message, since each send
+        // re-uploads the art to a fresh URL.
+        assert_eq!(take_as("shipit", &taken(&["shipit"]), Some("shipit")), None);
+        assert_eq!(take_as("shipit", &taken(&["ours"]), Some("ours")), None);
+
+        // A taken name is never overwritten: theirs arrives beside ours.
+        assert_eq!(take_as("shipit", &taken(&["shipit"]), None), Some("shipit-2".into()));
+        assert_eq!(
+            take_as("shipit", &taken(&["shipit", "shipit-2"]), None),
+            Some("shipit-3".into())
+        );
+        // An ALIAS answers to a name too, so it blocks one.
+        assert_eq!(take_as("ship", &taken(&["ship"]), None), Some("ship-2".into()));
+
+        // It gives up rather than growing without end.
+        let all: Vec<String> = std::iter::once("shipit".to_string())
+            .chain((2..=MAX_TAKEN_SUFFIX).map(|n| format!("shipit-{n}")))
+            .collect();
+        assert_eq!(take_as("shipit", &all, None), None);
+
+        // A name with no room for a suffix is refused by the name rule itself.
+        let long = "a".repeat(64);
+        assert_eq!(take_as(&long, &taken(&[]), None), Some(long.clone()));
+        assert_eq!(take_as(&long, &[long.clone()], None), None);
     }
 
     /// A PNG stating a size. The first 24 bytes are all `image_dimensions` reads, and the

@@ -3328,6 +3328,56 @@ feature worth having: a local-only decoration would be a different, smaller feat
   people may each have a `:shipit:` and they may be different pictures, so redrawing their
   words with our art would be this app putting words in their mouth. It is the same rule
   that stops a local nickname from rewriting the record of a Teams frame.
+- **An emoji somebody SENDS joins the reader's pack as the message arrives, under the name
+  its sender gave it.** Seeing a colleague's emoji and being able to USE one were two
+  different things: the art travelled, so it drew — but `:shipit:` posted nothing until the
+  code had been picked out of that message's own "…" menu, one emoji at a time, which is a
+  pack nobody fills. It fills itself now
+  (`import_emoji_from_message` in src/bin/server.rs, over `custom_emoji::art_in_body` and
+  `take_as`), and the whole thing rests on one fact that was already true: the markup this
+  app writes carries the NAME in `itemid` beside the art in `src`, so a colleague's emoji
+  arrives complete and nothing about it is guessed at or asked for. Seven rules hold it,
+  each pinned by a test:
+  - **It happens on INGEST, beside push and the agent trigger** (a fresh insert, in the
+    trouter loop), not on render. That is where every other "this message is new" reaction
+    already lives, and it covers a channel nobody has scrolled to. It is CLAIMED in the
+    store like a push, because this machine runs two send-capable backends against one store
+    and both ingest every frame.
+  - **A name the user already holds is NEVER overwritten.** Their `:shipit:` keeps posting
+    their own art; the colleague's arrives as `shipit-2`, bounded, and an ALIAS blocks a name
+    too. Both pictures exist, under two words — which is the only shape that does not put a
+    colleague in charge of what the user's own message posts.
+  - **Art the pack already holds is not taken twice, and the BYTES are what say so**
+    (`Store::custom_emoji_named_by_bytes`, one `WHERE bytes = ?`). Not a nicety: every send
+    re-uploads the art to a fresh AMS object (`teams_send::resolve_custom_emoji`), so the URL
+    is new in every message and cannot answer it — without the byte check the second
+    `:shipit:` message would mint `shipit-2`, the third `shipit-3`, and a busy thread would
+    fill the pack with copies of one glyph.
+  - **The art must come from a TEAMS host** (`teams_media::is_allowed_media_url`, the rail
+    `custom_emoji_add` already holds), which is also what keeps Teams' OWN emoji out — theirs
+    wears the same `itemtype` with a name-shaped `itemid`, and what differs is that the
+    personal-expressions CDN is not on that list. And the bytes are MEASURED, never believed:
+    the same caps an upload from the dialog passes.
+  - **A quoted emoji is not taken**, because a quote is words said earlier and its art came
+    with the message it quotes — `art_in_body` reuses `substitute_codes`' own walk, so the
+    skipped regions are one list rather than two. The trap that cost a test: a skipped region
+    arrives as ONE raw segment beginning just after its opening tag, so a quote whose first
+    child is an emoji starts with `<img` and reads exactly like a lone tag.
+  - **It is a SETTING, on by default** (Settings › Custom emoji, over
+    `SETTING_EMOJI_AUTO_IMPORT` — the sender-icon switch's own shape and default). What it is
+    for is the one thing the pack decides: what art `:shipit:` posts under the user's own name
+    on the next send. A store this app cannot READ counts as off, because a failed read is not
+    an answer; a read-only backend never writes at all.
+  - **The manual row stays, and takes itself away.** `extractableCustomEmoji` already refuses
+    a code the pack holds, and the import emits `custom_emoji_changed` — so "Add to my emoji"
+    disappears on its own once the emoji is in, and remains exactly where it is still the only
+    way in: an older message, and the switch turned off. Nothing in `message-bubble.tsx`
+    changed.
+  The mock carries the SWITCH and deliberately not the import: the import is a backend act on
+  a frame, with no surface of its own, and a mock reimplementation of `take_as` would be a
+  second spelling of the one policy that can drift from it. What is UNVERIFIED against the
+  tenant is the pairing — one real colleague's emoji arriving on a live frame — since the
+  reads and the markup are measured (above) and the policy is pinned in Rust.
 - **Three regions are never substituted**: `<code>`, `<pre>`, and a reply quote. The first
   two because Slack does not render an emoji in code either; the third because a quote
   holds a colleague's own words and substituting our art into them would rewrite what they

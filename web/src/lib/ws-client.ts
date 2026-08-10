@@ -1230,6 +1230,7 @@ export class Backend {
     if (patch.linearToken !== undefined) params.linear_token = patch.linearToken;
     if (patch.ghostMode !== undefined) params.ghost_mode = patch.ghostMode;
     if (patch.senderIcons !== undefined) params.sender_icons = patch.senderIcons;
+    if (patch.emojiAutoImport !== undefined) params.emoji_auto_import = patch.emojiAutoImport;
     return this.writeRequest<AppSettings>("set_settings", params);
   }
   /** Turn "Always available" on or off, which publishes the user's OWN presence:

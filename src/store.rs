@@ -4156,6 +4156,28 @@ impl Store {
         }
     }
 
+    /// The name of the pack entry holding exactly these bytes, if the pack holds them at
+    /// all. Aliases carry no bytes, so only real art ever answers.
+    ///
+    /// This is what tells "an emoji this machine already has" from "a picture it has never
+    /// seen", and the BYTES are the only thing that can: a custom emoji is re-uploaded to
+    /// a fresh AMS object on every send (`teams_send::resolve_custom_emoji`), so the URL a
+    /// message carries is new each time and the name may be one somebody else chose. See
+    /// `custom_emoji::take_as`, whose termination rests on this.
+    ///
+    /// One `WHERE bytes = ?` rather than a hash column: SQLite compares BLOBs directly,
+    /// and a pack is tens of rows of at most 128 KB.
+    pub fn custom_emoji_named_by_bytes(&self, bytes: &[u8]) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT name FROM custom_emoji WHERE bytes = ?1 LIMIT 1",
+                params![bytes],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// Set — or with both `None`, remove — one custom emoji. Exactly one of `art` or
     /// `alias_of` must be present; both or neither is refused. An alias may not point
     /// at an alias. The name is validated, and dimensions are capped. Validating the

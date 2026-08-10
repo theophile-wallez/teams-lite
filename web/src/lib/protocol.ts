@@ -816,6 +816,15 @@ export type AppSettings = {
    *  it is a switch — the rails that make the request defensible live in
    *  `src/sender_icon.rs`. Off means no such request is ever made. */
   sender_icons: boolean;
+  /** Take a custom emoji somebody SENDS into this machine's pack as the message arrives,
+   *  under the name its sender gave it. ON by default — a colleague's emoji that has to be
+   *  picked out of a menu one at a time is a pack nobody fills.
+   *
+   *  A name the user already holds is never overwritten: theirs arrives as `shipit-2`, and
+   *  art the pack already holds under any name is not taken twice. The switch exists for the
+   *  one thing the pack decides — what `:shipit:` posts under the user's own name on the
+   *  next send (see `import_emoji_from_message` in src/bin/server.rs). */
+  emoji_auto_import: boolean;
 };
 
 /** The Linear workspace one machine's key belongs to (mirrors `linear::Workspace` in
@@ -852,6 +861,8 @@ export type SettingsPatch = {
   ghostMode?: boolean;
   /** Turn sender icons on or off (see {@link AppSettings.sender_icons}). */
   senderIcons?: boolean;
+  /** Turn the emoji auto-import on or off (see {@link AppSettings.emoji_auto_import}). */
+  emojiAutoImport?: boolean;
 };
 
 /** Kind discriminant for an enriched GitLab link (mirrors the Rust `LinkMetadata`
