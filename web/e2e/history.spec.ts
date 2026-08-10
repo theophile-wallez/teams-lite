@@ -35,8 +35,8 @@ async function settled(page: import("@playwright/test").Page) {
 }
 
 /**
- * Sample the history once per animation frame while wheeling it upward, and
- * report how far the content moved on frames the wheel did *not* drive.
+ * Sample the history once per animation frame while wheeling it upward, and report
+ * how far the content moved OTHER than with the scroller.
  *
  * Following one message's on-screen position is the only honest measure of
  * smoothness: `scrollTop` legitimately jumps when a page is prepended (the
@@ -58,8 +58,16 @@ async function wheelUpAndMeasure(
 
   await page.evaluate(`(() => {
     const el = document.querySelector('[data-testid="message-scroll"]');
-    const probe = { frames: [], notches: [] };
+    const probe = { frames: [], pending: [] };
     window.__scrollProbe = probe;
+    // Every scroll the virtualizer performs ITSELF, so a twitch can be attributed
+    // instead of guessed at (the same instrumentation scripts/scroll-probe.ts uses).
+    const nativeScrollTo = el.scrollTo.bind(el);
+    el.scrollTo = (arg) => {
+      const to = typeof arg === "object" && arg !== null ? arg.top : arg;
+      probe.pending.push(Number(to ?? 0) - el.scrollTop);
+      return nativeScrollTo(arg);
+    };
     const anchorAt = () => {
       const box = el.getBoundingClientRect();
       const middle = box.top + box.height / 2;
@@ -78,6 +86,10 @@ async function wheelUpAndMeasure(
       const anchor = anchorAt();
       probe.frames.push({
         t: performance.now(),
+        // What the scroller did, and how much of that the app asked for itself.
+        // Between them they say what the content was supposed to do.
+        top: el.scrollTop,
+        written: probe.pending.splice(0).reduce((n, d) => n + d, 0),
         anchor: anchor ? anchor.id : null,
         y: anchor ? anchor.y : 0,
       });
@@ -88,7 +100,6 @@ async function wheelUpAndMeasure(
 
   await page.mouse.move(700, 450);
   for (let i = 0; i < opts.notches; i++) {
-    await page.evaluate(`window.__scrollProbe.notches.push(performance.now())`);
     await page.mouse.wheel(0, -90);
     await page.waitForTimeout(opts.intervalMs);
   }
@@ -96,25 +107,53 @@ async function wheelUpAndMeasure(
   await cdp?.send("Emulation.setCPUThrottlingRate", { rate: 1 });
   await cdp?.detach();
 
-  // A notch keeps the content moving for a while (Chromium animates wheel
-  // scrolling), so only frames well clear of one count as idle.
+  // Every frame is measured, and what it is held to is what the content was SUPPOSED
+  // to do on it. The scroller moves for two different reasons and they mean opposite
+  // things for the reader:
+  //
+  //  - the WHEEL moves the viewport over a list that stands still, so the content
+  //    moves on screen by exactly what the wheel asked for;
+  //  - the app's OWN write re-anchors the reader over a list that just grew above
+  //    them (a prepended page), so `scrollTop` jumps and the content must not move at
+  //    all.
+  //
+  // So the wheel's own share is `scrollTop` minus what the app wrote, and a frame is
+  // clean when the content moved by that and nothing else. Anything left over is the
+  // history moving on its own — which is precisely the defect: a correction painted a
+  // frame before the row positions it accounts for shows up as content moving by the
+  // correction with nothing having asked for it.
+  //
+  // This used to be a WINDOW around each wheel notch instead, and a fixed window is
+  // not a fact about the browser: under CPU throttling a long task defers a notch and
+  // its scroll is delivered a frame or two later — measured at 149ms and 579ms after
+  // the notch that asked for it, with the scroller moving its full 90px on that very
+  // frame. Any window narrow enough to be worth having reads one of those as a jump,
+  // and it does so whenever anything changes the geometry of the list (a time mark
+  // above a block of messages was the change that found it).
   return page.evaluate(`(() => {
-    const { frames, notches } = window.__scrollProbe;
-    const driven = (t) => notches.some((n) => t >= n - 20 && t <= n + 120);
+    const { frames } = window.__scrollProbe;
+    // A pixel or two of tolerance covers sub-pixel layout and scroll rounding.
+    const SLACK_PX = 2;
     let worst = 0;
     let total = 0;
-    let idle = 0;
+    let compared = 0;
     for (let i = 1; i < frames.length; i++) {
       const prev = frames[i - 1];
       const frame = frames[i];
-      if (frame.anchor === null || frame.anchor !== prev.anchor || driven(frame.t)) continue;
-      idle++;
-      const moved = Math.abs(frame.y - prev.y);
-      total += moved;
-      worst = Math.max(worst, moved);
+      // Only a message both frames had mounted says where the content is.
+      if (frame.anchor === null || frame.anchor !== prev.anchor) continue;
+      compared++;
+      const scrolled = frame.top - prev.top;
+      // Scrolling up (a negative delta) moves the content down; the app's own writes
+      // move the reader with the content and so ask for no movement at all.
+      const owed = frame.written - scrolled;
+      const twitch = Math.abs(frame.y - prev.y - owed);
+      if (twitch <= SLACK_PX) continue;
+      total += twitch;
+      worst = Math.max(worst, twitch);
     }
-    return { idleFrames: idle, worst: Math.round(worst), total: Math.round(total) };
-  })()`) as Promise<{ idleFrames: number; worst: number; total: number }>;
+    return { comparedFrames: compared, worst: Math.round(worst), total: Math.round(total) };
+  })()`) as Promise<{ comparedFrames: number; worst: number; total: number }>;
 }
 
 test.describe("history (infinite scroll)", () => {
@@ -190,17 +229,17 @@ test.describe("history (infinite scroll)", () => {
     // virtualizer corrects `scrollTop`. That correction used to paint a frame
     // before the row positions it compensates, jerking the history by the
     // estimate error (up to ~40px) over and over on the way up.
-    // One notch every 150ms: fast enough to keep pulling pages, slow enough that
-    // most frames are idle and can be held to "nothing moved".
+    // One notch every 150ms: fast enough to keep pulling pages, slow enough that the
+    // pages land mid-scroll, which is where the race was.
     const motion = await wheelUpAndMeasure(page, {
       notches: 30,
       intervalMs: 150,
       cpuThrottle: 8,
     });
 
-    // Enough idle frames for the measurement to mean something.
-    expect(motion.idleFrames).toBeGreaterThan(20);
-    // Nothing may move while the wheel is idle. A pixel or two of tolerance
+    // Enough frames compared for the measurement to mean something.
+    expect(motion.comparedFrames).toBeGreaterThan(20);
+    // The content may only move with the scroller. A pixel or two of tolerance
     // covers sub-pixel layout rounding; the regression is an order of magnitude
     // above that.
     expect(motion.worst).toBeLessThanOrEqual(4);
@@ -308,6 +347,28 @@ test.describe("history (infinite scroll)", () => {
       "data-visible",
       "false",
     );
+  });
+
+  test("says when a block of messages was sent, and not on every message", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    await settled(page);
+
+    // The backlog spans several days with the occasional multi-hour silence in it, so
+    // the history has blocks to open (see `gapMs` in the mock).
+    const marks = page.locator('[data-testid="message-time"]');
+    await expect.poll(() => marks.count(), { timeout: 4_000 }).toBeGreaterThan(0);
+
+    // A mark always states a time, whatever date it carries.
+    for (const text of await marks.allInnerTexts()) {
+      expect(text).toMatch(/\d{1,2}[:.]\d{2}/);
+    }
+
+    // And it marks a BLOCK: the messages inside one carry nothing of their own, which
+    // is the whole difference from a stamp per bubble.
+    const mounted = await page.locator('[data-testid="message"]').count();
+    expect(mounted).toBeGreaterThan(2);
+    expect(await marks.count()).toBeLessThan(mounted);
   });
 
   test("leaves the reading position alone when a message arrives while scrolled up", async ({

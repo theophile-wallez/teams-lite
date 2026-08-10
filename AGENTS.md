@@ -250,6 +250,59 @@ whether it is a control; `message-pane.tsx` owns the scroll and resolves the tar
   forwarded screenshot rather than shorten it, and the screenshot is often the whole quoted
   message.
 
+## When a message was sent (a mark per BLOCK, never a stamp per bubble)
+
+The history says when it happened the way Instagram's own threads do: one small centred
+line above the first message of a stretch, and nothing above the rest of it.
+`web/src/lib/message-time.ts` decides which messages earn one and what each says, and
+`message-pane.tsx` draws it — nothing about a bubble changed.
+
+- **A block begins for two reasons, and both are the reader's question rather than a round
+  number.** The DAY changed (23:55 and 00:10 are ten minutes apart and belong to two days,
+  which is the one thing the words can never say), or the two messages are at least
+  `TIME_MARK_GAP_MS` apart — an hour, below which a slow exchange over lunch would be cut
+  into stamped fragments. A stamp on every message is the same fact ten times over.
+- **A mark needs the message BEFORE it**, so the oldest loaded row never carries one: the
+  history pages older as the reader scrolls up, and a mark drawn on whatever happens to be
+  at the top would be taken away again by the page that arrives above it. What that costs
+  is a thread whose whole loaded page sits inside one hour of one day — a conversation
+  being had right now, where the answer is "just now".
+- **It says only as much date as the reader needs** — the time for today, "Yesterday" for
+  yesterday, the weekday inside the week, then the date, and the year only beyond this one
+  — in the reader's own locale and zone, over the epoch ms the wire carries. The exact
+  moment is on the mark's `title`, so one reading "Yesterday 14:32" still answers which day
+  that was.
+- **The mark BREAKS a same-author run, in both directions.** Two messages an hour apart are
+  two things somebody said, and tucking the second against the first at continuation
+  spacing — under a line saying the day changed — would draw them as one.
+- **The marks are a PASS over the history, not a decision per bubble** (`messageTimeMarks`,
+  computed where `trackerProjects` is and for its reason): the pane re-renders on every
+  frame of a live agent run and on every scroll that mounts a row, while a mark changes only
+  when the messages do. It is taken over the history AS DRAWN — one run for a chat, one per
+  thread for a channel, since a reply's neighbour is the reply above it inside its own
+  thread.
+- **Its height is a CONSTANT the row estimate knows** (`TIME_MARK_ROW_PX`, added by
+  `estimateSize` for exactly the rows that carry one). A row taller than its estimate is
+  corrected by writing `scrollTop` the moment it is measured, and that correction is the
+  twitch `e2e/history.spec.ts` exists to catch — so the mark is held at its own height
+  rather than at whatever the line happens to measure.
+
+**Adding it also mended the twitch test's own arithmetic**, which is worth knowing before
+touching either. That test wheels the history up under an 8x CPU throttle and used to hold
+every frame outside a 140ms window around each notch to "nothing moved". A fixed window is
+not a fact about the browser: under the throttle a long task defers a notch and its scroll
+is delivered a frame or two later — measured at 149ms and 579ms after the notch that asked
+for it, with the scroller moving its own full 90px on that very frame — so the reader's own
+wheel was reported as a jump of exactly one notch, and it took a 36px line to expose it. The
+frames now carry `scrollTop` and every scroll the virtualizer performs ITSELF (`scrollTo` is
+patched, as `scripts/scroll-probe.ts` already does), and each frame is held to what the
+content was SUPPOSED to do: the wheel moves the viewport over a still list, so the content
+moves by what the wheel asked; the app's own write re-anchors the reader over a list that
+grew above them, so `scrollTop` jumps and the content must not move at all. Anything left
+over is the history moving on its own. It is SHARPER than the window it replaced rather than
+looser — reintroducing the original defect (`directDomUpdates: false`) is caught at 3640px,
+where the old metric needed luck about timing to see it at all.
+
 ## The local agent (`@claude` in a thread)
 
 The user can summon a coding agent that runs on this machine from any Teams client —

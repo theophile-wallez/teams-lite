@@ -20,6 +20,7 @@ import {
   type ReactionPick,
   type RichQuote,
 } from "~/lib/protocol";
+import { messageTimeMarks } from "~/lib/message-time";
 import type { AgentAnswer } from "~/lib/agent-answer";
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
@@ -67,6 +68,13 @@ const PREPEND_TRIGGER_MIN_PX = 600;
 // scrolling never shows a blank band.
 const ROW_ESTIMATE_PX = 64;
 const OVERSCAN_ROWS = 8;
+// The room a time mark takes above the message that opens a block (see
+// lib/message-time.ts). It is a CONSTANT rather than whatever the line happens to
+// measure, and `estimateSize` adds exactly it for a row that carries one: a row
+// taller than its estimate is corrected by writing `scrollTop` the moment it is
+// measured, and a correction the reader has to watch is the twitch
+// `e2e/history.spec.ts` exists to catch.
+const TIME_MARK_ROW_PX = 36;
 // Height reserved at the top of the list for the "loading earlier messages"
 // row, so reserving (and releasing) it doesn't shift the rows below.
 const HISTORY_LOADER_PX = 32;
@@ -261,6 +269,15 @@ export function MessagePane(props: { onBack?: () => void }) {
     return groupThreads(messages);
   }, [isChannel, messages]);
 
+  // Which messages open a block of time, and what each one says (see
+  // lib/message-time.ts). Taken over the history AS DRAWN — one run for a chat, one per
+  // thread for a channel, since a reply's neighbour is the reply above it inside its own
+  // thread — and once per change of the history rather than per rendered bubble.
+  const timeMarks = useMemo(
+    () => messageTimeMarks(threads ? threads.map((t) => [t.lead, ...t.replies]) : [messages]),
+    [threads, messages],
+  );
+
   // Deep-linking to a reply inside a collapsed thread: expand that thread so the
   // scroll effect can find and center the target node.
   useEffect(() => {
@@ -333,7 +350,14 @@ export function MessagePane(props: { onBack?: () => void }) {
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => viewportRef.current,
-    estimateSize: () => ROW_ESTIMATE_PX,
+    // A row that opens a block of time is taller by exactly the mark it carries, and
+    // the estimate says so: an estimate that ignored it would be corrected on first
+    // measure, once per marked row, all the way up a scroll.
+    estimateSize: (index) => {
+      const row = rows[index];
+      const marked = row?.kind === "message" && timeMarks.has(row.message.id);
+      return ROW_ESTIMATE_PX + (marked ? TIME_MARK_ROW_PX : 0);
+    },
     getItemKey: (index) => rows[index]?.key ?? index,
     overscan: OVERSCAN_ROWS,
     // Chat semantics, straight from the virtualizer: `anchorTo: "end"` keeps the
@@ -671,16 +695,42 @@ export function MessagePane(props: { onBack?: () => void }) {
     opts?: { onPanel?: boolean },
   ) => {
     const seenBy = readAnchors.get(m.id);
+    // When this message was sent, said once above the block it opens rather than on
+    // every bubble (see lib/message-time.ts). The mark BREAKS a same-author run in
+    // both directions: two messages an hour apart are two things somebody said, and
+    // tucking the second against the first at continuation spacing — under a line
+    // that says the day changed — would draw them as one.
+    const mark = timeMarks.get(m.id);
+    const nextMark = next ? timeMarks.get(next.id) : undefined;
     return (
       <div key={m.id} className="contents">
+        {mark && (
+          <div
+            data-testid="message-time"
+            // Held at its own constant height, which the row estimate knows about.
+            // The words sit at the foot of it, close to the block they label.
+            style={{ height: `${TIME_MARK_ROW_PX}px` }}
+            className="flex shrink-0 items-end justify-center pb-1.5"
+          >
+            {/* The exact moment is the title, so a mark reading "Yesterday 14:32"
+                still answers which day that was. */}
+            <time
+              dateTime={new Date(m.compose_time).toISOString()}
+              title={new Date(m.compose_time).toLocaleString()}
+              className="text-[11px] font-medium leading-none text-text-faint"
+            >
+              {mark}
+            </time>
+          </div>
+        )}
         {m.system_event ? (
           <SystemEventLine event={m.system_event} />
         ) : (
           <MessageBubble
             message={m}
             showSenderName={isGroup}
-            continuesAbove={sameAuthor(prev, m)}
-            continuesBelow={sameAuthor(m, next)}
+            continuesAbove={sameAuthor(prev, m) && !mark}
+            continuesBelow={sameAuthor(m, next) && !nextMark}
             onPanel={opts?.onPanel}
             editing={editingId === m.id}
             highlighted={highlightId === m.id}
