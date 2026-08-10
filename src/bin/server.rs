@@ -1079,6 +1079,19 @@ impl UpdatePhase {
 /// never stops trying.
 const DOWNLOAD_ATTEMPTS: usize = 2;
 
+/// How long a failed attempt waits before the next one.
+///
+/// **The commonest 404 here is CI republishing `latest`, and its width is measured.** The
+/// workflow DELETES the rolling release and creates it again with the asset
+/// (`.github/workflows/build.yml`), so `/releases/tags/latest` and the asset URL both
+/// answer 404 for the length of that one step — 6 s, 6 s and 10 s over the three runs of
+/// 2026-08-07. A retry with no wait rides out nothing: it re-read the release a
+/// millisecond later, inside the same hole, and the user was shown a bare `404 Not Found`
+/// on a release that was whole seconds afterwards. Wider than the widest hole measured,
+/// and short enough that a genuinely broken release still answers while somebody is still
+/// looking at the button.
+const DOWNLOAD_RETRY_WAIT: Duration = Duration::from_secs(20);
+
 /// What GitHub says about the release right now — the answer a download starts from.
 enum ReleaseNow {
     /// The asset to fetch, and the commit it was built from.
@@ -1634,6 +1647,30 @@ impl Ctx {
         installable
     }
 
+    /// Take a download failure back, once the release it was about has moved on.
+    ///
+    /// Only `Failed` is ever touched: every other phase either owns a live download or is a
+    /// statement the user still has to act on, and the pass that calls this never runs in
+    /// one of those. The progress frame is emitted only when something really changed, so an
+    /// up-to-date app is not sent one every two minutes.
+    fn clear_failed_update(&self) {
+        let cleared = self
+            .with_update(|slot| {
+                if slot.phase != UpdatePhase::Failed {
+                    return false;
+                }
+                slot.phase = UpdatePhase::Idle;
+                slot.error.clear();
+                slot.received = 0;
+                slot.file = None;
+                true
+            })
+            .unwrap_or(false);
+        if cleared {
+            self.emit_update_progress();
+        }
+    }
+
     /// Read what the update brings, once per release, and cache it for the payload.
     ///
     /// Called BEFORE `publish_release`, because that method is where the payload is spelled
@@ -1869,9 +1906,11 @@ impl Ctx {
                 Ok(()) => return Ok(Some(dest)),
                 Err(e) if attempt < DOWNLOAD_ATTEMPTS => {
                     eprintln!(
-                        "[update] attempt {attempt} failed: {e:#} — re-reading the release and \
-                         fetching it once more"
+                        "[update] attempt {attempt} failed: {e:#} — waiting {}s, then \
+                         re-reading the release and fetching it once more",
+                        DOWNLOAD_RETRY_WAIT.as_secs()
                     );
+                    tokio::time::sleep(DOWNLOAD_RETRY_WAIT).await;
                 }
                 Err(e) => return Err(e),
             }
@@ -8275,7 +8314,22 @@ impl Ctx {
     ///     manual check reports what went wrong instead, because "you are up to date" on
     ///     the strength of a read that failed is the one answer it must not give.
     async fn release_pass(&self, current: &str, ask: ReleaseAsk) -> ReleaseOutcome {
-        if !matches!(self.with_update(|slot| slot.phase), Ok(UpdatePhase::Idle)) {
+        // What a pass must stand aside for is a download that OWNS the payload:
+        // `Downloading` (a pass would move the total under the bar), `Ready` (it would
+        // forget the file the user is one click from installing), `Restarting`, and
+        // `Installed` — that row is asking to be restarted, and a pass that emptied it would
+        // take the sentence away.
+        //
+        // **`FAILED` IS NOT ONE OF THEM**, and reading it as one made the watch DEAF.
+        // Measured 2026-08-07: a download 404ed inside CI's own delete-and-recreate window,
+        // the phase stayed `Failed`, and eleven minutes and five polls after `latest` was
+        // whole again this backend had still never mentioned it. Nothing owns anything in
+        // that state — the only thing the row had left to offer was retrying a download of a
+        // build the tag had already moved past.
+        if !matches!(
+            self.with_update(|slot| slot.phase),
+            Ok(UpdatePhase::Idle | UpdatePhase::Failed)
+        ) {
             return ReleaseOutcome::Busy;
         }
         // A read-only backend never takes the claim: it is a screenshot backend, it cannot
@@ -8307,6 +8361,11 @@ impl Ctx {
                 if known == info.latest {
                     return ReleaseOutcome::Available;
                 }
+                // The release MOVED, so a failure from the last one is over: it was about a
+                // build the tag has already passed, and its reason named a 404 that is no
+                // longer true. Taken back here rather than left for the user to press
+                // through, which is what the pass being allowed to run while `Failed` is for.
+                self.clear_failed_update();
                 // What it brings, before it is announced: the payload is spelled once, in
                 // `publish_release`, so the list has to be known by the time it runs or the
                 // first thing every client hears would carry no list.
@@ -12379,6 +12438,66 @@ mod tests {
         // And bounded: a download that retried forever would hide a broken release behind
         // a button that never stops trying.
         assert!(DOWNLOAD_ATTEMPTS <= 3, "a download must not retry indefinitely");
+    }
+
+    /// **A FAILED DOWNLOAD NEITHER WEDGES THE WATCH NOR RETRIES INTO THE SAME HOLE.**
+    ///
+    /// 2026-08-07, and this one reached the user. CI deletes the rolling `latest` release and
+    /// creates it again with the asset, so the release read and the asset URL both answer 404
+    /// for the length of that step. A press inside that window failed twice with NO WAIT
+    /// between the attempts — the second re-read the release a millisecond later, inside the
+    /// same hole — and the phase then stayed `Failed`, which every pass stood aside for: five
+    /// polls and eleven minutes after `latest` was whole again this backend had still never
+    /// mentioned it, and the row's only offer was retrying a build the tag had moved past.
+    ///
+    /// Two halves, and neither replaces the other: the wait is what rides the hole out, and
+    /// the pass running while `Failed` is what heals the app when it does not.
+    #[test]
+    fn a_failed_download_neither_wedges_the_watch_nor_retries_into_the_same_hole() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        let pass = code
+            .split("    async fn release_pass(")
+            .nth(1)
+            .expect("the release watch's own pass")
+            .split("\n    /// The `update_check` RPC")
+            .next()
+            .expect("the pass ends before the next method");
+        assert!(
+            pass.contains("Ok(UpdatePhase::Idle | UpdatePhase::Failed)"),
+            "the pass must run while a download has FAILED. Standing aside for it leaves \
+             this backend unable to notice the release that healed seconds later — for as \
+             long as the process lives."
+        );
+        assert!(
+            pass.contains("clear_failed_update()"),
+            "a pass that publishes a NEW release must take the old failure back, or the row \
+             keeps offering to retry a download of a build the tag has moved past"
+        );
+
+        let fetch = code
+            .split("async fn fetch_release_asset(")
+            .nth(1)
+            .expect("the fetch that a download runs")
+            .split("\n    /// Install the downloaded build")
+            .next()
+            .expect("the method ends before the next one");
+        assert!(
+            fetch.contains("sleep(DOWNLOAD_RETRY_WAIT)"),
+            "the second attempt must WAIT. With no wait it re-reads the release inside the \
+             same republish window and fails identically, which is what the user saw."
+        );
+        // Wider than the widest republish measured (10 s), and short enough that a genuinely
+        // broken release still reports while the user is looking at the button.
+        assert!(
+            DOWNLOAD_RETRY_WAIT >= Duration::from_secs(15),
+            "a wait narrower than CI's own republish rides out nothing"
+        );
+        assert!(
+            DOWNLOAD_RETRY_WAIT <= Duration::from_secs(60),
+            "a download must report a broken release while somebody is still watching it"
+        );
     }
 
     #[test]
