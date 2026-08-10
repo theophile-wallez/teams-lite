@@ -34,8 +34,12 @@ MAX_DEPTH=4
 # A command with its working directory inside the worktree that must stop the prune.
 BUSY_COMMANDS='^(cargo|rustc|bun|bunx|node|npm|npx|pnpm|yarn|deno|vite|tsc|esbuild|webpack|rollup|turbo|next|gradle|mvn|make|cmake|ninja|go|python[0-9.]*|uv|poetry|playwright)$'
 # An MCP server runs the same interpreters and sits in the worktree for the whole
-# session without building anything, so it must not read as a busy build.
-IDLE_MARKER='mcp'
+# session without building anything, so it must not read as a busy build. A harness
+# HOOK is the same thing and had to be added for the same reason: one runs on every
+# turn with its working directory inside the worktree, so in a ~/.t3/worktrees one —
+# the very kind this script exists for, since those are the worktrees /ship KEEPS —
+# the prune was refused every single time, by the agent's own tooling.
+IDLE_MARKERS='(mcp|/hooks/)'
 
 dry_run=0
 verbose=0
@@ -74,7 +78,7 @@ busy_process() {
     cwd=$(readlink "$entry/cwd" 2>/dev/null) || continue
     [[ "$cwd" == "$root" || "$cwd" == "$root"/* ]] || continue
     cmdline=$(tr '\0' ' ' < "$entry/cmdline" 2>/dev/null)
-    [[ "$cmdline" == *"$IDLE_MARKER"* ]] && continue
+    [[ "$cmdline" =~ $IDLE_MARKERS ]] && continue
     cmd="${cmdline%% *}"
     cmd="${cmd##*/}"
     [[ "$cmd" =~ $BUSY_COMMANDS ]] || continue
