@@ -97,6 +97,59 @@ export function customEmojiNameError(name: string, taken: string[]): string | nu
   return null;
 }
 
+/** What an emoji may weigh and measure. Mirrors `custom_emoji::MAX_CUSTOM_EMOJI_BYTES`
+ *  and `MAX_CUSTOM_EMOJI_DIMENSION` — Slack's own limits. The BACKEND is what refuses a
+ *  picture outside them, from the bytes (`measure_art`); these are what let the dialog
+ *  shrink one BEFORE it is sent, which is the only reason they are here. */
+export const EMOJI_MAX_BYTES = 128 * 1024;
+export const EMOJI_MAX_DIMENSION = 512;
+
+/** The box an over-size picture is redrawn into: Slack's own emoji size, and the size the
+ *  slackmojis already in the pack are.
+ *
+ *  It is well inside BOTH caps, which is what makes one pass enough: 128x128 of raw RGBA
+ *  is 64 KB, so a PNG of it cannot reach the 128 KB one. Redrawing at the 512 px cap
+ *  instead would fit the dimension and fail the weight, and a glyph drawn at 20 px in a
+ *  message has nothing to spend the other 384 px on. */
+export const EMOJI_SHRINK_DIMENSION = 128;
+
+/** What to do with a picture the caps refuse — redraw it into `shrinkTo`, or refuse it
+ *  with `error` — and `null` when it already fits.
+ *
+ *  Slack shrinks an over-size upload rather than refusing it, and this is the deciding
+ *  half of copying that; the redraw itself is `add-emoji-dialog.tsx`, because it needs a
+ *  canvas. The aspect ratio is kept (a squashed emoji is worse than a refused one) and
+ *  nothing is ever drawn LARGER, so a small-but-heavy picture is re-encoded at its own
+ *  size rather than stretched to 128 px.
+ *
+ *  A GIF is refused, and that is the one place this stops being Slack: its frames live
+ *  nowhere a canvas can see, so redrawing one keeps the first frame and throws the
+ *  animation away — the reason the backend re-encodes nothing either. */
+export function emojiOversize(art: {
+  width: number;
+  height: number;
+  bytes: number;
+  contentType: string;
+}): { shrinkTo: { width: number; height: number } } | { error: string } | null {
+  const fits =
+    art.bytes <= EMOJI_MAX_BYTES &&
+    art.width <= EMOJI_MAX_DIMENSION &&
+    art.height <= EMOJI_MAX_DIMENSION;
+  if (fits) return null;
+  if (art.contentType === "image/gif") {
+    return {
+      error: `A GIF cannot be shrunk here without losing its animation. Resize it to ${EMOJI_SHRINK_DIMENSION} pixels and under ${EMOJI_MAX_BYTES / 1024} KB first.`,
+    };
+  }
+  const scale = Math.min(1, EMOJI_SHRINK_DIMENSION / Math.max(art.width, art.height));
+  return {
+    shrinkTo: {
+      width: Math.max(1, Math.round(art.width * scale)),
+      height: Math.max(1, Math.round(art.height * scale)),
+    },
+  };
+}
+
 /**
  * Is this body nothing but custom emoji?
  *

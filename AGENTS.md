@@ -3398,9 +3398,33 @@ feature worth having: a local-only decoration would be a different, smaller feat
   unauthenticated path simply fails, and a stranger's URL on the authenticated one would
   send the user's token off-tenant. That mistake was made once during the build and is
   worth recording as the reason the rule is written down.
-- **Slack's limits, copied**: 128 KB, 512 px on a side, PNG/JPEG/GIF/WebP and never SVG,
-  and **nothing re-encodes** — so an over-limit image is refused with a reason rather than
-  scaled, because a GIF re-encode would kill the animation.
+- **Slack's limits, copied**: 128 KB, 512 px on a side, PNG/JPEG/GIF/WebP and never SVG.
+- **A picture too big is SHRUNK where it is pasted, and the BACKEND still re-encodes
+  nothing.** Slack takes a screenshot somebody pasted and reduces it; refusing one with
+  "512 pixels or smaller on a side" sends the user out to an image editor for a glyph that
+  will be drawn at 20 px. So the Add Emoji dialog redraws it — `emojiOversize`
+  (`web/src/lib/custom-emoji.ts`) decides, `redrawSmaller` in `add-emoji-dialog.tsx` draws,
+  and what is SENT is already inside both caps. Five rules hold it, and each is pinned by a
+  test (`custom-emoji.test.ts` for the arithmetic, `web/e2e/custom-emoji.spec.ts` for the
+  paste):
+  - **The caps stay the STORE's invariant.** `custom_emoji::measure_art` is unchanged and
+    still reads the type and the size out of the bytes, so the shrink is what stops a
+    refusal from happening rather than a way around one — the discipline the dialog's own
+    measurement already had (it is "a courtesy rather than the check").
+  - **The box is 128 px, not the 512 px cap** (`EMOJI_SHRINK_DIMENSION`, Slack's own emoji
+    size and the size the slackmojis in the pack already are). It is well inside BOTH caps,
+    which is what makes one pass enough: 128x128 of raw RGBA is 64 KB, so a PNG of it cannot
+    reach the 128 KB one. Redrawing at 512 px would fit the dimension and fail the weight.
+  - **Nothing is ever drawn LARGER, and the shape is kept.** A small-but-heavy picture is
+    re-encoded at its own size — upscaling it to 128 px would make it heavier — and a
+    squashed emoji is worse than a refused one.
+  - **A GIF is still REFUSED, for the reason nothing re-encodes one anywhere in this app**:
+    its frames live nowhere a canvas can see, so a redraw keeps the first frame and throws
+    the animation away. The refusal names that and says what to do instead.
+  - **The dialog says it shrunk the picture** (`add-emoji-shrunk`, naming the size it
+    arrived at). Reducing what somebody handed the app without saying so is the app quietly
+    changing their art. The URL source is untouched: those bytes are fetched by the backend,
+    which measures and refuses them as before.
 - **A custom reaction's key IS the art's address**, and it carries nothing else:
   `tlcustom-<objectUrl>`. The name cannot be in there — a name may hold digits and hyphens
   (`blob-2`), an AMS id starts with one, and no character in the name charset could

@@ -16,7 +16,9 @@ import type { Locator, Page } from "@playwright/test";
  *  5b. a LONE `:` opens the pack alone, Tab picks from it, and Enter still SENDS;
  *  6. a taken name is refused with Slack's own sentence;
  *  7. delete asks twice, and the confirming label is "Delete Emoji";
- *  8. one Backspace removes a whole chip.
+ *  8. one Backspace removes a whole chip;
+ *  9. a picture pasted into Settings too big to be an emoji is SHRUNK rather than refused,
+ *     and the dialog says so.
  *
  * Everything happens in the "Custom Emoji" thread, which the mock seeds for this feature
  * alone (`seedCustomEmojiThread` in web/mock/server.ts): it carries the colleague's message
@@ -105,6 +107,53 @@ async function openEmojiSettings(page: Page): Promise<Locator> {
   const section = page.locator('[data-testid="custom-emoji-settings"]');
   await expect(section).toBeVisible();
   return section;
+}
+
+/**
+ * Paste one picture of `width`x`height` into the Add Emoji dialog's paste area.
+ *
+ * It is drawn IN the page rather than encoded here: what this test needs is a real PNG too
+ * big to be an emoji, and a browser already has an encoder. The picture is noise rather
+ * than a flat fill, so it weighs something — a single colour compresses to a few hundred
+ * bytes, and a picture inside the weight cap would prove only half the rule.
+ */
+async function pasteEmojiImage(page: Page, width: number, height: number): Promise<void> {
+  await page.locator('[data-testid="add-emoji-dropzone"]').evaluate(
+    (element, size) =>
+      new Promise<void>((resolve, reject) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = size.width;
+        canvas.height = size.height;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          reject(new Error("no 2d context"));
+          return;
+        }
+        for (let x = 0; x < size.width; x += 4) {
+          for (let y = 0; y < size.height; y += 4) {
+            context.fillStyle = `rgb(${(x * 7) % 256},${(y * 11) % 256},${(x + y) % 256})`;
+            context.fillRect(x, y, 4, 4);
+          }
+        }
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error("no blob"));
+            return;
+          }
+          const clipboard = new DataTransfer();
+          clipboard.items.add(new File([blob], "big.png", { type: "image/png" }));
+          element.dispatchEvent(
+            new ClipboardEvent("paste", {
+              bubbles: true,
+              cancelable: true,
+              clipboardData: clipboard,
+            }),
+          );
+          resolve();
+        }, "image/png");
+      }),
+    { width, height },
+  );
 }
 
 test.describe("custom emoji", () => {
@@ -466,5 +515,38 @@ test.describe("custom emoji", () => {
     await page.keyboard.press("Backspace");
     await expect(chip).toHaveCount(0);
     await expect(field).toHaveText("");
+  });
+
+  test("a pasted picture too big to be an emoji is shrunk, and the dialog says so", async ({
+    page,
+  }) => {
+    const section = await openEmojiSettings(page);
+    await section.locator('[data-testid="add-custom-emoji"]').click();
+    const dialog = page.locator('[data-testid="add-emoji-dialog"]');
+    await expect(dialog).toBeVisible();
+
+    await pasteEmojiImage(page, 900, 600);
+
+    // This picture used to be REFUSED — 900 px is over the 512 px cap. It is redrawn at
+    // Slack's own emoji size instead, with the shape kept: 900x600 is 3:2, so the long
+    // side lands on 128 and the short one follows.
+    await expect(dialog.locator('[data-testid="add-emoji-shrunk"]')).toHaveText(
+      "Shrunk from 900×600 to 128×85 to fit.",
+    );
+    await expect(dialog.locator('[data-testid="add-emoji-error"]')).toHaveCount(0);
+
+    await dialog.locator('[data-testid="add-emoji-name"]').fill("bigpaste");
+    await dialog.locator('[data-testid="add-emoji-save"]').click();
+    await expect(dialog).toHaveCount(0);
+
+    // What reached the STORE is the shrunk art rather than what was pasted. The row draws
+    // the pack's own bytes, so the picture's intrinsic width is what says which one it is —
+    // and the backend measures the same bytes itself, so a save that went through is a
+    // picture inside both caps.
+    const art = section.locator('[data-testid="custom-emoji-row-bigpaste"] img');
+    await expect(art).toBeVisible();
+    await expect
+      .poll(() => art.evaluate((image: HTMLImageElement) => image.naturalWidth))
+      .toBe(128);
   });
 });

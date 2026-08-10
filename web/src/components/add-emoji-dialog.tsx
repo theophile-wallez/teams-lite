@@ -6,7 +6,12 @@ import {
   loadComposerImage,
   type ComposerImage,
 } from "~/lib/composer-image";
-import { customEmojiNameError } from "~/lib/custom-emoji";
+import {
+  EMOJI_MAX_BYTES,
+  EMOJI_SHRINK_DIMENSION,
+  customEmojiNameError,
+  emojiOversize,
+} from "~/lib/custom-emoji";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
 import { Button } from "./ui/button";
@@ -20,34 +25,86 @@ import {
 import { Input } from "./ui/input";
 import { Tabs, TabsPanel, TabsList, TabsTrigger } from "./ui/tabs";
 
-// Emoji caps are stricter than the composer's 10 MB: 128 KB and 512 px on a side.
-// The type list is shared to keep the accepted formats in sync.
-const EMOJI_MAX_BYTES = 128 * 1024;
-const EMOJI_MAX_DIMENSION = 512;
+/** A picture picked for an emoji: the composer's own, plus the one fact only this path
+ *  has — the size it ARRIVED at, when it had to be redrawn smaller to fit. The dialog
+ *  states that, because reducing what somebody handed the app without saying so is the
+ *  app quietly changing their art. */
+type EmojiImage = ComposerImage & { shrunkFrom?: { width: number; height: number } };
+
+/** `source` redrawn into `box`, as a PNG data URL.
+ *
+ *  PNG whatever the source was, because an emoji lives on its transparency and a JPEG
+ *  would flatten it onto black — the type the picture is STORED as is what comes back out
+ *  of this app inside an `<img>`, so it has to be the type the canvas really wrote. */
+function redrawSmaller(
+  source: string,
+  box: { width: number; height: number },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onerror = () => reject(new Error("Could not decode the image."));
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = box.width;
+      canvas.height = box.height;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("This browser cannot resize an image."));
+        return;
+      }
+      context.imageSmoothingQuality = "high";
+      context.drawImage(image, 0, 0, box.width, box.height);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    image.src = source;
+  });
+}
+
+/** How many bytes a base64 payload decodes to — what the caps are counted in, and the
+ *  only thing that says whether a redraw really got under them. */
+function decodedBytes(base64: string): number {
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
+}
 
 /**
- * A picture picked for an emoji, held to the EMOJI's own caps.
+ * A picture picked for an emoji, brought inside the EMOJI's own caps.
  *
- * Only the two caps are checked here, because only they are the emoji's: the accepted
- * TYPES are `loadComposerImage`'s own check, in its own sentence, so a copy of it here
- * would type-check every file twice to say the same thing. The 128 KB and 512 px, on the
- * other hand, must never become the composer's 10 MB — a glyph is eighty times smaller
- * than a screenshot, and this is what the backend refuses art with anyway
- * (`custom_emoji::measure_art`). The dialog checks them so the user is told before they
- * wait for an upload; the backend's check is the one that holds.
+ * The accepted TYPES and the composer's own 10 MB ceiling are `loadComposerImage`'s
+ * checks, in its own sentences, so a copy of them here would type-check every file twice
+ * to say the same thing. What belongs to the emoji is the 128 KB and the 512 px — and a
+ * picture over either one is SHRUNK rather than refused, the way Slack reduces an
+ * over-size upload, so nobody is sent out to an image editor for a glyph that will be
+ * drawn at 20 px. The backend's own measurement is still the check that holds
+ * (`custom_emoji::measure_art`, which reads the bytes this function ends up sending);
+ * the shrink is what stops it from having to refuse one.
  */
-async function loadEmojiImage(file: File): Promise<ComposerImage> {
-  if (file.size > EMOJI_MAX_BYTES) {
-    throw new Error("Select an image that is 128 KB or smaller.");
-  }
-
+async function loadEmojiImage(file: File): Promise<EmojiImage> {
   const loaded = await loadComposerImage(file);
+  const oversize = emojiOversize(loaded);
+  if (oversize === null) return loaded;
+  if ("error" in oversize) throw new Error(oversize.error);
 
-  if (loaded.width > EMOJI_MAX_DIMENSION || loaded.height > EMOJI_MAX_DIMENSION) {
-    throw new Error("an emoji must be 512 pixels or smaller on a side");
+  const previewUrl = await redrawSmaller(loaded.previewUrl, oversize.shrinkTo);
+  const marker = ";base64,";
+  const dataBase64 = previewUrl.slice(previewUrl.indexOf(marker) + marker.length);
+  const bytes = decodedBytes(dataBase64);
+  // Unreachable for a 128 px box — 128x128 of raw RGBA is 64 KB — but the caps are the
+  // backend's invariant, so the dialog never sends a picture it has not checked itself.
+  if (bytes > EMOJI_MAX_BYTES) {
+    throw new Error(`That image is still over ${EMOJI_MAX_BYTES / 1024} KB once shrunk.`);
   }
 
-  return loaded;
+  return {
+    ...loaded,
+    contentType: "image/png",
+    width: oversize.shrinkTo.width,
+    height: oversize.shrinkTo.height,
+    bytes,
+    dataBase64,
+    previewUrl,
+    shrunkFrom: { width: loaded.width, height: loaded.height },
+  };
 }
 
 export function AddEmojiDialog(props: {
@@ -59,7 +116,7 @@ export function AddEmojiDialog(props: {
   const controller = useController();
   const [activeTab, setActiveTab] = useState("upload");
   const [name, setName] = useState("");
-  const [image, setImage] = useState<ComposerImage | null>(null);
+  const [image, setImage] = useState<EmojiImage | null>(null);
   const [url, setUrl] = useState("");
   const [packFile, setPackFile] = useState<File | null>(null);
   const [packCount, setPackCount] = useState<number | null>(null);
@@ -212,6 +269,7 @@ export function AddEmojiDialog(props: {
               <div
                 role="button"
                 tabIndex={0}
+                data-testid="add-emoji-dropzone"
                 onPaste={(e) => void handlePaste(e)}
                 onClick={() => fileInput.current?.click()}
                 onKeyDown={(e) => {
@@ -247,6 +305,7 @@ export function AddEmojiDialog(props: {
               <input
                 ref={fileInput}
                 type="file"
+                data-testid="add-emoji-image-input"
                 accept={COMPOSER_IMAGE_TYPES.join(",")}
                 className="hidden"
                 onChange={(e) => {
@@ -254,9 +313,17 @@ export function AddEmojiDialog(props: {
                   e.target.value = "";
                 }}
               />
-              <p className="text-xs text-text-dim">
-                Square images under 128KB and with transparent backgrounds work best.
-              </p>
+              {image?.shrunkFrom ? (
+                <p data-testid="add-emoji-shrunk" className="text-xs text-text-dim">
+                  Shrunk from {image.shrunkFrom.width}×{image.shrunkFrom.height} to{" "}
+                  {image.width}×{image.height} to fit.
+                </p>
+              ) : (
+                <p className="text-xs text-text-dim">
+                  Anything bigger is shrunk to {EMOJI_SHRINK_DIMENSION} px. Square images
+                  with transparent backgrounds work best.
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">

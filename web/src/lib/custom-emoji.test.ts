@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
+  EMOJI_MAX_BYTES,
+  EMOJI_MAX_DIMENSION,
+  EMOJI_SHRINK_DIMENSION,
   bodyIsOnlyEmoji,
   customEmojiNameError,
+  emojiOversize,
   emojiSuggestions,
   emojiQueryBefore,
   extractableCustomEmoji,
@@ -340,5 +344,59 @@ describe("bodyIsOnlyEmoji", () => {
   it("says no to an empty body, which has no emoji to draw large", () => {
     expect(bodyIsOnlyEmoji([])).toBe(false);
     expect(bodyIsOnlyEmoji(parseRichHtml("<p> </p>"))).toBe(false);
+  });
+});
+
+describe("emojiOversize", () => {
+  const png = (width: number, height: number, bytes: number) => ({
+    width,
+    height,
+    bytes,
+    contentType: "image/png",
+  });
+
+  it("leaves a picture that already fits alone", () => {
+    expect(emojiOversize(png(64, 64, 4_000))).toBeNull();
+    // Exactly on both caps is inside them, which is what "128 KB or smaller" says.
+    expect(
+      emojiOversize(png(EMOJI_MAX_DIMENSION, EMOJI_MAX_DIMENSION, EMOJI_MAX_BYTES)),
+    ).toBeNull();
+  });
+
+  it("shrinks the long side to Slack's own emoji size and keeps the shape", () => {
+    // A screenshot: the long side lands on 128 and the aspect ratio is kept, because a
+    // squashed emoji is worse than a refused one.
+    expect(emojiOversize(png(900, 600, 400_000))).toEqual({
+      shrinkTo: { width: EMOJI_SHRINK_DIMENSION, height: 85 },
+    });
+    expect(emojiOversize(png(600, 900, 400_000))).toEqual({
+      shrinkTo: { width: 85, height: EMOJI_SHRINK_DIMENSION },
+    });
+    // Never below one pixel, however extreme the shape.
+    expect(emojiOversize(png(4_000, 3, 400_000))).toEqual({
+      shrinkTo: { width: EMOJI_SHRINK_DIMENSION, height: 1 },
+    });
+  });
+
+  it("re-encodes a small-but-heavy picture at its own size rather than stretching it", () => {
+    // Inside the dimension cap and over the weight one: the redraw is what gets it under,
+    // so the box is the picture's own size. Upscaling it to 128 px would make it heavier.
+    expect(emojiOversize(png(100, 100, EMOJI_MAX_BYTES + 1))).toEqual({
+      shrinkTo: { width: 100, height: 100 },
+    });
+  });
+
+  it("refuses an over-size GIF rather than flattening its animation", () => {
+    const refusal = emojiOversize({
+      width: 600,
+      height: 600,
+      bytes: 400_000,
+      contentType: "image/gif",
+    });
+    expect(refusal).toEqual({ error: expect.stringContaining("animation") });
+    // A GIF that fits is untouched, exactly like any other picture that fits.
+    expect(
+      emojiOversize({ width: 64, height: 64, bytes: 4_000, contentType: "image/gif" }),
+    ).toBeNull();
   });
 });
