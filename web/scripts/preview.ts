@@ -2602,6 +2602,24 @@ if (import.meta.main) {
           console.log("[preview] no tool call on screen — capturing the run as it stands"),
         );
       await shot(`${out}-working-light.png`);
+      // Stop sits on the live bubble's own header while the run streams — the control that
+      // ends a run mid-answer, reachable from any client watching one. Captured on the
+      // bubble, in both themes, because it is a per-vendor mark's neighbour.
+      const stop = page.locator('[data-testid="agent-stop"]');
+      if (await stop.count()) {
+        await shot(
+          `${out}-stop-light.png`,
+          '[data-testid="message"]:has([data-testid="agent-signature"]), [data-testid="agent-pending"]',
+        );
+        await setTheme("dark");
+        await shot(
+          `${out}-stop-dark.png`,
+          '[data-testid="message"]:has([data-testid="agent-signature"]), [data-testid="agent-pending"]',
+        );
+        await setTheme("light");
+      } else {
+        console.log("[preview] the run finished before Stop could be captured");
+      }
       // The transcript at its fullest, on its own, which is where its detail is: the
       // reasoning being written, a finished call and a running one, the rail they hang
       // off, and the ceiling it scrolls itself inside once it has all of that.
@@ -2672,7 +2690,7 @@ if (import.meta.main) {
       await shot(`${out}-opencode-dark.png`);
       await shot(`${out}-opencode-coin-dark.png`, '[data-testid="agent-coin"][data-backend="opencode"]');
       console.log(
-        `[preview] wrote ${out}-{thinking,working,transcript,writing,done,opencode}-*.png`,
+        `[preview] wrote ${out}-{thinking,working,stop,transcript,writing,done,opencode}-*.png`,
       );
     });
     process.exit(0);

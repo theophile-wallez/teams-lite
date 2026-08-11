@@ -445,4 +445,62 @@ test.describe("The local agent's answer", () => {
     await page.emulateMedia({ reducedMotion: "no-preference" });
     await expect(shine).toBeVisible();
   });
+
+  // Stopping a run mid-answer. The button is on the live bubble, reachable from any client
+  // watching the run — a phone included, which is the whole point, since most runs are
+  // asked for from one. What it must get right: the overlay tears down like a normal
+  // finish, and the message it falls back to is a SETTLED agent reply that kept the answer
+  // so far — never the "still being written…" of a reply left pending, and never lost.
+  test("stops a run mid-answer, keeping the answer so far", async ({ page }) => {
+    await gotoApp(page);
+    // Its own thread, named: this reads THE one agent reply of the history, and it ends the
+    // thread OFF, so it must not land on the sandbox and take that consent from a later spec.
+    await openConversationNamed(page, "Stop the Agent");
+    await optIn(page);
+
+    await fillComposer(page, "@claude which port does the backend listen on?");
+    await page.keyboard.press("Enter");
+
+    // Stop appears on the live bubble the moment the run is streaming, before the answer is
+    // done — it is only useful while there is a run to stop.
+    const stop = page.locator('[data-testid="agent-stop"]');
+    await expect(stop).toBeVisible();
+    const stream = page.locator('[data-testid="agent-stream"]');
+    await expect(stream).toBeVisible();
+
+    // Press it, and it says it is asking rather than pretending it is done: the run
+    // finalizes on its own, and the terminal frame is what tears the overlay down.
+    await stop.click();
+    await expect(stop).toContainText("Stopping…");
+
+    // The overlay goes, exactly as it does for a normal finish — no separate "stopped"
+    // state to clean up, because a stop is a run that ended early.
+    await expect(stream).toHaveCount(0, { timeout: 20_000 });
+    await expect(page.locator('[data-testid="agent-status"]')).toHaveCount(0);
+
+    // What is left is a SETTLED agent reply, not a pending one: the message kept the answer
+    // so far and signed off, so it reads as finished — the `agent-stalled` bubble of a reply
+    // left "still being written…" is exactly what a stop must not produce.
+    const bubble = page.locator('[data-testid="message"]', {
+      has: page.locator('[data-testid="agent-signature"]'),
+    });
+    await expect(bubble).toBeVisible();
+    await expect(page.locator('[data-testid="agent-stalled"]')).toHaveCount(0);
+    // The note the user reads, saying they ended it — and the run is no longer live, so the
+    // edge that says "being written" is gone with the overlay.
+    await expect(bubble).toContainText("stopped by you");
+    await expect(bubble.locator('[data-testid="agent-shine"]')).toHaveCount(0);
+    // The signature is stripped from the body (the mark says it instead), which is what
+    // makes this a finished agent reply rather than the raw failure shape.
+    await expect(bubble).not.toContainText("via teams-lite");
+
+    // Leave the thread as this describe found it: OFF, so the specs that read it after do
+    // not inherit a consent this test granted.
+    const menu = page.locator('[data-testid="agent-menu"]');
+    await menu.click();
+    const toggle = page.locator('[data-testid="agent-mode-toggle"]');
+    if ((await toggle.getAttribute("aria-checked")) === "true") await toggle.click();
+    await expect(menu).toHaveAttribute("data-agent-mode", "off");
+    await menu.click();
+  });
 });

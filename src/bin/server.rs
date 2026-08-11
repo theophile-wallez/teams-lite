@@ -391,7 +391,7 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// meanwhile. Nothing that merely found this socket gets to do that to the app the user is
 /// reading — and `update_check`, which only ASKS GitHub whether a newer build exists,
 /// deliberately stays open beside it: it changes nothing on this machine.
-const MACHINE_METHODS: [&str; 19] = [
+const MACHINE_METHODS: [&str; 20] = [
     "repair_broker",
     "restart_backend",
     "update_download",
@@ -406,6 +406,7 @@ const MACHINE_METHODS: [&str; 19] = [
     "agent_set_tools",
     "agent_set_provider",
     "agent_set_unrestricted",
+    "agent_stop",
     "set_person_name",
     "set_person_avatar",
     "custom_emoji_add",
@@ -446,6 +447,7 @@ fn machine_effect(method: &str) -> &'static str {
             "lets a local agent this machine runs use the user's own Claude Code \
              configuration — every tool it holds"
         }
+        "agent_stop" => "stops a local agent this machine is running mid-answer",
         "set_person_name" | "set_person_avatar" => {
             "decides the name and the face this machine puts on a colleague's messages"
         }
@@ -1208,6 +1210,17 @@ struct Ctx {
     /// Teams' own names, so a rename needs no invalidation at all: the name a page DRAWS is
     /// read per answer through `Store::display_name_for_mri`. See [`teams_people_of`].
     tracker_people: Arc<Mutex<Option<(i64, Arc<tracker_people::Roster>)>>>,
+    /// The agent runs this process is streaming RIGHT NOW, by `run_id`, each with the
+    /// switch that stops it (see [`agent_stop`]).
+    ///
+    /// The one handle onto a live run: the CLI child lives in a local inside `agent::run`
+    /// and is spawned `kill_on_drop`, so flipping this switch cancels the run future,
+    /// drops that child and kills the CLI. `run_id` is `conversation/trigger_id`, the id
+    /// every `agent_stream` frame already carries, so the page asks to stop a run by the
+    /// name it already knows it by. It holds only runs THIS backend owns — a run streaming
+    /// on another install is not in here, which is what `agent_stop` reports (see
+    /// § Running the released build beside the staged one).
+    agent_runs_inflight: Arc<Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>>,
 }
 
 /// Everything this machine knows about audio calling right now.
@@ -2533,6 +2546,7 @@ async fn main() -> Result<()> {
         calling: Arc::new(Mutex::new(CallingPlane::default())),
         gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         tracker_people: Arc::new(Mutex::new(None)),
+        agent_runs_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     // Watch the broker, and react once per CHANGE of state (see `observe_broker`).
@@ -3038,6 +3052,31 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 }
             );
             agent_status_json(&store)
+        }
+
+        // Stop a run this backend is streaming, mid-answer. The user pressed Stop on the
+        // live bubble; the run finalizes with the answer so far and a "stopped by you"
+        // note (see `agent_run_to_completion`), so the reply is kept, not lost.
+        //
+        // It only reaches a run THIS process owns: the registry is per-process, and the
+        // agent path is single-backend in the real deployment (a phone reaches 19420
+        // through the relay). A run streaming on the other install (19422) is simply not
+        // here, and `stopped: false` says so rather than pretending. It does not edit the
+        // message itself — flipping the switch is all it does, and the run's own
+        // finalization writes the body, so there is no double-edit to race.
+        "agent_stop" => {
+            let run_id = param_str(params, "run_id")?;
+            let stopped = match ctx.agent_runs_inflight.lock().unwrap().get(&run_id) {
+                Some(stop) => {
+                    let _ = stop.send(true);
+                    true
+                }
+                None => false,
+            };
+            if stopped {
+                eprintln!("[agent] stopping {run_id} — the user asked");
+            }
+            Ok(json!({ "stopped": stopped }))
         }
 
         // full conversation list — LOCAL-FIRST: answer instantly from the SQLite
@@ -9166,6 +9205,42 @@ fn agent_session_key(conversation_id: &str, backend: &str) -> String {
 /// Everything after the placeholder runs inside [`agent_run_to_completion`], so the one
 /// thing that must happen however the run ends — dropping the "this message was left
 /// mid-answer" record — happens on every path, including the ones that return an error.
+/// The marker a stopped run carries out of [`agent_run_to_completion`]'s `run` future.
+///
+/// It rides an `anyhow::Error` so the one branch that ends a run early is told apart from
+/// a real CLI failure by TYPE (`e.is::<AgentStopped>()`), never by matching on a message —
+/// a run the user stopped and a run that failed with the words "stopped" are different
+/// things, and only one keeps its partial answer.
+#[derive(Debug)]
+struct AgentStopped;
+
+impl std::fmt::Display for AgentStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stopped by the user")
+    }
+}
+
+impl std::error::Error for AgentStopped {}
+
+/// Resolve once the stop switch turns `true`.
+///
+/// The switch starts `false` and only ever moves to `true`, so a plain `changed()` loop is
+/// enough: a spurious wake re-reads `false` and waits again. `changed()` errors only when
+/// every sender is dropped, which cannot happen while [`agent_reply`] holds one for the
+/// whole run — so this never returns for any reason but a real stop.
+async fn wait_for_stop(stop: &mut tokio::sync::watch::Receiver<bool>) {
+    if *stop.borrow() {
+        return;
+    }
+    while stop.changed().await.is_ok() {
+        if *stop.borrow() {
+            return;
+        }
+    }
+    // Every sender gone: let the run finish on its own rather than reporting a stop.
+    std::future::pending::<()>().await
+}
+
 async fn agent_reply(
     ctx: &Ctx,
     command: &agent_policy::Command,
@@ -9223,7 +9298,17 @@ async fn agent_reply(
     }
     publish_agent_run_marker(&run);
 
-    let outcome = agent_run_to_completion(ctx, command, request, &sent.id, &people).await;
+    // The switch the user can flip to stop this run, keyed by the same `run_id` every
+    // frame carries. Registered before the run starts so a stop that arrives in the first
+    // second finds it, and taken back on every exit path below — a token left in the map
+    // would let `agent_stop` "stop" a run that already finished.
+    let run_id = format!("{}/{}", command.conversation_id, command.message_id);
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    ctx.agent_runs_inflight.lock().unwrap().insert(run_id.clone(), stop_tx);
+
+    let outcome = agent_run_to_completion(ctx, command, request, &sent.id, &people, stop_rx).await;
+
+    ctx.agent_runs_inflight.lock().unwrap().remove(&run_id);
 
     // The run is over, whatever it produced. Clearing the record BEFORE the result is
     // propagated is deliberate: a failed final edit is a finished run whose answer was
@@ -9239,12 +9324,19 @@ async fn agent_reply(
 }
 
 /// Run the agent and write its answer into the message [`agent_reply`] posted.
+///
+/// `stop` is the switch [`agent_stop`] flips: while it is `false` the run streams
+/// normally, and when it turns `true` the run future is dropped — which kills the CLI
+/// child (`kill_on_drop` in src/agent.rs) — and the answer so far is finalized with a
+/// "stopped by you" note rather than lost. Everything else about the terminal path is
+/// unchanged, which is the point: a stop is a run that ends early, not a fifth shape.
 async fn agent_run_to_completion(
     ctx: &Ctx,
     command: &agent_policy::Command,
     request: agent::Request,
     message_id: &str,
     people: &[agent_markdown::Mentionable],
+    mut stop: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let backend = command.backend;
 
@@ -9261,8 +9353,18 @@ async fn agent_run_to_completion(
     // The sender is dropped the moment the run ends, which is what stops both loops
     // below. Without that explicit drop the futures would wait on each other:
     // `tokio::join!` keeps every branch alive until all of them finish.
+    //
+    // The user's Stop wins a race against the CLI here: `select!` drops the losing
+    // branch, so a stop drops `agent::run` — and with it the child, via `kill_on_drop`.
+    // `Stopped` is the marker `outcome` carries out for it; the CLI's own answer never
+    // reads as one.
     let run = async move {
-        let outcome = agent::run(&request, &progress).await;
+        let outcome = tokio::select! {
+            outcome = agent::run(&request, &progress) => outcome,
+            // `changed()` only errors when every sender is dropped, which cannot happen
+            // while `agent_reply` holds one — so a real flip to `true` is the only way out.
+            _ = wait_for_stop(&mut stop) => Err(anyhow::Error::new(AgentStopped)),
+        };
         drop(progress);
         outcome
     };
@@ -9276,13 +9378,23 @@ async fn agent_run_to_completion(
         eprintln!("[agent] a progress edit failed (the answer still lands): {e}");
     }
 
-    let (final_body, session_id, cost) = match &outcome {
-        Ok(outcome) => (
-            agent_policy::reply_body(backend, &outcome.text, true, people),
-            outcome.session_id.clone(),
-            outcome.cost_usd,
-        ),
-        Err(e) => (agent_policy::failure_body(backend, &e.to_string()), None, None),
+    // A stop is not a failure: the answer so far is real and kept, with a note that the
+    // user ended the run. `watch_local` holds the last streamed progress, so the partial
+    // is exactly what the bubble was showing — and an empty one (stopped while thinking)
+    // falls back to the note alone inside `stopped_body`.
+    let stopped = outcome.as_ref().err().is_some_and(|e| e.is::<AgentStopped>());
+    let (final_body, session_id, cost) = if stopped {
+        let partial = watch_local.borrow().text.clone();
+        (agent_policy::stopped_body(backend, &partial, people), None, None)
+    } else {
+        match &outcome {
+            Ok(outcome) => (
+                agent_policy::reply_body(backend, &outcome.text, true, people),
+                outcome.session_id.clone(),
+                outcome.cost_usd,
+            ),
+            Err(e) => (agent_policy::failure_body(backend, &e.to_string()), None, None),
+        }
     };
     // The answer lands in the thread, and only THEN does the stream say it is over.
     //
@@ -9295,16 +9407,28 @@ async fn agent_run_to_completion(
     // The run's own last state, with the authoritative answer over it. The transcript
     // travels on the terminal frame too: it is an overlay on the message, so this is the
     // last frame that can carry it, and a `done` that dropped it would blank the
-    // reasoning a beat before the app lets the run go.
+    // reasoning a beat before the app lets the run go. A stopped run keeps the partial it
+    // was showing, so the frame's text matches the body just edited in.
+    let final_text = match &outcome {
+        Ok(outcome) => outcome.text.clone(),
+        Err(_) if stopped => watch_local.borrow().text.clone(),
+        Err(_) => String::new(),
+    };
     let final_progress = agent::Progress {
         phase: agent::Phase::Writing,
-        text: outcome.as_ref().map(|o| o.text.clone()).unwrap_or_default(),
+        text: final_text,
         ..watch_local.borrow().clone()
     };
     // Sent whatever the edit did: a client that never hears the run ended would show a
-    // bubble writing forever (until its own staleness guard fires, minutes later).
+    // bubble writing forever (until its own staleness guard fires, minutes later). A STOP
+    // ends the run as `done`, not `error`: the answer it kept is real, the body reads as
+    // finished, and the overlay tears down the same way a normal finish does.
     match &outcome {
         Ok(_) => ctx.emit(
+            "agent_stream",
+            agent_stream_frame(command, message_id, "done", &final_progress, None),
+        ),
+        Err(_) if stopped => ctx.emit(
             "agent_stream",
             agent_stream_frame(command, message_id, "done", &final_progress, None),
         ),
@@ -9330,9 +9454,13 @@ async fn agent_run_to_completion(
             outcome.text.chars().count(),
             cost.map(|c| format!(", ${c:.2}")).unwrap_or_default()
         ),
+        Err(_) if stopped => {
+            eprintln!("[agent] {} was stopped in {}", backend.name, command.conversation_id)
+        }
         Err(e) => eprintln!("[agent] {} could not answer: {e}", backend.name),
     }
-    outcome.map(|_| ())
+    // A stop is a clean end, not a failure the spawn wrapper should log as one.
+    if stopped { Ok(()) } else { outcome.map(|_| ()) }
 }
 
 /// Say every [`AGENT_RUN_HEARTBEAT`] that this run is still writing, until it ends.
@@ -12056,6 +12184,10 @@ mod tests {
             ("agent_set_mode", "in the user's name"),
             ("agent_set_tools", "local agent"),
             ("agent_set_provider", "which coding agent"),
+            // Stopping a run is the same class: it acts on a program this machine runs,
+            // it posts nothing itself (the run's own finalization writes the body), and a
+            // client that merely found the socket must not kill the user's agent.
+            ("agent_stop", "stops a local agent"),
         ] {
             assert!(!OUTWARD_METHODS.contains(&method), "{method}");
             assert_eq!(write_class(method), Some(WriteClass::Machine), "{method}");
@@ -12074,7 +12206,7 @@ mod tests {
         // The reply path checks `read_only()` on its own (an agent answering in the
         // user's name is the loudest thing a screenshot script could do), and the
         // gate refuses the switch that would arm it in the first place.
-        for method in ["agent_set_mode", "agent_set_tools", "agent_set_provider"] {
+        for method in ["agent_set_mode", "agent_set_tools", "agent_set_provider", "agent_stop"] {
             let err = check_write_allowed(method, &json!({ "write_token": "tok" }), None)
                 .expect_err("read-only must refuse");
             assert!(err.contains("read-only"), "{err}");

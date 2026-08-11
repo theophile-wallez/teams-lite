@@ -5220,6 +5220,31 @@ export class TeamsController {
   }
 
   /**
+   * Stop a run this backend is streaming, mid-answer.
+   *
+   * The user pressed Stop on the live bubble. This only asks — the backend flips the
+   * run's switch, and the run's own path finalizes the message with the answer so far
+   * and a "stopped by you" note. The overlay then tears down when the terminal frame
+   * arrives, exactly as it does for a normal finish (`forgetAgentRun`), so nothing here
+   * touches `agentRuns`.
+   *
+   * `stopped: false` means this backend does not own that run — it finished already, or
+   * it is streaming on the other install on this machine. Rejects on a real failure, so
+   * the button that called it can say why.
+   */
+  async stopAgentRun(runId: string): Promise<{ stopped: boolean }> {
+    let result: { stopped: boolean };
+    try {
+      result = await this.backend.agentStop(runId);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    playCue("success");
+    return result;
+  }
+
+  /**
    * Grant, or take back, one group of tools the agent may use without being asked.
    *
    * The other half of the same consent: the mode says WHERE this machine answers, this

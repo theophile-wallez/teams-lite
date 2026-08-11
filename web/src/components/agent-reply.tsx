@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Alert02Icon, ArrowRight01Icon, CheckIcon, Loading02Icon } from "@hugeicons/core-free-icons";
+import { Alert02Icon, ArrowRight01Icon, CheckIcon, Loading02Icon, StopIcon } from "@hugeicons/core-free-icons";
 import { agentMarkdownToHtml } from "~/lib/agent-markdown";
 import {
   agentPhaseLabel,
@@ -216,6 +216,10 @@ export function AgentStream(props: {
   onSettled: () => void;
   transcriptOpen?: boolean | null;
   onTranscriptToggle?: (open: boolean) => void;
+  /** Stop this run, if the surface can. Absent where a run cannot be reached (a stored
+   *  transcript has no live run to stop); present on every live bubble, phone included.
+   *  Returns the ask so the button can re-enable itself on a real failure. */
+  onStop?: () => Promise<unknown>;
 }) {
   const { run } = props;
   const live = agentRunIsLive(run);
@@ -246,6 +250,7 @@ export function AgentStream(props: {
         folded={agentTranscriptLabel(run.steps, run.tools_used)}
         open={props.transcriptOpen ?? null}
         onChoose={props.onTranscriptToggle ?? (() => undefined)}
+        onStop={live ? props.onStop : undefined}
       />
       {html ? (
         <RichContent
@@ -389,6 +394,45 @@ export function AgentStoredTranscript(props: {
  *   set small, dim and italic, and no Markdown is applied to it — a heading the model
  *   happened to type is not a heading in this app's voice.
  */
+/**
+ * Stop the run being written into this bubble.
+ *
+ * It sits on the live bubble's own header, so it is reachable from any client watching a
+ * run — a phone included, which is the whole point of the feature: most runs are asked for
+ * from one. Pressing it asks the backend to stop; the run then finalizes with the answer
+ * so far and a "stopped by you" note, and the overlay tears down the same way a finished
+ * run's does. So there is nothing to do on success but wait for that terminal frame — the
+ * button says "Stopping…" and stays disabled until the run ends under it, which unmounts it.
+ *
+ * A backend that does not own the run answers `stopped: false` (it is streaming on the
+ * other install, say); that is not an error, and the button simply settles when the frame
+ * that ends the run arrives. A real REJECTION re-enables it, because a Stop that silently
+ * did nothing is worse than one the reader can press again — and a double-press is guarded
+ * by the `asked` state, since the second click reaches the same live run.
+ */
+function AgentStopButton(props: { onStop: () => Promise<unknown> }) {
+  const [asked, setAsked] = useState(false);
+  return (
+    <button
+      type="button"
+      data-testid="agent-stop"
+      disabled={asked}
+      onClick={() => {
+        setAsked(true);
+        // Re-enable only on a real failure; success is followed by the run ending, which
+        // unmounts this button — leaving it disabled until then is the honest state.
+        void props.onStop().catch(() => setAsked(false));
+      }}
+      title="Stop this run"
+      aria-label="Stop this run"
+      className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-text-faint hover:bg-black/5 hover:text-text disabled:opacity-60 dark:hover:bg-white/10"
+    >
+      <HugeiconsIcon icon={StopIcon} className="size-3.5" strokeWidth={2} aria-hidden />
+      {asked ? "Stopping…" : "Stop"}
+    </button>
+  );
+}
+
 function TranscriptPanel(props: {
   steps: AgentStep[];
   /** The run, while it is going. `null` once it is over — a kept transcript has no phase,
@@ -401,6 +445,8 @@ function TranscriptPanel(props: {
    *  through a virtualized history, and a fold that reset there would fight the reader. */
   open: boolean | null;
   onChoose: (open: boolean) => void;
+  /** Stop the run, when there is one to stop. Absent on a stored transcript. */
+  onStop?: () => Promise<unknown>;
 }) {
   const { run } = props;
   const reduce = useReducedMotion();
@@ -506,7 +552,7 @@ function TranscriptPanel(props: {
         data-testid={live ? "agent-status" : undefined}
         role={live ? "status" : undefined}
         aria-live={live ? "polite" : undefined}
-        className="flex min-w-0"
+        className="flex min-w-0 items-center gap-2"
       >
         <button
           type="button"
@@ -517,7 +563,7 @@ function TranscriptPanel(props: {
           aria-expanded={has ? open : undefined}
           onClick={() => props.onChoose(!open)}
           className={cn(
-            "flex min-w-0 items-center gap-1 rounded text-left",
+            "flex min-w-0 flex-1 items-center gap-1 rounded text-left",
             has && "hover:text-text",
           )}
         >
@@ -558,6 +604,7 @@ function TranscriptPanel(props: {
             {label}
           </span>
         </button>
+        {props.onStop ? <AgentStopButton onStop={props.onStop} /> : null}
       </div>
 
       <AnimatePresence initial={false}>
@@ -787,6 +834,9 @@ export function AgentPendingBubble(props: {
   onSettled: () => void;
   transcriptOpen?: boolean | null;
   onTranscriptToggle?: (messageId: string, open: boolean) => void;
+  /** Stop the run this row is drawing. Threaded through like the toggle so the button is
+   *  the same one the posted message's bubble shows once Teams echoes it back. */
+  onStop?: (runId: string) => Promise<unknown>;
 }) {
   const reduce = useReducedMotion();
   return (
@@ -818,6 +868,7 @@ export function AgentPendingBubble(props: {
           onSettled={props.onSettled}
           transcriptOpen={props.transcriptOpen ?? null}
           onTranscriptToggle={(open) => props.onTranscriptToggle?.(props.run.message_id, open)}
+          onStop={props.onStop ? () => props.onStop!(props.run.run_id) : undefined}
         />
       </motion.div>
     </div>

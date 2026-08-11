@@ -910,6 +910,16 @@ export class Backend {
   agentSetUnrestricted(unrestricted: boolean): Promise<AgentStatus> {
     return this.writeRequest<AgentStatus>("agent_set_unrestricted", { unrestricted });
   }
+  /** Stop a run this backend is streaming, mid-answer, by the `run_id` its frames carry.
+   *
+   *  A WRITE request: it kills a program the machine is running for the user (a
+   *  `MACHINE_METHODS` entry in src/bin/server.rs, refused read-only). `stopped` is false
+   *  when this backend does not own the run — it finished already, or it is streaming on
+   *  the other install — which the caller reports rather than pretends away. The reply
+   *  itself is finalized with the answer so far by the run's own path, not by this call. */
+  agentStop(runId: string): Promise<{ stopped: boolean }> {
+    return this.writeRequest<{ stopped: boolean }>("agent_stop", { run_id: runId });
+  }
   /** Fetch the notifications panel's three activity streams — Activity, Mentions
    *  and Following — in one round-trip. None is a chat: the backend fetches them
    *  fresh from Teams (concurrently) and decodes each entry. */

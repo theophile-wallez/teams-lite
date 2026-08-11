@@ -787,6 +787,37 @@ pub fn failure_body(backend: &Backend, reason: &str) -> ReplyBody {
     ReplyBody { html: failure_html(backend, reason), mentions: Vec::new() }
 }
 
+/// The message body for a run the USER stopped: the answer so far, a note that they ended
+/// it, and the DONE signature LAST.
+///
+/// Three things it is careful about, each load-bearing:
+/// - It is the FINISHED shape, not the failure one ([`interrupted_html`]): the user
+///   stopped it on purpose, the partial answer is real and worth keeping, and "could not
+///   answer" would be a lie about a run that was answering fine.
+/// - The done signature (`— <backend>, via teams-lite`) is the LAST line, because that is
+///   the one a client reads a reply's authorship and its settled state from
+///   (`agentAuthorship` in web/src/lib/agent-message.ts, which matches the TRAILING
+///   `<p><em>…</em></p>`). A `writing…` footer would leave the bubble looking live for
+///   ever; the "stopped by you" note above it is body content the reader sees, and the
+///   signature is what makes the message an agent's at all.
+/// - `answer` is whatever had streamed in when the stop landed. An empty one — stopped
+///   while the model was still thinking — leaves the note standing alone, with no
+///   half-answer to keep.
+pub fn stopped_body(
+    backend: &Backend,
+    answer: &str,
+    people: &[crate::agent_markdown::Mentionable],
+) -> ReplyBody {
+    let (answer, cut) = truncate_answer(answer);
+    let (mut html, mentions) = crate::agent_markdown::to_html_with_mentions(&answer, people);
+    if cut {
+        html.push_str("<p><em>(cut short — the answer was longer than a chat message)</em></p>");
+    }
+    html.push_str("<p><em>— stopped by you</em></p>");
+    html.push_str(&format!("<p><em>— {}, via teams-lite</em></p>", backend.name));
+    ReplyBody { html, mentions }
+}
+
 /// [`interrupted_html`] as a body an edit can carry. See [`failure_body`].
 pub fn interrupted_body(backend: &Backend) -> ReplyBody {
     ReplyBody { html: interrupted_html(backend), mentions: Vec::new() }
@@ -1354,6 +1385,35 @@ mod tests {
         assert!(failure_body(&BACKENDS[0], "boom").mentions.is_empty());
         assert!(interrupted_body(&BACKENDS[0]).mentions.is_empty());
         assert_eq!(interrupted_body(&BACKENDS[0]).html, interrupted_html(&BACKENDS[0]));
+    }
+
+    #[test]
+    fn a_stopped_run_keeps_its_partial_answer_and_signs_off_as_finished() {
+        let body = stopped_body(&BACKENDS[0], "the port is 19420 and it", &[]);
+        // The half-answer the bubble was showing is kept verbatim.
+        assert!(body.html.contains("the port is 19420 and it"), "{}", body.html);
+        // A note the reader sees, saying they ended it.
+        assert!(body.html.contains("<p><em>— stopped by you</em></p>"), "{}", body.html);
+        // The DONE signature is LAST, so a client reads the reply as an agent's and as
+        // settled — not as one still being written (`agentAuthorship` matches the
+        // trailing `<p><em>…</em></p>`). This is the whole reason the note is not last.
+        assert!(
+            body.html.ends_with("<p><em>— claude, via teams-lite</em></p>"),
+            "{}",
+            body.html
+        );
+    }
+
+    #[test]
+    fn a_stop_while_thinking_is_the_note_alone_over_the_signature() {
+        // Nothing had streamed in yet: no half-answer to keep, so the body is the note
+        // and the signature — never the "thinking…" placeholder, which reads as live.
+        let body = stopped_body(&BACKENDS[0], "", &[]);
+        assert_eq!(
+            body.html,
+            "<p><em>— stopped by you</em></p><p><em>— claude, via teams-lite</em></p>"
+        );
+        assert!(body.mentions.is_empty());
     }
 
     #[test]

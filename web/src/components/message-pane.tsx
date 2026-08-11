@@ -675,6 +675,15 @@ export function MessagePane(props: { onBack?: () => void }) {
     [controller],
   );
 
+  // Stop a run by its own id. Stable for the same reason, and it returns the ask so the
+  // button re-enables itself on a real failure. Nothing here touches the overlay: the run
+  // finalizes with the answer so far and its terminal frame tears it down through
+  // `doAgentSettled`, exactly as a finished run does.
+  const doAgentStop = useCallback(
+    (runId: string) => controller.stopAgentRun(runId),
+    [controller],
+  );
+
   // The bubble's menu has already taken the confirmation (deleting is irreversible),
   // so this fires the call. An edit in progress on that message is dropped: its target
   // is about to be a placeholder.
@@ -736,6 +745,7 @@ export function MessagePane(props: { onBack?: () => void }) {
             highlighted={highlightId === m.id}
             agentRun={agentRun?.message_id === m.id ? agentRun : undefined}
             onAgentSettled={doAgentSettled}
+            onAgentStop={doAgentStop}
             agentTranscript={agentTranscripts[m.id]}
             agentTranscriptOpen={agentTranscriptsOpen[m.id] ?? null}
             onAgentTranscriptToggle={doAgentTranscriptToggle}
@@ -952,6 +962,7 @@ export function MessagePane(props: { onBack?: () => void }) {
                         // survive that swap.
                         transcriptOpen={agentTranscriptsOpen[row.run.message_id] ?? null}
                         onTranscriptToggle={doAgentTranscriptToggle}
+                        onStop={doAgentStop}
                       />
                     ) : (
                       renderMsg(row.message, row.prev, row.next)

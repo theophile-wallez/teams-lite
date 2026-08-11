@@ -2381,6 +2381,27 @@ function seedPlainTextSamples(): void {
   addFixtureConversation(convId, "Plain Text", messages);
 }
 
+/** Register a thread the "stop a run" spec drives, of its own so a reply it leaves behind
+ *  cannot match another agent test's bubble. One plain message, off by default like every
+ *  fixture but the sandbox — the spec opts it in and hands it back off. */
+function seedStopAgentThread(): void {
+  const convId = "19:stop-agent-demo@thread.v2";
+  const base = Date.now() - 21 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[2]!;
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: "<p>Ask the agent something, then stop it.</p>",
+      is_self: false,
+    },
+    0,
+  );
+  addFixtureConversation(convId, "Stop the Agent", messages);
+}
+
 /** Register the SANDBOX thread as a conversation of its own — the one the Rust policy
  *  opts in out of the box (`MOCK_AGENT_SANDBOX`, after `agent_policy::SANDBOX_THREAD`).
  *
@@ -3456,6 +3477,17 @@ function resetMockAgentProviders(): void {
  *  fresh Rust store: the mock runs no CLI, so this is only the setting travelling to the
  *  backend and back — which is exactly what the switch has to prove. */
 let mockAgentUnrestricted = false;
+
+/** The runs in flight right now, by `run_id` — the stand-in for the Rust process's own
+ *  registry of live runs. `agent_stop` answers `stopped: false` for anything not in here,
+ *  exactly as the backend does for a run that finished or belongs to the other install. */
+const mockAgentRunning = new Set<string>();
+
+/** The runs the user has asked to stop, by `run_id`. `agent_stop` adds one and
+ *  `simulateMockAgentRun` checks it between steps — the stand-in for the Rust registry
+ *  that cancels the run future. A run whose id is in here jumps to its terminal frame with
+ *  the answer so far and a "stopped by you" note, exactly as the backend finalizes it. */
+const mockAgentStopped = new Set<string>();
 
 /** The `agent_status` result, matching the Rust one. */
 function agentStatusView(): {
@@ -7121,6 +7153,17 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return agentStatusView();
     }
 
+    case "agent_stop": {
+      // A run in flight is stopped by flagging its id; the running simulation sees the
+      // flag between steps and finalizes with the answer so far. A flag for a run that is
+      // not in flight answers `stopped: false`, exactly as the Rust registry does for a
+      // run this backend does not own.
+      const runId = requireString(params, "run_id");
+      const stopped = mockAgentRunning.has(runId);
+      if (stopped) mockAgentStopped.add(runId);
+      return { stopped };
+    }
+
     case "agent_set_tools": {
       const tools = asObject(params).tools;
       mockAgentTools = Array.isArray(tools)
@@ -8358,6 +8401,7 @@ async function simulateMockAgentRun(
   broadcast(t.changedEvent, {});
 
   const runId = `${convId}/${trigger.id}`;
+  mockAgentRunning.add(runId);
   let toolsUsed = 0;
   let written = "";
   // The transcript the run has built so far. Every frame carries the WHOLE of it, the way
@@ -8393,56 +8437,78 @@ async function simulateMockAgentRun(
     });
   };
 
-  // 2. The run works itself out: nothing at all for a beat (the model is being called),
-  // then the transcript, an entry at a time — reasoning a clause at a time, and a tool
-  // call held for as long as one takes.
-  frame();
-  await step();
-  await step();
-  for (const entry of MOCK_AGENT_SCRIPT) {
-    if (entry.kind === "thought") {
-      const clauses = entry.text.split(". ");
-      steps.push({ kind: "thought", text: "" });
-      for (let i = 0; i < clauses.length; i += 1) {
-        // The newest thought GROWS: reasoning is one text arriving, not a row per
-        // fragment, and a client that appended instead would draw a paragraph a line.
-        steps[steps.length - 1] = { kind: "thought", text: clauses.slice(0, i + 1).join(". ") };
-        await step();
-        frame();
+  // The user's Stop, seen between steps — the stand-in for the Rust `select!` that drops
+  // the run future. It finalizes with the answer so far and a "stopped by you" note over
+  // the DONE signature, and ends the run as `done` (a stop is not a failure), which is
+  // exactly what `agent_run_to_completion` does. Returns true when it fired, so each loop
+  // can break out of its remaining steps.
+  const stoppedNow = (): boolean => mockAgentStopped.has(runId);
+  const finalizeStopped = (): void => {
+    editAgentReply(convId, reply.id, quote + agentStoppedHtml(backend, written));
+    frame({ phase: "done" });
+  };
+
+  try {
+    // 2. The run works itself out: nothing at all for a beat (the model is being called),
+    // then the transcript, an entry at a time — reasoning a clause at a time, and a tool
+    // call held for as long as one takes.
+    frame();
+    await step();
+    await step();
+    for (const entry of MOCK_AGENT_SCRIPT) {
+      if (stoppedNow()) return finalizeStopped();
+      if (entry.kind === "thought") {
+        const clauses = entry.text.split(". ");
+        steps.push({ kind: "thought", text: "" });
+        for (let i = 0; i < clauses.length; i += 1) {
+          // The newest thought GROWS: reasoning is one text arriving, not a row per
+          // fragment, and a client that appended instead would draw a paragraph a line.
+          steps[steps.length - 1] = { kind: "thought", text: clauses.slice(0, i + 1).join(". ") };
+          await step();
+          if (stoppedNow()) return finalizeStopped();
+          frame();
+        }
+        continue;
       }
-      continue;
+      toolsUsed += 1;
+      steps.push({ kind: "tool", tool: entry.tool, target: entry.target, done: false });
+      await step();
+      frame();
+      await step();
+      await step();
+      steps[steps.length - 1] = { kind: "tool", tool: entry.tool, target: entry.target, done: true };
+      frame();
     }
-    toolsUsed += 1;
-    steps.push({ kind: "tool", tool: entry.tool, target: entry.target, done: false });
-    await step();
-    frame();
-    await step();
-    await step();
-    steps[steps.length - 1] = { kind: "tool", tool: entry.tool, target: entry.target, done: true };
-    frame();
-  }
 
-  // 3. Writing: the answer in bursts of uneven size, which is how a model streams and
-  // therefore what the client's reveal has to smooth out.
-  const bursts = burstsOf(MOCK_AGENT_ANSWER);
-  for (let b = 0; b < bursts.length; b += 1) {
-    written += bursts[b];
-    await step();
-    frame();
-    // The Teams-visible half: the message itself is edited as the answer grows, far
-    // more coarsely than the stream (see AGENT_EDIT_INTERVAL).
-    if (b % 3 === 0) {
-      editAgentReply(convId, reply.id, body(written, true));
+    // 3. Writing: the answer in bursts of uneven size, which is how a model streams and
+    // therefore what the client's reveal has to smooth out.
+    const bursts = burstsOf(MOCK_AGENT_ANSWER);
+    for (let b = 0; b < bursts.length; b += 1) {
+      written += bursts[b];
+      await step();
+      if (stoppedNow()) return finalizeStopped();
+      frame();
+      // The Teams-visible half: the message itself is edited as the answer grows, far
+      // more coarsely than the stream (see AGENT_EDIT_INTERVAL).
+      if (b % 3 === 0) {
+        editAgentReply(convId, reply.id, body(written, true));
+      }
     }
-  }
 
-  // 4. Done: the authoritative answer, signed, in the message and on the stream. The
-  // transcript rides the terminal frame too, because it is an overlay on the message and
-  // this is the last frame that can carry it.
-  await step();
-  written = MOCK_AGENT_ANSWER;
-  editAgentReply(convId, reply.id, body(MOCK_AGENT_ANSWER, false));
-  frame({ phase: "done" });
+    // 4. Done: the authoritative answer, signed, in the message and on the stream. The
+    // transcript rides the terminal frame too, because it is an overlay on the message and
+    // this is the last frame that can carry it.
+    await step();
+    if (stoppedNow()) return finalizeStopped();
+    written = MOCK_AGENT_ANSWER;
+    editAgentReply(convId, reply.id, body(MOCK_AGENT_ANSWER, false));
+    frame({ phase: "done" });
+  } finally {
+    // The run is over however it ended; a later `agent_stop` for this id must answer
+    // `stopped: false`, and the flag is spent.
+    mockAgentRunning.delete(runId);
+    mockAgentStopped.delete(runId);
+  }
 }
 
 /** Split an answer into uneven chunks, the way tokens actually arrive. Deterministic
@@ -8469,6 +8535,18 @@ function agentSignedHtml(backend: string, answer: string, opts: { pending: boole
     ? `<p><em>${backend} is writing…</em></p>`
     : `<p><em>— ${backend}, via teams-lite</em></p>`;
   return body + footer;
+}
+
+/** The reply's body for a run the user stopped, as `agent_policy::stopped_body` builds it:
+ *  the answer so far, a "stopped by you" note, and the DONE signature LAST — which is what
+ *  makes the reply read as a finished agent message (`agentAuthorship` matches the trailing
+ *  `<p><em>…</em></p>`). An empty answer leaves the note standing alone. */
+function agentStoppedHtml(backend: string, answer: string): string {
+  return (
+    agentAnswerHtml(answer) +
+    `<p><em>— stopped by you</em></p>` +
+    `<p><em>— ${backend}, via teams-lite</em></p>`
+  );
 }
 
 /** The Markdown subset src/agent_markdown.rs renders, as much of it as the fixture
@@ -9592,6 +9670,7 @@ seedAppCards();
 seedThreadActivity();
 seedForwardedMessages();
 seedPlainTextSamples();
+seedStopAgentThread();
 seedAgentSandbox();
 seedMergeRequestReview();
 seedCustomEmojiThread();

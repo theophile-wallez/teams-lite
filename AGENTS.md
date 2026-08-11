@@ -577,6 +577,46 @@ Five more things worth knowing before touching it:
     `build_edit_body` writes `properties.mentions` and refuses a mention with no span in
     the body, exactly as a send does. Before this, an edit dropped `properties` entirely
     and an answer's mention would have been blue text notifying nobody.
+- **The user can STOP a run mid-answer, and the half-answer is KEPT.** A **Stop** button
+  sits on the live bubble's own header (`AgentStream` in `web/src/components/agent-reply.tsx`,
+  drawn on both the pending bubble and the posted message, so one control covers the phone
+  and the desktop), and pressing it flips the run's own switch. `agent_stop` is the RPC —
+  a write-token-gated `MACHINE_METHODS` entry, refused read-only, blocked against a live
+  port by the automation hook — and it does nothing but flip the switch: the run's own path
+  writes the body, so there is no double-edit to race. Six things hold it, and each is
+  pinned by a test:
+  - **The switch cancels the RUN FUTURE, and the CLI dies with it.** `agent_runs_inflight`
+    on `Ctx` keys a `watch::<bool>` sender by `run_id` (the `conversation/trigger_id` every
+    frame already carries), and `agent_run_to_completion` runs `agent::run` in a `select!`
+    against it. A flip drops that future, and the child — spawned `kill_on_drop` in
+    `src/agent.rs` — is killed with it. No pid, no signal: dropping the future is the whole
+    mechanism, which is why `src/agent.rs` needed no change.
+  - **A stop is a run that ENDED EARLY, not a fifth shape.** It finalizes down the SAME path
+    a finish takes — one final edit, one terminal `agent_stream` frame — and ends as `done`,
+    not `error`: the partial answer is real and the overlay tears down through `onSettled` /
+    `forgetAgentRun` exactly as a normal finish does. `AgentStopped` (a typed marker on the
+    run's error) is what tells the two apart, never a string match.
+  - **The body keeps the partial and signs off** (`agent_policy::stopped_body`): the answer
+    so far, a `— stopped by you` note, and the DONE signature LAST — because
+    `agentAuthorship` reads authorship and settled-state off the TRAILING `<p><em>…</em></p>`
+    (`web/src/lib/agent-message.ts`), so a note left last would leave the reply looking
+    pending for ever (`agent-stalled`) or not an agent's at all. An empty partial (stopped
+    while thinking) is the note over the signature alone — never the `thinking…` placeholder,
+    which reads as live.
+  - **The registry is per-PROCESS, and `stopped: false` says so honestly.** It holds only
+    runs THIS backend owns; a run streaming on the other install (19422) is simply not in it,
+    and the RPC answers `stopped: false` rather than pretending. No pid-signal fallback:
+    killing by signal would trip `repair_abandoned_agent_runs` and post the wrong "backend
+    restarted" body. The agent path is single-backend in the real deployment (a phone reaches
+    19420 through the relay), so this is the normal case.
+  - **The token is registered before the run starts and removed on every exit path**, beside
+    `begin_agent_run` / `finish_agent_run` — a token left in the map would let `agent_stop`
+    "stop" a run that already finished.
+  - `web/mock/server.ts` reproduces it with no CLI (`mockAgentRunning` / `mockAgentStopped`,
+    checked between steps in `simulateMockAgentRun`), so the whole surface is reviewable —
+    `cd web && bun run preview -- --out /tmp/reply --agent-reply` captures the button in both
+    themes, and `web/e2e/agent.spec.ts` pins that the overlay tears down and the reply is a
+    settled agent message that kept the answer.
 - **A run is bounded by SILENCE, not by a clock.** A question that needs an hour of tool
   calls gets the hour: the child is killed when the CLI emits nothing at all for
   `agent::RUN_IDLE_TIMEOUT` (30 min), and the deadline moves forward on every event, so

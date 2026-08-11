@@ -238,6 +238,9 @@ function MessageBubbleImpl(props: {
   agentRun?: AgentRun;
   /** Let go of a settled run — passed straight through to {@link AgentStream}. */
   onAgentSettled?: () => void;
+  /** Stop the run writing into this message — passed straight through to
+   *  {@link AgentStream}, keyed by the run's own id so the button reaches it. */
+  onAgentStop?: (runId: string) => Promise<unknown>;
   /** What the run that wrote this message worked out, kept after the run itself ended
    *  (see lib/agent-run.ts). Absent on every reply this app never watched being written. */
   agentTranscript?: AgentTranscript;
@@ -1003,6 +1006,11 @@ function MessageBubbleImpl(props: {
                   onSettled={props.onAgentSettled ?? (() => undefined)}
                   transcriptOpen={props.agentTranscriptOpen ?? null}
                   onTranscriptToggle={onTranscriptToggle}
+                  onStop={
+                    props.onAgentStop
+                      ? () => props.onAgentStop!(props.agentRun!.run_id)
+                      : undefined
+                  }
                 />
               </>
             ) : agent ? (

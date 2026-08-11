@@ -510,6 +510,11 @@ if ! sanctioned_automation; then
     # it cuts off a local agent that is writing a reply — so tooling must not be able to
     # restart the app somebody is reading, for the same reason it must not apply an update.
     #
+    # `agent_stop` kills a live `@claude` run mid-answer (MACHINE_METHODS in
+    # src/bin/server.rs): it acts on a program this machine is running for the user, and
+    # tooling must not cut a reply short in the user's own thread — the narrow cousin of the
+    # restart above.
+    #
     # The `call_*` methods are the sharpest entries in this list: a call RINGS a person.
     # `call_place` starts a device buzzing in somebody's pocket, `call_accept` opens the
     # user's own microphone to whoever is on the other end, `call_join` walks the user into
@@ -536,7 +541,7 @@ if ! sanctioned_automation; then
     # pack: a script that could plant art in the pack could post a picture under the
     # user's name on the next send (MACHINE_METHODS in src/bin/server.rs).
     if grep -qE '(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
