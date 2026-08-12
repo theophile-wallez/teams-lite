@@ -169,8 +169,101 @@ async fn main() -> Result<()> {
         println!("long key cleared: {}", if cleared.is_ok() { "yes" } else { "no" });
     }
 
+    // 8. THE END-TO-END CHECK: does a running backend take this art into the pack?
+    //
+    //    Everything above measures the WIRE. This measures the FEATURE, and it is the only
+    //    way to: the import happens in a live backend's own trouter loop, so no unit test
+    //    and no mock can reach it — the mock deliberately does not reimplement the policy.
+    //
+    //    It is a colleague's reaction, spelled the way a colleague's client spells one: art
+    //    uploaded to AMS that this pack has NEVER held, and a key naming it with a name this
+    //    pack has never held. Nothing here touches the pack first, which is what makes the
+    //    import the only thing that could put the entry there.
+    let probe_name = "e2eprobe";
+    let blue_png = build_1x1_blue_png();
+    println!("\n--- end-to-end: does a running backend import a reacted emoji?");
+
+    let store = teams_lite::store::Store::open(&db_path()?)?;
+    if store.custom_emoji_named_by_bytes(&blue_png)?.is_some()
+        || store.custom_emoji()?.iter().any(|e| e.name == probe_name)
+    {
+        println!("SKIPPED: the pack already holds the probe's art or its name — clean it first");
+        println!("\nOK — custom emoji reaction probe complete");
+        return Ok(());
+    }
+
+    let blue_url =
+        teams_send::upload_ams_object_url(&http, &session, &ic3, SANDBOX, "blue.png", &blue_png)
+            .await
+            .context("upload blue.png")?;
+    let import_key = custom_emoji::custom_reaction_key(&blue_url, probe_name);
+    println!("reacting with a name this pack has never held: :{probe_name}:");
+    set_reaction_raw(&http, &session, &sent.id, &import_key, true)
+        .await
+        .context("set the import probe's reaction")?;
+
+    // The frame travels, the backend fetches the art, and the row lands. Poll rather than
+    // sleep once, so a slow round trip reads as slow rather than as broken.
+    let mut imported = None;
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let store = teams_lite::store::Store::open(&db_path()?)?;
+        if let Some((_content_type, bytes)) = store.custom_emoji_art(probe_name)? {
+            imported = Some(bytes);
+            break;
+        }
+    }
+
+    match &imported {
+        Some(bytes) if bytes == &blue_png => {
+            println!("PASS: :{probe_name}: is in the pack, and its bytes are the ones uploaded");
+        }
+        Some(bytes) => println!(
+            "FAIL: :{probe_name}: was imported but holds {} bytes, not the {} uploaded",
+            bytes.len(),
+            blue_png.len()
+        ),
+        None => println!(
+            "FAIL: :{probe_name}: never arrived. Either no backend is running on this store, \
+             its build predates the import, or Settings › Custom emoji has the switch off."
+        ),
+    }
+
+    // Clean up both sides, whatever happened: the reaction on a real thread, and the row
+    // this probe put in the user's own pack.
+    println!("\ncleaning up...");
+    let cleared = set_reaction_raw(&http, &session, &sent.id, &import_key, false).await;
+    println!("  probe reaction cleared: {}", if cleared.is_ok() { "yes" } else { "no" });
+    if imported.is_some() {
+        let removed = teams_lite::store::Store::open(&db_path()?)?.remove_custom_emoji(probe_name)?;
+        println!("  :{probe_name}: removed from the pack: {}", if removed { "yes" } else { "no" });
+    }
+
     println!("\nOK — custom emoji reaction probe complete");
     Ok(())
+}
+
+/// Build a 1×1 BLUE PNG. Deliberately different bytes from the green one, so the import
+/// check cannot pass on art the pack already holds.
+fn build_1x1_blue_png() -> Vec<u8> {
+    let mut png = build_1x1_green_png();
+    // The IDAT payload is the pixel. Changing one byte of it changes the picture and the
+    // bytes, and leaves a valid PNG for everything the import measures (the signature, the
+    // IHDR dimensions and the length). The CRC that follows is not checked by any of it.
+    let idat = png.len() - 20;
+    png[idat] ^= 0xff;
+    png
+}
+
+/// The store the running backend keeps, resolved the way it resolves it.
+fn db_path() -> Result<String> {
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
+    let path = format!("{base}/teams-lite/teams-lite.sqlite");
+    anyhow::ensure!(std::path::Path::new(&path).exists(), "no store at {path}");
+    Ok(path)
 }
 
 /// Build a 1×1 green PNG (67 bytes).
