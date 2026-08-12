@@ -303,6 +303,52 @@ over is the history moving on its own. It is SHARPER than the window it replaced
 looser — reintroducing the original defect (`directDomUpdates: false`) is caught at 3640px,
 where the old metric needed luck about timing to see it at all.
 
+## WHO said it (a name per BLOCK too, and only where there is a question)
+
+A multi-party thread names the author above the first bubble of their run — WhatsApp's and
+iMessage's own shape, and the one the time mark already follows for "when". `nameShown` in
+`web/src/components/message-bubble.tsx` decides whether one is drawn and the pane feeds it
+`showSenderName` / `continuesAbove`.
+
+- **It is drawn where the reader cannot know**: an incoming message, in a GROUP CHAT or a
+  channel. Never on the user's own — they wrote it — never in a 1:1 or Notes, where the
+  thread's own title is the answer, and never on a continuation, because the same fact ten
+  times over is the noise a stamp per bubble already taught this history to avoid. An
+  agent's reply carries its own mark instead, in every thread rather than only in a group:
+  WHO wrote that one is the whole point of the label there.
+- **A multi-party thread is `isGroupChat`, so an `unknown` kind COUNTS.** That is what the
+  backend writes for a thread it has synced an id for and nothing else, and every such row
+  observed so far is a MEETING thread — several people in it, which is exactly where the
+  name is the reader's question. Spelled `kind === "group"` in the pane, it was the one
+  multi-party shape in the app that drew no sender at all.
+- **A NAME IS NOT AN IDENTITY, and it took a real thread to show it.** Teams carries the
+  author's name in `imdisplayname` and in nothing else, so a frame without one is stored
+  with a blank `sender` — measured on this tenant, 273 of the 899 messages of the busiest
+  group chat, every one of them from somebody the store CAN name off their other messages.
+  A name is frozen per row at insert and no sync refreshes it, so a blank stayed blank and
+  the bubble said nothing: the whole feature was missing exactly where it was wanted. Two
+  halves fix it, and each is pinned by a test:
+  - **The read resolves it from the sender's own MRI** — the `nicknamed!` ladder in
+    `src/store.rs`: the user's nickname, then the row's own name, then the newest name that
+    identity wrote under. It sits in the column list, so a message page, a single row
+    re-read after an edit (which is what the live feed broadcasts) and the row a push is
+    built from all state the same name, and it is the ladder
+    `Store::display_name_for_mri` already answered a typing signal with — spelled once,
+    because two answers to "who wrote this?" is the bug. An EMPTY mri resolves to nobody:
+    a recording and a thread activity carry no author at all, and reading them as one
+    person would lend the newest of them its name to all the rest — a blank says nothing,
+    a wrong name says something false.
+  - **A RUN is keyed on the identity** (`sameAuthor` in `message-pane.tsx`), and only on
+    the name where the store holds no identity. On that same store 35 adjacent pairs were
+    two DIFFERENT colleagues both blank: chained as one person talking twice, at
+    continuation spacing, with the second one's label suppressed as a repeat of the first's.
+    Two colleagues who really share a display name are the same failure with a rarer cause.
+- **The mock needed no half of its own**, and that is deliberate: the ladder is a store
+  READ and a mock reimplementation of it would be a second spelling of the one policy. Its
+  7 group chats of 3–5 people already draw the label, `web/e2e/media.spec.ts` pins that an
+  incoming group message carries one and the user's own does not, and the resolution itself
+  is pinned in `store::tests`.
+
 ## The local agent (`@claude` in a thread)
 
 The user can summon a coding agent that runs on this machine from any Teams client —

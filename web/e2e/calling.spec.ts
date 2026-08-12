@@ -211,6 +211,14 @@ test.describe("Audio calling", () => {
     await page.locator('[data-testid="call-button"]').click();
     const stage = page.locator('[data-testid="call-stage"]');
     await expect(stage).toBeVisible();
+    // Wait for the call to be UP before the service ends it, like every other test here.
+    // Measured against the tenant, this ending arrives on an established call — it is
+    // answered with an SDP and ended two seconds later — and a `stage` that is merely
+    // visible is a call still DIALING: a start is three awaits long (reserve, open the
+    // microphone, post the offer), so an end injected inside it made the page's own
+    // `call_place` land on a call the mock had already dropped, and the notice said
+    // "no such call" instead of who could not be reached. Flaky one run in three.
+    await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
 
     await endCallWithReason(page, CALL_END_UNREACHABLE);
 

@@ -13,6 +13,7 @@ import {
   computeReadReceiptAnchors,
   convLabel,
   copyableMessageText,
+  isGroupChat,
   isMeetingChat,
   type Channel,
   type ChatMessage,
@@ -232,8 +233,14 @@ export function MessagePane(props: { onBack?: () => void }) {
   // A thread the pane opens is either a chat (in `conversations`) or a channel
   // (in `channels`). The header, subtitle and sender-name display key off which.
   const openChannel = !openConv ? (channels.find((c) => c.id === openId) ?? null) : null;
-  // Show sender names in any multi-party thread: every channel, and group chats.
-  const isGroup = openChannel !== null || openConv?.kind === "group";
+  // Show sender names in any multi-party thread: every channel, and group chats — read
+  // through `isGroupChat`, so a thread stored as `unknown` counts. That is not a
+  // pedantic case: it is what the backend writes for a thread it has synced an id for
+  // and nothing else, and every such row observed so far is a MEETING thread — a
+  // conversation with several people in it, which is exactly where the name is the
+  // reader's question. Spelled `kind === "group"` here, it was the one multi-party shape
+  // in the app that drew no sender at all.
+  const isGroup = openChannel !== null || (openConv !== null && isGroupChat(openConv));
   const headerLabel = openConv
     ? convLabel(openConv)
     : openChannel
@@ -1056,19 +1063,28 @@ function ThreadGroup(props: {
  *  system event (e.g. a call line) is never part of a run, so it breaks chaining
  *  for its neighbours.
  *
+ *  Who the author IS comes from the identity when both messages carry one, and only
+ *  then from the name. Two names are two people right up until they are not: a frame
+ *  whose `imdisplayname` was empty leaves a blank name (see the `nicknamed!` ladder in
+ *  src/store.rs), and on this tenant's own store 35 adjacent pairs were two DIFFERENT
+ *  colleagues both blank — chained on `a.sender === b.sender` into one run, at
+ *  continuation spacing, with the second person's name suppressed as a repeat of the
+ *  first's. Two colleagues who really share a display name were the same failure with a
+ *  rarer cause. The name still answers for a message the store has no identity for.
+ *
  *  An agent's reply never chains, in either direction. On the wire it is the user's own
  *  message — same account, same display name — so without this it would tuck itself
  *  against the message that summoned it, at the tight spacing of one person talking
  *  twice. It is not that: it comes from somewhere else and it renders on the other side,
  *  so it takes the gap any other author's message would take. */
-function sameAuthor(a: ChatMessage | undefined, b: ChatMessage | undefined): boolean {
+export function sameAuthor(a: ChatMessage | undefined, b: ChatMessage | undefined): boolean {
   return (
     !!a &&
     !!b &&
     !a.system_event &&
     !b.system_event &&
     a.is_self === b.is_self &&
-    a.sender === b.sender &&
+    (a.sender_mri && b.sender_mri ? a.sender_mri === b.sender_mri : a.sender === b.sender) &&
     !agentAuthorship(a) &&
     !agentAuthorship(b)
   );

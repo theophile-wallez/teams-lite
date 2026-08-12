@@ -1135,18 +1135,52 @@ pub struct Store {
     conn: Connection,
 }
 
-/// SQL for "the name the user gave this person, or the one Teams gave them".
+/// SQL for "the name this app STATES for a person", in one ladder: the name the USER
+/// gave them, else the name the ROW itself carries, else the newest name that IDENTITY
+/// has written under anywhere in the store, else nothing.
 ///
 /// `$mri` and `$name` are the column references holding the person's MRI and their
-/// Teams-sourced display name. It builds a `COALESCE` over a primary-key lookup in
+/// Teams-sourced display name. The override is a primary-key lookup in
 /// `person_overrides`, so it costs one index probe on a table that stays EMPTY unless
-/// the user renamed somebody.
+/// the user renamed somebody; the identity fallback is one probe of
+/// `idx_msg_sender_mri`.
+///
+/// **That third rung is what makes a blank row nameable.** A frame carries the author's
+/// name in `imdisplayname` and in nothing else (see `teams_read::sender_display_name`),
+/// and plenty arrive without it — measured on this tenant, 273 of the 899 messages of
+/// the busiest group chat, from people who are named on their OTHER messages. The name
+/// is frozen per row at first insert and no sync refreshes it, so those stay blank for
+/// good: the bubble drew no sender at all, and 35 adjacent pairs in that store were two
+/// DIFFERENT people sharing one blank name — which a same-author run then tucked
+/// together as one person talking twice. The identity was there the whole time
+/// (`sender_mri` is set on every one of them), so this asks it. It is what the
+/// `blank_identity_senders` migration already promises a blank row gets, and the same
+/// ladder [`Store::display_name_for_mri`] answers a typing signal with — spelled once,
+/// because two answers to "who wrote this?" is the bug.
+///
+/// Two things about that rung are load-bearing, and each one attributed a message to the
+/// wrong person while it was missing:
+///
+/// - **Only a PERSON resolves** (`8:…`, the rule [`Store::named_people`] already states),
+///   which is also what keeps a row with no author at all out of it. Plenty carry none — a
+///   meeting recording, a thread activity, whose only author hint is a URL the ingest drops
+///   — and their `sender_mri` is empty or is the THREAD; matching on either makes every
+///   such row "the same person", so the newest of them lends its name to all the rest. That
+///   is worse than the blank it replaces: a blank says nothing, and a wrong name says
+///   something false.
+/// - **The inner alias is `named`, not `messages`.** Unaliased, `messages.sender_mri`
+///   inside the subquery binds to the subquery's OWN table rather than to the outer row,
+///   which matches every row of it and answers with whoever wrote last.
+///
+/// The trailing `''` keeps the result NOT NULL, since `messages.sender` is a nullable
+/// column.
 ///
 /// It exists as a macro rather than a function so the result is still a `&'static str`
 /// and can be baked into the `const` column lists below. That matters: putting the
 /// resolution in the column list is what makes EVERY read state the chosen name — a
-/// message page, a single row re-read after an edit, the row a push notification is
-/// built from — instead of leaving each of a dozen callers to remember.
+/// message page, a single row re-read after an edit (which is what the live feed
+/// broadcasts, so a live message is named too), the row a push notification is built
+/// from — instead of leaving each of a dozen callers to remember.
 ///
 /// The name is a local override and never travels back to Teams. See the
 /// `person_overrides` note in [`SCHEMA`].
@@ -1155,9 +1189,13 @@ macro_rules! nicknamed {
         concat!(
             "COALESCE(NULLIF((SELECT o.display_name FROM person_overrides o WHERE o.mri = ",
             $mri,
-            "), ''), ",
+            "), ''), NULLIF(",
             $name,
-            ")"
+            ", ''), (SELECT named.sender FROM messages named WHERE ",
+            $mri,
+            " LIKE '8:%' AND named.sender_mri = ",
+            $mri,
+            " AND named.sender <> '' ORDER BY named.seq DESC LIMIT 1), '')"
         )
     };
 }
@@ -3951,21 +3989,19 @@ impl Store {
     /// The user's own nickname for that person answers first, so a rename holds even
     /// for somebody who has never written in a thread we hold; otherwise it is the
     /// most recent non-empty `sender` we stored for that MRI. None when neither exists.
+    ///
+    /// It is [`nicknamed!`] with no row of its own to read a name off — the identity is
+    /// all there is — so the ladder is the macro's rather than a second copy of it: a
+    /// message's own author and a typing signal's must never resolve two different ways.
     pub fn display_name_for_mri(&self, sender_mri: &str) -> Result<Option<String>> {
         if sender_mri.is_empty() {
             return Ok(None);
         }
+        // `''` for the row's own name, since there is no row; the outer NULLIF turns the
+        // macro's "nothing is known" floor back into the None every caller falls back on.
+        let sql = format!("SELECT NULLIF({NAME}, '')", NAME = nicknamed!("?1", "''"));
         let name: Option<String> = self
-            .query_one(
-                "SELECT COALESCE(
-                     NULLIF((SELECT o.display_name FROM person_overrides o WHERE o.mri = ?1), ''),
-                     (SELECT sender FROM messages
-                      WHERE sender_mri = ?1 AND sender <> ''
-                      ORDER BY seq DESC LIMIT 1)
-                 )",
-                params![sender_mri],
-                |r| r.get::<_, Option<String>>(0),
-            )
+            .query_one(&sql, params![sender_mri], |r| r.get::<_, Option<String>>(0))
             .ok()
             .flatten();
         Ok(name)
@@ -5724,6 +5760,60 @@ mod tests {
         // Unknown MRI and empty MRI resolve to None (caller falls back gracefully).
         assert_eq!(s.display_name_for_mri("8:orgid:unknown").unwrap(), None);
         assert_eq!(s.display_name_for_mri("").unwrap(), None);
+    }
+
+    /// A row whose frame carried no `imdisplayname` is read under the name that IDENTITY
+    /// is known by, so the bubble can say who wrote it. The name is frozen per row at
+    /// insert and no sync refreshes it, so without this a message from somebody the store
+    /// can name perfectly well arrives anonymous — which is what the sender label above a
+    /// group chat's bubbles is for.
+    #[test]
+    fn a_message_with_no_stored_name_is_read_under_its_senders_known_name() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation("c1", "Chat", 0).unwrap();
+        let write = |seq: i64, name: &str, mri: &str| {
+            let mut m = msg("c1", seq);
+            m.sender = name.into();
+            m.sender_mri = mri.into();
+            s.insert_message(&m).unwrap();
+        };
+        write(1, "Clément DELBARRE", "8:orgid:bea5de00");
+        write(2, "", "8:orgid:bea5de00"); // sent from a client that named nobody
+        write(3, "", "8:orgid:2367c029"); // a DIFFERENT person, equally anonymous
+        write(4, "Théophile WALLEZ", "8:orgid:2367c029");
+        // Nothing at all is known about this one: no name on the row, none anywhere.
+        write(5, "", "8:orgid:nobody");
+        // Not a person: a thread activity's author is the THREAD, and one blank row must
+        // never lend its name to another just because both of them name no human.
+        write(6, "Meeting", "19:thread@thread.v2");
+        write(7, "", "19:thread@thread.v2");
+
+        let names: Vec<String> =
+            s.newest_messages("c1", 10).unwrap().into_iter().map(|m| m.sender).collect();
+        assert_eq!(
+            names,
+            [
+                "Clément DELBARRE",
+                "Clément DELBARRE",
+                "Théophile WALLEZ",
+                "Théophile WALLEZ",
+                "",
+                "Meeting",
+                "",
+            ],
+            "a blank row takes its own sender's name, and two blank rows from two people \
+             must not end up sharing one — nor from no person at all",
+        );
+
+        // The user's own name for somebody still wins over both — the ladder's first rung.
+        s.set_person_name("8:orgid:bea5de00", Some("Bebou"), 1).unwrap();
+        let renamed = s.get_message("c1", "m2").unwrap().unwrap();
+        assert_eq!(renamed.sender, "Bebou");
+        // And the single-row read agrees with the page read, since both are one macro.
+        assert_eq!(
+            s.display_name_for_mri("8:orgid:2367c029").unwrap().as_deref(),
+            Some("Théophile WALLEZ"),
+        );
     }
 
     #[test]
