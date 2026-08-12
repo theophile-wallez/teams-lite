@@ -62,11 +62,43 @@ export function CustomEmoji(props: {
 
   const onError = useCallback(() => setFailed(true), []);
 
-  if (failed || !objectUrl) {
+  // The size and the caller's own classes are INDEPENDENT: a `className` used to replace
+  // the size outright, so passing one silently un-did `jumbo` — two unrelated props, one
+  // of them quietly cancelling the other. The skeleton reads the SAME expression as the
+  // art, which is what makes it a skeleton: the box the glyph will occupy, occupied
+  // already, so nothing around it moves when the bytes land.
+  const sizing = cn(props.jumbo ? "size-[2.75em]" : "size-[1.15em]", props.className);
+
+  // LOADING is not FAILED, and drawing `label` for both was the visible cost of treating
+  // them as one state. These two branches are ordered failure-first so that reaching the
+  // art below narrows `objectUrl` to a string; asking "loading and not failed?" first says
+  // the same thing and leaves TypeScript unable to see it.
+
+  // The art genuinely cannot be fetched: the words are all that is left, and they are
+  // worth more than a box — `:shipit:` tells the reader which emoji they are missing, so
+  // this branch is deliberately unbounded and deliberately not sized.
+  if (failed) {
     return (
       <span aria-hidden className="leading-none">
         {props.label}
       </span>
+    );
+  }
+
+  // A fetch takes a moment, and for that moment the reaction chip drew the words "custom
+  // emoji" — its label names the art rather than a code, because two people's `:shipit:`
+  // are two different pictures — in a span that took none of the caller's classes, so
+  // unbounded text spilled out of a 30px pill and over the message above it. A quiet box
+  // of the right size says the same thing without saying anything.
+  if (!objectUrl) {
+    return (
+      <span
+        aria-hidden
+        className={cn(
+          "inline-block animate-pulse rounded-[0.2em] bg-element align-[-0.15em]",
+          sizing,
+        )}
+      />
     );
   }
 
@@ -79,14 +111,7 @@ export function CustomEmoji(props: {
       draggable={false}
       loading="lazy"
       onError={onError}
-      className={cn(
-        "inline-block select-none object-contain align-[-0.15em]",
-        // The size and the caller's own classes are INDEPENDENT: a `className` used to
-        // replace the size outright, so passing one silently un-did `jumbo` — two
-        // unrelated props, one of them quietly cancelling the other.
-        props.jumbo ? "size-[2.75em]" : "size-[1.15em]",
-        props.className,
-      )}
+      className={cn("inline-block select-none object-contain align-[-0.15em]", sizing)}
     />
   );
 }
