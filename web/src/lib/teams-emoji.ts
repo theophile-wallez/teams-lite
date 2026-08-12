@@ -13,6 +13,7 @@
 //     (`teamsReactionKey`), or the reaction would be meaningless to every other
 //     Teams client.
 
+import { isValidCustomEmojiName } from "./custom-emoji";
 import { mediaNeedsProxy } from "./protocol";
 import { TEAMS_EMOJI_CATALOG } from "./teams-emoji-catalog";
 
@@ -210,18 +211,27 @@ export const REACTION_PICKER: ReadonlyArray<{ key: string; emoji: string }> = [
  *  Microsoft's. A port of `custom_emoji::CUSTOM_REACTION_PREFIX`. */
 const CUSTOM_REACTION_PREFIX = "tlcustom-";
 
+/** What separates the art's address from its name in a reaction key. A port of
+ *  `custom_emoji::CUSTOM_REACTION_NAME_SEP`, whose comment says why it is this character:
+ *  it is in neither half, and it makes the address a URL fragment, so a teams-lite too old
+ *  to know about the name still fetches the same object. */
+const CUSTOM_REACTION_NAME_SEP = "#";
+
 /**
  * The art a custom reaction key names — a full URL for the media proxy — or `null`
  * when the key is not one of ours, which is how Microsoft's own keys stay untouched.
  * The reading half of `custom_emoji::custom_reaction_key`, whose doc comment holds the
  * whole argument for the shape, and which must move with it.
  *
- * The key is `tlcustom-<objectUrl>` and carries no NAME: a name may hold digits and
- * hyphens, an AMS id starts with one, and nothing in the name charset could separate
- * them (see the Rust side for the whole argument). So a reader gets the ART, which is
- * the half that must never be resolved locally — two people's `:shipit:` are two
- * different pictures. The label a reader shows is theirs to resolve: the quick row
- * knows the name it offered, and a chip says so neutrally.
+ * The key is `tlcustom-<objectUrl>#<name>`. The ART is the half that must never be
+ * resolved locally — two people's `:shipit:` are two different pictures — and the NAME is
+ * what lets a reader USE the emoji rather than only see it. `#` is what makes carrying both
+ * possible: it is in neither the name charset nor an AMS URL, so the key splits on the first
+ * one (see the Rust side for the whole argument).
+ *
+ * `name` is undefined for a key written before the name travelled — this tenant holds those
+ * — and for anything that is not a valid emoji name, since a key is written by whoever
+ * reacted. A key with no name still draws: the art was never the missing half.
  *
  * There is no key MINTED here on purpose. The URL names an AMS object that does not
  * exist until the backend has uploaded the art, so the page names the emoji and the
@@ -235,8 +245,13 @@ const CUSTOM_REACTION_PREFIX = "tlcustom-";
  * app strips out of a mail body. A Teams-hosted URL goes through the backend instead,
  * and anything else is not art we draw.
  */
-export function customReactionArt(key: string): { src: string } | null {
+export function customReactionArt(key: string): { src: string; name?: string } | null {
   if (!key.startsWith(CUSTOM_REACTION_PREFIX)) return null;
-  const src = key.slice(CUSTOM_REACTION_PREFIX.length);
-  return src.startsWith("https://") && mediaNeedsProxy(src) ? { src } : null;
+  const rest = key.slice(CUSTOM_REACTION_PREFIX.length);
+  // The FIRST separator splits, so a name can never smuggle a second one past the check.
+  const at = rest.indexOf(CUSTOM_REACTION_NAME_SEP);
+  const src = at < 0 ? rest : rest.slice(0, at);
+  if (!src.startsWith("https://") || !mediaNeedsProxy(src)) return null;
+  const name = at < 0 ? "" : rest.slice(at + 1);
+  return isValidCustomEmojiName(name) ? { src, name } : { src };
 }

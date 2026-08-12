@@ -3477,11 +3477,22 @@ feature worth having: a local-only decoration would be a different, smaller feat
   app writes carries the NAME in `itemid` beside the art in `src`, so a colleague's emoji
   arrives complete and nothing about it is guessed at or asked for. Seven rules hold it,
   each pinned by a test:
-  - **It happens on INGEST, beside push and the agent trigger** (a fresh insert, in the
-    trouter loop), not on render. That is where every other "this message is new" reaction
-    already lives, and it covers a channel nobody has scrolled to. It is CLAIMED in the
-    store like a push, because this machine runs two send-capable backends against one store
-    and both ingest every frame.
+  - **It happens on INGEST, beside push and the agent trigger** (in the trouter loop), not on
+    render. That is where every other "this message is new" reaction already lives, and it
+    covers a channel nobody has scrolled to.
+  - **A REACTION is a source, and on this tenant the commonest one** — so the import runs on
+    `inserted || reactions_changed`, which is where it differs from push and the agent beside
+    it. A reaction arrives as a frame on a message the store ALREADY holds, so `inserted` is
+    false: gated on it, the art most colleagues send would never have been seen. A changed
+    reaction set is as much "new emoji" as a new message is. The name comes from the key
+    (§ A custom reaction's key), and a key too old to carry one is SKIPPED rather than given
+    an invented name — see the manual row below, which is what is left for those.
+  - **The work is CLAIMED per UPLOAD, not per message** (`emoji/<name>#<src>`), because this
+    machine runs two send-capable backends against one store and both ingest every frame. Per
+    MESSAGE was the first shape and it was wrong for exactly the reason above: the insert takes
+    that claim, and every later reaction on the message is then dropped. An AMS object is one
+    upload, so the key is precisely "these bytes, under this name". It stays an optimisation
+    rather than a rail — a lost claim costs one repeat fetch that `take_as` skips on the bytes.
   - **A name the user already holds is NEVER overwritten.** Their `:shipit:` keeps posting
     their own art; the colleague's arrives as `shipit-2`, bounded, and an ALIAS blocks a name
     too. Both pictures exist, under two words — which is the only shape that does not put a
@@ -3507,11 +3518,15 @@ feature worth having: a local-only decoration would be a different, smaller feat
     for is the one thing the pack decides: what art `:shipit:` posts under the user's own name
     on the next send. A store this app cannot READ counts as off, because a failed read is not
     an answer; a read-only backend never writes at all.
-  - **The manual row stays, and takes itself away.** `extractableCustomEmoji` already refuses
-    a code the pack holds, and the import emits `custom_emoji_changed` — so "Add to my emoji"
-    disappears on its own once the emoji is in, and remains exactly where it is still the only
-    way in: an older message, and the switch turned off. Nothing in `message-bubble.tsx`
-    changed.
+  - **The manual row stays, takes itself away, and is the ONLY way in for art with no name.**
+    `extractableCustomEmoji` refuses a code the pack holds and the import emits
+    `custom_emoji_changed`, so "Add to my emoji" disappears on its own once the emoji is in,
+    and remains where it is still the only way: an older message, the switch turned off, and —
+    the case it now exists for — **a reaction whose key was written before the name travelled**.
+    That art is in every reader's history already and nothing but the reader can name it, so
+    the row offers it with an EMPTY code and the dialog opens on the art with the name field
+    blank. It reads a reaction only as a FALLBACK, after the body, because the body is where a
+    code the reader has actually seen written is.
   The mock carries the SWITCH and deliberately not the import: the import is a backend act on
   a frame, with no surface of its own, and a mock reimplementation of `take_as` would be a
   second spelling of the one policy that can drift from it. What is UNVERIFIED against the
@@ -3614,18 +3629,40 @@ feature worth having: a local-only decoration would be a different, smaller feat
     arrived at). Reducing what somebody handed the app without saying so is the app quietly
     changing their art. The URL source is untouched: those bytes are fetched by the backend,
     which measures and refuses them as before.
-- **A custom reaction's key IS the art's address**, and it carries nothing else:
-  `tlcustom-<objectUrl>`. The name cannot be in there — a name may hold digits and hyphens
-  (`blob-2`), an AMS id starts with one, and no character in the name charset could
-  separate the two, so a key spelling both could not be split back apart. Three things
-  follow, and each is pinned by `web/e2e/custom-emoji.spec.ts`: the PAGE never mints that
-  key (the object does not exist until the backend has uploaded the art, so `react` takes
-  `emoji` — the pack name — and mints the key from what the upload answered); a toggle-off
-  hands the EXISTING key back verbatim, with no upload and no re-mint; and a LABEL is
-  resolved locally or stated neutrally — the quick row knows the name it offered, a chip
-  says "custom emoji", because two people's `:shipit:` are two different pictures and the
-  art on the chip is theirs. Resolving a label from the reader's own pack is fine;
-  resolving ART locally never is.
+- **A custom reaction's key carries the art's address AND its name**:
+  `tlcustom-<objectUrl>#<name>`. A REACTION is how most custom emoji actually arrive —
+  measured on this tenant by `examples/custom_emoji_inbound_recon.rs`: 11 messages hold one,
+  addressing 14 distinct pictures against the 12 in the pack — so a key that named only the
+  art left the commonest case drawn and unusable, which is the whole complaint the
+  auto-import answers. Six things hold it, each pinned by a test:
+  - **`#` is what makes carrying both possible**, and it is chosen rather than convenient. It
+    is in NEITHER half — not in the name charset `[a-z0-9_+-]`, not in an AMS URL — so the
+    key splits on the FIRST one, unambiguously. The old `<name>-<id>` shape could not: a name
+    may hold digits and hyphens (`blob-2`, `parrot-1`) and an AMS id starts with one. Those
+    keys are still in this tenant's history and `custom_reaction_art` reads them, minus the
+    name it cannot recover.
+  - **It is ADDITIVE on the wire, which is the second reason for that character.** `#` opens
+    a URL FRAGMENT, and a browser never sends one to a server — so a teams-lite too old to
+    know about the name reads the whole remainder as the address, asks for
+    `…/views/imgo#shipit`, and is served the same object. A colleague on an older build loses
+    nothing.
+  - **The tenant accepts it, measured** (`examples/custom_emoji_reaction_probe.rs`, run
+    2026-08-12 against the sandbox chat): the key was accepted `200`, read back out of
+    `properties.emotions` **byte for byte** with the `#shipit` intact, split back into art +
+    name through this crate's own reader, and cleared with `value: 0`. A 289-character key is
+    accepted too, and an object URL plus a name is ~110.
+  - **The PAGE never mints that key** — the object does not exist until the backend has
+    uploaded the art, so `react` takes `emoji` (the pack name) and the backend mints from what
+    the upload answered — and **a toggle-off hands the EXISTING key back verbatim**, with no
+    upload and no re-mint.
+  - **A name is held to the store's own rule before it is believed**, on both sides
+    (`is_valid_name` / `isValidCustomEmojiName`): a key is written by whoever reacted and the
+    name is about to become a row. A refused name costs the LABEL only — the art still draws,
+    because the art was never the missing half.
+  - **A LABEL is still resolved locally or stated neutrally, and ART never is.** Two people's
+    `:shipit:` are two different pictures, so the chip draws the bytes the key names. What the
+    name buys is that the reader can now TYPE the emoji, not that their own art is substituted
+    into somebody else's reaction.
 - **Custom art in a stock Teams REACTION row is impossible**, and this is the one place
   Slack parity ends: their client renders a reaction from its own asset catalogue and has
   no fetch path. Both halves of the reaction surface say so — the quick row's custom band

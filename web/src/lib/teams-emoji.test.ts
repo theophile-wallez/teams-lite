@@ -132,6 +132,34 @@ describe("customReactionArt", () => {
     expect(customReactionArt(`tlcustom-${OBJECT_URL}`)).toEqual({ src: OBJECT_URL });
   });
 
+  it("hands back the NAME too, which is what lets a reader use the emoji", () => {
+    expect(customReactionArt(`tlcustom-${OBJECT_URL}#shipit`)).toEqual({
+      src: OBJECT_URL,
+      name: "shipit",
+    });
+    // The names that made the old `<name>-<id>` shape unparseable are ordinary now, because
+    // `#` is in neither half.
+    for (const name of ["blob-2", "parrot-1", "0", "a_b+c"]) {
+      expect(customReactionArt(`tlcustom-${OBJECT_URL}#${name}`)).toEqual({
+        src: OBJECT_URL,
+        name,
+      });
+    }
+  });
+
+  it("names the art but no NAME for a key written before the name travelled", () => {
+    // This tenant holds these, and so does any colleague on an older build. The art was
+    // never the missing half, so it still draws — only the label is absent.
+    expect(customReactionArt(`tlcustom-${OBJECT_URL}`)?.name).toBeUndefined();
+  });
+
+  it("refuses a NAME the store would refuse, and still draws the art", () => {
+    // A key is written by whoever reacted, and the name is about to become a row.
+    for (const bad of ["Ship It", "", "ship:it", "a".repeat(65), "ship#it"]) {
+      expect(customReactionArt(`tlcustom-${OBJECT_URL}#${bad}`)).toEqual({ src: OBJECT_URL });
+    }
+  });
+
   it("is a URL the media proxy will carry, so the art needs no second rail", () => {
     const art = customReactionArt(`tlcustom-${OBJECT_URL}`);
     expect(art).not.toBeNull();

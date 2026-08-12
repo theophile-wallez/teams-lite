@@ -73,8 +73,18 @@ async fn main() -> Result<()> {
     anyhow::ensure!(!sent.id.is_empty(), "the send returned no message id");
     println!("posted message, id = {}", sent.id);
 
-    // 3. Set a custom emoji reaction with the key the app mints: `tlcustom-<objectUrl>`.
-    let custom_key = custom_emoji::custom_reaction_key(&object_url);
+    // 3. Set a custom emoji reaction with the key the app mints:
+    //    `tlcustom-<objectUrl>#<name>`.
+    //
+    //    The `#` is the part worth measuring. It is what lets the NAME travel beside the art,
+    //    which is what makes a colleague's reaction emoji something a reader can USE rather
+    //    than only see — and a service that rejected the character, or normalized it away,
+    //    would take the name off every reaction silently. `#` also has a second meaning on
+    //    the wire (it opens a URL fragment), which is deliberate: an older teams-lite reads
+    //    the whole remainder as the address and is served the same object. Neither half of
+    //    that is worth assuming, so the assertions below check the key came back BYTE FOR
+    //    BYTE and that the name splits out of what the service stored.
+    let custom_key = custom_emoji::custom_reaction_key(&object_url, "shipit");
     println!("\nsetting custom emoji reaction with key = {}", custom_key);
     println!("  ({} characters)", custom_key.len());
     let set_result = set_reaction_raw(&http, &session, &sent.id, &custom_key, true).await;
@@ -97,9 +107,22 @@ async fn main() -> Result<()> {
     println!("key present in snapshot: {}", if key_present { "yes" } else { "no" });
     // The key IS the address of the art, so a key the service normalized — lowercased, or
     // truncated — would leave every reader with a URL that fetches nothing.
+    let verbatim = emotion_key_verbatim(&emotions_after_set, &custom_key);
+    println!("key round-tripped byte for byte: {}", if verbatim { "yes" } else { "no" });
+
+    // And the half that decides whether a reader can USE the emoji: does the NAME survive,
+    // and does it split back out of what the service actually stored? Read through the app's
+    // own reader, so this measures the code rather than a re-spelling of it.
+    match custom_emoji::custom_reaction_art(&custom_key) {
+        Some((url, Some(name))) => {
+            println!("the key splits back into art + name: {name} <- {url}");
+            anyhow::ensure!(url == object_url, "the address did not survive the split");
+        }
+        other => println!("*** the key did NOT split into art + name: {other:?}"),
+    }
     println!(
-        "key round-tripped byte for byte: {}",
-        if emotion_key_verbatim(&emotions_after_set, &custom_key) { "yes" } else { "no" }
+        "the NAME survived the service: {}",
+        if verbatim { "yes — the key is byte-identical, so `#shipit` is intact" } else { "NO" }
     );
 
     // Cleared straight away rather than left up for a human to look at: nobody has ever

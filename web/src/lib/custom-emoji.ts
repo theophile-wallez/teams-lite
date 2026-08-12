@@ -68,7 +68,7 @@ export function insertedEmojiName(
  * digit, then lowercase letters, digits, dashes, underscores, and plus signs. 1..64
  * characters.
  */
-function isValidCustomEmojiName(name: string): boolean {
+export function isValidCustomEmojiName(name: string): boolean {
   const len = name.length;
   if (len === 0 || len > 64) return false;
   const first = name.charCodeAt(0);
@@ -280,26 +280,48 @@ export function originalArtUrl(src: string): string {
 }
 
 /**
- * Custom emoji from a message body that the pack does not already hold.
+ * Custom emoji on a message that the pack does not already hold — from its BODY, and
+ * failing that from a REACTION on it.
  *
- * Teams delivers each custom emoji as real markup carrying its own art URL and code.
- * This extracts those emojis — their `src` and `:code:` — for the "Add to my emoji"
- * action menu row. Returns the FIRST one only: a message with three would turn one menu
- * into a directory.
+ * Teams delivers each custom emoji as real markup carrying its own art URL and code, and a
+ * reaction carries the same pair in its key. This extracts one — `src` and `code` — for the
+ * "Add to my emoji" action menu row. The FIRST one only: a message with three would turn one
+ * menu into a directory.
+ *
+ * The BODY comes first because that is where a code the reader has actually seen written is.
+ * A reaction is the fallback and it is not a rare one: measured on this tenant, most custom
+ * emoji arrive as reactions (`examples/custom_emoji_inbound_recon.rs`).
+ *
+ * **A reaction key with NO name is offered too, with an empty code**, and that is the whole
+ * point of this path now that the backend imports a named one on its own
+ * (`import_emoji_from_message`): the art already in a reader's history was reacted with
+ * before the name travelled, so nothing can name it but them. The dialog opens on the art
+ * with the name field empty. An unnamed BODY emoji cannot happen — the markup always carries
+ * its code — so this is the only source of one.
  *
  * Offered only when the pack does not already have that code. An existing emoji is never
- * overwritten silently.
+ * overwritten silently, which is why an unnamed one is always offered: there is no code to
+ * compare, and the dialog refuses a taken name itself.
  */
 export function extractableCustomEmoji(
   body: RichNode[],
   pack: readonly CustomEmoji[],
+  /** The message's custom reactions, already parsed by `customReactionArt`. Parsed by the
+   *  CALLER on purpose: that function lives in `teams-emoji.ts`, which reads the name rule
+   *  from this module, and importing it back would make the two files a cycle. */
+  reactionArt: readonly { src: string; name?: string }[] = [],
 ): { src: string; code: string } | null {
   const taken = new Set(pack.map((e) => e.name));
   const emoji = firstCustomEmoji(body);
-  if (!emoji) return null;
-  // `firstCustomEmoji` already stripped the colons — the code is a bare name here.
-  if (taken.has(emoji.code)) return null;
-  return emoji;
+  if (emoji) {
+    // `firstCustomEmoji` already stripped the colons — the code is a bare name here.
+    return taken.has(emoji.code) ? null : emoji;
+  }
+  for (const art of reactionArt) {
+    if (art.name === undefined) return { src: art.src, code: "" };
+    if (!taken.has(art.name)) return { src: art.src, code: art.name };
+  }
+  return null;
 }
 
 function firstCustomEmoji(nodes: RichNode[]): { src: string; code: string } | null {

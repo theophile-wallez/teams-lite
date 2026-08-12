@@ -643,8 +643,14 @@ function MessageBubbleImpl(props: {
   // and the code is not already taken. Never silently overwrites an existing emoji.
   const addableEmoji = useMemo(() => {
     const allBody = [...(bodyParts[0] ?? []), ...(bodyParts[1] ?? [])];
-    return extractableCustomEmoji(allBody, customPack);
-  }, [bodyParts, customPack]);
+    // A REACTION on this message is a source too, and on this tenant the commonest one.
+    // The backend takes a NAMED one on its own, so what this row is really left with is the
+    // art reacted with before the name travelled — which nothing but the reader can name.
+    const reactionArt = (props.message.reactions ?? [])
+      .map((r) => customReactionArt(r.key))
+      .filter((art): art is { src: string; name?: string } => art !== null);
+    return extractableCustomEmoji(allBody, customPack, reactionArt);
+  }, [bodyParts, customPack, props.message.reactions]);
 
   // Whether this quote can take the reader to what it quotes, which is a question about
   // the PAYLOAD and not about the UI: a reply blockquote names the quoted message (Teams

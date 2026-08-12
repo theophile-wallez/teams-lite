@@ -4025,7 +4025,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         }
                     })
                     .await?;
-                (custom_emoji::custom_reaction_key(&object_url), true)
+                // The name travels beside the art: a reaction is how most custom emoji
+                // reach a colleague, and without a name there is nothing for their pack
+                // to hold it under (see `custom_reaction_key`).
+                (custom_emoji::custom_reaction_key(&object_url, name), true)
             } else {
                 // Decide the toggle from what we currently hold: same key -> off.
                 let current_key = ctx
@@ -8786,23 +8789,13 @@ fn import_emoji_from_message(ctx: &Ctx, store: &Store, message: &Message) {
         return;
     }
     // The cheapest test first: nearly every message carries no emoji at all, and this is
-    // one pass over the body against a settings read and a claim.
-    let art = custom_emoji::art_in_body(&message.content);
+    // one pass over the body and one over the reactions against a settings read and a claim.
+    let art = inbound_emoji_in(message);
     if art.is_empty() {
         return;
     }
     if !emoji_auto_import_enabled(store).unwrap_or(false) {
         return;
-    }
-    let claim = format!("emoji/{}/{}", message.conversation_id, message.id);
-    match store.claim_once(&claim, now_ms()) {
-        Ok(true) => {}
-        // The other backend on this store is already fetching these.
-        Ok(false) => return,
-        Err(e) => {
-            eprintln!("[emoji] could not claim {claim}: {e}");
-            return;
-        }
     }
     let ctx = ctx.clone();
     tokio::spawn(async move {
@@ -8826,6 +8819,32 @@ fn import_emoji_from_message(ctx: &Ctx, store: &Store, message: &Message) {
     });
 }
 
+/// Every named custom emoji one message carries, from its BODY and from its REACTIONS,
+/// distinct by name and body-first.
+///
+/// A reaction is not a footnote here: measured on this tenant
+/// (`examples/custom_emoji_inbound_recon.rs`), it is how most custom emoji arrive — 14
+/// distinct pictures against 12 held in the pack — and reading the body alone left every one
+/// of them visible and unusable, which is exactly the complaint this whole feature answers.
+///
+/// A reaction key names its art and, since `custom_emoji::custom_reaction_key` learned to
+/// carry it, the name its reactor knows it by. A key written before that — this tenant holds
+/// those, and so does any colleague on an older build — carries no name, and is SKIPPED: the
+/// art is drawn from the key as it always was, and naming it is the reader's own act through
+/// the message's "…" menu. This app never invents a name for somebody else's picture, because
+/// the name is what the reader will type and what their own next send will post.
+fn inbound_emoji_in(message: &Message) -> Vec<custom_emoji::InboundEmoji> {
+    let mut art = custom_emoji::art_in_body(&message.content);
+    for key in teams_lite::store::reaction_keys(&message.reactions) {
+        let Some((src, Some(name))) = custom_emoji::custom_reaction_art(&key) else { continue };
+        if art.iter().any(|held| held.name == name) {
+            continue;
+        }
+        art.push(custom_emoji::InboundEmoji { name: name.to_string(), src: src.to_string() });
+    }
+    art
+}
+
 /// Fetch one inbound emoji's art and store it, answering the name it was stored under —
 /// or `None` when the pack was deliberately left alone. See [`import_emoji_from_message`]
 /// for what each step is guarding against.
@@ -8837,6 +8856,18 @@ async fn take_emoji_into_pack(
         teams_media::is_allowed_media_url(&emoji.src),
         "its art is not served from a Teams host"
     );
+    // Claim the WORK ITEM — this upload under this name — rather than the message, because
+    // a REACTION arrives on a message that is already in the store: a claim on the message
+    // would be taken by its own insert and every later reaction on it silently dropped. An
+    // AMS object is one upload, so this key is exactly "these bytes, under this name".
+    //
+    // It stays an optimisation and not a correctness rail: it spares this machine's second
+    // backend the same fetch, and a claim that were somehow lost costs one repeat fetch that
+    // `take_as` then skips on the bytes.
+    let claim = format!("emoji/{}#{}", emoji.name, emoji.src);
+    if !ctx.store()?.claim_once(&claim, now_ms())? {
+        return Ok(None);
+    }
     let session = ctx.session().await?;
     // The bytes as they were UPLOADED, not the rendition the message names: AMS answers
     // `views/imgo` for an animated GIF with a single still frame, and a pack entry outlives
@@ -10800,6 +10831,10 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
                     // `reacted`; otherwise re-read, so the broadcast carries reactions
                     // preserved across the change (the parsed `m` may hold the sentinel,
                     // not the stored set).
+                    // Whether the reaction set really changed, read before `reacted` is
+                    // consumed below: it is what says a frame carrying no new message may
+                    // still carry new emoji (see the import further down).
+                    let reactions_changed = reacted.is_some();
                     let row = reacted
                         .or_else(|| store.get_message(&m.conversation_id, &m.id).ok().flatten())
                         .unwrap_or_else(|| m.clone());
@@ -10817,14 +10852,23 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
                         // that means "this message is new", and the trigger is claimed in
                         // the store so two backends answer it once.
                         agent_live_message(&ctx_msgs, store, &row, from_me, &self_mri);
-                        // …and take the custom emoji it carries into the pack, so a
-                        // colleague's `:shipit:` is one the user can type rather than one
-                        // they have to pick out of a menu first. Same place for the same
-                        // reason: a fresh insert is the one event that means "this message
-                        // is new", and the work is claimed so two backends do it once.
-                        // Not gated on `from_me`: a message the user sent from ANOTHER
-                        // install carries art this pack may not hold, and one sent from
-                        // this pack is skipped on its bytes.
+                    }
+                    // …and take the custom emoji this frame carries into the pack, so a
+                    // colleague's `:shipit:` is one the user can type rather than one they
+                    // have to pick out of a menu first.
+                    //
+                    // NOT under `inserted`, unlike the two above, and that is the whole
+                    // difference: a REACTION arrives as a frame on a message this store
+                    // already holds, so `inserted` is false and the art a colleague reacted
+                    // with — which is how MOST custom emoji arrive here, measured — would
+                    // never be seen. A changed reaction set is as much "new emoji" as a new
+                    // message is. Each upload is claimed individually, so a frame that
+                    // carries nothing new costs one settings read.
+                    //
+                    // Not gated on `from_me` either: a message the user sent from ANOTHER
+                    // install carries art this pack may not hold, and one sent from this
+                    // pack is skipped on its bytes.
+                    if inserted || reactions_changed {
                         import_emoji_from_message(&ctx_msgs, store, &row);
                     }
                 }
@@ -14021,9 +14065,26 @@ mod lifecycle_tests {
             body.contains("emoji_auto_import_enabled(store).unwrap_or(false)"),
             "an unreadable store is not consent"
         );
-        assert!(body.contains("claim_once"), "two backends share this store");
+
+        // A REACTION is a source, and on this tenant the commonest one. It is claimed per
+        // UPLOAD rather than per message, because a reaction arrives on a message the store
+        // already holds — a claim on the message is taken by its own insert, and every later
+        // reaction on it would be dropped.
+        let sources = body_of(source, "fn inbound_emoji_in(");
+        assert!(sources.contains("custom_emoji::art_in_body"), "the body is a source");
+        assert!(sources.contains("reaction_keys"), "a reaction is a source");
+        assert!(
+            sources.contains("custom_emoji::custom_reaction_art"),
+            "a reaction's name comes from its key"
+        );
+        let call_site = body_of(source, "let reactions_changed = reacted.is_some()");
+        assert!(
+            call_site.contains("if inserted || reactions_changed"),
+            "a reaction arrives on a message that is already stored"
+        );
 
         let take_body = body_of(source, "async fn take_emoji_into_pack(");
+        assert!(take_body.contains("claim_once"), "two backends share this store");
         assert!(
             take_body.contains("teams_media::is_allowed_media_url"),
             "the session token reaches Teams hosts only"

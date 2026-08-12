@@ -348,6 +348,10 @@ test.describe("custom emoji", () => {
     const chip = bubble.locator('[data-testid^="reaction-chip-tlcustom-"]');
     await expect(chip).toBeVisible();
     expect(await chip.getAttribute("data-testid")).toContain("tlcustom-https://");
+    // …and the NAME rides beside the address, after a `#`. That is what lets a colleague's
+    // pack hold the emoji they were reacted at rather than only draw it — measured accepted
+    // and stored byte for byte by the tenant in examples/custom_emoji_reaction_probe.rs.
+    expect(await chip.getAttribute("data-testid")).toContain("#shipit");
     await expect(bubble.locator('[data-testid="reaction-chip-like"]')).toHaveCount(0);
 
     // And the chip IS art, fetched through the media proxy: proxied bytes reach the DOM as

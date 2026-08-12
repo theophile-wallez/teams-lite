@@ -6608,9 +6608,11 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const id = requireString(params, "conversation");
       const messageId = requireString(params, "message_id");
       const picked = asObject(params).emoji;
+      // The NAME rides beside the address, as `custom_emoji::custom_reaction_key` writes it:
+      // it is what lets a reader's pack hold a colleague's reaction emoji at all.
       const key =
         typeof picked === "string" && picked
-          ? `tlcustom-${emojiObjectUrl(picked)}`
+          ? `tlcustom-${emojiObjectUrl(picked)}#${picked}`
           : requireString(params, "key");
       // A pick is always an ADD: its key names one upload, so it can never be the key
       // already on the message.

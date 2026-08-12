@@ -91,22 +91,56 @@ pub fn measure_art(bytes: &[u8]) -> anyhow::Result<(&'static str, u32, u32)> {
 
 const CUSTOM_REACTION_PREFIX: &str = "tlcustom-";
 
-/// The Teams emotion key for a custom emoji reaction: our prefix, then the URL of the
-/// AMS object the art was uploaded to. The key carries the ART and nothing else.
+/// The character between the art's address and its name in a reaction key.
 ///
-/// The NAME deliberately does not travel. It cannot: a name may hold digits and hyphens
-/// (`blob-2` and `parrot-1` are legal), an AMS id starts with one, and no character in
-/// the name charset `[a-z0-9_+-]` can separate the two — so a key spelling both could
-/// not be split back apart. Carrying the URL instead also hands the reader something
-/// complete: a full URL for the media proxy rather than a bare id with no host, since
-/// Teams rewrites the AMS host it serves an object from. What a reader loses is the
-/// name, which only ever labelled the reaction — and a label is resolved locally or
-/// stated neutrally, while art must come from the message.
+/// `#` is the whole reason the name can travel at all, and it is chosen rather than
+/// convenient. It is in NEITHER half: not in the name charset `[a-z0-9_+-]`
+/// (`is_valid_name`), and not in an AMS object URL — so the key splits back apart on the
+/// FIRST one, unambiguously. And it makes what precedes it a URL FRAGMENT, which a browser
+/// never sends to a server: a teams-lite too old to know about the name reads the whole
+/// remainder as the address, asks for `…/views/imgo#shipit`, and is served the same object.
+/// The name is additive on the wire in the strictest sense.
+const CUSTOM_REACTION_NAME_SEP: char = '#';
+
+/// The Teams emotion key for a custom emoji reaction: our prefix, the URL of the AMS object
+/// the art was uploaded to, then `#` and the name the reactor knows it by.
+///
+/// The URL is what a reader must have, because art is never resolved locally — two people's
+/// `:shipit:` are two different pictures. The NAME is what a reader needs to be able to USE
+/// the emoji rather than only see it: a reaction is how most custom emoji arrive
+/// (measured — `examples/custom_emoji_inbound_recon.rs`), and without a name there is
+/// nothing to type and nothing to store one under.
+///
+/// It could not be spelled at all before [`CUSTOM_REACTION_NAME_SEP`]: a name may hold
+/// digits and hyphens (`blob-2`, `parrot-1`), an AMS id starts with one, and no character in
+/// the name charset separates the two — so `<name>-<id>` could not be split back apart. That
+/// older shape is still in this tenant's history and [`custom_reaction_art`] reads it, minus
+/// the name it cannot recover.
 ///
 /// Length is not a concern: the service accepted a 289-character key when it was
 /// measured (`examples/custom_emoji_reaction_probe.rs`) and an object URL is ~100.
-pub fn custom_reaction_key(object_url: &str) -> String {
-    format!("{CUSTOM_REACTION_PREFIX}{object_url}")
+pub fn custom_reaction_key(object_url: &str, name: &str) -> String {
+    format!("{CUSTOM_REACTION_PREFIX}{object_url}{CUSTOM_REACTION_NAME_SEP}{name}")
+}
+
+/// What a custom reaction key names: the art's address, and the name its reactor knows it
+/// by when the key carries one.
+///
+/// `None` for a key that is not ours, which is how Microsoft's own keys stay untouched. The
+/// name is `None` for a key written before it travelled — this tenant holds those — and for
+/// anything that is not a name the store would accept, because a key is written by whoever
+/// reacted and a name is about to become a row.
+///
+/// The URL is NOT checked here: what art may be fetched is `teams_media`'s question on the
+/// backend and the media proxy's on the page (see `customReactionArt`, which does check,
+/// because a browser fetching a colleague's arbitrary URL is the tracking pixel this app
+/// strips out of a mail body).
+pub fn custom_reaction_art(key: &str) -> Option<(&str, Option<&str>)> {
+    let rest = key.strip_prefix(CUSTOM_REACTION_PREFIX)?;
+    match rest.split_once(CUSTOM_REACTION_NAME_SEP) {
+        Some((url, name)) => Some((url, is_valid_name(name).then_some(name))),
+        None => Some((rest, None)),
+    }
 }
 
 /// The URL that answers an AMS object's ORIGINAL bytes, given the rendition a message
@@ -687,15 +721,51 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_reaction_key_is_prefixed_and_carries_the_url() {
+    fn a_custom_reaction_key_is_prefixed_and_carries_the_url_and_the_name() {
         let url = "https://eu-api.asm.skype.com/v1/objects/0-weu-d1-abc/views/imgo";
-        let key = custom_reaction_key(url);
-        assert_eq!(key, format!("tlcustom-{url}"));
+        let key = custom_reaction_key(url, "shipit");
+        assert_eq!(key, format!("tlcustom-{url}#shipit"));
+        assert_eq!(custom_reaction_art(&key), Some((url, Some("shipit"))));
 
-        // A name that would have been unparseable in the old shape: it is simply not
-        // in the key, so `blob-2` and `parrot-1` cost nothing.
-        let key = custom_reaction_key("https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo");
-        assert_eq!(key, "tlcustom-https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo");
+        // The names that made the old `<name>-<id>` shape unparseable: a hyphen and a
+        // digit are ordinary here, because `#` is in neither half.
+        for name in ["blob-2", "parrot-1", "0", "a_b+c"] {
+            let key = custom_reaction_key(url, name);
+            assert_eq!(custom_reaction_art(&key), Some((url, Some(name))), "{name}");
+        }
+
+        // A key written before the name travelled — this tenant holds them — reads as the
+        // art alone rather than as nothing.
+        assert_eq!(
+            custom_reaction_art("tlcustom-https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo"),
+            Some(("https://eu-api.asm.skype.com/v1/objects/0-b/views/imgo", None))
+        );
+        // And the abandoned shape, which really is in the history: the id is not a URL and
+        // the name cannot be recovered from it, so it answers no name rather than a wrong one.
+        assert_eq!(
+            custom_reaction_art("tlcustom-shipit-0-frc-d4-12c8d40c9b86709d4e41ea8c271bf8ec"),
+            Some(("shipit-0-frc-d4-12c8d40c9b86709d4e41ea8c271bf8ec", None))
+        );
+
+        // Microsoft's own keys are not ours.
+        assert_eq!(custom_reaction_art("like"), None);
+        assert_eq!(custom_reaction_art("heart"), None);
+
+        // A key is written by whoever reacted, so the name is held to the store's own rule
+        // before it can become a row. The ART still resolves — the picture is fine, only
+        // the label is refused.
+        for bad in ["Ship It", "", "ship:it", &"a".repeat(65)] {
+            let key = format!("tlcustom-{url}#{bad}");
+            assert_eq!(custom_reaction_art(&key), Some((url, None)), "{bad:?}");
+        }
+
+        // Only the FIRST separator splits, so a name cannot smuggle one and a URL that
+        // somehow held one keeps everything after it out of the name.
+        assert_eq!(
+            custom_reaction_art(&format!("tlcustom-{url}#ship#it")),
+            Some((url, None)),
+            "`ship#it` is not a valid name, so no name is claimed"
+        );
     }
 
     /// The cases here are the ones `originalArtUrl` is held to in

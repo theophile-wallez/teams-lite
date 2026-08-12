@@ -1370,6 +1370,26 @@ pub fn my_reaction_key(reactions_json: &str, my_mri: &str) -> Option<String> {
     None
 }
 
+/// Every emotion key in a reactions snapshot, in the order the snapshot lists them.
+///
+/// Best-effort like the rest of this family: a malformed snapshot answers nothing rather
+/// than failing, because a surprising shape must never break the path it is read on.
+pub fn reaction_keys(reactions_json: &str) -> Vec<String> {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(reactions_json) else {
+        return Vec::new();
+    };
+    parsed
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("key").and_then(|k| k.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Pure transform: apply our own reaction to a reactions snapshot and return the
 /// new JSON. `key = Some(k)` makes our reaction exactly `k` (removing us from any
 /// other key); `key = None` removes it. Empty emotions (no users left) are

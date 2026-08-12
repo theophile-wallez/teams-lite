@@ -289,6 +289,50 @@ describe("extractableCustomEmoji", () => {
     const result = extractableCustomEmoji(nodes, []);
     expect(result).toEqual({ src: EMOJI_URL, code: "shipit" });
   });
+
+  // A REACTION is the other source, and measured on this tenant the commonest one: most
+  // custom emoji arrive as one. The body still wins, because that is where a code the
+  // reader has actually seen written is.
+  const REACTION_URL = "https://eu-api.asm.skype.com/v1/objects/0-r/views/imgo";
+
+  it("falls back to a reaction's art, with the name its key carries", () => {
+    const nodes = parseRichHtml("<p>no emoji here</p>");
+    expect(extractableCustomEmoji(nodes, [], [{ src: REACTION_URL, name: "meow" }])).toEqual({
+      src: REACTION_URL,
+      code: "meow",
+    });
+  });
+
+  it("prefers the BODY over a reaction", () => {
+    const nodes = parseRichHtml(`<p>${EMOJI_IMG}</p>`);
+    expect(extractableCustomEmoji(nodes, [], [{ src: REACTION_URL, name: "meow" }])).toEqual({
+      src: EMOJI_URL,
+      code: "shipit",
+    });
+  });
+
+  it("skips a reaction whose name the pack already holds", () => {
+    const nodes = parseRichHtml("<p>no emoji here</p>");
+    const held = [{ src: REACTION_URL, name: "meow" }];
+    expect(extractableCustomEmoji(nodes, [emoji("meow")], held)).toBeNull();
+  });
+
+  it("offers a NAMELESS reaction with an empty code, for the reader to name", () => {
+    // The art already in a reader's history was reacted with before the name travelled in
+    // the key, so nothing but the reader can name it — and the backend, which imports a
+    // NAMED one on its own, deliberately will not invent one. This row is what is left.
+    const nodes = parseRichHtml("<p>no emoji here</p>");
+    expect(extractableCustomEmoji(nodes, [], [{ src: REACTION_URL }])).toEqual({
+      src: REACTION_URL,
+      code: "",
+    });
+    // Even with a full pack: there is no code to compare, and the dialog refuses a taken
+    // name itself.
+    expect(extractableCustomEmoji(nodes, [emoji("meow")], [{ src: REACTION_URL }])).toEqual({
+      src: REACTION_URL,
+      code: "",
+    });
+  });
 });
 
 describe("bodyIsOnlyEmoji", () => {
