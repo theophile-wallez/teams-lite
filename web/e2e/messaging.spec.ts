@@ -10,6 +10,53 @@ import {
   sendFromComposer,
   setSendControl,
 } from "./helpers";
+import type { Page } from "@playwright/test";
+
+declare global {
+  interface Window {
+    /** The page's real Clipboard, kept aside where a test hides it from the app. */
+    realClipboard: Clipboard;
+  }
+}
+
+/** Open a conversation by name via the command palette. A copy test names its thread and
+ *  its message: the sidebar's order and the newest row are both shared state — one mock
+ *  process serves the whole run — while a seeded body is the same words every time. */
+async function openByPalette(page: Page, name: string): Promise<void> {
+  await page.keyboard.press("Control+k");
+  const input = page.locator("[cmdk-input]");
+  await expect(input).toBeVisible();
+  await input.fill(name);
+  await input.press("Enter");
+  await expect(page.locator("[cmdk-input]")).toHaveCount(0);
+  await expect(page.locator('[data-testid="conversation-title"]')).toContainText(name);
+}
+
+/** A seeded message of the Media Gallery, named by its own words. */
+const SEEDED = "screenshot from the incident";
+
+/** Copy that message through its "…" menu, and answer with the words its bubble shows —
+ *  what the clipboard is then held against. */
+async function copySeededMessage(page: Page): Promise<string> {
+  const target = page.locator('[data-testid="message"]', { hasText: SEEDED }).first();
+  await expect(target).toBeVisible();
+  const said = squashed((await target.textContent()) ?? "");
+  await target.hover();
+  await target.locator('[data-testid="message-actions"]').click();
+  await page.locator('[data-testid="action-copy"]').click();
+  return said;
+}
+
+/** A value on the clipboard that the copy under test must replace. The clipboard outlives
+ *  a test, so an assertion that only reads it back passes on the PREVIOUS test's copy —
+ *  which is a Copy that writes nothing looking exactly like one that works. */
+const STALE = "nothing was copied";
+
+/** One space for every run of whitespace: a body spanning two blocks is copied with a
+ *  newline between them and rendered without one, and this test is about the words. */
+function squashed(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
 
 test.describe("messaging", () => {
   test("sends a message and shows the echoed bubble", async ({ page }) => {
@@ -150,16 +197,48 @@ test.describe("messaging", () => {
     await expect(page.locator('[data-testid="reply-banner"]')).toHaveCount(0);
   });
 
+  // The CLIPBOARD is what this asserts, not the sentence about it. Reading the status
+  // line alone is how a Copy that reported success and wrote nothing survived.
   test("copies a message to the clipboard", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await gotoApp(page);
-    await openConversationAt(page, 0);
-    const target = page.locator('[data-testid="message"]').first();
-    await target.hover();
-    await target.locator('[data-testid="message-actions"]').click();
-    await page.locator('[data-testid="action-copy"]').click();
-    // The app reports success in the status bar.
+    await openByPalette(page, "Media Gallery");
+    await page.evaluate((stale) => navigator.clipboard.writeText(stale), STALE);
+
+    const said = await copySeededMessage(page);
     await expect(page.locator('[data-testid="status-bar"]')).toContainText("copied");
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).not.toBe(STALE);
+    expect(said).toContain(squashed(copied));
+  });
+
+  // The async Clipboard API is not everywhere: it needs a secure context, and a
+  // plain-HTTP front is a supported way to open this app (the launcher takes `--host`),
+  // so `navigator.clipboard` is undefined there and the write was simply lost — reported
+  // by one line at the foot of the sidebar, which reads as a Copy that does nothing.
+  test("copies through the selection path when the clipboard API is missing", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    // What an insecure origin looks like to the APP: no `writeText` at all. The real one
+    // is kept aside for the test itself, which seeds the clipboard and reads it back —
+    // hiding it from the app is the point, hiding it from both proves nothing.
+    await page.addInitScript(() => {
+      const real = navigator.clipboard;
+      Object.defineProperty(window, "realClipboard", { configurable: true, value: real });
+      Object.defineProperty(navigator, "clipboard", { configurable: true, get: () => ({}) });
+    });
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+    const clipboard = () => page.evaluate(() => window.realClipboard.readText());
+    await page.evaluate((stale) => window.realClipboard.writeText(stale), STALE);
+
+    const said = await copySeededMessage(page);
+    await expect(page.locator('[data-testid="status-bar"]')).toContainText("copied");
+    const copied = await clipboard();
+    expect(copied).not.toBe(STALE);
+    expect(said).toContain(squashed(copied));
   });
 
   // A send that fails is the one failure this app must not swallow. It used to be

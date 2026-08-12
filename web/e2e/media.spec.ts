@@ -448,4 +448,21 @@ test.describe("media (images + attachments)", () => {
     await expect(withText.locator('[data-testid="message-image"]')).toHaveCount(1);
     await expect(withText).not.toHaveAttribute("data-image-only", "true");
   });
+
+  // A message whose whole body is a picture has no text at all, and `writeText("")`
+  // RESOLVES — so Copy reported itself done while the clipboard got nothing. It says
+  // what it really did now, which is the only thing the reader can act on.
+  test("says a picture-only message has no text to copy", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    const pictureOnly = page
+      .locator('[data-testid="message"]')
+      .filter({ has: page.locator('img[alt="whiteboard"]') })
+      .first();
+    await pictureOnly.hover();
+    await pictureOnly.locator('[data-testid="message-actions"]').click();
+    await page.locator('[data-testid="action-copy"]').click();
+    await expect(page.locator('[data-testid="status-bar"]')).toContainText("Nothing to copy");
+  });
 });

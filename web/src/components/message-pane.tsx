@@ -21,6 +21,7 @@ import {
   type ReactionPick,
   type RichQuote,
 } from "~/lib/protocol";
+import { copyText } from "~/lib/clipboard";
 import { messageTimeMarks } from "~/lib/message-time";
 import type { AgentAnswer } from "~/lib/agent-answer";
 import { agentAuthorship } from "~/lib/agent-message";
@@ -622,14 +623,21 @@ export function MessagePane(props: { onBack?: () => void }) {
     [controller, openId],
   );
 
+  // Copy says what really happened, and both halves of that were wrong. `writeText("")`
+  // RESOLVES, so a message whose whole body is a picture — a colleague's screenshot, a
+  // sticker, an emoji — reported itself copied while the clipboard got nothing; and the
+  // write is lost outright wherever the async API is missing or refused, which is what
+  // `copyText` is for (see lib/clipboard.ts).
   const doCopy = useCallback(async (m: ChatMessage) => {
     const text = copyableMessageText(m);
-    try {
-      await navigator.clipboard.writeText(text);
-      controller.setStatus("Message copied to clipboard");
-    } catch {
-      controller.setStatus("Copy failed: clipboard unavailable");
+    if (!text) {
+      controller.setStatus("Nothing to copy: this message has no text");
+      return;
     }
+    const copied = await copyText(text);
+    controller.setStatus(
+      copied ? "Message copied to clipboard" : "Copy failed: clipboard unavailable",
+    );
   }, [controller]);
 
   const doStartEdit = useCallback((m: ChatMessage) => {
