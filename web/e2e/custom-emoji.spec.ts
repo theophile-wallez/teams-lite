@@ -361,6 +361,14 @@ test.describe("custom emoji", () => {
     await expect(art).toHaveAttribute("src", /^blob:/);
     await expect(art).not.toHaveAttribute("alt", "👍");
 
+    // Pointing at it says WHOSE reaction it is and WHICH emoji — the key carries the
+    // name beside the address, so it is `:shipit:` rather than "custom emoji" and
+    // nothing else. The title is on the ART as well as on the chip: the art fills the
+    // pill, so its own is the one a pointer ever lands on.
+    await expect(chip).toHaveAttribute("title", "You reacted with :shipit:");
+    await expect(art).toHaveAttribute("title", "You reacted with :shipit:");
+    await expect(art).toHaveAttribute("alt", ":shipit:");
+
     // The chip hands its own key back, verbatim — no second upload, no re-mint — and the
     // reaction goes. It used to mint a DIFFERENT key here and clear one nobody had set,
     // which left Teams holding the reaction while the local row dropped it.

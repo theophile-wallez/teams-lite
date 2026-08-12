@@ -198,7 +198,16 @@ type SystemEvent =
 
 // Aggregated reaction on a message (mirrors protocol.ts Reaction / the Rust
 // `reactions_value` wire shape).
-type Reaction = { key: string; count: number; mine: boolean };
+//
+// `mris` is the mock's own STORAGE, exactly as the Rust store keeps the emotion's
+// user list, and `users` is what a read resolves it into (see `nicknamed`) — so a
+// renamed colleague is named in a tooltip here for the same reason they are named
+// there. A fixture may leave `mris` out; the reaction is then a count with no names,
+// which is the honest state for a reactor this machine has never seen write.
+type Reaction = { key: string; count: number; mine: boolean; mris?: string[]; users?: ReactionUser[] };
+
+// One person behind a reaction, as the wire carries them.
+type ReactionUser = { name: string; mine?: boolean };
 
 // One @mention in a message body (mirrors protocol.ts MessageMention / the Rust
 // `parse_mentions` wire shape). The body's span carries only `itemid`; this is
@@ -2602,7 +2611,19 @@ function nickname(mri: string | undefined): string {
 function nicknamed(m: ChatMessage): ChatMessage {
   const own = nickname(m.sender_mri);
   const mentions_me = (m.mentions ?? []).some((mention) => mention.mri === SELF_MRI);
-  return { ...m, sender: own || m.sender, mentions_me };
+  const reactions = m.reactions?.map(reactionWithPeople);
+  return { ...m, sender: own || m.sender, mentions_me, reactions };
+}
+
+/** One reaction on its way to a page: the people behind it named, the way the Rust
+ *  `reactions_value` names them off each reactor's MRI. A reaction with no stored MRIs
+ *  keeps its count and names nobody, which is what the page counts instead. */
+function reactionWithPeople(r: Reaction): Reaction {
+  const users = (r.mris ?? []).map((mri) => ({
+    name: nickname(mri) || teamsNameFor(mri),
+    mine: mri === SELF_MRI,
+  }));
+  return { key: r.key, count: r.count, mine: r.mine, users };
 }
 
 /** Drop an override entry that no longer overrides anything, so "no override" is
@@ -8083,9 +8104,19 @@ function reactMessage(
   if (!msg) return false;
 
   const list = msg.reactions ?? [];
-  // Drop our reaction from wherever it currently sits (one per user).
+  // Drop our reaction from wherever it currently sits (one per user) — out of the
+  // count AND out of the user list, which is what the tooltip is drawn from.
   const withoutMine = list
-    .map((r) => (r.mine ? { ...r, count: r.count - 1, mine: false } : r))
+    .map((r) =>
+      r.mine
+        ? {
+            ...r,
+            count: r.count - 1,
+            mine: false,
+            mris: (r.mris ?? []).filter((mri) => mri !== SELF_MRI),
+          }
+        : r,
+    )
     .filter((r) => r.count > 0);
   const wasMineKey = list.find((r) => r.mine)?.key;
   // Same key => toggle off. `alwaysOn` is what a PICK from the pack does: the real
@@ -8097,8 +8128,12 @@ function reactMessage(
   if (on) {
     const existing = withoutMine.find((r) => r.key === key);
     next = existing
-      ? withoutMine.map((r) => (r.key === key ? { ...r, count: r.count + 1, mine: true } : r))
-      : [...withoutMine, { key, count: 1, mine: true }];
+      ? withoutMine.map((r) =>
+          r.key === key
+            ? { ...r, count: r.count + 1, mine: true, mris: [...(r.mris ?? []), SELF_MRI] }
+            : r,
+        )
+      : [...withoutMine, { key, count: 1, mine: true, mris: [SELF_MRI] }];
   }
 
   msg.reactions = next;
@@ -9203,8 +9238,18 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       if (!msg) return Response.json({ ok: false }, { status: 404 });
       const count = typeof body.count === "number" ? body.count : 1;
       const mine = Boolean(body.mine);
+      // WHO reacted, so a spec can read the tooltip. `mris` names them explicitly;
+      // by default they are the first colleagues of the roster (plus us when `mine`),
+      // and a spec asking for more reactors than that leaves the rest unnamed — which
+      // is the state a tooltip counts rather than names.
+      const named = Array.isArray(body.mris)
+        ? body.mris.filter((mri): mri is string => typeof mri === "string")
+        : [
+            ...(mine ? [SELF_MRI] : []),
+            ...PEOPLE.slice(0, Math.max(0, count - (mine ? 1 : 0))).map((p) => p.mri),
+          ];
       const others = (msg.reactions ?? []).filter((r) => r.key !== key);
-      msg.reactions = count > 0 ? [...others, { key, count, mine }] : others;
+      msg.reactions = count > 0 ? [...others, { key, count, mine, mris: named }] : others;
       broadcast("message", nicknamed(msg));
       return Response.json({ ok: true, message: msg }, { status: 200 });
     }

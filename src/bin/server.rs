@@ -3119,10 +3119,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // signal; the name is the fallback.
             let me = ctx.identity().await?;
             let (self_name, self_mri) = (me.name, me.mri);
-            let (cached, has_more) = {
-                let store = ctx.store()?;
-                newest_history_page(&store, &conv)?
-            };
+            // Held open until the page is serialized below: a reaction states the names
+            // of the people behind it, which is a store read (see `reactions_value`).
+            let store = ctx.store()?;
+            let (cached, has_more) = newest_history_page(&store, &conv)?;
             // background refresh (does not block the response = instant switch)
             let ctx_bg = ctx.clone();
             let conv_bg = conv.clone();
@@ -3143,18 +3143,29 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let after = {
                         if let Ok(store) = ctx_bg.store() {
                             let inserted = teams_read::persist_page(&store, &conv_bg, &page).unwrap_or(0);
+                            // Serialized while the store is still open: a message states
+                            // who reacted to it, and that is a store read.
                             newest_history_page(&store, &conv_bg)
                                 .ok()
                                 .filter(|(_, has_more)| inserted > 0 || *has_more != had_more)
+                                .map(|(msgs, has_more)| {
+                                    let value = messages_value(
+                                        &msgs,
+                                        &self_name_bg,
+                                        &self_mri_bg,
+                                        Some(&store),
+                                    );
+                                    (value, has_more)
+                                })
                         } else {
                             None
                         }
                     };
-                    if let Some((msgs, has_more)) = after {
+                    if let Some((messages, has_more)) = after {
                         // something changed vs the cache we already returned
                         ctx_bg.emit("messages_updated", json!({
                             "conversation": conv_bg,
-                            "messages": messages_value(&msgs, &self_name_bg, &self_mri_bg),
+                            "messages": messages,
                             "has_more": has_more
                         }));
                     }
@@ -3168,7 +3179,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     );
                 }
             });
-            Ok(messages_json(&cached, &self_name, &self_mri, has_more))
+            Ok(messages_json(&cached, &self_name, &self_mri, has_more, Some(&store)))
         }
 
         // older page for scroll-up
@@ -3178,23 +3189,25 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .get("before_seq")
                 .and_then(Value::as_i64)
                 .context("missing param: before_seq")?;
-            let (cached, cached_has_more) = {
-                let store = ctx.store()?;
-                cached_history_page(&store, &conv, before_seq)?
-            };
-
+            // Before the store is opened, so the page below can be serialized while it is
+            // still open: a reaction states who is behind it, which is a store read.
             let me = ctx.identity().await?;
             let (self_name, self_mri) = (me.name, me.mri);
-            if !cached.is_empty() {
-                return Ok(messages_json(
-                    &cached,
-                    &self_name,
-                    &self_mri,
-                    cached_has_more,
-                ));
-            }
-            if !cached_has_more {
-                return Ok(messages_json(&[], &self_name, &self_mri, false));
+            {
+                let store = ctx.store()?;
+                let (cached, cached_has_more) = cached_history_page(&store, &conv, before_seq)?;
+                if !cached.is_empty() {
+                    return Ok(messages_json(
+                        &cached,
+                        &self_name,
+                        &self_mri,
+                        cached_has_more,
+                        Some(&store),
+                    ));
+                }
+                if !cached_has_more {
+                    return Ok(messages_json(&[], &self_name, &self_mri, false, Some(&store)));
+                }
             }
 
             let before_ms = {
@@ -3222,12 +3235,16 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     }
                 })
                 .await?;
-            let has_more = {
-                let store = ctx.store()?;
-                teams_read::persist_backfill_page(&store, &conv, &page)?;
-                store.oldest_cursor(&conv)?.1
-            };
-            Ok(messages_json(&page.messages, &self_name, &self_mri, has_more))
+            let store = ctx.store()?;
+            teams_read::persist_backfill_page(&store, &conv, &page)?;
+            let has_more = store.oldest_cursor(&conv)?.1;
+            Ok(messages_json(
+                &page.messages,
+                &self_name,
+                &self_mri,
+                has_more,
+                Some(&store),
+            ))
         }
 
         // Persist unsent composer text locally. This never touches the network.
@@ -3907,7 +3924,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // above promised.
             if let Ok(store) = ctx.store() {
                 if let Some(updated) = store.update_message_content(&conv, &message_id, &final_html)? {
-                    ctx.emit("message", message_json(&updated, &self_name, &self_mri));
+                    ctx.emit("message", message_json(&updated, &self_name, &self_mri, Some(&store)));
                 }
             }
             Ok(json!({ "edited": true }))
@@ -3957,7 +3974,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
 
             if let Ok(store) = ctx.store() {
                 if let Some(updated) = store.mark_message_deleted(&conv, &message_id)? {
-                    ctx.emit("message", message_json(&updated, &self_name, &self_mri));
+                    ctx.emit("message", message_json(&updated, &self_name, &self_mri, Some(&store)));
                 }
             }
             Ok(json!({ "deleted": true }))
@@ -4064,7 +4081,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 if let Some(updated) =
                     store.set_my_reaction(&conv, &message_id, &self_mri, key_arg, now_ms)?
                 {
-                    ctx.emit("message", message_json(&updated, &self_name, &self_mri));
+                    ctx.emit("message", message_json(&updated, &self_name, &self_mri, Some(&store)));
                 }
             }
             Ok(json!({ "reacted": on }))
@@ -7760,10 +7777,15 @@ fn may_delete(stored: Option<&Message>, self_name: &str, self_mri: &str) -> bool
     }
 }
 
-fn messages_value(msgs: &[Message], self_name: &str, self_mri: &str) -> Value {
+fn messages_value(
+    msgs: &[Message],
+    self_name: &str,
+    self_mri: &str,
+    store: Option<&Store>,
+) -> Value {
     json!(msgs
         .iter()
-        .map(|m| message_json(m, self_name, self_mri))
+        .map(|m| message_json(m, self_name, self_mri, store))
         .collect::<Vec<_>>())
 }
 
@@ -7803,12 +7825,24 @@ fn system_event_value(m: &Message) -> Value {
 }
 
 /// Decode a message's stored reactions into the wire shape the UIs render: one
-/// `{ "key", "count", "mine" }` per emotion that has at least one user, with
-/// `mine` true when our own MRI is among them. The full user list stays server-
-/// side; the UI only needs the aggregate plus whether we reacted. A legacy /
-/// blank / malformed value degrades to an empty array so one bad row can never
-/// break serialization.
-fn reactions_value(m: &Message, self_mri: &str) -> Value {
+/// `{ "key", "count", "mine", "users" }` per emotion that has at least one user,
+/// with `mine` true when our own MRI is among them. A legacy / blank / malformed
+/// value degrades to an empty array so one bad row can never break serialization.
+///
+/// `users` says WHO reacted, in the order Teams listed them (reaction time), so a
+/// reader can point at a chip and learn whose emoji it is. Each entry carries the
+/// name and nothing else — a reaction is not a person card, and an MRI on the wire
+/// would be one more place a page could name somebody its own way. Which entry is
+/// OURS travels per user rather than being inferred from the aggregate `mine`: the
+/// page says "You" where we are among the reactors, and it cannot know which of
+/// several names that is.
+///
+/// The name is [`Store::display_name_for_mri`] — the one ladder, so a person the
+/// user renamed is named here exactly as they are above their own bubbles. With no
+/// store (a unit test, a caller that holds none) the names come out empty, which is
+/// the same state as a reactor this machine has never seen write: the page then
+/// counts them instead of naming them.
+fn reactions_value(m: &Message, self_mri: &str, store: Option<&Store>) -> Value {
     let parsed: Value = serde_json::from_str(&m.reactions).unwrap_or_else(|_| json!([]));
     let Some(list) = parsed.as_array() else {
         return json!([]);
@@ -7818,23 +7852,39 @@ fn reactions_value(m: &Message, self_mri: &str) -> Value {
         .filter_map(|e| {
             let key = e.get("key").and_then(Value::as_str)?;
             let users = e.get("users").and_then(Value::as_array)?;
-            if users.is_empty() {
+            // ponytail: one indexed name lookup per reactor, uncached. A page of
+            // history is a few dozen of them; a cache earns its place when a
+            // measurement says so.
+            let people: Vec<Value> = users
+                .iter()
+                .filter_map(|u| u.get("mri").and_then(Value::as_str))
+                .map(|mri| {
+                    let mine = !self_mri.is_empty() && teams_lite::store::same_user(mri, self_mri);
+                    let name = store
+                        .and_then(|s| s.display_name_for_mri(mri).ok().flatten())
+                        .unwrap_or_default();
+                    json!({ "name": name, "mine": mine })
+                })
+                .collect();
+            if people.is_empty() {
                 return None;
             }
-            let mine = !self_mri.is_empty()
-                && users
-                    .iter()
-                    .filter_map(|u| u.get("mri").and_then(Value::as_str))
-                    .any(|m| teams_lite::store::same_user(m, self_mri));
-            Some(json!({ "key": key, "count": users.len(), "mine": mine }))
+            let mine = people.iter().any(|p| p["mine"] == json!(true));
+            Some(json!({ "key": key, "count": people.len(), "mine": mine, "users": people }))
         })
         .collect();
     json!(out)
 }
 
-fn messages_json(msgs: &[Message], self_name: &str, self_mri: &str, has_more: bool) -> Value {
+fn messages_json(
+    msgs: &[Message],
+    self_name: &str,
+    self_mri: &str,
+    has_more: bool,
+    store: Option<&Store>,
+) -> Value {
     json!({
-        "messages": messages_value(msgs, self_name, self_mri),
+        "messages": messages_value(msgs, self_name, self_mri, store),
         "has_more": has_more
     })
 }
@@ -8061,7 +8111,7 @@ async fn thread_mentionable_people(
 /// web/src/lib/protocol.ts). Absent from an older backend, and the reader then treats
 /// it as "not known" and notifies, because a mention nobody is told about is the worse
 /// failure.
-fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
+fn message_json(m: &Message, self_name: &str, self_mri: &str, store: Option<&Store>) -> Value {
     json!({
         "id": m.id, "conversation_id": m.conversation_id, "seq": m.seq,
         "compose_time": m.compose_time, "sender": m.sender, "sender_mri": m.sender_mri,
@@ -8069,7 +8119,7 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str) -> Value {
         "content": m.content,
         "attachments": attachments_value(m),
         "mentions": mentions_value(m),
-        "reactions": reactions_value(m, self_mri),
+        "reactions": reactions_value(m, self_mri, store),
         "system_event": system_event_value(m),
         "is_self": is_self(m, self_name, self_mri),
         "mentions_me": push_policy::mentions_user(&m.mentions, self_mri),
@@ -10838,7 +10888,7 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
                     let row = reacted
                         .or_else(|| store.get_message(&m.conversation_id, &m.id).ok().flatten())
                         .unwrap_or_else(|| m.clone());
-                    ctx_msgs.emit("message", message_json(&row, &self_name, &self_mri));
+                    ctx_msgs.emit("message", message_json(&row, &self_name, &self_mri, Some(&store)));
                     // Reach the devices no socket reaches: a phone whose Home Screen app
                     // is closed learns about this message only through Web Push. Only on
                     // a FRESH insert — a reaction arriving on an old message is not news
@@ -13241,7 +13291,7 @@ mod tests {
         ]"#
         .into();
 
-        let v = reactions_value(&m, "8:me");
+        let v = reactions_value(&m, "8:me", None);
         let arr = v.as_array().unwrap();
         assert_eq!(arr.len(), 1, "the empty-user 'heart' emotion is dropped");
         assert_eq!(arr[0]["key"], "like");
@@ -13249,8 +13299,50 @@ mod tests {
         assert_eq!(arr[0]["mine"], true);
 
         // `mine` is false when our MRI is not among the reactors
-        let v = reactions_value(&m, "8:someone_else");
+        let v = reactions_value(&m, "8:someone_else", None);
         assert_eq!(v.as_array().unwrap()[0]["mine"], false);
+    }
+
+    /// A chip has to be able to say WHOSE emoji it is, and the name it says is the one
+    /// ladder every other surface uses — so a colleague the user RENAMED is named here
+    /// exactly as they are above their own bubbles.
+    #[test]
+    fn a_reaction_names_the_people_behind_it_through_the_one_name_ladder() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_conversation("c1", "Chat", 0).unwrap();
+        let mut wrote = message(1);
+        wrote.sender = "Ada Lovelace".into();
+        wrote.sender_mri = "8:orgid:ada".into();
+        store.insert_message(&wrote).unwrap();
+
+        let mut m = message(2);
+        m.reactions = r#"[{"key":"like","users":[
+            {"mri":"8:orgid:ada","time":1},
+            {"mri":"8:me","time":2},
+            {"mri":"8:orgid:stranger","time":3}
+        ]}]"#
+            .into();
+
+        let users = |store: Option<&Store>| reactions_value(&m, "8:me", store)[0]["users"].clone();
+
+        // In the order Teams listed them, each entry saying whether it is ours — the
+        // page reads that to say "You", and the aggregate `mine` cannot say which name.
+        let v = users(Some(&store));
+        assert_eq!(v[0], json!({ "name": "Ada Lovelace", "mine": false }));
+        assert_eq!(v[1]["mine"], true);
+        // Somebody this machine has never seen write is carried NAMELESS rather than
+        // dropped: the page counts them, and a chip of 3 over two names reads as a bug.
+        assert_eq!(v[2], json!({ "name": "", "mine": false }));
+
+        // The user's own name for them wins, here as everywhere else.
+        store.set_person_name("8:orgid:ada", Some("Ada"), 1).unwrap();
+        assert_eq!(users(Some(&store))[0]["name"], "Ada");
+
+        // With no store there are no names, which is the same shape as the stranger
+        // above — never a missing field the page would have to guess at.
+        let v = users(None);
+        assert_eq!(v[0], json!({ "name": "", "mine": false }));
+        assert_eq!(v.as_array().unwrap().len(), 3);
     }
 
     #[test]
@@ -13258,17 +13350,17 @@ mod tests {
         let mut m = message(1);
         m.mentions =
             r#"[{"itemid":0,"mri":"8:orgid:leonor","kind":"person","display_name":"Leonor"}]"#.into();
-        let v = message_json(&m, "Alice", "8:me");
+        let v = message_json(&m, "Alice", "8:me", None);
         assert_eq!(v["mentions"][0]["itemid"], 0);
         assert_eq!(v["mentions"][0]["mri"], "8:orgid:leonor");
         assert_eq!(v["mentions"][0]["kind"], "person");
 
         // A message with none, and a row whose value is unusable, both serialize
         // as an empty list — never as a string, and never as an error.
-        assert_eq!(message_json(&message(2), "Alice", "8:me")["mentions"], json!([]));
+        assert_eq!(message_json(&message(2), "Alice", "8:me", None)["mentions"], json!([]));
         let mut broken = message(3);
         broken.mentions = "{not json".into();
-        assert_eq!(message_json(&broken, "Alice", "8:me")["mentions"], json!([]));
+        assert_eq!(message_json(&broken, "Alice", "8:me", None)["mentions"], json!([]));
     }
 
     #[test]
@@ -13281,19 +13373,19 @@ mod tests {
         let mut m = message(1);
         m.mentions =
             r#"[{"itemid":0,"mri":"8:me","kind":"person","display_name":"Alice"}]"#.into();
-        assert_eq!(message_json(&m, "Alice", "8:me")["mentions_me"], true);
+        assert_eq!(message_json(&m, "Alice", "8:me", None)["mentions_me"], true);
         assert_eq!(
-            message_json(&m, "Bob", "8:someone_else")["mentions_me"],
+            message_json(&m, "Bob", "8:someone_else", None)["mentions_me"],
             false,
             "a mention of somebody else is not one of ours"
         );
 
         // A message that mentions nobody, and a row whose list is unusable, both say
         // false rather than nothing — the page reads an ABSENT field as "not known".
-        assert_eq!(message_json(&message(2), "Alice", "8:me")["mentions_me"], false);
+        assert_eq!(message_json(&message(2), "Alice", "8:me", None)["mentions_me"], false);
         let mut broken = message(3);
         broken.mentions = "{not json".into();
-        assert_eq!(message_json(&broken, "Alice", "8:me")["mentions_me"], false);
+        assert_eq!(message_json(&broken, "Alice", "8:me", None)["mentions_me"], false);
     }
 
     #[test]
@@ -13303,12 +13395,12 @@ mod tests {
         let mut m = message(1);
         m.message_type = "Text".into();
         m.content = "pour moi c'est <yyyy>-<id>".into();
-        let v = message_json(&m, "Alice", "8:me");
+        let v = message_json(&m, "Alice", "8:me", None);
         assert_eq!(v["message_type"], "Text");
         assert_eq!(v["content"], "pour moi c'est <yyyy>-<id>", "the body is not rewritten");
 
         // A legacy row carries an empty type — "unknown", not a guess.
-        assert_eq!(message_json(&message(2), "Alice", "8:me")["message_type"], "");
+        assert_eq!(message_json(&message(2), "Alice", "8:me", None)["message_type"], "");
     }
 
     #[test]
@@ -13374,7 +13466,7 @@ mod tests {
     fn system_event_rides_the_wire_only_for_events() {
         // A normal chat message carries a null system_event on the wire.
         let chat = message(1);
-        assert!(message_json(&chat, "Alice", "8:me")["system_event"].is_null());
+        assert!(message_json(&chat, "Alice", "8:me", None)["system_event"].is_null());
 
         // A call event serializes its structured payload for the UI to render.
         let mut call = message(2);
@@ -13382,7 +13474,7 @@ mod tests {
         call.system_event =
             r#"{"kind":"call","event":"ended","duration_seconds":600,"participant_count":5,"participants":["A"]}"#
                 .into();
-        let v = message_json(&call, "Alice", "8:me");
+        let v = message_json(&call, "Alice", "8:me", None);
         assert_eq!(v["system_event"]["kind"], "call");
         assert_eq!(v["system_event"]["event"], "ended");
         assert_eq!(v["system_event"]["duration_seconds"], 600);

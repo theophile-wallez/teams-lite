@@ -27,9 +27,13 @@ import { useController } from "./controller-context";
 export function CustomEmoji(props: {
   src: string;
   /** The words this glyph stands for — its `:code:` where the reader knows it, and a
-   *  neutral phrase where the key names only art. Used as `alt`, `title`, and as the
-   *  text drawn in its place when the bytes cannot be fetched. */
+   *  neutral phrase where the key names only art. Used as `alt`, as the default
+   *  `title`, and as the text drawn in its place when the bytes cannot be fetched. */
   label: string;
+  /** What a pointer resting on the glyph says, when that is more than the words it
+   *  stands for: on a reaction chip the art fills the whole pill, so the CHIP's own
+   *  title would never be read and this carries it instead. */
+  title?: string;
   /** Draw it large, for a message that is nothing but emoji. The bubble decides this and
    *  drops its own chrome in the same breath (see `bodyIsOnlyEmoji`) — a large glyph still
    *  inside a padded bubble reads as an uploaded picture, which is the thing to avoid. */
@@ -106,7 +110,7 @@ export function CustomEmoji(props: {
     <img
       src={objectUrl}
       alt={props.label}
-      title={props.label}
+      title={props.title ?? props.label}
       aria-hidden
       draggable={false}
       loading="lazy"

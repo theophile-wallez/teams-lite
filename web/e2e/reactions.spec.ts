@@ -185,4 +185,62 @@ test.describe("message reactions", () => {
     // Not ours, so the "mine" highlight attribute is absent.
     await expect(chip).not.toHaveAttribute("data-mine", "true");
   });
+
+  test("a chip says WHO reacted, and counts the reactors it cannot name", async ({ page }) => {
+    await gotoApp(page);
+    const conv = await openConversationAt(page, 0);
+
+    const target = page.locator('[data-testid="message"]').first();
+    const messageId = await target.getAttribute("data-message-id");
+
+    // Three colleagues, named. The count alone answers "how many"; whose emoji it is
+    // was reachable nowhere before this, and it is the reader's actual question.
+    await emitReaction(page, {
+      conversation: conv,
+      message_id: messageId!,
+      key: "laugh",
+      count: 3,
+      mris: ["8:orgid:ava-thompson", "8:orgid:liam-nguyen", "8:orgid:olivia-martins"],
+    });
+    const chip = target.locator('[data-testid="reaction-chip-laugh"]');
+    await expect(chip).toHaveAttribute(
+      "title",
+      "Ava Thompson, Liam Nguyen, and Olivia Martins reacted with laugh",
+    );
+    // A screen reader is handed `aria-label` INSTEAD of the title, so the names are in
+    // it too — after the action, which is what a press on the chip does.
+    await expect(chip).toHaveAttribute(
+      "aria-label",
+      "Add laugh reaction — Ava Thompson, Liam Nguyen, and Olivia Martins",
+    );
+
+    // WE come first, which is where Teams puts us and what a reader looks for — and
+    // never under our own name, which a reader has to compare against their own.
+    // (The mock names us plus its first colleague for a `mine` reaction of two.)
+    await emitReaction(page, {
+      conversation: conv,
+      message_id: messageId!,
+      key: "heart",
+      count: 2,
+      mine: true,
+    });
+    await expect(target.locator('[data-testid="reaction-chip-heart"]')).toHaveAttribute(
+      "title",
+      "You and Ava Thompson reacted with heart",
+    );
+
+    // A reactor this machine has never seen write has no name, and is COUNTED rather
+    // than dropped: a chip saying 3 over nothing at all reads as a chip with a bug.
+    await emitReaction(page, {
+      conversation: conv,
+      message_id: messageId!,
+      key: "surprised",
+      count: 3,
+      mris: [],
+    });
+    await expect(target.locator('[data-testid="reaction-chip-surprised"]')).toHaveAttribute(
+      "title",
+      "3 people reacted with surprised",
+    );
+  });
 });

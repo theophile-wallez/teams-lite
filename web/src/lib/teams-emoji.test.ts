@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { mediaNeedsProxy } from "./protocol";
+import { mediaNeedsProxy, type Reaction } from "./protocol";
 import {
   appleEmojiUrl,
   canReactWith,
   customReactionArt,
   reactionEmoji,
+  reactionLabel,
+  reactionTitle,
   teamsReactionKey,
   REACTION_PICKER,
 } from "./teams-emoji";
@@ -190,5 +192,70 @@ describe("customReactionArt", () => {
     expect(customReactionArt("tlcustom-https://skype.com.evil.example/p.png")).toBeNull();
     // And the legitimate key still draws, so the rail refuses hosts rather than reactions.
     expect(customReactionArt(`tlcustom-${OBJECT_URL}`)).toEqual({ src: OBJECT_URL });
+  });
+});
+
+describe("reactionTitle — whose emoji a chip is", () => {
+  const OBJECT_URL = "https://eu-api.asm.skype.com/v1/objects/0-weu-d1-abc/views/imgo";
+  const chip = (over: Partial<Reaction>): Reaction => ({
+    key: "like",
+    count: 1,
+    mine: false,
+    ...over,
+  });
+
+  it("names the reactors, and puts US first", () => {
+    expect(
+      reactionTitle(
+        chip({
+          count: 3,
+          mine: true,
+          users: [
+            { name: "Ada Lovelace" },
+            { name: "", mine: true },
+            { name: "Grace Hopper" },
+          ],
+        }),
+      ),
+    ).toBe("You, Ada Lovelace, and Grace Hopper reacted with like");
+    expect(reactionTitle(chip({ mine: true, users: [{ name: "", mine: true }] }))).toBe(
+      "You reacted with like",
+    );
+    expect(reactionTitle(chip({ users: [{ name: "Ada Lovelace" }] }))).toBe(
+      "Ada Lovelace reacted with like",
+    );
+  });
+
+  it("COUNTS a reactor it cannot name rather than dropping them", () => {
+    // A chip saying 3 over two names reads as a chip with a bug; the backend leaves a
+    // name empty for somebody this machine has never seen write.
+    expect(
+      reactionTitle(chip({ count: 3, users: [{ name: "Ada Lovelace" }, { name: "" }, { name: "" }] })),
+    ).toBe("Ada Lovelace and 2 others reacted with like");
+    expect(reactionTitle(chip({ count: 2, users: [{ name: "Ada Lovelace" }, { name: "" }] }))).toBe(
+      "Ada Lovelace and 1 other reacted with like",
+    );
+    // Nobody named at all: "1 other" would say somebody was left out, and none was.
+    expect(reactionTitle(chip({ count: 2, users: [{ name: "" }, { name: "" }] }))).toBe(
+      "2 people reacted with like",
+    );
+    expect(reactionTitle(chip({ users: [{ name: "" }] }))).toBe("1 person reacted with like");
+  });
+
+  it("falls back to the COUNT for a backend too old to carry the list", () => {
+    expect(reactionTitle(chip({ count: 4 }))).toBe("4 people reacted with like");
+    // …and still says what the emoji is when there is nobody at all to name.
+    expect(reactionTitle(chip({ count: 0 }))).toBe("Reacted with like");
+  });
+
+  it("names a CUSTOM reaction by its own code, and falls back to the phrase", () => {
+    // The whole complaint this answers: a custom chip said "custom emoji" and nothing
+    // else, so a reader could see the art and never learn what to type.
+    expect(reactionTitle(chip({ key: `tlcustom-${OBJECT_URL}#shipit`, users: [{ name: "Ada" }] }))).toBe(
+      "Ada reacted with :shipit:",
+    );
+    // A key written before the name travelled — this tenant holds those.
+    expect(reactionLabel(`tlcustom-${OBJECT_URL}`)).toBe("custom emoji");
+    expect(reactionLabel("like")).toBe("like");
   });
 });

@@ -14,7 +14,7 @@
 //     Teams client.
 
 import { isValidCustomEmojiName } from "./custom-emoji";
-import { mediaNeedsProxy } from "./protocol";
+import { mediaNeedsProxy, type Reaction } from "./protocol";
 import { TEAMS_EMOJI_CATALOG } from "./teams-emoji-catalog";
 
 /** Shown for a key no catalog entry, tone rule, or code point can explain — a
@@ -254,4 +254,66 @@ export function customReactionArt(key: string): { src: string; name?: string } |
   if (!src.startsWith("https://") || !mediaNeedsProxy(src)) return null;
   const name = at < 0 ? "" : rest.slice(at + 1);
   return isValidCustomEmojiName(name) ? { src, name } : { src };
+}
+
+/** What a custom reaction is called when its key names only art. */
+export const CUSTOM_REACTION_LABEL = "custom emoji";
+
+/** The words a reaction is called: its `:code:` for one of the user's own emoji, the
+ *  neutral phrase for art whose key carries no name (this tenant holds keys written
+ *  before the name travelled — see {@link customReactionArt}), and Microsoft's own
+ *  emotion key otherwise, which is the word every other reaction surface here uses. */
+export function reactionLabel(key: string): string {
+  const custom = customReactionArt(key);
+  if (!custom) return key;
+  return custom.name ? `:${custom.name}:` : CUSTOM_REACTION_LABEL;
+}
+
+/** English, deliberately: the words it joins are this app's own ("You", "2 others"),
+ *  and a French list format around English words reads as neither. Dates still follow
+ *  the reader's locale — those are the reader's data, not our vocabulary. */
+const LIST_FORMAT = new Intl.ListFormat("en", { style: "long", type: "conjunction" });
+
+/**
+ * WHO reacted, as the phrase a chip's tooltip opens with: "You", "Ada Lovelace and
+ * you", "Ada, Grace and 2 others".
+ *
+ * We come FIRST, which is where Teams puts us and what a reader looks for. A reactor
+ * the backend could not name — nobody this machine has ever seen write — is COUNTED
+ * rather than dropped, because a chip saying 3 over two names is a chip that looks
+ * wrong; and a whole reaction of unnamed people still answers "how many". `count` is
+ * the fallback for a backend too old to carry the list at all, so an older payload
+ * degrades to the number instead of to silence.
+ */
+export function reactionReactors(reaction: Reaction): string {
+  const users = reaction.users ?? [];
+  const mine = users.some((u) => u.mine);
+  const named = users.filter((u) => !u.mine && u.name.trim()).map((u) => u.name.trim());
+  const total = Math.max(users.length, reaction.count);
+  const unnamed = Math.max(0, total - named.length - (mine ? 1 : 0));
+  const parts = mine ? ["You", ...named] : [...named];
+  if (unnamed > 0) {
+    // "1 other" beside a name, "1 person" on its own: "1 other reacted" with nobody
+    // else named says there is somebody this phrase left out, and there is not.
+    const beside = parts.length > 0;
+    if (unnamed === 1) parts.push(beside ? "1 other" : "1 person");
+    else parts.push(`${unnamed} ${beside ? "others" : "people"}`);
+  }
+  return LIST_FORMAT.format(parts);
+}
+
+/**
+ * A reaction chip's tooltip: who reacted, and with what — "Ada Lovelace and you
+ * reacted with :shipit:". It is the only place a reader learns whose emoji a chip
+ * is, which is why a custom one names its own `:code:` here rather than saying
+ * "custom emoji" and nothing else.
+ *
+ * With nobody to name at all (a reaction with no users and no count, which nothing
+ * should send) it still says what the emoji is rather than coming out empty: a
+ * tooltip that appears blank reads as a bug in the chip.
+ */
+export function reactionTitle(reaction: Reaction): string {
+  const label = reactionLabel(reaction.key);
+  const who = reactionReactors(reaction);
+  return who ? `${who} reacted with ${label}` : `Reacted with ${label}`;
 }

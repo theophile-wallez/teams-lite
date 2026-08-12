@@ -601,6 +601,10 @@ export async function emitReaction(
     key?: string;
     count?: number;
     mine?: boolean;
+    /** Whose reaction it is. Omitted, the mock names the first colleagues of its
+     *  roster; `[]` leaves every reactor unnamed, which is a real state (nobody this
+     *  machine has seen write) and the one a chip's tooltip counts rather than names. */
+    mris?: string[];
   },
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {

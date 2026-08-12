@@ -29,7 +29,14 @@ import {
   type ReactionPick,
   type RichQuote,
 } from "~/lib/protocol";
-import { customReactionArt, reactionEmoji, REACTION_PICKER } from "~/lib/teams-emoji";
+import {
+  customReactionArt,
+  reactionEmoji,
+  reactionLabel,
+  reactionReactors,
+  reactionTitle,
+  REACTION_PICKER,
+} from "~/lib/teams-emoji";
 import { hasActivePipeline } from "~/lib/gitlab-pipeline";
 import { LINEAR_WEB_HOST } from "~/lib/linear";
 import { mergeRequestsIn, type MergeRequestLink } from "~/lib/merge-request";
@@ -1780,17 +1787,26 @@ function ReactionChips(props: {
     >
       {props.reactions.map((r) => {
         const custom = customReactionArt(r.key);
+        // WHO reacted, and with what. It is the whole answer a reader points at a chip
+        // for, and the only place a custom one is named: the art is the sender's, but
+        // the key carries their own `:code:` for it, so the phrase says that rather
+        // than "custom emoji" and nothing else.
+        const title = reactionTitle(r);
+        // Nobody but us: "Remove your :shipit: reaction" already says whose it is, and
+        // "— You" after it is the same word twice.
+        const who = r.mine && r.count === 1 ? "" : reactionReactors(r);
         return (
           <button
             key={r.key}
             type="button"
+            title={title}
             data-testid={`reaction-chip-${r.key}`}
             data-mine={r.mine ? "true" : undefined}
             aria-pressed={r.mine}
-            // A custom key names its ART and no name, so the label says what it is
-            // rather than naming somebody else's emoji from our own pack — two people's
-            // `:shipit:` are two different pictures, and the art on the chip is theirs.
-            aria-label={`${r.mine ? "Remove your" : "Add"} ${custom ? "custom emoji" : r.key} reaction`}
+            // The label is the ACTION and then who is behind the chip — not the whole
+            // sentence, which would say the emoji twice: a screen reader is given
+            // `aria-label` INSTEAD of `title`, so the names have to be in it.
+            aria-label={`${r.mine ? "Remove your" : "Add"} ${reactionLabel(r.key)} reaction${who ? ` — ${who}` : ""}`}
             // Verbatim, and that is the whole toggle-off path: the key already names an
             // uploaded object, so nothing is uploaded and nothing is re-minted.
             onClick={() => props.onToggle({ key: r.key })}
@@ -1805,7 +1821,15 @@ function ReactionChips(props: {
             )}
           >
             {custom ? (
-              <CustomEmoji src={custom.src} label="custom emoji" className="size-5" />
+              // The art fills the pill, so its OWN title is what a pointer lands on —
+              // the chip's would never be read. It carries the same sentence, and the
+              // label stays the short words the fallback draws in place of the art.
+              <CustomEmoji
+                src={custom.src}
+                label={reactionLabel(r.key)}
+                title={title}
+                className="size-5"
+              />
             ) : (
               <Emoji emoji={reactionEmoji(r.key)} className="size-5" />
             )}

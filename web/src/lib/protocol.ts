@@ -72,7 +72,18 @@ export type Reaction = {
   key: string;
   count: number;
   mine: boolean;
+  /** Who reacted, in the order Teams listed them (reaction time) — what a chip's
+   *  tooltip names (see `reactionTitle`). Absent from a backend too old to say, and
+   *  the tooltip then counts the reactors instead of naming them. */
+  users?: ReactionUser[];
 };
+
+/** One person behind a reaction. The name is the backend's own ladder — a renamed
+ *  colleague is named here as they are above their bubbles — and is empty for
+ *  somebody this machine has never seen write, who is counted rather than named.
+ *  `mine` travels PER USER because the page says "You" where we are among them and
+ *  the aggregate `mine` cannot say which of several names that is. */
+export type ReactionUser = { name: string; mine?: boolean };
 
 /**
  * What a reaction surface hands the backend: one of Microsoft's own emotion keys, or

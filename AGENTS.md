@@ -349,6 +349,47 @@ iMessage's own shape, and the one the time mark already follows for "when". `nam
   incoming group message carries one and the user's own does not, and the resolution itself
   is pinned in `store::tests`.
 
+## WHO reacted (a chip says it on hover, and a custom one says its own name)
+
+A reaction chip carries a count and no names, which answers "how many" and never the
+reader's actual question. Pointing at one now says both: "Ada Lovelace and you reacted
+with :shipit:". `reactions_value` (src/bin/server.rs) resolves the people,
+`reactionTitle` / `reactionReactors` / `reactionLabel` (`web/src/lib/teams-emoji.ts`)
+write the phrase, and the chip in `message-bubble.tsx` carries it as a plain `title`.
+
+- **The names are the BACKEND's, through the one ladder.** The stored emotion holds
+  each reactor's MRI (`teams_read::parse_emotions`) and nothing else, so the wire gains
+  a `users` list resolved by `Store::display_name_for_mri` — which is why a colleague
+  the user RENAMED is named here exactly as they are above their own bubbles. The page
+  is never handed the MRIs: one answer about a name in this app, and a reaction is not
+  a person card. It is what made the two history handlers hold their store open until
+  the page is serialized — a message now states something a store read answers.
+- **`mine` travels per USER as well as per reaction.** The page puts "You" first, where
+  Teams puts it and where a reader looks, and the aggregate flag cannot say which of
+  several names is theirs.
+- **A reactor with no name is COUNTED, never dropped** — somebody this machine has
+  never seen write, and a backend too old to carry the list at all: "Ada and 2 others",
+  "3 people". A chip saying 3 over two names reads as a chip with a bug.
+- **A CUSTOM reaction names its own `:code:`**, which is the second half of the reason
+  its key carries a name (§ Custom emoji): the art is the sender's and is never
+  resolved from the reader's pack, but the key's own name is what lets the tooltip say
+  which emoji it is rather than "custom emoji" and nothing else. A key written before
+  the name travelled still says the neutral phrase.
+- **It is the ART that carries the tooltip on a custom chip**, not only the button: the
+  glyph fills the pill, so the button's own `title` is the one a pointer never lands on
+  (`CustomEmoji`'s `title`, which defaults to its label everywhere else).
+- **A screen reader is handed the names too.** `aria-label` REPLACES `title` for
+  assistive tech, so it carries the action and then who is behind the chip — the emoji
+  once, not twice, and no names at all on a reaction that is only ours, where "Remove
+  your :shipit: reaction" has already said whose it is.
+
+The mock keeps the reactors' MRIs and resolves them at its own read boundary
+(`reactionWithPeople` in `nicknamed`), which is the split the backend has; `emitReaction`
+takes `mris` so a spec can name them or leave them unnamed. `web/e2e/reactions.spec.ts`
+and `custom-emoji.spec.ts` pin the phrases, and the ladder itself is pinned in
+`server::tests`. There is no capture: a native tooltip is not something a screenshot
+holds.
+
 ## The local agent (`@claude` in a thread)
 
 The user can summon a coding agent that runs on this machine from any Teams client —
@@ -3661,8 +3702,9 @@ feature worth having: a local-only decoration would be a different, smaller feat
     because the art was never the missing half.
   - **A LABEL is still resolved locally or stated neutrally, and ART never is.** Two people's
     `:shipit:` are two different pictures, so the chip draws the bytes the key names. What the
-    name buys is that the reader can now TYPE the emoji, not that their own art is substituted
-    into somebody else's reaction.
+    name buys is that the reader can now TYPE the emoji — and that the chip can SAY which
+    emoji it is (§ WHO reacted) — not that their own art is substituted into somebody else's
+    reaction.
 - **Custom art in a stock Teams REACTION row is impossible**, and this is the one place
   Slack parity ends: their client renders a reaction from its own asset catalogue and has
   no fetch path. Both halves of the reaction surface say so — the quick row's custom band
