@@ -1,4 +1,4 @@
-//! Render a release body from commit subjects on stdin. CI's half of `src/changelog.rs`.
+//! Render a release body from commit messages on stdin. CI's half of `src/changelog.rs`.
 //!
 //! It exists so the release notes on github.com and the list the update button shows are
 //! the SAME list, grouped by the same code. The alternative was an awk pipeline in
@@ -8,8 +8,13 @@
 //! It talks to nothing. One read of stdin, one write to stdout, no network and no tenant,
 //! which is what makes it safe to run from a workflow:
 //!
-//!     git log --no-merges --pretty=format:%s "$prev..$GITHUB_SHA" \
+//!     git log -z --no-merges --pretty=format:%s%n%b "$prev..$GITHUB_SHA" \
 //!       | cargo run --quiet --example changelog
+//!
+//! THE RECORDS ARE NUL-SEPARATED, and that is `-z` doing the one thing this needs: a commit
+//! MESSAGE is several lines — the subject and then the author's paragraphs, which is most of
+//! what a release page has to say — so a newline cannot separate one commit from the next.
+//! Splitting on lines is what this used to do, and it is why every entry was one sentence.
 //!
 //! The commit that a release was built from is NOT printed here. It is added by the
 //! workflow, once, on its own line — `src/update.rs` reads it back out of the notes when
@@ -26,12 +31,12 @@ fn main() {
         println!("No changes.");
         return;
     }
-    let subjects: Vec<String> = input
-        .lines()
+    let messages: Vec<String> = input
+        .split('\0')
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|record| !record.is_empty())
         .map(str::to_string)
         .collect();
-    let log = teams_lite::changelog::from_commits(&subjects, subjects.len());
+    let log = teams_lite::changelog::from_commits(&messages, messages.len());
     println!("{}", teams_lite::changelog::to_markdown(&log));
 }

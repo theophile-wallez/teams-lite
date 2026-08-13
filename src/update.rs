@@ -238,8 +238,8 @@ pub fn compare(release: &Release, current_rev: &str) -> Option<UpdateInfo> {
 ///
 /// GitHub's compare API answers that in one request, which is why the changelog is not
 /// assembled from the release history: the running build may be a hundred releases back,
-/// and this is true whether or not any of them still exists. The subjects are handed to
-/// `changelog::from_commits`, which is the ONE place they are grouped (CI renders the same
+/// and this is true whether or not any of them still exists. The whole messages are handed
+/// to `changelog::from_commits`, which is the ONE place they are read (CI renders the same
 /// module into every release body — see src/changelog.rs).
 ///
 /// Best-effort like the check it follows. A commit GitHub cannot find (a force-pushed
@@ -271,30 +271,33 @@ pub async fn changes(
 /// `total_commits` is how many there really are. Passing both is what lets the app say
 /// "and 40 more" instead of quietly ending the list.
 pub fn parse_comparison(body: &serde_json::Value) -> crate::changelog::Changelog {
-    let subjects: Vec<String> = body
+    let messages: Vec<String> = body
         .get("commits")
         .and_then(|c| c.as_array())
         .map(|commits| {
             commits
                 .iter()
                 .filter_map(|c| c.get("commit")?.get("message")?.as_str())
-                // The first line only: a commit body is a paragraph the author wrote for
-                // whoever reads the history, not a line in a list.
-                .map(|message| message.lines().next().unwrap_or("").trim().to_string())
-                .filter(|subject| !subject.is_empty())
+                // The WHOLE message: `changelog::from_commits` splits the subject from the
+                // paragraphs under it, so this parse and the workflow's `git log` hand it
+                // the same shape and neither decides what a reader is shown. It used to cut
+                // at the first line here, which threw the author's own explanation away
+                // before the one module that knows what to do with it ever saw it.
+                .map(|message| message.trim().to_string())
+                .filter(|message| !message.is_empty())
                 .collect()
         })
         .unwrap_or_default();
 
     // Newest first, which is not the order the API answers in: `compare` lists commits
     // oldest first, and a reader scanning a group wants the newest at the top.
-    let subjects: Vec<String> = subjects.into_iter().rev().collect();
+    let messages: Vec<String> = messages.into_iter().rev().collect();
     let total = body
         .get("total_commits")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
-        .unwrap_or(subjects.len());
-    crate::changelog::from_commits(&subjects, total)
+        .unwrap_or(messages.len());
+    crate::changelog::from_commits(&messages, total)
 }
 
 /// Find the release's own `teams` binary in the API's `assets` array.
@@ -870,15 +873,22 @@ mod tests {
         assert_eq!(summaries, vec!["the newer one", "the older one"]);
     }
 
-    /// A commit message is a subject and then a paragraph. Only the subject is a line in a
-    /// list; the body is what the author wrote for whoever reads the history.
+    /// A commit message is a subject and then the author's paragraphs. The subject is the
+    /// entry; the body is the DETAIL, which the release page renders and the app's own
+    /// payload drops — one split, in `changelog::parse`, so this parse decides neither.
     #[test]
-    fn only_a_commits_first_line_becomes_a_change() {
+    fn a_commits_body_travels_beside_its_summary() {
         let got = parse_comparison(&comparison_json(
             1,
-            &["feat(calendar): join a meeting\n\nA long explanation nobody wants in a list."],
+            &["feat(calendar): join a meeting\n\nWhat was wrong before, and what it cost."],
         ));
-        assert_eq!(got.groups[0].changes[0].summary, "join a meeting");
+        let change = &got.groups[0].changes[0];
+        assert_eq!(change.summary, "join a meeting");
+        assert_eq!(
+            change.body.as_deref(),
+            Some("What was wrong before, and what it cost."),
+            "the paragraphs under a subject are most of what a release page has to say"
+        );
     }
 
     /// GitHub's compare stops at 250 commits and states the real count beside them, so a
@@ -1255,6 +1265,32 @@ mod tests {
         assert!(
             workflow.contains("fetch-depth: 0"),
             "the changelog is `git log` between two builds, so the clone must hold history"
+        );
+
+        // THE WHOLE MESSAGE, NUL-SEPARATED. A commit here carries a subject and then the
+        // paragraphs saying what was wrong before — measured at 1 501 bytes of subject
+        // against 22 171 bytes of body over 20 commits. `--pretty=format:%s` is what this
+        // used to be, and it published 6% of what the authors wrote; going back to it would
+        // fail nothing else, because both surfaces would simply render short entries.
+        assert!(
+            workflow.contains("git log -z --no-merges --pretty=format:%s%n%b"),
+            "the release notes must carry each commit's BODY, and `-z` is what separates the \
+             records: a newline cannot, because it is inside every message"
+        );
+
+        // The base must be BEHIND this build. Two releases answer "where is the reader
+        // coming from" and the rolling tag races with itself, so ancestry is what picks —
+        // without it a second push inside one build re-lists the first push's own change.
+        assert!(
+            workflow.contains("merge-base --is-ancestor"),
+            "the changelog base must be proved an ancestor of this build, or the range names \
+             commits this build does not hold"
+        );
+        assert!(
+            workflow.contains("refs/tags/build-*"),
+            "the newest immutable build release is the second candidate for the base: it is \
+             published before `latest` is recreated, which is what saves the range from the \
+             rolling tag's own race"
         );
 
         // The asset window prunes BUILD releases only. `latest` losing its binary is the

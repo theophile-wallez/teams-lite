@@ -4084,6 +4084,55 @@ thought of. It reads conventional commits — the type becomes the heading, the 
 apart from the summary, a `!` is lifted to a **Breaking** group above everything — and a
 subject written outside the convention keeps its own words rather than being dropped.
 
+**THE SUBJECT IS THE TITLE OF A CHANGE, NEVER THE CHANGE.** A commit here carries a subject
+of some 75 characters and then the paragraphs saying what was wrong before, what the change
+costs and why it is shaped that way — measured over 20 commits of master, **1 501 bytes of
+subject against 22 171 bytes of body**. This read `--pretty=format:%s` and nothing else, so a
+release page held one sentence for a fortnight of work and 94% of what the authors wrote
+reached nobody. The body travels as `Change::body` now, and four rules carry it. Each is
+pinned by a test — three in `changelog::tests`, and the workflow's own in `update::tests`,
+because that file is on the other side of a process boundary and a change there is invisible
+to everything else:
+
+- **The two readers get different amounts of it, and that is not a compromise.** The RELEASE
+  PAGE renders the detail: whoever opens it is asking what a build changed and has a page for
+  the answer. The APP is handed the summaries alone (`#[serde(skip)]`), because its list is a
+  hover panel over a sidebar showing the newest few — a paragraph an entry there is a wall of
+  text in a 20rem card, and 200 changes of prose is a 400 KB message on a socket built for
+  JSON. It is still ONE list, grouped once; what differs is how much of each entry a surface
+  has the room to draw.
+- **`git log -z --no-merges --pretty=format:%s%n%b` is the whole of the CI side**, and `-z` is
+  load-bearing: a commit MESSAGE is several lines, so a newline cannot separate one commit
+  from the next. `from_commits` takes whole messages for that reason, and the compare API's
+  `commit.message` goes in untouched as well — one split, in one place, so neither caller
+  decides what a reader is shown.
+- **The page's prose is BUDGETED, and an entry carries all of its detail or none**
+  (`MAX_BODY_BYTES`, 40 000 — well inside GitHub's own 125 000-character limit on a release
+  body, which would REFUSE the release rather than shorten it). The first entry that does not
+  fit ends the details for the rest of the page, so a reader gets whole entries and then
+  summaries instead of paragraphs appearing and vanishing by the accident of their length.
+  108 commits render to 47 KB. Half a paragraph reads as a fault, and a budget bounds the
+  prose and never the LIST — dropping an entry is what `omitted` says out loud.
+- **The work is FOLDED under what the reader can see.** `Reworked`, `Documented`, `Tests` and
+  `Housekeeping` go behind one `<details>` disclosure, because a refactor alters no behaviour
+  and a test proves what already shipped — they must not stand between the reader and the
+  features. Two exceptions, and each is a rule: they stand OPEN when they are all there is
+  (housekeeping is why a release exists on a day nobody shipped a feature, and a page whose
+  whole content is folded reads as an empty page), and `Other` is never folded, because a
+  subject this module could not classify may say anything and hiding it on the strength of a
+  missing prefix would bury a real change. A `revert` sits with `fix`: something the reader
+  HAD is gone.
+
+**The base is PROVED to be behind this build, and two releases are asked.** `latest` is the
+honest answer to "where is the reader coming from" — it is what every installed copy asks
+about — but it is a rolling tag recreated at the END of the job, so two pushes a minute apart
+race on it: the second job read `latest` before the first recreated it, and `build-218bd7b`'s
+page re-listed `build-c40f8d8`'s own change. The newest immutable `build-*` tag is published
+BEFORE the tag is recreated, so it names the newer commit exactly when the race loses it.
+Both are candidates; the workflow keeps the one that is an ANCESTOR of this build and closest
+to it, and falls back to the parent. A non-ancestor is refused rather than used, because a
+force-pushed history would otherwise put commits this build does not hold in its own notes.
+
 **It is two clicks, and each one is the user's.** `update_download` streams the release
 asset into `~/.cache/teams-lite/updates` and reports progress as a fill inside the button;
 `update_apply` puts it in place and restarts onto it. Nothing happens on its own: the

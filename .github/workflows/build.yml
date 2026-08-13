@@ -118,13 +118,48 @@ jobs:
         run: |
           set -euo pipefail
 
-          # WHERE THE READER IS COMING FROM is the commit `latest` currently names — that is
-          # the build every installed copy is running, so it is the only honest base for
-          # "what changed". Read BEFORE the tag is recreated, or it would name this commit.
-          base="$(gh release view latest --json targetCommitish --jq .targetCommitish 2>/dev/null || true)"
-          # A first run, a deleted release, or a commit this clone does not hold (a force
-          # push): fall back to the parent, so a build always states at least its own change.
-          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+          # WHERE THE READER IS COMING FROM is the build they are running, and TWO releases
+          # answer that — neither alone. `latest` is the honest one: it is what every
+          # installed copy asks about. But it is a ROLLING tag recreated at the end of this
+          # job, so two pushes a minute apart race on it: the second job read `latest` before
+          # the first recreated it, and its release page then re-listed a change the previous
+          # page had already stated (build-218bd7b repeated build-c40f8d8's own entry). The
+          # immutable `build-*` release is published BEFORE the tag is recreated, so it names
+          # the newer commit exactly when the race loses it.
+          #
+          # So both are candidates, and ANCESTRY picks: the base must be behind this build,
+          # and of those the CLOSEST one is the truth about what this build adds.
+          #
+          # The newest build tags, not just THE newest: a build tag names a commit on
+          # whatever line it was built from, so the newest one is not always behind this
+          # build (measured: build-13bf909 is not an ancestor of build-218bd7b). One
+          # candidate would be dropped by the ancestry check with nothing to fall back on.
+          candidates="$(gh release view latest --json targetCommitish --jq .targetCommitish 2>/dev/null || true)"
+          candidates="$candidates $(git for-each-ref --sort=-creatordate --count=10 --format='%(refname:short)' 'refs/tags/build-*')"
+
+          base=""
+          nearest=""
+          for candidate in $candidates; do
+            # A commit this clone does not hold: a deleted release, or a force-pushed history.
+            git cat-file -e "${candidate}^{commit}" 2>/dev/null || continue
+            resolved="$(git rev-parse "${candidate}^{commit}")"
+            # Not an ANCESTOR means the range would name commits this build does not hold.
+            if ! git merge-base --is-ancestor "$resolved" "$GITHUB_SHA"; then
+              continue
+            fi
+            behind="$(git rev-list --count "${resolved}..${GITHUB_SHA}")"
+            # Zero is this very commit, which would render "No changes." over a real build.
+            if [ "$behind" -eq 0 ]; then
+              continue
+            fi
+            if [ -z "$nearest" ] || [ "$behind" -lt "$nearest" ]; then
+              nearest="$behind"
+              base="$resolved"
+            fi
+          done
+          # A first run, or no candidate behind us: the parent, so a build always states at
+          # least its own change.
+          if [ -z "$base" ]; then
             base="$(git rev-parse "${GITHUB_SHA}^" 2>/dev/null || echo "${GITHUB_SHA}")"
           fi
           echo "changelog base: $base"
@@ -133,10 +168,15 @@ jobs:
           # The FIRST line is the machine-readable one, and it must stay first: src/update.rs
           # reads the commit back out of the notes when GitHub resolves `target_commitish` to
           # a branch name, by taking the first 40-character hex run in the body.
+          #
+          # `-z` and `%b` are the release notes' own content: a commit here carries a subject
+          # and then the paragraphs saying what was wrong before and what the change costs,
+          # which is most of what this page has to say. NUL separates the records because a
+          # newline cannot — it is inside every message.
           {
             echo "Rolling build from ${GITHUB_SHA} — $(date -u +%Y-%m-%dT%H:%M:%SZ)."
             echo
-            git log --no-merges --pretty=format:%s "${base}..${GITHUB_SHA}" \
+            git log -z --no-merges --pretty=format:%s%n%b "${base}..${GITHUB_SHA}" \
               | cargo run --quiet --example changelog
           } > out/notes.md
           cat out/notes.md
