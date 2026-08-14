@@ -61,10 +61,15 @@
 //
 // A plain switch published Available at 03:00 as eagerly as at 11:00, which is a green
 // dot with nobody human behind it — the one thing a status somebody reads to decide
-// whether to write must not be. So the setting carries a WINDOW in the machine's own
-// local time ("08:00-19:00"), the heartbeat registers only inside it and withdraws once
-// at its end, and the status outside it is whatever Teams computes on its own — exactly
-// as with the setting off.
+// whether to write must not be. So the setting carries a WINDOW ("08:00-19:00") and the
+// ZONE it is kept in ("Europe/Paris"), the heartbeat registers only inside it and
+// withdraws once at its end, and the status outside it is whatever Teams computes on its
+// own — exactly as with the setting off.
+//
+// The zone is the user's and not the machine's, because the PERSON travels while the
+// always-on service stays in one flat: 08:00 set in Paris is not 08:00 read from Tokyo
+// (see [`minute_of_day`]). Its absence is the machine's own zone, which is what an install
+// that never set one keeps.
 //
 // The window is OPTIONAL, and its absence is all day: that is what the setting did
 // before it grew one, so an install that never sets hours behaves as it always did.
@@ -343,17 +348,46 @@ pub fn should_publish(enabled: bool, hours: Option<AvailableHours>, minute_of_da
     enabled && hours.is_none_or(|window| window.covers(minute_of_day))
 }
 
-/// The current minute of the LOCAL day, in the machine's own time zone.
+/// The minute of the day `now` falls on, in the zone the WINDOW is kept in.
 ///
 /// Local rather than UTC because the user writes "8am to 7pm" meaning their own morning,
 /// and the process that has to decide at 03:00 with every window closed is the only thing
-/// here holding a clock. The zone is the machine's own, DST included, which is why this
-/// reads a real time zone rather than an offset stored beside the window: a stored offset
-/// is an hour wrong for half the year, and an hour is exactly the size of the mistake this
+/// here holding a clock.
+///
+/// `zone` is the user's own, and `None` is the MACHINE's — which is the older behaviour and
+/// the right default, but not an answer this feature can rest on: the person travels and the
+/// machine they run this on does not. Somebody who set 08:00-19:00 in Paris and is reading
+/// this from Tokyo wants their green dot in Tokyo's morning, and the always-on service is
+/// still in a flat in Paris. So the zone is a SETTING, resolved from the IANA database with
+/// its DST rules rather than from an offset stored beside the window — an offset is an hour
+/// wrong for half the year, and an hour is exactly the size of the mistake this whole
 /// feature exists to avoid.
-pub fn local_minute_of_day() -> u32 {
-    let now = chrono::Local::now();
-    now.hour() * 60 + now.minute()
+pub fn minute_of_day(now: chrono::DateTime<chrono::Utc>, zone: Option<chrono_tz::Tz>) -> u32 {
+    match zone {
+        Some(zone) => {
+            let there = now.with_timezone(&zone);
+            there.hour() * 60 + there.minute()
+        }
+        None => {
+            let here = now.with_timezone(&chrono::Local);
+            here.hour() * 60 + here.minute()
+        }
+    }
+}
+
+/// The zone an `available_zone` setting names, or `None` for the machine's own.
+///
+/// Strict, and for the reason [`AvailableHours::parse_pair`] is: a name this refuses is
+/// never stored, so every later read of that row is a zone or the machine's. A stored name
+/// the database no longer knows (a zone renamed between chrono-tz releases) reads as the
+/// machine's rather than as an error — the same direction `AvailableHours::parse_setting`
+/// fails in, because the alternative is a setting pane that cannot draw itself.
+pub fn parse_zone(name: &str) -> Option<chrono_tz::Tz> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    name.parse::<chrono_tz::Tz>().ok()
 }
 
 /// Extract the presences from the response array. An entry without an mri or
@@ -569,8 +603,50 @@ mod tests {
     }
 
     #[test]
-    fn the_local_minute_is_a_minute_of_a_day() {
-        assert!(local_minute_of_day() < MINUTES_PER_DAY);
+    fn the_minute_of_the_day_is_the_one_in_the_users_own_zone() {
+        // The instant the whole setting is about: the middle of a Paris night.
+        let at = "2026-08-14T01:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        let paris = parse_zone("Europe/Paris").unwrap();
+        let tokyo = parse_zone("Asia/Tokyo").unwrap();
+        assert_eq!(minute_of_day(at, Some(paris)), 3 * 60, "03:00 in August (UTC+2)");
+        assert_eq!(minute_of_day(at, Some(tokyo)), 10 * 60);
+        assert_eq!(minute_of_day(at, parse_zone("UTC")), 60);
+
+        // So one window answers differently in two places, which is the whole feature: the
+        // person travels and the machine they run this on does not.
+        let hours = AvailableHours::parse_pair("08:00", "19:00").unwrap();
+        assert!(!should_publish(true, Some(hours), minute_of_day(at, Some(paris))));
+        assert!(should_publish(true, Some(hours), minute_of_day(at, Some(tokyo))));
+
+        // No zone is the machine's own, which is the older behaviour.
+        assert!(minute_of_day(at, None) < MINUTES_PER_DAY);
+    }
+
+    #[test]
+    fn the_zone_reads_the_iana_database_and_refuses_anything_else() {
+        assert_eq!(parse_zone("Europe/Paris").map(|z| z.name()), Some("Europe/Paris"));
+        assert_eq!(parse_zone("  Asia/Tokyo  ").map(|z| z.name()), Some("Asia/Tokyo"));
+        // Nothing, and nothing this app would have written, is the machine's own zone.
+        for machine in ["", "   "] {
+            assert!(parse_zone(machine).is_none());
+        }
+        // A typo, an offset and a Windows label are all refused: a zone answered with this
+        // machine's would publish somebody's status at hours nobody chose.
+        for bad in ["Europe/Pariss", "+02:00", "CEST", "Romance Standard Time", "paris"] {
+            assert!(parse_zone(bad).is_none(), "{bad:?} is not an IANA zone");
+        }
+    }
+
+    #[test]
+    fn a_zone_keeps_its_hours_across_a_dst_change() {
+        // The reason this is a zone NAME and not an offset: Paris is UTC+2 in August and
+        // UTC+1 in December, so a stored offset would publish 08:00-19:00 as 07:00-18:00 for
+        // half the year — an hour wrong, which is the mistake the window exists to avoid.
+        let paris = parse_zone("Europe/Paris").unwrap();
+        let summer = "2026-08-14T06:30:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        let winter = "2026-12-14T07:30:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        assert_eq!(minute_of_day(summer, Some(paris)), 8 * 60 + 30);
+        assert_eq!(minute_of_day(winter, Some(paris)), 8 * 60 + 30);
     }
 
     /// The code of one module, without its test module and without comments — so a

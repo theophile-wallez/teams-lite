@@ -287,7 +287,10 @@ describe("Backend request/response", () => {
       const { backend, socket } = await connected();
       backend.setWriteToken("tok");
 
-      const promise = backend.setAlwaysAvailable(enabled, { from: "08:00", to: "19:00" });
+      const promise = backend.setAlwaysAvailable(enabled, {
+        hours: { from: "08:00", to: "19:00" },
+        zone: "Europe/Paris",
+      });
 
       const frame = JSON.parse(socket.sent[0]!) as {
         id: number;
@@ -299,6 +302,7 @@ describe("Backend request/response", () => {
         enabled,
         from: "08:00",
         to: "19:00",
+        zone: "Europe/Paris",
         write_token: "tok",
       });
 
@@ -313,6 +317,7 @@ describe("Backend request/response", () => {
             always_available: enabled,
             available_from: "08:00",
             available_to: "19:00",
+            available_zone: "Europe/Paris",
             available_now: enabled,
           },
         }),
@@ -322,19 +327,27 @@ describe("Backend request/response", () => {
     }
   });
 
-  // All day is the ABSENCE of a window, and it has to reach the backend as a stated
-  // absence: `undefined` would drop out of the JSON, and a call carrying neither hour is
-  // how a reader clears the hours they had.
-  it("states all day as both hours null", async () => {
+  // All day is the ABSENCE of a window, and so is the machine's own zone: both have to reach
+  // the backend as a STATED absence, because `undefined` drops out of the JSON and a call
+  // carrying neither hour is how a reader clears the hours they had.
+  it("states all day, and the machine's own zone, as nulls", async () => {
     const { backend, socket } = await connected();
     backend.setWriteToken("tok");
 
     // Nothing answers this one — the frame is the whole assertion — so the close below
     // rejects it, and an unhandled rejection would fail the suite from outside any test.
-    const promise = backend.setAlwaysAvailable(true, null).catch(() => undefined);
+    const promise = backend
+      .setAlwaysAvailable(true, { hours: null, zone: null })
+      .catch(() => undefined);
 
     const frame = JSON.parse(socket.sent[0]!) as { params?: Record<string, unknown> };
-    expect(frame.params).toEqual({ enabled: true, from: null, to: null, write_token: "tok" });
+    expect(frame.params).toEqual({
+      enabled: true,
+      from: null,
+      to: null,
+      zone: null,
+      write_token: "tok",
+    });
     backend.close();
     await promise;
   });

@@ -3142,12 +3142,27 @@ if (import.meta.main) {
       await setTheme("dark");
       await show(`${out}-on-dark.png`);
 
+      // A window that CROSSES MIDNIGHT: the two thumbs are the same pair, and the green is
+      // drawn on the OUTSIDE of them — the one state the slider's own range cannot express.
+      await setTheme("light");
+      await setAvailableHours(page, { from: "22:00", to: "06:00" });
+      await show(`${out}-night-light.png`);
+
+      // A phone's width, because this card now holds a slider, two fields and a zone picker:
+      // the row wraps rather than pushing the pane sideways.
+      await setAvailableHours(page, { from: "08:00", to: "19:00" });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(300);
+      await show(`${out}-mobile-light.png`);
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(300);
+
       // Leave the shared mock as it was found.
       await setTheme("light");
       await setAvailableHours(page, null);
       await setAlwaysAvailable(page, false);
       console.log(
-        `[preview] wrote ${out}-{off,on,hours,waiting}-light.png and ` +
+        `[preview] wrote ${out}-{off,on,hours,waiting,night,mobile}-light.png and ` +
           `${out}-{hours,on}-dark.png`,
       );
     });

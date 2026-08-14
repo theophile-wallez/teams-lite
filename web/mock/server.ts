@@ -3313,6 +3313,9 @@ const mockSettings = {
   // backend stores them (see `SETTING_AVAILABLE_HOURS` in src/bin/server.rs). Empty out of
   // the box, so the switch behaves as it did before the hours existed.
   available_hours: "",
+  // The IANA zone those hours are kept in, empty for this machine's own — the backend's own
+  // default (see `SETTING_AVAILABLE_ZONE` in src/bin/server.rs).
+  available_zone: "",
   // ON, like the real backend's default (see `sender_icons_enabled` in
   // src/bin/server.rs). Here it reaches no domain either: `mockSenderIcon` draws the
   // mark, so the whole surface is exercised with nothing leaving the machine.
@@ -3932,6 +3935,7 @@ function settingsView(): {
   always_available: boolean;
   available_from: string | null;
   available_to: string | null;
+  available_zone: string | null;
   available_now: boolean;
   sender_icons: boolean;
   emoji_auto_import: boolean;
@@ -3946,10 +3950,13 @@ function settingsView(): {
     always_available: mockSettings.always_available,
     available_from: hours?.from ?? null,
     available_to: hours?.to ?? null,
+    available_zone: mockSettings.available_zone || null,
     // The one field the page cannot work out for itself: the real backend owns the clock
     // and the zone the heartbeat acts on (see `available_now` in src/bin/server.rs). The
     // mock owns one too — this process's — so the same reading holds.
-    available_now: mockSettings.always_available && (hours === null || mockHoursCoverNow(hours)),
+    available_now:
+      mockSettings.always_available &&
+      (hours === null || mockHoursCoverNow(hours, mockSettings.available_zone)),
     sender_icons: mockSettings.sender_icons,
     emoji_auto_import: mockSettings.emoji_auto_import,
   };
@@ -3972,13 +3979,48 @@ function parseMockHours(stored: string): { from: string; to: string } | null {
   return { from: from.trim(), to: to.trim() };
 }
 
-/** Is this process's local minute inside the window? Wraps past midnight, and the end is
- *  exclusive — `AvailableHours::covers`, in the other language. */
-function mockHoursCoverNow(hours: { from: string; to: string }): boolean {
-  const now = new Date();
-  const minute = now.getHours() * 60 + now.getMinutes();
+/** Is the minute inside the window, IN THE ZONE the window is kept in? Wraps past midnight,
+ *  and the end is exclusive — `AvailableHours::covers` and `minute_of_day` together, in the
+ *  other language. An empty zone is this process's own, like the backend's `None`. */
+function mockHoursCoverNow(hours: { from: string; to: string }, zone: string): boolean {
+  const minute = mockZoneMinute(zone);
   const [start, end] = [mockHourMinute(hours.from) ?? 0, mockHourMinute(hours.to) ?? 0];
   return start <= end ? minute >= start && minute < end : minute >= start || minute < end;
+}
+
+/** One formatter per zone, kept: building an `Intl.DateTimeFormat` is not free (the first one
+ *  in a process loads the ICU tables), and `settingsView` is answered on every connect and on
+ *  every settings write. A mock that spent milliseconds there would shift the timing of the
+ *  greeting for every spec in the run. */
+const mockZoneFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** The current minute of the day in `zone` (empty = this machine's), over the browser/runtime
+ *  IANA database — the same one the backend resolves a zone name against. */
+function mockZoneMinute(zone: string): number {
+  const now = new Date();
+  if (!zone) return now.getHours() * 60 + now.getMinutes();
+  let format = mockZoneFormatters.get(zone);
+  if (!format) {
+    format = new Intl.DateTimeFormat("en-GB", {
+      timeZone: zone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    mockZoneFormatters.set(zone, format);
+  }
+  return mockHourMinute(format.format(now).replace("24:", "00:")) ?? 0;
+}
+
+/** Does this runtime know the zone? The backend refuses a name its IANA database does not
+ *  hold, and a mock that accepted one would hide the refusal instead of failing a test. */
+function mockZoneIsKnown(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-GB", { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 type GitLabKind = "merge_request" | "issue" | "project";
@@ -7677,6 +7719,11 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       } else {
         mockSettings.available_hours = "";
       }
+      const zone = typeof o.zone === "string" ? o.zone.trim() : "";
+      if (zone.length > 0 && !mockZoneIsKnown(zone)) {
+        throw new Error(`\`zone\` is not an IANA time zone: ${zone}`);
+      }
+      mockSettings.available_zone = zone;
       mockSettings.always_available = o.enabled;
       return settingsView();
     }
@@ -9244,6 +9291,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       } else if (body.from === null && body.to === null) {
         mockSettings.available_hours = "";
       }
+      if (typeof body.zone === "string") mockSettings.available_zone = body.zone;
       if (typeof body.enabled === "boolean") mockSettings.always_available = body.enabled;
       const settings = settingsView();
       broadcast("settings_changed", settings);

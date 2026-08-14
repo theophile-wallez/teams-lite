@@ -144,6 +144,14 @@ test.describe("always available", () => {
     );
     await expect(state(page)).toContainText(`nothing published until ${laterStart}`);
 
+    // And a write made WHILE one end is missing keeps the hours the backend still holds —
+    // turning the switch off and on again must not cost somebody their window.
+    await toggle(page).click();
+    await expect(toggle(page)).toHaveAttribute("aria-checked", "false");
+    await toggle(page).click();
+    await expect(toggle(page)).toHaveAttribute("aria-checked", "true");
+    await expect(state(page)).toContainText(`nothing published until ${laterStart}`);
+
     // All day is the absence of a window, and the switch alone is then what it always was.
     await fromField(page).fill(laterStart);
     await expect(state(page)).toContainText(laterStart);
@@ -151,6 +159,51 @@ test.describe("always available", () => {
     await expect(state(page)).toContainText("all day");
 
     // Leave the shared mock as it was found.
+    await setAlwaysAvailable(page, false);
+  });
+
+  // The slider is the control the hours are really set with: two thumbs over one day, the
+  // fields beside it following every drag. It is driven from the KEYBOARD here, which is both
+  // the accessible path and the only deterministic one — and radix commits on key up, so one
+  // press is one write.
+  test("drags the window with the slider, and the fields follow", async ({ page }) => {
+    await gotoApp(page);
+    await setAlwaysAvailable(page, true);
+    await setHours(page, "08:00", "19:00");
+
+    const thumbs = page.locator('[data-testid="available-slider"] [role="slider"]');
+    await expect(thumbs).toHaveCount(2);
+
+    // The END thumb, a quarter of an hour later: the step is 15 minutes, because that is what
+    // a work window is really set to.
+    await thumbs.nth(1).focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(toField(page)).toHaveValue("19:15");
+    await expect(page.locator('[data-testid="available-hours-hint"]')).toContainText(
+      "08:00 – 19:15",
+    );
+
+    // The START thumb, the other way.
+    await thumbs.nth(0).focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(fromField(page)).toHaveValue("07:45");
+
+    // Every drag is a write, so a reload finds what the slider left behind.
+    await gotoApp(page);
+    await page.locator('[data-testid="open-settings"]').click();
+    await expect(fromField(page)).toHaveValue("07:45");
+    await expect(toField(page)).toHaveValue("19:15");
+
+    // The two thumbs cannot pass each other, so a window that CROSSES MIDNIGHT is typed
+    // rather than dragged — and the slider then draws it as green on the OUTSIDE.
+    await setHours(page, "22:00", "06:00");
+    const values = await thumbs.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("aria-valuenow")),
+    );
+    expect(values).toEqual([String(6 * 60), String(22 * 60)]);
+
+    // Leave the shared mock as it was found.
+    await clearHours(page);
     await setAlwaysAvailable(page, false);
   });
 
@@ -174,5 +227,49 @@ test.describe("always available", () => {
     // Leave the shared mock as it was found.
     await clearHours(page);
     await setAlwaysAvailable(page, false);
+  });
+});
+
+// The zone the hours are kept in is the USER's, not the machine's — the person travels while
+// the always-on backend stays in one flat. This browser is pinned to Paris, so the zone it
+// suggests and the zone stored can be told apart with no reference to the clock.
+test.describe("the hours' own time zone", () => {
+  test.use({ timezoneId: "Europe/Paris" });
+
+  test("is set from the pane, and the reader's own zone is one press away", async ({ page }) => {
+    await gotoApp(page);
+    await page.locator('[data-testid="open-settings"]').click();
+    const toggle = page.locator('[data-testid="always-available-toggle"]');
+    if ((await toggle.getAttribute("aria-checked")) !== "true") await toggle.click();
+
+    const zone = page.locator('[data-testid="available-zone"]');
+    const hint = page.locator('[data-testid="available-hours-hint"]');
+    // Nothing stored is the backend machine's own zone, which is the older behaviour.
+    await expect(zone).toHaveValue("");
+
+    await page.locator('[data-testid="available-from"]').fill("08:00");
+    await page.locator('[data-testid="available-to"]').fill("19:00");
+    await zone.selectOption("Asia/Tokyo");
+    await expect(hint).toContainText("Asia/Tokyo");
+
+    // The zone lives on the backend with the hours: a reload must find it.
+    await gotoApp(page);
+    await page.locator('[data-testid="open-settings"]').click();
+    await expect(page.locator('[data-testid="available-zone"]')).toHaveValue("Asia/Tokyo");
+
+    // And the pane offers the zone THIS browser is in, because that is where the reader is.
+    const here = page.locator('[data-testid="available-zone-here"]');
+    await expect(here).toHaveText(/Europe\/Paris/);
+    await here.click();
+    await expect(page.locator('[data-testid="available-zone"]')).toHaveValue("Europe/Paris");
+    // A control that changes nothing reads as a bug: with their own zone stored, it is gone.
+    await expect(here).toHaveCount(0);
+
+    // Leave the shared mock as it was found.
+    await page.locator('[data-testid="available-all-day"]').click();
+    await page.locator('[data-testid="available-zone"]').selectOption("");
+    const off = page.locator('[data-testid="always-available-toggle"]');
+    if ((await off.getAttribute("aria-checked")) === "true") await off.click();
+    await expect(off).toHaveAttribute("aria-checked", "false");
   });
 });

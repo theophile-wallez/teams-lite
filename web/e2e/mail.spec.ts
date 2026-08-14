@@ -427,6 +427,14 @@ test.describe("mail", () => {
   test("leaves the chat surfaces untouched", async ({ page }) => {
     // Mail must not leak into the conversation list, exactly as channels must not.
     await gotoApp(page);
+    // The count below is of the rows the VIEWPORT holds — the list is virtualized — so the
+    // sidebar has to be in one steady shape for both readings. The notification offer arrives
+    // at its foot once the push status has answered, and it takes one row's room: counted
+    // across it, this test measures that arrival rather than anything about mail. Its own
+    // dismissal is the way to a steady sidebar.
+    const offer = page.locator('[data-testid="notification-offer-dismiss"]');
+    await offer.click({ timeout: 5_000 }).catch(() => undefined);
+    await expect(page.locator('[data-testid="notification-offer"]')).toHaveCount(0);
     const chats = await page.locator('[data-testid="conversation-row"]').count();
     await openMailTab(page);
     const { inbox } = await fetchTestMail(page);
@@ -434,7 +442,11 @@ test.describe("mail", () => {
 
     await page.locator('[data-testid="tab-chats"]').click();
     await expect(page.locator('[data-testid="sidebar-scroll"]')).toBeVisible();
-    expect(await page.locator('[data-testid="conversation-row"]').count()).toBe(chats);
+    // RETRIED rather than snapshotted: the list is virtualized, so the number of rows drawn
+    // is the number the viewport holds — and anything that arrives at the foot of the sidebar
+    // while this is read (the notification offer does) takes one row's room. What the test is
+    // about is that no MAIL row is among them, which the ids below assert.
+    await expect(page.locator('[data-testid="conversation-row"]')).toHaveCount(chats);
     const ids = await page
       .locator('[data-testid="conversation-row"]')
       .evaluateAll((els) => els.map((e) => e.getAttribute("data-conversation-id") ?? ""));

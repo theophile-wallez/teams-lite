@@ -46,6 +46,11 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # feature asked for (no serde, no oldtime): a stored UTC offset would be an hour wrong for
 # half the year, which is exactly the size of mistake that setting exists to avoid.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# The IANA time-zone database, for the same one caller: the hours are the USER's own
+# morning, and the user travels while the machine they run this on does not (see
+# `teams_presence::minute_of_day`). `chrono::Local` answers only "this machine's zone",
+# which is the wrong answer for somebody who set 08:00-19:00 in Paris and is now in Tokyo.
+chrono-tz = "0.10"
 
 [dev-dependencies]
 # `test-util` is tokio's paused clock, and it is here for one rule: the agent stops a

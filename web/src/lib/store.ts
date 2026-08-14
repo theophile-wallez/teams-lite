@@ -35,7 +35,7 @@ import {
   type AddressPerson,
   type AvatarPicture,
   type AppSettings,
-  type AvailableHours,
+  type PresenceSchedule,
   type LinearWorkspace,
   type BrokerStatus,
   type CalendarEvent,
@@ -842,6 +842,7 @@ function initialState(): AppState {
       // dot before the settings land would state a status nobody outside can see.
       available_from: null,
       available_to: null,
+      available_zone: null,
       available_now: false,
       // On, like the backend's own default (see `sender_icons_enabled`): the switch
       // must not read "off" for the moment before the settings land, or the user would
@@ -5181,12 +5182,12 @@ export class TeamsController {
     return settings;
   }
 
-  /** Turn "Always available" on or off — and set the HOURS it keeps — reflecting the
-   *  fresh view in state.
+  /** Turn "Always available" on or off — and set the HOURS it keeps, and the ZONE they are
+   *  kept in — reflecting the fresh view in state.
    *
-   *  `hours` is both ends or `null` for all day, and it is always sent: the pane holds the
-   *  window the backend last answered with, so a call that omitted it would clear the
-   *  user's hours every time they touched the switch.
+   *  The whole schedule is always sent: the pane holds what the backend last answered with,
+   *  so a call that omitted either half would clear the user's hours or their zone every time
+   *  they touched the switch.
    *
    *  Not part of `saveSettings`, because this one publishes the user's own presence to
    *  Teams: it is gated like a send, and the state only moves once the backend says
@@ -5194,11 +5195,11 @@ export class TeamsController {
    *  instead of claiming a status nobody outside this machine can see. */
   async setAlwaysAvailable(
     enabled: boolean,
-    hours: AvailableHours | null,
+    schedule: PresenceSchedule,
   ): Promise<AppSettings> {
     let settings: AppSettings;
     try {
-      settings = await this.backend.setAlwaysAvailable(enabled, hours);
+      settings = await this.backend.setAlwaysAvailable(enabled, schedule);
     } catch (e) {
       playCue("error");
       throw e;

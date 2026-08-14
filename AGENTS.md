@@ -2308,10 +2308,11 @@ user. Two independent mechanisms enforce that split:
   call — the control and the sentence it carries, the live state, the card it leaves in the
   conversation and the Settings list: `bun run preview -- --out /tmp/rec --call-recording`
   (it writes a real webm out of the mock's canvases, with no camera and no microphone). For
-  "Always available" and the HOURS it keeps — off, on all day, the hours running and the hours
-  not yet come round: `bun run preview -- --out /tmp/av --available`, or `setAlwaysAvailable` /
+  "Always available" and the HOURS it keeps — off, on all day, the hours running, the hours not
+  yet come round, a window crossing midnight and the card at a phone's width:
+  `bun run preview -- --out /tmp/av --available`, or `setAlwaysAvailable` /
   `setAvailableHours` from the same file (both assert the MOCK sentinel: against a real backend
-  those two fields decide when the user's own status is published). For the
+  those fields decide when the user's own status is published). For the
   write-lock banner, in both of its
   causes: `bun run preview -- --out /tmp/wl --write-lock`. For the notification offer —
   the row that asks once, in both themes and at a phone's width:
@@ -3422,10 +3423,12 @@ colleague reads.
 **AND IT KEEPS HOURS, because green at 03:00 is a claim nobody believes.** The setting
 was a plain switch and published Available at three in the morning as eagerly as at
 eleven — which defeats the one thing it is for: a status that reads as a person at their
-desk. So it carries a WINDOW in the machine's own local time (`08:00-19:00`), and the
-pane is two native `<input type="time">` fields under the switch
-(`web/src/lib/presence-hours.ts` holds the pure half, `SETTING_AVAILABLE_HOURS` and
-`presence_intent` the backend's). Seven rules, and each is pinned by a test:
+desk. So it carries a WINDOW (`08:00-19:00`) and the ZONE that window is kept in
+(`Europe/Paris`); the pane draws the window as a two-thumb SLIDER over one day with the
+exact hours as fields beside it, and the zone as a picker under both
+(`web/src/lib/presence-hours.ts` holds the pure half, `SETTING_AVAILABLE_HOURS`,
+`SETTING_AVAILABLE_ZONE` and `presence_intent` the backend's). Nine rules, and each is
+pinned by a test:
 
 - **The switch is the CONSENT and the window only NARROWS it.**
   `teams_presence::should_publish` is the one spelling of "should this machine be green
@@ -3444,11 +3447,34 @@ pane is two native `<input type="time">` fields under the switch
   setting nobody can check; `22:00-06:00` is a night shift, and refusing it would be an
   arbitrary limit on the same comparison inverted. The end is exclusive, which is what the
   two numbers read as.
-- **The clock is the BACKEND's, and it is a real time zone.** It is the process that has to
-  decide at 03:00 with every window closed, so `local_minute_of_day` reads the machine's
-  own zone — DST included — rather than an offset stored beside the window, which is an
-  hour wrong for half the year. An hour is the size of the mistake this feature exists to
-  avoid.
+- **The CLOCK is the backend's and the ZONE is the user's, which are two different things.**
+  The process that has to decide at 03:00 with every window closed is the backend, so it holds
+  the clock — but the zone cannot be that machine's, because the PERSON travels while the
+  always-on service stays in one flat: 08:00 set in Paris is not 08:00 read from Tokyo. So
+  `SETTING_AVAILABLE_ZONE` holds an IANA NAME and `teams_presence::minute_of_day` resolves the
+  instant in it (the whole of the `chrono-tz` dependency). A name and never an offset, because
+  an offset is an hour wrong for half the year — Paris is UTC+2 in August and UTC+1 in
+  December, and an hour is exactly the size of the mistake this feature exists to avoid. No
+  zone is the MACHINE's own, which is the older behaviour and what an install that never set
+  one keeps; a name the database does not hold is REFUSED at the RPC, because a typo answered
+  with this machine's zone publishes the user's status at hours nobody chose.
+- **The zone the pane OFFERS comes from the browser, and the list costs the wire nothing.**
+  `Intl` is where the reader is, which is the fact the setting exists for, so the picker's
+  options are `Intl.supportedValuesOf("timeZone")` and a one-press "Use Europe/Paris" appears
+  only while that is not the stored one — a control that changes nothing reads as a bug. The
+  backend validates against its own copy of the same IANA database, so nothing here trusts the
+  page's list.
+- **The window is a SLIDER, and the fields are what a slider cannot do.** Two thumbs over one
+  day at a 15-minute step is how somebody says "my day looks like this", and it is one control
+  for one value — but the thumbs cannot pass each other, so a window that CROSSES MIDNIGHT can
+  only be typed, and aiming at 08:30 is slower than typing it. So both are drawn over one
+  state: `hoursSlider` / `hoursFromSlider` carry the window's MODE through a drag (without it
+  one drag turns 22:00-06:00 into its opposite), a wrapped window is drawn green on the OUTSIDE
+  of the two thumbs (the primitive's own range is one element, so the pane draws both
+  segments), and a DRAG publishes nothing — `onValueCommit` is the write, because a publish per
+  frame is dozens of outward calls for one gesture. The thumb carries 44px of touch target
+  around 16px of ink (`web/src/components/ui/slider.tsx`, the ninth radix primitive here), and
+  the keyboard moves it, which is what the spec drives it with.
 - **The HEARTBEAT is what turns the hours into a status, and its two edges are not
   symmetric.** Nobody is clicking anything at 08:00 or 19:00, so the heartbeat acts:
   inside the hours it registers, and it keeps registering because a registration EXPIRES;
@@ -3463,13 +3489,14 @@ pane is two native `<input type="time">` fields under the switch
   heartbeat emits `settings_changed` on the turn, so a Settings pane left open across 19:00
   stops claiming a green dot the backend has already withdrawn.
 
-`web/mock/server.ts` mirrors the store and both refusals with no tenant (it publishes no
-presence at all, which is what makes driving the switch safe), `cd web && bun run preview
--- --out /tmp/av --available` captures the switch off, on all day, the hours running and
-the hours not yet come round, and `web/e2e/always-available.spec.ts` pins every rule the
-page owns. **The hours themselves are untested against the tenant**, and deliberately: the
-publish and its undo are the two calls that were measured, and a window only decides WHEN
-this app makes them.
+`web/mock/server.ts` mirrors the store and every refusal with no tenant — the window, the
+zone, and `available_now` resolved in that zone over the runtime's own IANA database (it
+publishes no presence at all, which is what makes driving the switch safe). `cd web && bun run
+preview -- --out /tmp/av --available` captures the switch off, on all day, the hours running,
+the hours not yet come round, a window crossing midnight and the card at a phone's width, and
+`web/e2e/always-available.spec.ts` pins every rule the page owns. **The hours and the zone are
+untested against the tenant**, and deliberately: the publish and its undo are the two calls
+that were measured, and a window only decides WHEN this app makes them.
 
 - **`set_always_available` is an `OUTWARD_METHODS` entry**, in both directions: it
   needs the write token, a read-only backend refuses it, and the hook blocks a script
@@ -4038,8 +4065,8 @@ user's. What changes is only what is asked.
   Web Push to the user's own devices (`src/push.rs` + `src/push_policy.rs`), the
   READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`), the
   READ-ONLY Teams/Outlook calendar (`src/calendar.rs`), presence — reading everybody's
-  and, only when the user asks for it and only during the hours they set, publishing their
-  own (`src/teams_presence.rs`,
+  and, only when the user asks for it and only during the hours they set in the zone they
+  named, publishing their own (`src/teams_presence.rs`,
   see § The user's own status), the READ-ONLY conversation roster an @mention list is
   built from (`src/teams_members.rs`, see § @mentions), the one-to-one AUDIO CALLING
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
@@ -4629,7 +4656,7 @@ one its own port if the phone should reach it — this machine serves 8443 → 1
 8444 → 19442).
 
 **A setting a NEWER build understands is not one an OLDER build honours**, and the presence
-HOURS (§ The user's own status) are the first to show it: both backends refresh the one
+HOURS and their ZONE (§ The user's own status) are the first to show it: both backends refresh the one
 registration, so an install from before that commit keeps the user green at 03:00 whatever
 window the other one was given. Nothing here can prevent that — the older process reads a
 row it has never heard of — and it heals with the next update, which is what the released

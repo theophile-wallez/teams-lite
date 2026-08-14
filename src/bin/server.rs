@@ -182,6 +182,14 @@ const SETTING_ALWAYS_AVAILABLE: &str = "always_available";
 /// the next morning gets the hours they set, not a blank. And the two are written together
 /// by one RPC, so a stored window with the switch off can never publish anything.
 const SETTING_AVAILABLE_HOURS: &str = "available_hours";
+/// The IANA time zone those hours are kept in (`"Europe/Paris"`), empty for the machine's
+/// own — which is the older behaviour and the default.
+///
+/// It is a setting because the PERSON travels and the machine does not: the always-on
+/// service runs on one machine in one flat, and somebody who set 08:00-19:00 in Paris and is
+/// reading this from Tokyo wants their green dot in Tokyo's morning. A zone name rather than
+/// an offset, so the answer survives DST (see [`teams_presence::minute_of_day`]).
+const SETTING_AVAILABLE_ZONE: &str = "available_zone";
 /// Sender icons (`"0"` = off, anything else = on, and ON is the default): show the mark
 /// of the organisation a mail came from, fetched from that organisation's own domain
 /// (see [`sender_icon`]).
@@ -4388,13 +4396,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .and_then(Value::as_bool)
                 .context("`enabled` must be true or false")?;
             let hours = available_hours_param(params)?;
-            let publish =
-                teams_presence::should_publish(enabled, hours, teams_presence::local_minute_of_day());
+            let zone = available_zone_param(params)?;
+            let minute = teams_presence::minute_of_day(chrono::Utc::now(), zone);
+            let publish = teams_presence::should_publish(enabled, hours, minute);
             publish_presence(&ctx, publish).await?;
             let store = ctx.store()?;
             store.set_setting(
                 SETTING_AVAILABLE_HOURS,
                 &hours.map(|window| window.as_setting()).unwrap_or_default(),
+            )?;
+            store.set_setting(
+                SETTING_AVAILABLE_ZONE,
+                zone.map(|zone| zone.name()).unwrap_or_default(),
             )?;
             store.set_setting(SETTING_ALWAYS_AVAILABLE, if enabled { "1" } else { "0" })?;
             settings_json(&store)
@@ -6916,12 +6929,10 @@ fn settings_json(store: &Store) -> Result<Value> {
     let settings = link_preview_settings(store)?;
     let hours = available_hours(store)?;
     // Whether the status is green THIS minute, which is a fact only this process holds: it
-    // owns the clock the heartbeat acts on, and its zone is not necessarily the reader's —
-    // the always-on service runs on a machine at home and the page is often a phone
-    // somewhere else. So the page is told rather than left to work it out (the reading
-    // `mentions_me` already takes), and the heartbeat says so again when the hours turn.
-    let available_now =
-        presence_intent(store, teams_presence::local_minute_of_day())?.unwrap_or(false);
+    // owns the clock the heartbeat acts on, and the zone the window is kept in. So the page
+    // is told rather than left to work it out (the reading `mentions_me` already takes), and
+    // the heartbeat says so again when the hours turn.
+    let available_now = presence_intent(store, chrono::Utc::now())?.unwrap_or(false);
     Ok(json!({
         "gitlab_host": settings.gitlab_host,
         "gitlab_token_set": settings.gitlab_token.is_some(),
@@ -6930,6 +6941,9 @@ fn settings_json(store: &Store) -> Result<Value> {
         "always_available": always_available(store)?,
         "available_from": hours.map(|h| teams_presence::format_hhmm(h.from)),
         "available_to": hours.map(|h| teams_presence::format_hhmm(h.to)),
+        // The zone by NAME, so the pane can say whose morning those hours are — `null` is
+        // this machine's own, which is what an install that never set one keeps.
+        "available_zone": available_zone(store)?.map(|zone| zone.name().to_string()),
         "available_now": available_now,
         "sender_icons": sender_icons_enabled(store)?,
         "emoji_auto_import": emoji_auto_import_enabled(store)?,
@@ -7038,6 +7052,15 @@ fn available_hours(store: &Store) -> Result<Option<teams_presence::AvailableHour
         .and_then(teams_presence::AvailableHours::parse_setting))
 }
 
+/// The zone those hours are kept in, or `None` for this machine's own (see
+/// [`SETTING_AVAILABLE_ZONE`]).
+fn available_zone(store: &Store) -> Result<Option<chrono_tz::Tz>> {
+    Ok(store
+        .get_setting(SETTING_AVAILABLE_ZONE)?
+        .as_deref()
+        .and_then(teams_presence::parse_zone))
+}
+
 /// What this backend should do about the user's own status at `minute_of_day`:
 ///
 /// * `None` — the switch is off, so there is nothing to publish and nothing to take back
@@ -7048,13 +7071,15 @@ fn available_hours(store: &Store) -> Result<Option<teams_presence::AvailableHour
 ///   registration expires ([`PRESENCE_HEARTBEAT`]).
 /// * `Some(false)` — the switch is on and the hours are not: withdraw, once.
 ///
-/// The minute is a parameter rather than a clock read so the whole decision is testable;
-/// its one caller reads [`teams_presence::local_minute_of_day`].
-fn presence_intent(store: &Store, minute_of_day: u32) -> Result<Option<bool>> {
+/// The INSTANT is a parameter rather than a clock read, so the whole decision — the zone
+/// included — is testable: 01:00Z is 03:00 in Paris and 10:00 in Tokyo, and which of those
+/// the window is compared against is the one thing this feature can get silently wrong.
+fn presence_intent(store: &Store, now: chrono::DateTime<chrono::Utc>) -> Result<Option<bool>> {
     if !always_available(store)? {
         return Ok(None);
     }
-    Ok(Some(teams_presence::should_publish(true, available_hours(store)?, minute_of_day)))
+    let minute = teams_presence::minute_of_day(now, available_zone(store)?);
+    Ok(Some(teams_presence::should_publish(true, available_hours(store)?, minute)))
 }
 
 /// The window a `set_always_available` call carries: both ends, or neither.
@@ -7074,6 +7099,23 @@ fn available_hours_param(params: &Value) -> Result<Option<teams_presence::Availa
             "`from` and `to` are a pair: send both hours, or neither to be available all day"
         ),
     }
+}
+
+/// The zone a `set_always_available` call carries: an IANA name, or nothing for the
+/// machine's own.
+///
+/// A name the database does not hold is REFUSED rather than quietly ignored: the whole point
+/// of the setting is that the hours are somebody's own morning, and a typo silently answered
+/// with this machine's zone publishes their status at hours nobody chose.
+fn available_zone_param(params: &Value) -> Result<Option<chrono_tz::Tz>> {
+    let Some(name) =
+        params.get("zone").and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty())
+    else {
+        return Ok(None);
+    };
+    teams_presence::parse_zone(name)
+        .with_context(|| format!("`zone` is not an IANA time zone: {name}"))
+        .map(Some)
 }
 
 /// The presence endpoint id this store's backends register, minted once and then
@@ -8416,7 +8458,7 @@ fn spawn_presence_heartbeat(ctx: Ctx) {
             let intent = ctx
                 .store()
                 .ok()
-                .and_then(|store| presence_intent(&store, teams_presence::local_minute_of_day()).ok())
+                .and_then(|store| presence_intent(&store, chrono::Utc::now()).ok())
                 // A store this tick could not open says nothing, which is the switch-off
                 // reading: this loop must never publish on a failed read.
                 .flatten();
@@ -11774,24 +11816,43 @@ mod tests {
         // window. `available_now` is then the switch itself.
         store.set_setting(SETTING_ALWAYS_AVAILABLE, "1").unwrap();
         assert_eq!(settings_json(&store).unwrap()["available_now"], true);
-        assert_eq!(presence_intent(&store, 3 * 60).unwrap(), Some(true));
+        let night = "2026-08-14T01:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        let midday = "2026-08-14T10:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        assert_eq!(presence_intent(&store, night).unwrap(), Some(true));
 
+        // The hours, kept in a zone the user named — which is what the two of them mean
+        // together: 01:00Z is 03:00 in Paris, and nobody is at their desk.
         store.set_setting(SETTING_AVAILABLE_HOURS, "08:00-19:00").unwrap();
+        store.set_setting(SETTING_AVAILABLE_ZONE, "Europe/Paris").unwrap();
         let settings = settings_json(&store).unwrap();
         assert_eq!(settings["available_from"], "08:00");
         assert_eq!(settings["available_to"], "19:00");
-        assert_eq!(presence_intent(&store, 12 * 60).unwrap(), Some(true), "inside the hours");
+        assert_eq!(settings["available_zone"], "Europe/Paris");
+        assert_eq!(presence_intent(&store, midday).unwrap(), Some(true), "12:00 in Paris");
         assert_eq!(
-            presence_intent(&store, 3 * 60).unwrap(),
+            presence_intent(&store, night).unwrap(),
             Some(false),
             "outside them the heartbeat withdraws, rather than doing nothing"
         );
+
+        // The same instant and the same window, read in Tokyo: 10:00, and green. This is
+        // the whole point of storing the zone — the person moved, the machine did not.
+        store.set_setting(SETTING_AVAILABLE_ZONE, "Asia/Tokyo").unwrap();
+        assert_eq!(presence_intent(&store, night).unwrap(), Some(true));
+        assert_eq!(settings_json(&store).unwrap()["available_zone"], "Asia/Tokyo");
+
+        // A zone no database holds reads as this machine's own, like a malformed window: one
+        // answer for the pane and for the heartbeat.
+        store.set_setting(SETTING_AVAILABLE_ZONE, "Europe/Pariss").unwrap();
+        assert!(available_zone(&store).unwrap().is_none());
+        assert_eq!(settings_json(&store).unwrap()["available_zone"], Value::Null);
+        store.set_setting(SETTING_AVAILABLE_ZONE, "Europe/Paris").unwrap();
 
         // The switch off is `None` and not `Some(false)`: an install that never turned this
         // on must make no presence request at all, and the RPC that turns it off has
         // already withdrawn the registration.
         store.set_setting(SETTING_ALWAYS_AVAILABLE, "0").unwrap();
-        assert_eq!(presence_intent(&store, 12 * 60).unwrap(), None);
+        assert_eq!(presence_intent(&store, midday).unwrap(), None);
         assert_eq!(
             available_hours(&store).unwrap(),
             teams_presence::AvailableHours::parse_setting("08:00-19:00"),
@@ -11825,6 +11886,24 @@ mod tests {
         }
         assert!(available_hours_param(&json!({ "from": "8am", "to": "19:00" })).is_err());
         assert!(available_hours_param(&json!({ "from": "09:00", "to": "09:00" })).is_err());
+    }
+
+    // The zone travels with the hours, and a name the database does not hold is REFUSED: a
+    // typo answered with this machine's zone would publish the user's status at hours nobody
+    // chose, which is the failure the setting exists to prevent.
+    #[test]
+    fn a_presence_zone_is_an_iana_name_or_nothing() {
+        assert!(available_zone_param(&json!({ "enabled": true })).unwrap().is_none());
+        assert!(available_zone_param(&json!({ "zone": null })).unwrap().is_none());
+        assert!(available_zone_param(&json!({ "zone": "" })).unwrap().is_none());
+        assert_eq!(
+            available_zone_param(&json!({ "zone": "Europe/Paris" })).unwrap().map(|z| z.name()),
+            Some("Europe/Paris")
+        );
+        for bad in ["Europe/Pariss", "+02:00", "CEST", "paris"] {
+            let err = available_zone_param(&json!({ "zone": bad })).unwrap_err().to_string();
+            assert!(err.contains("IANA"), "{err}");
+        }
     }
 
     // One id, minted once and then kept. A fresh id per call would register a second

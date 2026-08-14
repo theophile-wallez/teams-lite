@@ -829,6 +829,13 @@ export type AppSettings = {
    *  so the backend refuses one (see `available_hours_param` in src/bin/server.rs). */
   available_from: string | null;
   available_to: string | null;
+  /** The IANA zone those hours are kept in (`"Europe/Paris"`), or `null` for the BACKEND
+   *  machine's own — which is what an install that never set one keeps.
+   *
+   *  It is the user's own zone and not the machine's because the PERSON travels while the
+   *  always-on service stays where it is: 08:00 set in Paris is not 08:00 read from Tokyo. A
+   *  name rather than an offset, so the answer survives DST. */
+  available_zone: string | null;
   /** Whether the status is green THIS minute — the switch, narrowed by the hours.
    *
    *  Stated by the backend rather than worked out here, because the clock and the zone
@@ -860,6 +867,14 @@ export type AppSettings = {
  *  `AppSettings.available_from`). `"08:00"` is what an `<input type="time">` reads and
  *  writes, which is why the wire carries that spelling rather than minutes. */
 export type AvailableHours = { from: string; to: string };
+
+/** The whole schedule a `set_always_available` call carries: the window (or `null` for all
+ *  day) and the zone it is kept in (or `null` for the backend machine's own).
+ *
+ *  One object rather than two arguments, because the two travel together on every call: the
+ *  pane holds what the backend last answered with, so a call that omitted either would clear
+ *  it. */
+export type PresenceSchedule = { hours: AvailableHours | null; zone: string | null };
 
 /** The Linear workspace one machine's key belongs to (mirrors `linear::Workspace` in
  *  src/linear.rs).

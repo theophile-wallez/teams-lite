@@ -18,7 +18,18 @@ import {
   VolumeOffIcon,
 } from "@hugeicons/core-free-icons";
 import { APPEARANCES, appearanceLabel, type Appearance } from "~/lib/appearance";
-import { availabilityLine, hoursDraft, hoursLabel } from "~/lib/presence-hours";
+import {
+  availabilityLine,
+  hoursDraft,
+  hoursFromSlider,
+  hoursLabel,
+  hoursSlider,
+  HOURS_STEP_MINUTES,
+  MACHINE_ZONE_LABEL,
+  MINUTES_PER_DAY,
+  suggestedZone,
+  zoneOptions,
+} from "~/lib/presence-hours";
 import type { AvailableHours, SettingsPatch } from "~/lib/protocol";
 import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
@@ -31,6 +42,7 @@ import { useAppState, useController } from "./controller-context";
 import { LinearLogo } from "./linear-logo";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { Slider } from "./ui/slider";
 
 const APPEARANCE_ICONS: Record<Appearance, IconSvgElement> = {
   system: ComputerIcon,
@@ -39,6 +51,21 @@ const APPEARANCE_ICONS: Record<Appearance, IconSvgElement> = {
 };
 
 type SaveState = { kind: "idle" | "saving" | "saved" } | { kind: "error"; message: string };
+
+/** Where the presence slider's two thumbs stand before a window exists: a working day, which
+ *  is what the reader is almost certainly about to drag towards — a slider that opened at
+ *  00:00-24:00 would say "all day" while the fields beside it said nothing. */
+const DEFAULT_SPAN: [number, number] = [8 * 60, 19 * 60];
+
+/** The zone THIS browser is in, which is where the reader is. Guarded, because a page can be
+ *  server-rendered and `Intl` has no zone to report there. */
+function browserTimeZone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The Settings surface, rendered in the right pane in place of a conversation
@@ -591,11 +618,15 @@ function AlwaysAvailableSettings() {
   useEffect(() => setFrom(settings.available_from ?? ""), [settings.available_from]);
   useEffect(() => setTo(settings.available_to ?? ""), [settings.available_to]);
 
-  const publish = async (nextEnabled: boolean, hours: AvailableHours | null) => {
+  const publish = async (
+    nextEnabled: boolean,
+    hours: AvailableHours | null,
+    zone: string | null = settings.available_zone,
+  ) => {
     setBusy(true);
     setError(null);
     try {
-      await controller.setAlwaysAvailable(nextEnabled, hours);
+      await controller.setAlwaysAvailable(nextEnabled, { hours, zone });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -604,11 +635,18 @@ function AlwaysAvailableSettings() {
   };
 
   const draft = hoursDraft(from, to);
-  // The switch always carries the hours the pane holds: a call that sent none would clear
-  // the user's window every time they turned the status off and on again. A window only
-  // one end of is not something the backend can store, so the switch keeps the hours it
-  // last had while the sentence below asks for the other end.
-  const hoursForSwitch = draft.kind === "hours" ? draft.hours : null;
+  // The window the BACKEND holds, which is what every write that is not itself about the
+  // hours has to carry: the switch and the zone both send the whole schedule, so a call that
+  // sent none would clear the user's window every time they touched either.
+  const storedHours =
+    settings.available_from && settings.available_to
+      ? { from: settings.available_from, to: settings.available_to }
+      : null;
+  // A window only one end of is not something the backend can store — so the switch and the
+  // zone keep the hours it last HAD while the sentence below asks for the other end, and only
+  // an emptied pair (all day) really clears them.
+  const hoursForSwitch =
+    draft.kind === "hours" ? draft.hours : draft.kind === "all-day" ? null : storedHours;
 
   // Typing an hour is the write — the pane holds no Save button, like the model picker.
   // Both ends stores the window, both empty is all day, and one end stores nothing.
@@ -619,6 +657,31 @@ function AlwaysAvailableSettings() {
     if (next.kind === "hours") void publish(enabled, next.hours);
     else if (next.kind === "all-day") void publish(enabled, null);
   };
+
+  // The slider stands for the window the two fields hold, and for a DEFAULT span when they
+  // hold none — so the control the reader drags is never at a position that means nothing.
+  const slider = hoursSlider(hoursForSwitch) ?? { values: DEFAULT_SPAN, wrapped: false };
+  const sliderValues = [slider.values[0], slider.values[1]];
+
+  // A drag moves the fields and posts nothing (see the slider below); the commit is the
+  // write. Both keep the window's MODE, so dragging a night shift keeps it one.
+  const dragHours = (next: number[]) => {
+    const hours = hoursFromSlider(next, slider.wrapped);
+    setFrom(hours.from);
+    setTo(hours.to);
+  };
+  const commitHours = (next: number[]) => {
+    const hours = hoursFromSlider(next, slider.wrapped);
+    setFrom(hours.from);
+    setTo(hours.to);
+    void publish(enabled, hours);
+  };
+
+  // The zones this browser can name, and the one the reader is in right now — which is the
+  // whole reason the zone is a setting: the person travels, the backend's machine does not.
+  const browserZone = browserTimeZone();
+  const zones = zoneOptions(settings.available_zone, browserZone);
+  const suggestion = suggestedZone(settings.available_zone, browserZone);
 
   const timeField =
     "rounded-lg bg-element px-2 py-1 text-[13px] text-foreground tabular-nums " +
@@ -683,49 +746,138 @@ function AlwaysAvailableSettings() {
           </button>
         </div>
 
-        {/* The hours. Native time fields, in the app's own boxes: a picker of this app's
-            own would be a second one to keep in step with every phone's keyboard. */}
-        <div className="flex flex-wrap items-center gap-2 border-t border-border-subtle pt-3">
-          <span className="text-[13px] text-foreground">Only between</span>
-          {/* Never DISABLED while a write is in flight, unlike the switch: a native time
-              field edited from its hour segment fires as soon as those two digits land, and
-              disabling it there blurs it — on a phone over a tailnet that is 300 ms in which
-              the minutes the reader is typing go nowhere. */}
-          <input
-            type="time"
-            aria-label="Available from"
-            data-testid="available-from"
-            value={from}
-            onChange={(e) => editHours(e.target.value, to)}
-            className={timeField}
-          />
-          <span className="text-[13px] text-text-faint">and</span>
-          <input
-            type="time"
-            aria-label="Available until"
-            data-testid="available-to"
-            value={to}
-            onChange={(e) => editHours(from, e.target.value)}
-            className={timeField}
-          />
-          {draft.kind === "hours" && (
-            <button
-              type="button"
-              data-testid="available-all-day"
-              disabled={busy}
-              onClick={() => editHours("", "")}
-              className="rounded-lg px-2 py-1 text-[11px] text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+        {/* The hours. A two-thumb SLIDER is the control — a window is a span, and dragging
+            its two ends is how somebody says "my day looks like this" — with the exact hours
+            beside it as fields, because typing 08:30 beats aiming at it and because a window
+            that CROSSES MIDNIGHT cannot be dragged into being (the thumbs cannot pass each
+            other). One value, two ways in: the slider is coarse and direct, the fields are
+            exact. */}
+        <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[13px] text-foreground">Green between</span>
+            {/* Never DISABLED while a write is in flight, unlike the switch: a native time
+                field edited from its hour segment fires as soon as those two digits land, and
+                disabling it there blurs it — on a phone over a tailnet that is 300 ms in which
+                the minutes the reader is typing go nowhere. */}
+            <input
+              type="time"
+              aria-label="Available from"
+              data-testid="available-from"
+              value={from}
+              onChange={(e) => editHours(e.target.value, to)}
+              className={timeField}
+            />
+            <span className="text-[13px] text-text-faint">and</span>
+            <input
+              type="time"
+              aria-label="Available until"
+              data-testid="available-to"
+              value={to}
+              onChange={(e) => editHours(from, e.target.value)}
+              className={timeField}
+            />
+            {draft.kind === "hours" && (
+              <button
+                type="button"
+                data-testid="available-all-day"
+                disabled={busy}
+                onClick={() => editHours("", "")}
+                className="rounded-lg px-2 py-1 text-[11px] text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+              >
+                All day
+              </button>
+            )}
+          </div>
+
+          <Slider
+            data-testid="available-slider"
+            min={0}
+            max={MINUTES_PER_DAY}
+            step={HOURS_STEP_MINUTES}
+            // One step between the thumbs, which is also the backend's own rule: two equal
+            // hours read both as "never" and as "all day", so it refuses them.
+            minStepsBetweenThumbs={1}
+            value={sliderValues}
+            // The drag moves the readout on every frame and posts NOTHING: a publish per
+            // frame would be dozens of outward calls for one gesture. The commit — pointer up,
+            // or key up — is the write.
+            onValueChange={(next) => dragHours(next)}
+            onValueCommit={(next) => commitHours(next)}
+            // A window crossing midnight is green on the OUTSIDE of the two thumbs, and this
+            // primitive's own range is one element — so the caller draws both segments.
+            renderRange={!slider?.wrapped}
+          >
+            {slider?.wrapped && (
+              <>
+                <span
+                  aria-hidden
+                  className="absolute inset-y-0 left-0 bg-primary"
+                  style={{ width: `${(slider.values[0] / MINUTES_PER_DAY) * 100}%` }}
+                />
+                <span
+                  aria-hidden
+                  className="absolute inset-y-0 right-0 bg-primary"
+                  style={{
+                    width: `${((MINUTES_PER_DAY - slider.values[1]) / MINUTES_PER_DAY) * 100}%`,
+                  }}
+                />
+              </>
+            )}
+          </Slider>
+          {/* The scale, so the two thumbs sit on something a reader can place them against. */}
+          <div
+            aria-hidden
+            className="flex justify-between px-0.5 text-[10px] tabular-nums text-text-faint"
+          >
+            {["00:00", "06:00", "12:00", "18:00", "24:00"].map((mark) => (
+              <span key={mark}>{mark}</span>
+            ))}
+          </div>
+
+          {/* The ZONE those hours are kept in. It is the user's own and not the machine's,
+              because the person travels while the always-on service stays in one flat. The
+              list is the browser's own IANA names, so it costs the wire nothing. */}
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <label
+              htmlFor="available-zone"
+              className="text-[13px] text-foreground"
             >
-              All day
-            </button>
-          )}
+              in
+            </label>
+            <select
+              id="available-zone"
+              data-testid="available-zone"
+              value={settings.available_zone ?? ""}
+              disabled={busy}
+              onChange={(e) => void publish(enabled, hoursForSwitch, e.target.value || null)}
+              className={cn(timeField, "max-w-[15rem]")}
+            >
+              <option value="">{MACHINE_ZONE_LABEL}</option>
+              {zones.map((zone) => (
+                <option key={zone} value={zone}>
+                  {zone}
+                </option>
+              ))}
+            </select>
+            {suggestion && (
+              <button
+                type="button"
+                data-testid="available-zone-here"
+                disabled={busy}
+                onClick={() => void publish(enabled, hoursForSwitch, suggestion)}
+                className="rounded-lg px-2 py-1 text-[11px] text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+              >
+                Use {suggestion}
+              </button>
+            )}
+          </div>
         </div>
         <span data-testid="available-hours-hint" className="text-[11px] text-text-faint">
           {draft.kind === "incomplete"
             ? "Set both times — one on its own says nothing, and clearing both means all day."
             : draft.kind === "all-day"
-              ? "Empty means all day. Set a range — 08:00 to 19:00 — and the green dot keeps working hours on your backend's own clock."
-              : `Green ${hoursLabel(draft.hours)} on your backend's own clock; outside those hours Teams decides your status. An end before its start crosses midnight.`}
+              ? "Empty means all day. Drag a span — 08:00 to 19:00 — and the green dot keeps working hours."
+              : `Green ${hoursLabel(draft.hours)} in ${settings.available_zone ?? MACHINE_ZONE_LABEL.toLowerCase()}; outside those hours Teams decides your status. An end before its start crosses midnight.`}
         </span>
       </div>
 

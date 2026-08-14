@@ -29,7 +29,6 @@ import type { OutboundMention } from "./mentions";
 import type {
   AddressPeopleResult,
   AppSettings,
-  AvailableHours,
   BackendRestartResult,
   CalendarInfo,
   CalendarViewResult,
@@ -48,6 +47,7 @@ import type {
   PersonOverride,
   PersonProfile,
   PresenceResult,
+  PresenceSchedule,
   ReactionPick,
   ReadReceiptsResult,
   ReplyTo,
@@ -1249,7 +1249,9 @@ export class Backend {
    *  endpoint reporting Available (and refreshes it on a heartbeat), outside them it
    *  removes that registration and hands the status back to whatever Teams computes.
    *
-   *  `hours` is both ends or `null` for all day; the backend refuses a half window. What
+   *  `schedule.hours` is both ends or `null` for all day, and `schedule.zone` is an IANA name
+   *  or `null` for the backend machine's own; the backend refuses a half window and a zone it
+   *  cannot resolve. What
    *  it publishes is what the pair says about the minute the call arrives, so turning the
    *  setting on at 03:00 with 08:00-19:00 set changes nothing visible until the morning.
    *
@@ -1257,11 +1259,12 @@ export class Backend {
    *  colleague reads the green dot — so it is gated like a send and a read-only
    *  backend refuses it (see OUTWARD_METHODS in src/bin/server.rs). Returns the fresh
    *  settings view, so the switch only moves once Teams was actually told. */
-  setAlwaysAvailable(enabled: boolean, hours: AvailableHours | null): Promise<AppSettings> {
+  setAlwaysAvailable(enabled: boolean, schedule: PresenceSchedule): Promise<AppSettings> {
     return this.writeRequest<AppSettings>("set_always_available", {
       enabled,
-      from: hours?.from ?? null,
-      to: hours?.to ?? null,
+      from: schedule.hours?.from ?? null,
+      to: schedule.hours?.to ?? null,
+      zone: schedule.zone,
     });
   }
   /** Enrich a tracker link with metadata for a rich preview card. Resolves with
