@@ -102,14 +102,15 @@ export function NotificationOffer() {
             </span>
           </Button>
         ) : (
-          // iOS in a tab. There is no press that can fix it, so the row is the sentence
-          // — the one `pushBlockerMessage` already writes, rather than a second spelling
-          // of Apple's rule.
+          // Something the READER can undo and this app cannot: an iOS tab, or a page on
+          // plain http. There is no press that would work, so the row is the sentence —
+          // the one `pushBlockerMessage` already writes, keyed on the blocker itself
+          // rather than a second spelling of Apple's rule or of the secure-context one.
           <p
-            data-testid="notification-offer-install"
+            data-testid="notification-offer-advice"
             className="min-w-0 flex-1 text-[11px] leading-snug text-text-dim"
           >
-            {pushBlockerMessage("needs-install")}
+            {pushBlockerMessage(push.blocker)}
           </p>
         )}
         <button

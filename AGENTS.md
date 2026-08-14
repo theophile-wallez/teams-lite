@@ -2441,6 +2441,19 @@ an outward action, so it is gated on purpose:
     Share → Add to Home Screen. That row carries no button, because there is no press that
     could work in a Safari tab — and it is the only place the phone half of this feature is
     ever mentioned to somebody who has not gone looking.
+  - **AN INSECURE ADDRESS IS BLAMED ON THE ADDRESS, never on the browser.** No browser
+    publishes `serviceWorker` or `PushManager` outside a secure context, so a page opened
+    over plain `http://` at a hostname or a LAN address — a tailnet name with the TLS front
+    skipped, `http://192.168…` — answered "this browser cannot receive push notifications".
+    That is false about the browser, blames the one thing the reader cannot change, and
+    hides a one-step fix; it reached a real reader on Brave, which has had Web Push for
+    years. `PushEnvironment.secure` is the browser's OWN `isSecureContext` (it already
+    knows loopback counts, and a rule written over `location` here would re-derive that and
+    get it wrong), and `insecure` is ordered ABOVE both `unsupported` and `needs-install` —
+    every one of those arrives as the same symptom, the APIs simply missing, so the order
+    is the whole of `pushBlocker`. HTTPS beats Apple's rule because an `http` page cannot
+    be added to the Home Screen either. An ABSENT flag reads as secure: the capability
+    check is what really decides, and this one only picks which sentence explains it.
   - **A refusal is said AT the press**, in the browser's own words (a push service switched
     off, a worker that will not register). The composer's rule: an action that did not
     happen must never be left looking like it did.

@@ -53,10 +53,34 @@ test.describe("The notification offer", () => {
     await gotoApp(page);
     const offer = page.locator('[data-testid="notification-offer"]');
     await expect(offer).toHaveAttribute("data-shape", "install");
-    await expect(offer.locator('[data-testid="notification-offer-install"]')).toContainText(
+    await expect(offer.locator('[data-testid="notification-offer-advice"]')).toContainText(
       "Add to Home Screen",
     );
     await expect(offer.locator('[data-testid="notification-offer-enable"]')).toHaveCount(0);
+  });
+
+  test("blames the address, not the browser, on an insecure origin", async ({ page }) => {
+    // A page served over plain http:// to anything but loopback — which is how this app is
+    // reached from another machine when the TLS front is skipped. Every API push needs is
+    // absent there, and the app used to answer "this browser cannot receive push
+    // notifications" on a browser that certainly can. It reached a real reader on Brave.
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "isSecureContext", { get: () => false });
+      // @ts-expect-error — the shape an insecure origin really has.
+      delete window.PushManager;
+    });
+
+    await gotoApp(page);
+    const offer = page.locator('[data-testid="notification-offer"]');
+    await expect(offer).toHaveAttribute("data-shape", "insecure");
+    const advice = offer.locator('[data-testid="notification-offer-advice"]');
+    await expect(advice).toContainText("secure connection");
+    await expect(advice).toContainText("127.0.0.1");
+    await expect(advice).not.toContainText("cannot receive");
+
+    // And Settings says the same thing, since both read the one sentence.
+    await page.locator('[data-testid="open-settings"]').click();
+    await expect(page.locator('[data-testid="push-blocked"]')).toContainText("secure connection");
   });
 });
 

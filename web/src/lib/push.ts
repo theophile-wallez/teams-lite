@@ -46,12 +46,19 @@ export type PushEnvironment = {
   /** An Apple mobile browser, where push exists only for an installed app. Used to
    *  turn "capable: false" into advice instead of a dead end. */
   appleMobile: boolean;
+  /** A secure context (`https:`, or a loopback host). Every API push needs is absent
+   *  without one, so this is the difference between "your browser cannot" and "this
+   *  address cannot" — see {@link pushBlocker}. */
+  secure: boolean;
   /** The Notification permission, or "unavailable" where the API is absent. */
   permission: NotificationPermission | "unavailable";
 };
 
 /** Why this device cannot receive push notifications, or `null` when it can. */
 export type PushBlocker =
+  /** The page is on an insecure origin, where no browser publishes any of this. Open
+   *  the app over HTTPS, or on loopback. */
+  | "insecure"
   /** iOS: add the page to the Home Screen and open it from there. */
   | "needs-install"
   /** The browser has no Push API at all. */
@@ -77,7 +84,13 @@ export type PushState = {
 };
 
 export const INITIAL_PUSH_STATE: PushState = {
-  environment: { capable: false, installed: false, appleMobile: false, permission: "unavailable" },
+  environment: {
+    capable: false,
+    installed: false,
+    appleMobile: false,
+    secure: true,
+    permission: "unavailable",
+  },
   blocker: "unsupported",
   endpoint: null,
   devices: [],
@@ -116,20 +129,33 @@ export function readPushEnvironment(
   const permission = hasNotification
     ? ((win as { Notification: { permission: NotificationPermission } }).Notification.permission)
     : ("unavailable" as const);
-  return { capable, installed, appleMobile, permission };
+  // `isSecureContext` is the browser's own answer, and it is the only one worth asking:
+  // it already knows that loopback counts and that a tailnet HTTPS front does too, which
+  // a rule written over `location` here would have to re-derive and get wrong. Absent (an
+  // ancient browser, a stub in a test) reads as SECURE, because the capability check
+  // below is what really decides — this flag only chooses which sentence explains it.
+  const secure = (win as { isSecureContext?: boolean }).isSecureContext !== false;
+  return { capable, installed, appleMobile, secure, permission };
 }
 
 /**
  * The one thing standing between this device and notifications, or `null`.
  *
- * Order matters: a backend that never pushes makes every browser question moot, and
- * on iOS "not installed" must beat "unsupported" — the APIs really are missing in a
- * tab, and telling the user their browser cannot do it would be wrong AND
- * discouraging when the fix is Share → Add to Home Screen.
+ * ORDER IS THE WHOLE OF THIS FUNCTION, because every cause below arrives as the same
+ * symptom — `capable: false`, the APIs simply missing — and what differs is the reader's
+ * next move. A backend that never pushes makes every browser question moot. An INSECURE
+ * ORIGIN comes next: no browser publishes `serviceWorker` or `PushManager` without a
+ * secure context, so a page opened over plain `http://` at a hostname or a LAN address
+ * (a tailnet name without TLS, `http://192.168…`) reported "this browser cannot receive
+ * push notifications" — which is false about the browser, blames the wrong thing, and
+ * hides the one-step fix. It is the mistake `needs-install` already exists to avoid, in
+ * the other direction, and it happened to a real reader on Brave. HTTPS beats the Apple
+ * branch, since an iOS page over `http` cannot be installed either.
  */
 export function pushBlocker(environment: PushEnvironment, backendSupports: boolean): PushBlocker {
   if (!backendSupports) return "backend";
   if (!environment.capable) {
+    if (!environment.secure) return "insecure";
     return environment.appleMobile && !environment.installed ? "needs-install" : "unsupported";
   }
   if (environment.permission === "denied") return "denied";
@@ -139,6 +165,8 @@ export function pushBlocker(environment: PushEnvironment, backendSupports: boole
 /** A sentence for each blocker, so the pane never has to guess the wording. */
 export function pushBlockerMessage(blocker: PushBlocker, reason?: string): string | null {
   switch (blocker) {
+    case "insecure":
+      return "Notifications need a secure connection, and this page is on plain http:// — no browser offers them there. Open teams-lite over https, or at http://127.0.0.1 on the machine it runs on.";
     case "needs-install":
       return "On iPhone and iPad, notifications need the app on your Home Screen. Tap Share, then “Add to Home Screen”, and open teams-lite from there.";
     case "unsupported":
@@ -158,6 +186,8 @@ export type PushOffer =
   | "enable"
   /** iOS in a tab, where the fix is Share → Add to Home Screen. */
   | "install"
+  /** A page on plain http://, where the fix is the address. */
+  | "insecure"
   | null;
 
 /**
@@ -176,13 +206,25 @@ export type PushOffer =
  * `INITIAL_PUSH_STATE` is `unsupported` too, so nothing is offered before the backend has
  * answered: a row that appeared and then took itself back is worse than one beat of
  * silence.
+ *
+ * The two blockers it DOES speak for are the two the reader can undo themselves: an iOS
+ * tab (add it to the Home Screen) and an insecure address (open it over https). Both are a
+ * sentence rather than a button, because there is no press here that could work.
  */
 export function pushOffer(state: PushState, dismissed: boolean): PushOffer {
   if (dismissed) return null;
   // On here already. The list of OTHER devices is Settings' business, not a row's.
   if (state.endpoint !== null) return null;
-  if (state.blocker === null) return "enable";
-  return state.blocker === "needs-install" ? "install" : null;
+  switch (state.blocker) {
+    case null:
+      return "enable";
+    case "needs-install":
+      return "install";
+    case "insecure":
+      return "insecure";
+    default:
+      return null;
+  }
 }
 
 /**

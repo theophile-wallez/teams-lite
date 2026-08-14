@@ -37,8 +37,22 @@ describe("readPushEnvironment", () => {
       capable: true,
       installed: true,
       appleMobile: true,
+      secure: true,
       permission: "default",
     });
+  });
+
+  it("reads the browser's own secure-context answer, and treats silence as secure", () => {
+    // A plain-http origin: the browser says so itself, and every API push needs is gone
+    // with it. Absent (a stub, an ancient browser) must read as secure, because the
+    // capability check is what really decides — this flag only picks the sentence.
+    const insecure = readPushEnvironment(
+      { userAgent: MAC_UA },
+      { matchMedia: () => ({ matches: false }), isSecureContext: false } as never,
+    );
+    expect(insecure.secure).toBe(false);
+    expect(insecure.capable).toBe(false);
+    expect(readPushEnvironment({ userAgent: MAC_UA }, capableWindow()).secure).toBe(true);
   });
 
   it("reports an iPhone Safari TAB as not capable and not installed", () => {
@@ -86,7 +100,13 @@ describe("readPushEnvironment", () => {
 });
 
 describe("pushBlocker", () => {
-  const capable = { capable: true, installed: true, appleMobile: false, permission: "default" as const };
+  const capable = {
+    capable: true,
+    installed: true,
+    appleMobile: false,
+    secure: true,
+    permission: "default" as const,
+  };
 
   it("clears the way when the browser and the backend both agree", () => {
     expect(pushBlocker(capable, true)).toBe(null);
@@ -98,14 +118,46 @@ describe("pushBlocker", () => {
   });
 
   it("asks an iPhone to install the app rather than calling it unsupported", () => {
-    const tab = { capable: false, installed: false, appleMobile: true, permission: "unavailable" as const };
+    const tab = {
+      capable: false,
+      installed: false,
+      appleMobile: true,
+      secure: true,
+      permission: "unavailable" as const,
+    };
     expect(pushBlocker(tab, true)).toBe("needs-install");
     expect(pushBlockerMessage("needs-install")).toContain("Add to Home Screen");
   });
 
   it("calls a browser without the APIs unsupported", () => {
-    const old = { capable: false, installed: false, appleMobile: false, permission: "unavailable" as const };
+    const old = {
+      capable: false,
+      installed: false,
+      appleMobile: false,
+      secure: true,
+      permission: "unavailable" as const,
+    };
     expect(pushBlocker(old, true)).toBe("unsupported");
+  });
+
+  it("blames the ADDRESS before the browser, and before Apple's rule", () => {
+    // Every cause here arrives as the same symptom — the APIs simply missing — so the
+    // order is what decides which sentence the reader gets. On plain http a browser that
+    // certainly supports push was told it does not, which is false and hides the fix; and
+    // an iOS page over http cannot be installed either, so HTTPS comes first there too.
+    const http = {
+      capable: false,
+      installed: false,
+      appleMobile: false,
+      secure: false,
+      permission: "unavailable" as const,
+    };
+    expect(pushBlocker(http, true)).toBe("insecure");
+    expect(pushBlocker({ ...http, appleMobile: true }, true)).toBe("insecure");
+    const message = pushBlockerMessage("insecure") ?? "";
+    expect(message).toContain("secure connection");
+    expect(message).toContain("127.0.0.1");
+    expect(message).not.toContain("cannot receive");
   });
 
   it("reports a refused permission, which only the OS can undo", () => {
@@ -137,6 +189,10 @@ describe("pushOffer", () => {
 
   it("offers iOS the one thing that would fix it", () => {
     expect(pushOffer(state({ blocker: "needs-install" }), false)).toBe("install");
+  });
+
+  it("speaks for an insecure address, which the reader can undo", () => {
+    expect(pushOffer(state({ blocker: "insecure" }), false)).toBe("insecure");
   });
 
   it("stays silent for a blocker no press of this row could undo", () => {
