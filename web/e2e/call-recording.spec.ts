@@ -6,6 +6,7 @@ import {
   gotoApp,
   openConversationNamed,
   resetCall,
+  setSendControl,
   test,
 } from "./helpers";
 
@@ -69,6 +70,14 @@ async function hangUp(page: Page): Promise<void> {
 }
 
 test.describe("Recording a call", () => {
+  // The send log is the MOCK's, and one mock process serves the whole run — so "nothing was
+  // sent" can only be asserted against a log this test emptied. Without it the claim is
+  // "nothing in the entire run was sent", which every spec that sends a message breaks, and
+  // whose failure names this flow rather than the specs that really wrote.
+  test.beforeEach(async ({ page }) => {
+    await setSendControl(page, { clear: true });
+  });
+
   test.afterEach(async ({ page }) => {
     await resetCall(page);
   });

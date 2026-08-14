@@ -152,6 +152,39 @@ export function pushBlockerMessage(blocker: PushBlocker, reason?: string): strin
   }
 }
 
+/** What the sidebar says about notifications, or `null` for nothing at all. */
+export type PushOffer =
+  /** This device can subscribe and has not: offer the switch. */
+  | "enable"
+  /** iOS in a tab, where the fix is Share → Add to Home Screen. */
+  | "install"
+  | null;
+
+/**
+ * Whether the sidebar offers notifications, and in which of its two shapes.
+ *
+ * The feature was complete and nobody had it on: measured on this machine's own store,
+ * ZERO devices were subscribed while the switch had sat in Settings for a fortnight. A
+ * setting nobody finds is a feature that does not exist — so the offer comes to the
+ * reader once, where they already look, and the Settings section stays the place they
+ * turn it back off.
+ *
+ * SILENT on `denied`, `unsupported` and `backend`, and that is the whole reason this is a
+ * function rather than a `!endpoint` check: a row the reader cannot act on is a nag. Each
+ * of those three is undone somewhere this app cannot reach — the OS settings, another
+ * browser, a backend started read-only — and Settings › Notifications already says which.
+ * `INITIAL_PUSH_STATE` is `unsupported` too, so nothing is offered before the backend has
+ * answered: a row that appeared and then took itself back is worse than one beat of
+ * silence.
+ */
+export function pushOffer(state: PushState, dismissed: boolean): PushOffer {
+  if (dismissed) return null;
+  // On here already. The list of OTHER devices is Settings' business, not a row's.
+  if (state.endpoint !== null) return null;
+  if (state.blocker === null) return "enable";
+  return state.blocker === "needs-install" ? "install" : null;
+}
+
 /**
  * Decode a base64url VAPID key into the bytes `pushManager.subscribe` wants.
  *

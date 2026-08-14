@@ -46,6 +46,7 @@ import { GitLabSidebar, GitLabTabIcon } from "./gitlab-sidebar";
 import { ChatMenu } from "./chat-menu";
 import { useAppState, useController } from "./controller-context";
 import { MailList } from "./mail-list";
+import { NotificationOffer } from "./notification-offer";
 import { NotificationsBell } from "./notifications-bell";
 import { ShortcutChord } from "./shortcut";
 import { StatusBar } from "./status-bar";
@@ -278,6 +279,7 @@ export function ConversationList(props: {
       <BrokerBanner />
       <WriteLockBanner />
       <UpdateButton />
+      <NotificationOffer />
       <StatusBar />
     </aside>
   );

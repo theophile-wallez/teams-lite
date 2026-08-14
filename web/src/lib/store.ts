@@ -172,7 +172,7 @@ import {
   visibleRange,
   type CalendarViewMode,
 } from "./calendar";
-import { ensureNotificationPermission, notifyCall, notifyMessage } from "./notify";
+import { notifyCall, notifyMessage } from "./notify";
 import {
   INITIAL_PUSH_STATE,
   currentSubscription,
@@ -1188,9 +1188,11 @@ export class TeamsController {
       // Reveal the (empty) UI anyway after a beat so the error is visible.
       setTimeout(() => this.set({ ready: true }), 2500);
     }
-    // Best-effort: ask for notification permission after connect (a user
-    // gesture may be required; the browser handles that).
-    void ensureNotificationPermission();
+    // Nothing asks for notification permission here, deliberately: a prompt with no
+    // question in front of it is dismissed, and a browser dismissed a few times answers
+    // `denied` for good — the one state neither this app nor its Settings pane can undo.
+    // The reader is offered notifications by a row they can read first (see
+    // notification-offer.tsx), and the permission is asked from that press.
   }
 
   /**
@@ -1367,7 +1369,7 @@ export class TeamsController {
       ) {
         // The message's own text, read the way its type says it must be (a `Text`
         // body is plain, not HTML) — so a notification never eats what it quotes.
-        notifyMessage(m.sender, copyableMessageText(m));
+        notifyMessage(m.sender, copyableMessageText(m), m.conversation_id);
         // Subtle inbound cue, riding the same gate as the desktop notification —
         // so the conversation you're looking at never chimes at you.
         playCue("droplet");
@@ -1797,7 +1799,7 @@ export class TeamsController {
     this.set({ incomingCalls: next });
 
     if (convId !== this.get().openId) {
-      notifyCall(call.caller, this.callGroupLabel(convId));
+      notifyCall(call.caller, this.callGroupLabel(convId), convId);
     }
   }
 

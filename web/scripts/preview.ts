@@ -1320,6 +1320,35 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // The notification OFFER: the row that asks once, at the foot of the sidebar. It needs
+  // no test hook — a browser that can subscribe and has not is the state every fresh
+  // profile is in, which is the point of the row. The iOS "add to Home Screen" shape is
+  // deliberately not captured: it is a paragraph of text, pinned by
+  // e2e/notification-settings.spec.ts, and spoofing a user agent to photograph a sentence
+  // buys nothing.
+  if (args.includes("--notifications")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      const offer = '[data-testid="notification-offer"][data-shape="enable"]';
+      await page.locator(offer).waitFor({ state: "visible" });
+      await shot(`${out}-light.png`);
+      await shot(`${out}-row-light.png`, offer);
+      await setTheme("dark");
+      await shot(`${out}-dark.png`);
+      await shot(`${out}-row-dark.png`, offer);
+
+      // A phone, where this row is the only place the reader will ever meet the feature:
+      // the sidebar IS the screen there, and the row shares its foot with the status line.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.locator(offer).waitFor({ state: "visible" });
+      await shot(`${out}-mobile-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-light.png, ${out}-row-light.png, ${out}-dark.png, ` +
+          `${out}-row-dark.png and ${out}-mobile-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // @mentions: the suggestion list a typed "@" opens, the chip a picked person leaves
   // in the composer, what Backspace does to it (one word per keystroke, Teams-style),
   // and the mention as it reads once the message is sent.

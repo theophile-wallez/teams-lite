@@ -2309,7 +2309,9 @@ user. Two independent mechanisms enforce that split:
   conversation and the Settings list: `bun run preview -- --out /tmp/rec --call-recording`
   (it writes a real webm out of the mock's canvases, with no camera and no microphone). For the
   write-lock banner, in both of its
-  causes: `bun run preview -- --out /tmp/wl --write-lock`. To review a detail too
+  causes: `bun run preview -- --out /tmp/wl --write-lock`. For the notification offer —
+  the row that asks once, in both themes and at a phone's width:
+  `bun run preview -- --out /tmp/notif --notifications`. To review a detail too
   small to read in a
   1200px page — a 16px icon, a chip, a badge — crop to it and raise the pixel
   density: `bun run preview -- --out /tmp/chip --element
@@ -2412,6 +2414,48 @@ an outward action, so it is gated on purpose:
 - **A read-only backend never pushes.** `deliver_push` refuses before the network,
   not only at the dispatch gate — live delivery never passes through the gate, and a
   screenshot script must not buzz the user's phone.
+- **THE FEATURE IS OFFERED, because a setting nobody finds is a feature that does not
+  exist.** The whole chain above worked and NOBODY HAD IT ON: measured on this machine's
+  own store, **zero rows in `push_subscriptions`** against a VAPID key that had been
+  generated a fortnight earlier — the switch was in Settings › Notifications and the app
+  never once said notifications were possible. So one row sits at the foot of the sidebar
+  (`web/src/components/notification-offer.tsx`, over the pure `pushOffer`), where the
+  update row already stands and for its reasons. It is not a second gate: the press calls
+  the same `enablePush`, and Settings is still where a device is turned back off. Five
+  rules, each pinned by `web/e2e/notification-settings.spec.ts` or `push.test.ts`:
+  - **THE PRESS IS THE PERMISSION, and NOTHING asks any other way.** It used to be asked
+    on connect, out of nowhere (`ensureNotificationPermission`, deleted): a prompt with no
+    question in front of it is dismissed, and a browser dismissed a few times stops asking
+    and answers `denied` — the one state neither this app nor its Settings pane can undo,
+    and it takes the push path down with the popup. Asking from the reader's own press is
+    also the only shape iOS accepts.
+  - **It is SILENT on `denied`, `unsupported` and `backend`** — that is why `pushOffer` is
+    a function rather than a `!endpoint` check. Each is undone somewhere this app cannot
+    reach, and a row the reader cannot act on is a nag. `INITIAL_PUSH_STATE` is
+    `unsupported` too, so nothing is offered before the backend has answered.
+  - **iOS gets the one thing that would fix it**, in `pushBlockerMessage`'s own words:
+    Share → Add to Home Screen. That row carries no button, because there is no press that
+    could work in a Safari tab — and it is the only place the phone half of this feature is
+    ever mentioned to somebody who has not gone looking.
+  - **A refusal is said AT the press**, in the browser's own words (a push service switched
+    off, a worker that will not register). The composer's rule: an action that did not
+    happen must never be left looking like it did.
+  - **One dismissal is for good, per browser** (`localStorage`, like every other
+    client-side preference here). The offer is worth making once; a dismissal on the laptop
+    must not silence it on the phone.
+  `cd web && bun run preview -- --out /tmp/notif --notifications` captures the row in both
+  themes and at a phone's width. The iOS shape is deliberately not captured: it is a
+  paragraph of text, and spoofing a user agent to photograph a sentence buys nothing.
+- **A LIVE PAGE SHOWS ITS OWN POPUP TWO WAYS, and the second one is what reaches the
+  phone.** The service worker deliberately shows nothing while a window is visible, so the
+  page owes the reader that notification itself (`web/src/lib/notify.ts`) — and an
+  installed web app on iOS HAS `window.Notification` (its `permission` and
+  `requestPermission` both work) while REFUSING the constructor: WebKit only notifies
+  through the service worker registration there. So the constructor is tried and its
+  failure is a ROUTE rather than an outcome, and `registration.showNotification` is the
+  fallback. A tap carries the same `data.url` a push does — the path
+  `push_policy::notification_for` already writes — so `notificationclick` in
+  `web/public/sw.js` needed no second case.
 - **The payload is encrypted to the device** (RFC 8291, verified against the RFC's
   own test vector). That is a privacy guarantee, not an implementation detail: the
   push service forwards a colleague's words without being able to read them. Never

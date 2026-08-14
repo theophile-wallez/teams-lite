@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  INITIAL_PUSH_STATE,
   base64UrlToBytes,
   bytesToBase64Url,
   deviceLabel,
   pushBlocker,
   pushBlockerMessage,
+  pushOffer,
   readPushEnvironment,
+  type PushBlocker,
+  type PushState,
 } from "./push";
 
 /** A browser that supports everything push needs. */
@@ -111,6 +115,47 @@ describe("pushBlocker", () => {
   it("uses the backend's own reason when it has one", () => {
     expect(pushBlockerMessage("backend", "read-only")).toBe("read-only");
     expect(pushBlockerMessage(null)).toBe(null);
+  });
+});
+
+describe("pushOffer", () => {
+  const state = (patch: Partial<PushState> = {}): PushState => ({
+    ...INITIAL_PUSH_STATE,
+    blocker: null,
+    ...patch,
+  });
+
+  it("offers the switch to a device that could subscribe and has not", () => {
+    expect(pushOffer(state(), false)).toBe("enable");
+  });
+
+  it("says nothing once this device is subscribed", () => {
+    expect(pushOffer(state({ endpoint: "https://fcm.googleapis.com/fcm/send/x" }), false)).toBe(
+      null,
+    );
+  });
+
+  it("offers iOS the one thing that would fix it", () => {
+    expect(pushOffer(state({ blocker: "needs-install" }), false)).toBe("install");
+  });
+
+  it("stays silent for a blocker no press of this row could undo", () => {
+    // Each of these is undone somewhere this app cannot reach — the OS settings, another
+    // browser, a backend started read-only — so a row would be a nag. Settings says which.
+    for (const blocker of ["denied", "unsupported", "backend"] as PushBlocker[]) {
+      expect(pushOffer(state({ blocker }), false)).toBe(null);
+    }
+  });
+
+  it("says nothing before the backend has answered", () => {
+    // INITIAL_PUSH_STATE is `unsupported`: a row that appeared and then took itself back
+    // is worse than one beat of silence.
+    expect(pushOffer(INITIAL_PUSH_STATE, false)).toBe(null);
+  });
+
+  it("is over for good once dismissed, whatever the state says", () => {
+    expect(pushOffer(state(), true)).toBe(null);
+    expect(pushOffer(state({ blocker: "needs-install" }), true)).toBe(null);
   });
 });
 
