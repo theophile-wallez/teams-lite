@@ -2307,7 +2307,11 @@ user. Two independent mechanisms enforce that split:
   other install shape keeps: `bun run preview -- --out /tmp/upd --update`. For recording a
   call — the control and the sentence it carries, the live state, the card it leaves in the
   conversation and the Settings list: `bun run preview -- --out /tmp/rec --call-recording`
-  (it writes a real webm out of the mock's canvases, with no camera and no microphone). For the
+  (it writes a real webm out of the mock's canvases, with no camera and no microphone). For
+  "Always available" and the HOURS it keeps — off, on all day, the hours running and the hours
+  not yet come round: `bun run preview -- --out /tmp/av --available`, or `setAlwaysAvailable` /
+  `setAvailableHours` from the same file (both assert the MOCK sentinel: against a real backend
+  those two fields decide when the user's own status is published). For the
   write-lock banner, in both of its
   causes: `bun run preview -- --out /tmp/wl --write-lock`. For the notification offer —
   the row that asks once, in both themes and at a phone's width:
@@ -3402,6 +3406,58 @@ Reading other people's presence is the older half of that module and stays open;
 publish is gated, because a green dot is a claim about where the user is that every
 colleague reads.
 
+**AND IT KEEPS HOURS, because green at 03:00 is a claim nobody believes.** The setting
+was a plain switch and published Available at three in the morning as eagerly as at
+eleven — which defeats the one thing it is for: a status that reads as a person at their
+desk. So it carries a WINDOW in the machine's own local time (`08:00-19:00`), and the
+pane is two native `<input type="time">` fields under the switch
+(`web/src/lib/presence-hours.ts` holds the pure half, `SETTING_AVAILABLE_HOURS` and
+`presence_intent` the backend's). Seven rules, and each is pinned by a test:
+
+- **The switch is the CONSENT and the window only NARROWS it.**
+  `teams_presence::should_publish` is the one spelling of "should this machine be green
+  right now", read by the RPC, by the heartbeat and by the settings answer alike — two
+  answers to that question is the bug that shows as a switch saying one thing while
+  colleagues see another. Off is off whatever the hours say.
+- **NO window is ALL DAY**, which is exactly what the setting did before it grew one — so
+  an install that never sets hours behaves as it always did, and an older page that sends
+  neither hour is not silently rescheduled.
+- **The two hours are a PAIR: both or neither** (`available_hours_param`). A half window
+  reads equally as "all day from 8" and as "8 until whenever", so the backend refuses one
+  and the pane stores nothing until the reader has said which — the rule a diff's
+  `diff_refs` and a picture's `width`/`height` already follow.
+- **`from == to` is refused, and an end BEFORE its start crosses midnight.** `09:00-09:00`
+  reads equally as never and as all day, and one character deciding between those is a
+  setting nobody can check; `22:00-06:00` is a night shift, and refusing it would be an
+  arbitrary limit on the same comparison inverted. The end is exclusive, which is what the
+  two numbers read as.
+- **The clock is the BACKEND's, and it is a real time zone.** It is the process that has to
+  decide at 03:00 with every window closed, so `local_minute_of_day` reads the machine's
+  own zone — DST included — rather than an offset stored beside the window, which is an
+  hour wrong for half the year. An hour is the size of the mistake this feature exists to
+  avoid.
+- **The HEARTBEAT is what turns the hours into a status, and its two edges are not
+  symmetric.** Nobody is clicking anything at 08:00 or 19:00, so the heartbeat acts:
+  inside the hours it registers, and it keeps registering because a registration EXPIRES;
+  at the end of them it withdraws ONCE. A DELETE every two minutes all night would be 700
+  pointless requests a day and a journal full of them. With the switch OFF it says nothing
+  at all — the RPC that turned it off already withdrew — which is why an install that never
+  turned this on still makes no presence request.
+- **`available_now` is stated by the backend, and the page is TOLD when it turns.** The
+  clock and the zone that decide it are the backend's, and they are often not the reader's
+  — the always-on service runs on a machine at home while the page is a phone somewhere
+  else — so the page never works it out (the reading `mentions_me` already takes). The
+  heartbeat emits `settings_changed` on the turn, so a Settings pane left open across 19:00
+  stops claiming a green dot the backend has already withdrawn.
+
+`web/mock/server.ts` mirrors the store and both refusals with no tenant (it publishes no
+presence at all, which is what makes driving the switch safe), `cd web && bun run preview
+-- --out /tmp/av --available` captures the switch off, on all day, the hours running and
+the hours not yet come round, and `web/e2e/always-available.spec.ts` pins every rule the
+page owns. **The hours themselves are untested against the tenant**, and deliberately: the
+publish and its undo are the two calls that were measured, and a window only decides WHEN
+this app makes them.
+
 - **`set_always_available` is an `OUTWARD_METHODS` entry**, in both directions: it
   needs the write token, a read-only backend refuses it, and the hook blocks a script
   or a `curl` that names the presence write on a command line. Turning the setting
@@ -3418,9 +3474,9 @@ colleague reads.
   setting. A test in `teams_presence::tests` scans the crate for that endpoint, and
   the automation hook refuses any command that names it. Do not weaken either.
 - **A registration expires after 300 s** (measured), so `spawn_presence_heartbeat`
-  refreshes it every 120 s while the setting is on, and the first tick restores the
-  state after a restart. One endpoint id lives in the store, so the always-on service
-  and the user's dev backend refresh ONE registration rather than two.
+  refreshes it every 120 s while the setting is on and inside its hours, and the first
+  tick restores the state after a restart. One endpoint id lives in the store, so the
+  always-on service and the user's dev backend refresh ONE registration rather than two.
 - **A read-only backend never publishes.** `publish_presence` refuses before the
   network, not only at the dispatch gate — the heartbeat never passes through that
   gate, and a screenshot backend must not tell the user's colleagues they are around.
@@ -3969,7 +4025,8 @@ user's. What changes is only what is asked.
   Web Push to the user's own devices (`src/push.rs` + `src/push_policy.rs`), the
   READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`), the
   READ-ONLY Teams/Outlook calendar (`src/calendar.rs`), presence — reading everybody's
-  and, only when the user asks for it, publishing their own (`src/teams_presence.rs`,
+  and, only when the user asks for it and only during the hours they set, publishing their
+  own (`src/teams_presence.rs`,
   see § The user's own status), the READ-ONLY conversation roster an @mention list is
   built from (`src/teams_members.rs`, see § @mentions), the one-to-one AUDIO CALLING
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
@@ -4557,6 +4614,13 @@ is answered, and the presence endpoint id lives in the store so both backends re
 registration. One thing is deliberately NOT shared: the tailnet mapping (give the released
 one its own port if the phone should reach it — this machine serves 8443 → 19440 and
 8444 → 19442).
+
+**A setting a NEWER build understands is not one an OLDER build honours**, and the presence
+HOURS (§ The user's own status) are the first to show it: both backends refresh the one
+registration, so an install from before that commit keeps the user green at 03:00 whatever
+window the other one was given. Nothing here can prevent that — the older process reads a
+row it has never heard of — and it heals with the next update, which is what the released
+build is there to exercise. Worth knowing before diagnosing a window that seems not to hold.
 
 **They also share the DOWNLOAD CACHE, and that one bit them.** `~/.cache/teams-lite/updates`
 is per MACHINE while an update's phase is per PROCESS, so the staged service's own cleanup

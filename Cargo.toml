@@ -39,6 +39,13 @@ sha2 = "0.10"
 # `sha2` above already brings in, so it adds no tree of its own.
 sha1 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
+# Local wall-clock time, for exactly one caller: the hours "Always available" keeps
+# (`teams_presence::local_minute_of_day`). Everything else here is epoch ms or ISO-8601
+# UTC and needs no calendar — but "green from 08:00 to 19:00" is the user's OWN morning,
+# and resolving that means the machine's time zone with its DST rules. `clock` is the one
+# feature asked for (no serde, no oldtime): a stored UTC offset would be an hour wrong for
+# half the year, which is exactly the size of mistake that setting exists to avoid.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 # `test-util` is tokio's paused clock, and it is here for one rule: the agent stops a

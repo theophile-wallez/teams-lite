@@ -287,7 +287,7 @@ describe("Backend request/response", () => {
       const { backend, socket } = await connected();
       backend.setWriteToken("tok");
 
-      const promise = backend.setAlwaysAvailable(enabled);
+      const promise = backend.setAlwaysAvailable(enabled, { from: "08:00", to: "19:00" });
 
       const frame = JSON.parse(socket.sent[0]!) as {
         id: number;
@@ -295,7 +295,12 @@ describe("Backend request/response", () => {
         params?: Record<string, unknown>;
       };
       expect(frame.method).toBe("set_always_available");
-      expect(frame.params).toEqual({ enabled, write_token: "tok" });
+      expect(frame.params).toEqual({
+        enabled,
+        from: "08:00",
+        to: "19:00",
+        write_token: "tok",
+      });
 
       socket.simulateMessage(
         JSON.stringify({
@@ -306,12 +311,32 @@ describe("Backend request/response", () => {
             linear_token_set: false,
             ghost_mode: false,
             always_available: enabled,
+            available_from: "08:00",
+            available_to: "19:00",
+            available_now: enabled,
           },
         }),
       );
       await expect(promise).resolves.toMatchObject({ always_available: enabled });
       backend.close();
     }
+  });
+
+  // All day is the ABSENCE of a window, and it has to reach the backend as a stated
+  // absence: `undefined` would drop out of the JSON, and a call carrying neither hour is
+  // how a reader clears the hours they had.
+  it("states all day as both hours null", async () => {
+    const { backend, socket } = await connected();
+    backend.setWriteToken("tok");
+
+    // Nothing answers this one — the frame is the whole assertion — so the close below
+    // rejects it, and an unhandled rejection would fail the suite from outside any test.
+    const promise = backend.setAlwaysAvailable(true, null).catch(() => undefined);
+
+    const frame = JSON.parse(socket.sent[0]!) as { params?: Record<string, unknown> };
+    expect(frame.params).toEqual({ enabled: true, from: null, to: null, write_token: "tok" });
+    backend.close();
+    await promise;
   });
 
   // Approving a merge request is the ONE write this app makes to a tracker: it acts under

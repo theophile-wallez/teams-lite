@@ -988,6 +988,30 @@ export async function setAlwaysAvailable(page: Page, on: boolean): Promise<void>
 }
 
 /**
+ * Set the HOURS that switch keeps, or clear them back to all day (`null`).
+ *
+ * The sentinel again: against the real backend these two fields decide when the user's own
+ * status is published, so a driver that typed into them without proving the backend is a
+ * mock is the failure § Automation safety exists for.
+ */
+export async function setAvailableHours(
+  page: Page,
+  hours: { from: string; to: string } | null,
+): Promise<void> {
+  await assertMockBackend(page);
+  await page.locator('[data-testid="open-settings"]').click();
+  const from = page.locator('[data-testid="available-from"]');
+  await from.waitFor({ state: "visible" });
+  if (hours) {
+    await from.fill(hours.from);
+    await page.locator('[data-testid="available-to"]').fill(hours.to);
+  } else {
+    await page.locator('[data-testid="available-all-day"]').click();
+  }
+  await page.waitForTimeout(300);
+}
+
+/**
  * Open the first UNREAD chat, which is what has an unread marker to clear. Returns
  * its id like {@link openFirstConversation}, or throws when the fixture set has no
  * unread row left (a previous open in the same session reads them one by one).
@@ -3076,30 +3100,56 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // "Always available": the one setting other people can see. Both states, because the
-  // copy under the switch is what tells the user who reads the green dot.
+  // "Always available": the one setting other people can see. Every state, because the
+  // copy under the switch is what tells the user who reads the green dot — and the HOURS
+  // have two of their own, which are the whole reason the setting is not just a switch:
+  // inside them the status is green, outside them nothing is published at all.
   if (args.includes("--available")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       // The pane scrolls, and this section sits below the integrations — so bring it
       // into view before every capture, or the shot is of GitLab's token field.
       const section = page.locator('[data-testid="always-available-settings"]');
+      const show = async (name: string) => {
+        await section.scrollIntoViewIfNeeded();
+        await page.waitForTimeout(200);
+        await shot(name);
+      };
+      // The window is aimed relative to NOW, because the mock decides `available_now` on
+      // its own clock: a capture pinned to 08:00-19:00 would show "green until" all day
+      // and "nothing published until" all night.
+      const at = (offsetMinutes: number) => {
+        const when = new Date(Date.now() + offsetMinutes * 60_000);
+        const pad = (n: number) => String(n).padStart(2, "0");
+        return `${pad(when.getHours())}:${pad(when.getMinutes())}`;
+      };
+
       await setAlwaysAvailable(page, false);
-      await section.scrollIntoViewIfNeeded();
-      await page.waitForTimeout(200);
-      await shot(`${out}-off-light.png`);
+      await show(`${out}-off-light.png`);
       await setAlwaysAvailable(page, true);
-      await section.scrollIntoViewIfNeeded();
-      await page.waitForTimeout(200);
-      await shot(`${out}-on-light.png`);
+      await show(`${out}-on-light.png`);
+
+      // Hours that are running: green, and the line says when it stops.
+      await setAvailableHours(page, { from: at(-60), to: at(60) });
+      await show(`${out}-hours-light.png`);
       await setTheme("dark");
-      await section.scrollIntoViewIfNeeded();
-      await page.waitForTimeout(200);
-      await shot(`${out}-on-dark.png`);
+      await show(`${out}-hours-dark.png`);
+
+      // Hours that have not come round: the switch is on and nothing is published, which
+      // is the state a plain switch could not express.
+      await setTheme("light");
+      await setAvailableHours(page, { from: at(120), to: at(180) });
+      await show(`${out}-waiting-light.png`);
+      await setTheme("dark");
+      await show(`${out}-on-dark.png`);
 
       // Leave the shared mock as it was found.
       await setTheme("light");
+      await setAvailableHours(page, null);
       await setAlwaysAvailable(page, false);
-      console.log(`[preview] wrote ${out}-{off,on}-light.png and ${out}-on-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-{off,on,hours,waiting}-light.png and ` +
+          `${out}-{hours,on}-dark.png`,
+      );
     });
     process.exit(0);
   }

@@ -3309,6 +3309,10 @@ const mockSettings = {
   // Off, like the real backend's default. Here it is only a flag: the mock publishes
   // no presence at all, which is the whole point of driving the UI against it.
   always_available: false,
+  // The hours that switch keeps, as `"08:00-19:00"` — empty for all day, exactly as the
+  // backend stores them (see `SETTING_AVAILABLE_HOURS` in src/bin/server.rs). Empty out of
+  // the box, so the switch behaves as it did before the hours existed.
+  available_hours: "",
   // ON, like the real backend's default (see `sender_icons_enabled` in
   // src/bin/server.rs). Here it reaches no domain either: `mockSenderIcon` draws the
   // mark, so the whole surface is exercised with nothing leaving the machine.
@@ -3926,19 +3930,55 @@ function settingsView(): {
   linear_token_set: boolean;
   ghost_mode: boolean;
   always_available: boolean;
+  available_from: string | null;
+  available_to: string | null;
+  available_now: boolean;
   sender_icons: boolean;
   emoji_auto_import: boolean;
 } {
   const host = mockSettings.gitlab_host.trim() || "gitlab.com";
+  const hours = parseMockHours(mockSettings.available_hours);
   return {
     gitlab_host: host,
     gitlab_token_set: mockSettings.gitlab_token.length > 0,
     linear_token_set: mockSettings.linear_token.length > 0,
     ghost_mode: mockSettings.ghost_mode,
     always_available: mockSettings.always_available,
+    available_from: hours?.from ?? null,
+    available_to: hours?.to ?? null,
+    // The one field the page cannot work out for itself: the real backend owns the clock
+    // and the zone the heartbeat acts on (see `available_now` in src/bin/server.rs). The
+    // mock owns one too — this process's — so the same reading holds.
+    available_now: mockSettings.always_available && (hours === null || mockHoursCoverNow(hours)),
     sender_icons: mockSettings.sender_icons,
     emoji_auto_import: mockSettings.emoji_auto_import,
   };
+}
+
+/** `"08:00"` -> minutes since midnight, strict like `parse_hhmm` in src/teams_presence.rs. */
+function mockHourMinute(text: string): number | null {
+  const match = /^(\d{2}):(\d{2})$/.exec(text.trim());
+  if (!match) return null;
+  const [hour, minute] = [Number(match[1]), Number(match[2])];
+  return hour < 24 && minute < 60 ? hour * 60 + minute : null;
+}
+
+/** The stored window, or null for all day (mirrors `AvailableHours::parse_setting`). */
+function parseMockHours(stored: string): { from: string; to: string } | null {
+  const [from, to] = stored.split("-");
+  if (from === undefined || to === undefined) return null;
+  const [start, end] = [mockHourMinute(from), mockHourMinute(to)];
+  if (start === null || end === null || start === end) return null;
+  return { from: from.trim(), to: to.trim() };
+}
+
+/** Is this process's local minute inside the window? Wraps past midnight, and the end is
+ *  exclusive — `AvailableHours::covers`, in the other language. */
+function mockHoursCoverNow(hours: { from: string; to: string }): boolean {
+  const now = new Date();
+  const minute = now.getHours() * 60 + now.getMinutes();
+  const [start, end] = [mockHourMinute(hours.from) ?? 0, mockHourMinute(hours.to) ?? 0];
+  return start <= end ? minute >= start && minute < end : minute >= start || minute < end;
 }
 
 type GitLabKind = "merge_request" | "issue" | "project";
@@ -7611,12 +7651,32 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return settingsView();
     }
 
-    // The real backend registers a Teams endpoint here and refreshes it (see
-    // `set_always_available` in src/bin/server.rs). The mock only remembers the flag:
-    // nothing leaves the machine, which is what makes driving the switch safe.
+    // The real backend registers a Teams endpoint here and refreshes it inside the HOURS
+    // it is given (see `set_always_available` in src/bin/server.rs). The mock only
+    // remembers the switch and the window: nothing leaves the machine, which is what makes
+    // driving the switch safe. It refuses exactly what the backend refuses — a mock that
+    // accepted a half window would hide the bug instead of failing a test.
     case "set_always_available": {
       const o = asObject(params);
       if (typeof o.enabled !== "boolean") throw new Error("`enabled` must be true or false");
+      const hour = (key: string) => {
+        const value = o[key];
+        return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+      };
+      const [from, to] = [hour("from"), hour("to")];
+      if ((from === null) !== (to === null)) {
+        throw new Error(
+          "`from` and `to` are a pair: send both hours, or neither to be available all day",
+        );
+      }
+      if (from !== null && to !== null) {
+        const [start, end] = [mockHourMinute(from), mockHourMinute(to)];
+        if (start === null || end === null) throw new Error(`not an HH:MM time: ${from}-${to}`);
+        if (start === end) throw new Error("the two hours must differ");
+        mockSettings.available_hours = `${from}-${to}`;
+      } else {
+        mockSettings.available_hours = "";
+      }
       mockSettings.always_available = o.enabled;
       return settingsView();
     }
@@ -9171,6 +9231,23 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         },
         { status: 200 },
       );
+    }
+    // The HOURS turning, which no page asks for: the real backend's heartbeat notices at
+    // 19:00 that it is past the window, withdraws the registration and says so
+    // (`settings_changed` in src/bin/server.rs). This mock holds no clock loop, so the hook
+    // stands in for the moment — it moves the stored window and broadcasts, which is the
+    // one thing a spec cannot do by driving the pane. Undone by turning the switch off, so
+    // no reset of its own is needed.
+    if (body.kind === "presence") {
+      if (typeof body.from === "string" && typeof body.to === "string") {
+        mockSettings.available_hours = `${body.from}-${body.to}`;
+      } else if (body.from === null && body.to === null) {
+        mockSettings.available_hours = "";
+      }
+      if (typeof body.enabled === "boolean") mockSettings.always_available = body.enabled;
+      const settings = settingsView();
+      broadcast("settings_changed", settings);
+      return Response.json({ ok: true, settings }, { status: 200 });
     }
     if (body.kind === "person_overrides" && body.clear === true) {
       const affected = [...personOverrides.keys()];

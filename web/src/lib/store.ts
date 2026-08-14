@@ -35,6 +35,7 @@ import {
   type AddressPerson,
   type AvatarPicture,
   type AppSettings,
+  type AvailableHours,
   type LinearWorkspace,
   type BrokerStatus,
   type CalendarEvent,
@@ -836,6 +837,12 @@ function initialState(): AppState {
       linear_token_set: false,
       ghost_mode: false,
       always_available: false,
+      // No hours is all day, and `available_now` false until the backend answers — the
+      // reading every unanswered capability takes in this app: a pane that claimed a green
+      // dot before the settings land would state a status nobody outside can see.
+      available_from: null,
+      available_to: null,
+      available_now: false,
       // On, like the backend's own default (see `sender_icons_enabled`): the switch
       // must not read "off" for the moment before the settings land, or the user would
       // be told no icon is fetched while one is.
@@ -1448,6 +1455,14 @@ export class TeamsController {
     on("person_override_changed", (raw) => {
       const mri = (raw as { mri?: string } | null)?.mri;
       if (mri) this.forgetPerson(mri);
+    });
+
+    // The settings moved without this page asking. Today one thing does that: the
+    // presence hours turning, which the backend acts on while nobody is clicking anything
+    // (see `spawn_presence_heartbeat`). Without it a Settings pane left open across 19:00
+    // would keep claiming a green dot the backend had already withdrawn.
+    on("settings_changed", (raw) => {
+      if (raw && typeof raw === "object") this.set({ settings: raw as AppSettings });
     });
 
     // The custom emoji pack changed — here, or in the other backend sharing this store.
@@ -5166,16 +5181,24 @@ export class TeamsController {
     return settings;
   }
 
-  /** Turn "Always available" on or off and reflect the fresh view in state.
+  /** Turn "Always available" on or off — and set the HOURS it keeps — reflecting the
+   *  fresh view in state.
+   *
+   *  `hours` is both ends or `null` for all day, and it is always sent: the pane holds the
+   *  window the backend last answered with, so a call that omitted it would clear the
+   *  user's hours every time they touched the switch.
    *
    *  Not part of `saveSettings`, because this one publishes the user's own presence to
    *  Teams: it is gated like a send, and the state only moves once the backend says
    *  the status was actually changed. Rejects on failure so the switch can say why
    *  instead of claiming a status nobody outside this machine can see. */
-  async setAlwaysAvailable(enabled: boolean): Promise<AppSettings> {
+  async setAlwaysAvailable(
+    enabled: boolean,
+    hours: AvailableHours | null,
+  ): Promise<AppSettings> {
     let settings: AppSettings;
     try {
-      settings = await this.backend.setAlwaysAvailable(enabled);
+      settings = await this.backend.setAlwaysAvailable(enabled, hours);
     } catch (e) {
       playCue("error");
       throw e;

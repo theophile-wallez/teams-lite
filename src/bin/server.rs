@@ -30,7 +30,7 @@
 //          | mail_folders_changed | mail_list_updated | mail_list_error
 //          | calendars_changed | calendar_view_updated | calendar_view_error
 //          | gitlab_list_updated | gitlab_mr_updated | gitlab_read_error
-//          | agent_stream | person_override_changed
+//          | agent_stream | person_override_changed | settings_changed
 //
 // The `mail_*` methods are the READ-ONLY Outlook surface (see `mail`): the same
 // broker identity carries the mailbox, and the app lists folders, reads messages and
@@ -166,10 +166,22 @@ const SETTING_GHOST_MODE: &str = "ghost_mode";
 /// this machine as an endpoint reporting Available and refreshing it on a heartbeat
 /// (see [`teams_presence::register_available_endpoint`] and `spawn_presence_heartbeat`).
 ///
+/// It is the CONSENT half of the setting; [`SETTING_AVAILABLE_HOURS`] is the other, and
+/// green at 03:00 is what made the second one necessary.
+///
 /// OUTWARD, which is why `set_always_available` is in {@link OUTWARD_METHODS}: the
 /// green dot is what every colleague reads to decide whether to write. Off by default
 /// because a status the user did not ask for is a claim about them they never made.
 const SETTING_ALWAYS_AVAILABLE: &str = "always_available";
+/// The hours the setting above keeps the user green, as `"08:00-19:00"` in the machine's
+/// own local time — empty (or absent) for all day, which is what the switch meant before
+/// it grew a window (see [`teams_presence::AvailableHours`]).
+///
+/// It is a separate row rather than a shape stored in the switch's own so that a window
+/// SURVIVES the switch: somebody who turns the setting off in the evening and on again
+/// the next morning gets the hours they set, not a blank. And the two are written together
+/// by one RPC, so a stored window with the switch off can never publish anything.
+const SETTING_AVAILABLE_HOURS: &str = "available_hours";
 /// Sender icons (`"0"` = off, anything else = on, and ON is the default): show the mark
 /// of the organisation a mail came from, fetched from that organisation's own domain
 /// (see [`sender_icon`]).
@@ -4364,13 +4376,26 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // Turning it ON registers the endpoint immediately (the heartbeat then keeps
         // it alive); turning it OFF removes the registration, and the user's status
         // goes back to whatever Teams computes on its own.
+        //
+        // The call also carries the HOURS (`from`/`to`, both or neither — see
+        // {@link available_hours_param}), and what it publishes is what the schedule says
+        // about THIS minute rather than the switch alone: turning the setting on at 03:00
+        // with 08:00-19:00 set withdraws instead of registering, because that is the state
+        // the user just asked for. The heartbeat then registers when the morning comes.
         "set_always_available" => {
             let enabled = params
                 .get("enabled")
                 .and_then(Value::as_bool)
                 .context("`enabled` must be true or false")?;
-            publish_presence(&ctx, enabled).await?;
+            let hours = available_hours_param(params)?;
+            let publish =
+                teams_presence::should_publish(enabled, hours, teams_presence::local_minute_of_day());
+            publish_presence(&ctx, publish).await?;
             let store = ctx.store()?;
+            store.set_setting(
+                SETTING_AVAILABLE_HOURS,
+                &hours.map(|window| window.as_setting()).unwrap_or_default(),
+            )?;
             store.set_setting(SETTING_ALWAYS_AVAILABLE, if enabled { "1" } else { "0" })?;
             settings_json(&store)
         }
@@ -6889,12 +6914,23 @@ fn param_str_list(params: &Value, key: &str) -> Vec<String> {
 /// the UI only needs to know it is set, never its value.
 fn settings_json(store: &Store) -> Result<Value> {
     let settings = link_preview_settings(store)?;
+    let hours = available_hours(store)?;
+    // Whether the status is green THIS minute, which is a fact only this process holds: it
+    // owns the clock the heartbeat acts on, and its zone is not necessarily the reader's —
+    // the always-on service runs on a machine at home and the page is often a phone
+    // somewhere else. So the page is told rather than left to work it out (the reading
+    // `mentions_me` already takes), and the heartbeat says so again when the hours turn.
+    let available_now =
+        presence_intent(store, teams_presence::local_minute_of_day())?.unwrap_or(false);
     Ok(json!({
         "gitlab_host": settings.gitlab_host,
         "gitlab_token_set": settings.gitlab_token.is_some(),
         "linear_token_set": settings.linear_token.is_some(),
         "ghost_mode": ghost_mode(store)?,
         "always_available": always_available(store)?,
+        "available_from": hours.map(|h| teams_presence::format_hhmm(h.from)),
+        "available_to": hours.map(|h| teams_presence::format_hhmm(h.to)),
+        "available_now": available_now,
         "sender_icons": sender_icons_enabled(store)?,
         "emoji_auto_import": emoji_auto_import_enabled(store)?,
     }))
@@ -6991,6 +7027,53 @@ fn stored_linear_workspace(store: &Store) -> Option<Value> {
 /// setting that publishes the user's own status is that it publishes nothing.
 fn always_available(store: &Store) -> Result<bool> {
     Ok(store.get_setting(SETTING_ALWAYS_AVAILABLE)?.as_deref() == Some("1"))
+}
+
+/// The hours the switch above keeps the user green, or `None` for all day (see
+/// [`SETTING_AVAILABLE_HOURS`]).
+fn available_hours(store: &Store) -> Result<Option<teams_presence::AvailableHours>> {
+    Ok(store
+        .get_setting(SETTING_AVAILABLE_HOURS)?
+        .as_deref()
+        .and_then(teams_presence::AvailableHours::parse_setting))
+}
+
+/// What this backend should do about the user's own status at `minute_of_day`:
+///
+/// * `None` — the switch is off, so there is nothing to publish and nothing to take back
+///   (the RPC that turned it off already withdrew the registration). This is what the
+///   heartbeat did on every tick before the setting had hours, and it is why an install
+///   that never turned the setting on makes no presence request at all.
+/// * `Some(true)` — inside the hours: register, and keep registering, because a
+///   registration expires ([`PRESENCE_HEARTBEAT`]).
+/// * `Some(false)` — the switch is on and the hours are not: withdraw, once.
+///
+/// The minute is a parameter rather than a clock read so the whole decision is testable;
+/// its one caller reads [`teams_presence::local_minute_of_day`].
+fn presence_intent(store: &Store, minute_of_day: u32) -> Result<Option<bool>> {
+    if !always_available(store)? {
+        return Ok(None);
+    }
+    Ok(Some(teams_presence::should_publish(true, available_hours(store)?, minute_of_day)))
+}
+
+/// The window a `set_always_available` call carries: both ends, or neither.
+///
+/// A HALF window is refused rather than half-applied — "from 08:00" with no end reads
+/// equally as "all day from 8" and as "8 until whenever", so the caller has to say which.
+/// Both absent, or both `null`, is all day: the setting as it was before it grew hours,
+/// which is what keeps an older page working against this backend.
+fn available_hours_param(params: &Value) -> Result<Option<teams_presence::AvailableHours>> {
+    let hour = |key: &str| {
+        params.get(key).and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty())
+    };
+    match (hour("from"), hour("to")) {
+        (None, None) => Ok(None),
+        (Some(from), Some(to)) => Ok(Some(teams_presence::AvailableHours::parse_pair(from, to)?)),
+        _ => anyhow::bail!(
+            "`from` and `to` are a pair: send both hours, or neither to be available all day"
+        ),
+    }
 }
 
 /// The presence endpoint id this store's backends register, minted once and then
@@ -8314,24 +8397,59 @@ async fn publish_presence(ctx: &Ctx, available: bool) -> Result<()> {
 /// Two backends may share this store; both refresh the SAME endpoint id, so Teams
 /// counts one endpoint however many of ours are running (see
 /// {@link SETTING_PRESENCE_ENDPOINT_ID}).
+///
+/// It is also what turns the HOURS ({@link SETTING_AVAILABLE_HOURS}) into a status,
+/// because nobody is clicking anything at 08:00 or at 19:00. The asymmetry between the
+/// two edges is the registration's own: it EXPIRES, so being green has to be said again
+/// every tick, while going Offline is said ONCE — a DELETE every two minutes all night
+/// would be 700 pointless requests a day and a journal full of them.
 fn spawn_presence_heartbeat(ctx: Ctx) {
     if read_only() {
         return;
     }
     tokio::spawn(async move {
+        // What this backend last told the service, so the withdrawal at the end of the
+        // hours happens once and the page is told only when the answer really turns.
+        // `None` while the switch is off — nothing has been said and nothing is owed.
+        let mut published: Option<bool> = None;
         loop {
-            let on = ctx
+            let intent = ctx
                 .store()
                 .ok()
-                .and_then(|store| always_available(&store).ok())
-                .unwrap_or(false);
-            if on {
-                if let Err(e) = publish_presence(&ctx, true).await {
-                    // Transient by nature (a broker that re-locked, a 429): the next
-                    // tick retries, and the only cost of a miss is the status falling
-                    // back to what Teams computes.
-                    eprintln!("[presence] refreshing the Available endpoint failed: {e:#}");
+                .and_then(|store| presence_intent(&store, teams_presence::local_minute_of_day()).ok())
+                // A store this tick could not open says nothing, which is the switch-off
+                // reading: this loop must never publish on a failed read.
+                .flatten();
+            match intent {
+                // The switch is off: the RPC that turned it off already withdrew the
+                // registration, so this tick has nothing to say.
+                None => published = None,
+                Some(want) if want || published != Some(false) => {
+                    match publish_presence(&ctx, want).await {
+                        Ok(()) => {
+                            // Only on a turn, and only after the service took it: this is
+                            // what keeps a Settings pane open across 19:00 from claiming a
+                            // green dot nobody can see (see `available_now`).
+                            if published != Some(want) {
+                                if let Ok(store) = ctx.store() {
+                                    if let Ok(settings) = settings_json(&store) {
+                                        ctx.emit("settings_changed", settings);
+                                    }
+                                }
+                            }
+                            published = Some(want);
+                        }
+                        // Transient by nature (a broker that re-locked, a 429): the next
+                        // tick retries, and the only cost of a miss is the status falling
+                        // back to what Teams computes.
+                        Err(e) => eprintln!(
+                            "[presence] {} the Available endpoint failed: {e:#}",
+                            if want { "refreshing" } else { "withdrawing" }
+                        ),
+                    }
                 }
+                // Outside the hours, and the service has already been told.
+                Some(_) => {}
             }
             tokio::time::sleep(PRESENCE_HEARTBEAT).await;
         }
@@ -11639,6 +11757,74 @@ mod tests {
             store.set_setting(SETTING_ALWAYS_AVAILABLE, off).unwrap();
             assert!(!always_available(&store).unwrap(), "{off:?} must read as off");
         }
+    }
+
+    // The hours narrow the switch, and the wire says both of them plus what they mean for
+    // THIS minute — a page cannot work that out, because the clock and the zone that
+    // decide it are the backend's.
+    #[test]
+    fn the_hours_narrow_the_switch_and_travel_with_it() {
+        let store = Store::open_in_memory().unwrap();
+        let settings = settings_json(&store).unwrap();
+        assert_eq!(settings["available_from"], Value::Null, "no hours set is all day");
+        assert_eq!(settings["available_to"], Value::Null);
+        assert_eq!(settings["available_now"], false, "the switch is off");
+
+        // The switch alone, with no hours: all day, exactly as before this setting grew a
+        // window. `available_now` is then the switch itself.
+        store.set_setting(SETTING_ALWAYS_AVAILABLE, "1").unwrap();
+        assert_eq!(settings_json(&store).unwrap()["available_now"], true);
+        assert_eq!(presence_intent(&store, 3 * 60).unwrap(), Some(true));
+
+        store.set_setting(SETTING_AVAILABLE_HOURS, "08:00-19:00").unwrap();
+        let settings = settings_json(&store).unwrap();
+        assert_eq!(settings["available_from"], "08:00");
+        assert_eq!(settings["available_to"], "19:00");
+        assert_eq!(presence_intent(&store, 12 * 60).unwrap(), Some(true), "inside the hours");
+        assert_eq!(
+            presence_intent(&store, 3 * 60).unwrap(),
+            Some(false),
+            "outside them the heartbeat withdraws, rather than doing nothing"
+        );
+
+        // The switch off is `None` and not `Some(false)`: an install that never turned this
+        // on must make no presence request at all, and the RPC that turns it off has
+        // already withdrawn the registration.
+        store.set_setting(SETTING_ALWAYS_AVAILABLE, "0").unwrap();
+        assert_eq!(presence_intent(&store, 12 * 60).unwrap(), None);
+        assert_eq!(
+            available_hours(&store).unwrap(),
+            teams_presence::AvailableHours::parse_setting("08:00-19:00"),
+            "the window survives the switch, so a morning does not have to set it again"
+        );
+
+        // A stored value no RPC would have written reads as all day — one answer for the
+        // settings the page draws and for the heartbeat that acts on them.
+        store.set_setting(SETTING_AVAILABLE_HOURS, "nonsense").unwrap();
+        assert!(available_hours(&store).unwrap().is_none());
+        assert_eq!(settings_json(&store).unwrap()["available_from"], Value::Null);
+    }
+
+    // Both hours or neither. A half window has two readings and the caller has to say
+    // which; an hour that will not parse must never reach the store, because every later
+    // read of that row treats what it cannot parse as all day.
+    #[test]
+    fn a_presence_window_is_a_pair_or_nothing() {
+        assert_eq!(available_hours_param(&json!({ "enabled": true })).unwrap(), None);
+        assert_eq!(
+            available_hours_param(&json!({ "enabled": true, "from": null, "to": null })).unwrap(),
+            None
+        );
+        assert_eq!(
+            available_hours_param(&json!({ "from": "08:00", "to": "19:00" })).unwrap(),
+            Some(teams_presence::AvailableHours { from: 8 * 60, to: 19 * 60 })
+        );
+        for half in [json!({ "from": "08:00" }), json!({ "to": "19:00" }), json!({ "from": "08:00", "to": "" })] {
+            let err = available_hours_param(&half).unwrap_err().to_string();
+            assert!(err.contains("pair"), "{err}");
+        }
+        assert!(available_hours_param(&json!({ "from": "8am", "to": "19:00" })).is_err());
+        assert!(available_hours_param(&json!({ "from": "09:00", "to": "09:00" })).is_err());
     }
 
     // One id, minted once and then kept. A fresh id per call would register a second

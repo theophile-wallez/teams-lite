@@ -819,8 +819,24 @@ export type AppSettings = {
   ghost_mode: boolean;
   /** Always available: keep the user's own Teams status green. Off by default — with
    *  it on, the backend registers this machine as an endpoint reporting Available and
-   *  refreshes it, so every colleague sees the green dot until it is turned off. */
+   *  refreshes it, so every colleague sees the green dot until it is turned off.
+   *
+   *  It is the CONSENT half; `available_from`/`available_to` are the hours it keeps. */
   always_available: boolean;
+  /** The hours the switch above keeps the user green, as `"08:00"` in the BACKEND's own
+   *  local time — `null` on both for all day, which is what the switch meant before it
+   *  grew a window. Either both are set or neither is: a half window has two readings,
+   *  so the backend refuses one (see `available_hours_param` in src/bin/server.rs). */
+  available_from: string | null;
+  available_to: string | null;
+  /** Whether the status is green THIS minute — the switch, narrowed by the hours.
+   *
+   *  Stated by the backend rather than worked out here, because the clock and the zone
+   *  that decide it are its own: the always-on service runs on a machine at home while
+   *  this page is often a phone somewhere else. It follows the hours turning through the
+   *  `settings_changed` event, so a pane left open across 19:00 stops claiming a green
+   *  dot nobody can see. */
+  available_now: boolean;
   /** Sender icons: show the mark of the organisation a mail came from, fetched from
    *  that organisation's own domain. ON by default, and the only setting here that is:
    *  it is the one place the app requests something from a server nobody configured, so
@@ -837,6 +853,13 @@ export type AppSettings = {
    *  next send (see `import_emoji_from_message` in src/bin/server.rs). */
   emoji_auto_import: boolean;
 };
+
+/** The hours "Always available" keeps the user green, in the backend's own local time.
+ *
+ *  Both ends or neither: `null` in place of this whole object is all day (see
+ *  `AppSettings.available_from`). `"08:00"` is what an `<input type="time">` reads and
+ *  writes, which is why the wire carries that spelling rather than minutes. */
+export type AvailableHours = { from: string; to: string };
 
 /** The Linear workspace one machine's key belongs to (mirrors `linear::Workspace` in
  *  src/linear.rs).

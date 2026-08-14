@@ -536,6 +536,24 @@ export async function clearReadReceipts(page: Page): Promise<void> {
   expect(res.ok()).toBeTruthy();
 }
 
+/** Move the "Always available" hours from OUTSIDE the page, through the mock's gated test
+ *  hook, and broadcast the settings the way the backend's heartbeat does when a window
+ *  turns (`settings_changed`).
+ *
+ *  It is the only way to reach that moment from a spec: the real backend notices at 19:00
+ *  that it is past the window and withdraws the registration with nobody clicking anything,
+ *  and this mock holds no clock loop. Turning the switch off undoes it, so it needs no reset
+ *  of its own. */
+export async function emitPresenceHours(
+  page: Page,
+  body: { from?: string | null; to?: string | null; enabled?: boolean },
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "presence", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Clear every name and face the user gave somebody, through the mock's gated test
  *  hook. One mock process serves the whole run, so a rename left behind would rename
  *  that person for every later spec. */

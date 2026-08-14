@@ -18,7 +18,8 @@ import {
   VolumeOffIcon,
 } from "@hugeicons/core-free-icons";
 import { APPEARANCES, appearanceLabel, type Appearance } from "~/lib/appearance";
-import type { SettingsPatch } from "~/lib/protocol";
+import { availabilityLine, hoursDraft, hoursLabel } from "~/lib/presence-hours";
+import type { AvailableHours, SettingsPatch } from "~/lib/protocol";
 import { pushBlockerMessage } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { AiProvidersSettings } from "./ai-providers-settings";
@@ -561,34 +562,67 @@ function SenderIconSettings() {
 }
 
 /**
- * Always available — keep the user's own Teams status green.
+ * Always available — keep the user's own Teams status green, DURING THE HOURS THEY SET.
  *
- * The one setting here that other people can see. With it on, the backend registers
- * this machine as a Teams endpoint reporting Available and refreshes it every two
- * minutes, so the status stays green while the app's backend runs — including with
- * every window closed. With it off, the registration is removed and Teams computes
- * the status again, exactly as before.
+ * The one setting here that other people can see. Inside the hours the backend registers
+ * this machine as a Teams endpoint reporting Available and refreshes it every two minutes,
+ * so the status stays green while the app's backend runs — including with every window
+ * closed. Outside them, and with the switch off, the registration is removed and Teams
+ * computes the status again, exactly as before.
+ *
+ * The hours are what make the green dot a claim a person could plausibly make: the switch
+ * alone published Available at 03:00 as eagerly as at 11:00. They are OPTIONAL, and both
+ * fields empty means all day — which is what this setting did before it grew them.
  *
  * Off by default, and the copy says plainly who sees it: a status the user did not ask
  * for is a claim about where they are that they never made.
  */
 function AlwaysAvailableSettings() {
   const controller = useController();
-  const enabled = useAppState((s) => s.settings.always_available);
+  const settings = useAppState((s) => s.settings);
+  const enabled = settings.always_available;
+  const [from, setFrom] = useState(settings.available_from ?? "");
+  const [to, setTo] = useState(settings.available_to ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const toggle = async () => {
+  // Follow the backend: the settings arrive shortly after connect, and the hours turning
+  // arrives as an event while this pane is open (see `settings_changed`).
+  useEffect(() => setFrom(settings.available_from ?? ""), [settings.available_from]);
+  useEffect(() => setTo(settings.available_to ?? ""), [settings.available_to]);
+
+  const publish = async (nextEnabled: boolean, hours: AvailableHours | null) => {
     setBusy(true);
     setError(null);
     try {
-      await controller.setAlwaysAvailable(!enabled);
+      await controller.setAlwaysAvailable(nextEnabled, hours);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   };
+
+  const draft = hoursDraft(from, to);
+  // The switch always carries the hours the pane holds: a call that sent none would clear
+  // the user's window every time they turned the status off and on again. A window only
+  // one end of is not something the backend can store, so the switch keeps the hours it
+  // last had while the sentence below asks for the other end.
+  const hoursForSwitch = draft.kind === "hours" ? draft.hours : null;
+
+  // Typing an hour is the write — the pane holds no Save button, like the model picker.
+  // Both ends stores the window, both empty is all day, and one end stores nothing.
+  const editHours = (nextFrom: string, nextTo: string) => {
+    setFrom(nextFrom);
+    setTo(nextTo);
+    const next = hoursDraft(nextFrom, nextTo);
+    if (next.kind === "hours") void publish(enabled, next.hours);
+    else if (next.kind === "all-day") void publish(enabled, null);
+  };
+
+  const timeField =
+    "rounded-lg bg-element px-2 py-1 text-[13px] text-foreground tabular-nums " +
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
   return (
     <section className="flex flex-col gap-4" data-testid="always-available-settings">
@@ -605,47 +639,94 @@ function AlwaysAvailableSettings() {
         </div>
       </div>
 
-      <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4 shadow-chip">
-        <div className="flex min-w-0 items-center gap-3">
-          <span
-            aria-hidden
-            data-testid="always-available-dot"
-            className={cn(
-              "size-2.5 shrink-0 rounded-full transition-colors",
-              enabled ? "bg-emerald-500" : "bg-element",
-            )}
-          />
-          <div className="flex min-w-0 flex-col">
-            <span className="text-[13px] font-medium text-foreground">Show me as Available</span>
-            <span className="text-[11px] text-text-faint">
-              {enabled
-                ? "On — your status stays green while teams-lite runs, even with every window closed"
-                : "Off — Teams decides your status, as it does without this app"}
-            </span>
+      <div className="flex flex-col gap-4 rounded-xl bg-card p-4 shadow-chip">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <span
+              aria-hidden
+              data-testid="always-available-dot"
+              className={cn(
+                "size-2.5 shrink-0 rounded-full transition-colors",
+                settings.available_now ? "bg-emerald-500" : "bg-element",
+              )}
+            />
+            <div className="flex min-w-0 flex-col">
+              <span className="text-[13px] font-medium text-foreground">
+                Show me as Available
+              </span>
+              <span data-testid="always-available-state" className="text-[11px] text-text-faint">
+                {availabilityLine(settings)}
+              </span>
+            </div>
           </div>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          aria-label="Always available"
-          data-testid="always-available-toggle"
-          disabled={busy}
-          onClick={() => void toggle()}
-          className={cn(
-            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-            busy && "opacity-60",
-            enabled ? "bg-primary" : "bg-element",
-          )}
-        >
-          <span
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            aria-label="Always available"
+            data-testid="always-available-toggle"
+            disabled={busy}
+            onClick={() => void publish(!enabled, hoursForSwitch)}
             className={cn(
-              "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
-              enabled ? "translate-x-[22px]" : "translate-x-0.5",
+              "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+              busy && "opacity-60",
+              enabled ? "bg-primary" : "bg-element",
             )}
+          >
+            <span
+              className={cn(
+                "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+                enabled ? "translate-x-[22px]" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
+
+        {/* The hours. Native time fields, in the app's own boxes: a picker of this app's
+            own would be a second one to keep in step with every phone's keyboard. */}
+        <div className="flex flex-wrap items-center gap-2 border-t border-border-subtle pt-3">
+          <span className="text-[13px] text-foreground">Only between</span>
+          {/* Never DISABLED while a write is in flight, unlike the switch: a native time
+              field edited from its hour segment fires as soon as those two digits land, and
+              disabling it there blurs it — on a phone over a tailnet that is 300 ms in which
+              the minutes the reader is typing go nowhere. */}
+          <input
+            type="time"
+            aria-label="Available from"
+            data-testid="available-from"
+            value={from}
+            onChange={(e) => editHours(e.target.value, to)}
+            className={timeField}
           />
-        </button>
+          <span className="text-[13px] text-text-faint">and</span>
+          <input
+            type="time"
+            aria-label="Available until"
+            data-testid="available-to"
+            value={to}
+            onChange={(e) => editHours(from, e.target.value)}
+            className={timeField}
+          />
+          {draft.kind === "hours" && (
+            <button
+              type="button"
+              data-testid="available-all-day"
+              disabled={busy}
+              onClick={() => editHours("", "")}
+              className="rounded-lg px-2 py-1 text-[11px] text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+            >
+              All day
+            </button>
+          )}
+        </div>
+        <span data-testid="available-hours-hint" className="text-[11px] text-text-faint">
+          {draft.kind === "incomplete"
+            ? "Set both times — one on its own says nothing, and clearing both means all day."
+            : draft.kind === "all-day"
+              ? "Empty means all day. Set a range — 08:00 to 19:00 — and the green dot keeps working hours on your backend's own clock."
+              : `Green ${hoursLabel(draft.hours)} on your backend's own clock; outside those hours Teams decides your status. An end before its start crosses midnight.`}
+        </span>
       </div>
 
       {error && (

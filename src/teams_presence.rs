@@ -55,8 +55,24 @@
 // IT IS THE USER'S OWN STATUS, AND OUTWARD. Every colleague sees the green dot, so
 // the RPC that turns it on is in `OUTWARD_METHODS`, it is off by default, and a
 // read-only backend never registers anything.
+//
+// ---------------------------------------------------------------------------
+// AND IT KEEPS HOURS ([`AvailableHours`])
+//
+// A plain switch published Available at 03:00 as eagerly as at 11:00, which is a green
+// dot with nobody human behind it — the one thing a status somebody reads to decide
+// whether to write must not be. So the setting carries a WINDOW in the machine's own
+// local time ("08:00-19:00"), the heartbeat registers only inside it and withdraws once
+// at its end, and the status outside it is whatever Teams computes on its own — exactly
+// as with the setting off.
+//
+// The window is OPTIONAL, and its absence is all day: that is what the setting did
+// before it grew one, so an install that never sets hours behaves as it always did.
+// [`should_publish`] is the one spelling of "should this machine be green right now",
+// read by the RPC, by the heartbeat and by the settings answer alike.
 
 use anyhow::{Context, Result};
+use chrono::Timelike;
 use serde_json::{json, Value};
 
 use crate::teams::Session;
@@ -236,6 +252,110 @@ pub async fn remove_endpoint(
     Ok(())
 }
 
+/// Minutes in a day, which is the range every minute-of-day below lives in.
+const MINUTES_PER_DAY: u32 = 24 * 60;
+
+/// The hours "Always available" keeps the user green, as minutes since local midnight.
+///
+/// The END IS EXCLUSIVE, because that is what the two numbers read as: 08:00-19:00 is
+/// green through 18:59 and hands the status back at 19:00.
+///
+/// A window whose end is BEFORE its start WRAPS past midnight — 22:00-06:00 is a night
+/// shift, and refusing it would be an arbitrary limit on the same comparison inverted.
+/// `from == to` is the one pair refused: it reads equally as "never" and as "all day",
+/// and one character deciding between those is a setting nobody can check. All day is
+/// the ABSENCE of a window (see [`AvailableHours::parse_setting`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AvailableHours {
+    /// Minutes since local midnight, inclusive.
+    pub from: u32,
+    /// Minutes since local midnight, exclusive.
+    pub to: u32,
+}
+
+impl AvailableHours {
+    /// The window a caller asked for, as two `HH:MM` strings. Validating, because this
+    /// is what an RPC's params reach: an hour this function will not build can never be
+    /// stored, so every later read of the setting is a window or nothing.
+    pub fn parse_pair(from: &str, to: &str) -> Result<Self> {
+        let from = parse_hhmm(from).with_context(|| format!("`from` is not an HH:MM time: {from}"))?;
+        let to = parse_hhmm(to).with_context(|| format!("`to` is not an HH:MM time: {to}"))?;
+        anyhow::ensure!(
+            from != to,
+            "the two hours must differ: leave them out for all day, and an end before its \
+             start is a window that crosses midnight"
+        );
+        Ok(Self { from, to })
+    }
+
+    /// The window as it is stored, and as `parse_setting` reads it back.
+    pub fn as_setting(&self) -> String {
+        format!("{}-{}", format_hhmm(self.from), format_hhmm(self.to))
+    }
+
+    /// The stored window, or `None` for all day.
+    ///
+    /// A value this cannot parse reads as all day rather than as an error, so there is ONE
+    /// answer to "what are the hours" for the settings the UI draws and for the heartbeat
+    /// that acts on them. Only a write outside [`AvailableHours::parse_pair`] can produce
+    /// one, and a disagreement between those two readers would be a switch that says one
+    /// thing while the machine does another.
+    pub fn parse_setting(text: &str) -> Option<Self> {
+        let (from, to) = text.trim().split_once('-')?;
+        Self::parse_pair(from, to).ok()
+    }
+
+    /// Does the window cover this minute of the local day?
+    pub fn covers(&self, minute_of_day: u32) -> bool {
+        if self.from <= self.to {
+            minute_of_day >= self.from && minute_of_day < self.to
+        } else {
+            // Wraps past midnight: green from the start of the evening to the end of the
+            // morning, and nothing in the daylight between them.
+            minute_of_day >= self.from || minute_of_day < self.to
+        }
+    }
+}
+
+/// `HH:MM` -> minutes since midnight. Strict on purpose: this is what decides whether a
+/// window can be stored at all, and a lenient parse of an hour is a status published at
+/// an hour nobody chose.
+fn parse_hhmm(text: &str) -> Option<u32> {
+    let (h, m) = text.trim().split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+/// Minutes since midnight -> `HH:MM`, the spelling `parse_hhmm` reads and the one an
+/// `<input type="time">` takes.
+pub fn format_hhmm(minute_of_day: u32) -> String {
+    let minute_of_day = minute_of_day % MINUTES_PER_DAY;
+    format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
+}
+
+/// Whether this machine should be publishing an Available endpoint at `minute_of_day`:
+/// the switch, narrowed by the window when there is one.
+///
+/// Pure, and the ONE spelling of the question — the RPC, the heartbeat and the settings
+/// answer all read it, because two answers to "am I green now?" is the bug that shows up
+/// as a switch saying one thing while colleagues see another.
+pub fn should_publish(enabled: bool, hours: Option<AvailableHours>, minute_of_day: u32) -> bool {
+    enabled && hours.is_none_or(|window| window.covers(minute_of_day))
+}
+
+/// The current minute of the LOCAL day, in the machine's own time zone.
+///
+/// Local rather than UTC because the user writes "8am to 7pm" meaning their own morning,
+/// and the process that has to decide at 03:00 with every window closed is the only thing
+/// here holding a clock. The zone is the machine's own, DST included, which is why this
+/// reads a real time zone rather than an offset stored beside the window: a stored offset
+/// is an hour wrong for half the year, and an hour is exactly the size of the mistake this
+/// feature exists to avoid.
+pub fn local_minute_of_day() -> u32 {
+    let now = chrono::Local::now();
+    now.hour() * 60 + now.minute()
+}
+
 /// Extract the presences from the response array. An entry without an mri or
 /// without a `presence` object is dropped; a person the service reports as
 /// unknown is kept (as "PresenceUnknown") so the caller can tell "we asked and
@@ -372,6 +492,85 @@ mod tests {
         assert_eq!(body["availability"], "Available");
         assert_eq!(body["activity"], "Available");
         assert_eq!(body["deviceType"], "Web");
+    }
+
+    #[test]
+    fn an_hour_is_read_strictly_and_written_back_the_same_way() {
+        assert_eq!(parse_hhmm("08:00"), Some(8 * 60));
+        assert_eq!(parse_hhmm("00:00"), Some(0));
+        assert_eq!(parse_hhmm("23:59"), Some(23 * 60 + 59));
+        assert_eq!(parse_hhmm(" 19:30 "), Some(19 * 60 + 30));
+        for bad in ["", "8", "8:00pm", "24:00", "12:60", "-1:00", "12:0a", "12"] {
+            assert_eq!(parse_hhmm(bad), None, "{bad:?} is not an hour");
+        }
+        for minute in [0, 8 * 60, 19 * 60 + 5, 23 * 60 + 59] {
+            assert_eq!(parse_hhmm(&format_hhmm(minute)), Some(minute));
+        }
+    }
+
+    #[test]
+    fn a_window_covers_its_start_and_stops_at_its_end() {
+        let hours = AvailableHours::parse_pair("08:00", "19:00").unwrap();
+        assert!(!hours.covers(7 * 60 + 59));
+        assert!(hours.covers(8 * 60), "the start is inside the window");
+        assert!(hours.covers(18 * 60 + 59));
+        assert!(!hours.covers(19 * 60), "the end is not: 19:00 hands the status back");
+        assert!(!hours.covers(3 * 60), "03:00 is the hour this whole window exists for");
+    }
+
+    #[test]
+    fn a_window_whose_end_is_before_its_start_crosses_midnight() {
+        let night = AvailableHours::parse_pair("22:00", "06:00").unwrap();
+        assert!(night.covers(23 * 60));
+        assert!(night.covers(0), "midnight is inside a night shift");
+        assert!(night.covers(5 * 60 + 59));
+        assert!(!night.covers(6 * 60));
+        assert!(!night.covers(12 * 60), "the daylight between the ends is outside it");
+    }
+
+    #[test]
+    fn two_equal_hours_are_refused_because_they_read_both_ways() {
+        // "never" and "all day" are both plausible readings of 09:00-09:00, so the caller
+        // has to say which: all day is the absence of a window.
+        let err = AvailableHours::parse_pair("09:00", "09:00").unwrap_err().to_string();
+        assert!(err.contains("must differ"), "{err}");
+        assert!(AvailableHours::parse_pair("09:00", "9am").is_err());
+        assert!(AvailableHours::parse_pair("", "19:00").is_err());
+    }
+
+    #[test]
+    fn a_stored_window_round_trips_and_anything_else_reads_as_all_day() {
+        let hours = AvailableHours::parse_pair("08:00", "19:00").unwrap();
+        assert_eq!(hours.as_setting(), "08:00-19:00");
+        assert_eq!(AvailableHours::parse_setting("08:00-19:00"), Some(hours));
+        // Nothing stored, and nothing this module would ever have written: all day, which
+        // is what the setting meant before it grew hours.
+        for all_day in ["", "   ", "08:00", "08:00-", "yes", "08:00-08:00", "08:00-25:00"] {
+            assert_eq!(
+                AvailableHours::parse_setting(all_day),
+                None,
+                "{all_day:?} must read as all day"
+            );
+        }
+    }
+
+    #[test]
+    fn the_switch_decides_first_and_the_window_only_narrows_it() {
+        let hours = AvailableHours::parse_pair("08:00", "19:00").unwrap();
+        // Off is off, whatever the hours say — the switch is the consent.
+        assert!(!should_publish(false, None, 12 * 60));
+        assert!(!should_publish(false, Some(hours), 12 * 60));
+        // On with no window is all day, which is what this setting always did.
+        for minute in [0, 3 * 60, 12 * 60, 23 * 60 + 59] {
+            assert!(should_publish(true, None, minute));
+        }
+        assert!(should_publish(true, Some(hours), 12 * 60));
+        assert!(!should_publish(true, Some(hours), 3 * 60));
+    }
+
+    #[test]
+    fn the_local_minute_is_a_minute_of_a_day() {
+        assert!(local_minute_of_day() < MINUTES_PER_DAY);
     }
 
     /// The code of one module, without its test module and without comments — so a

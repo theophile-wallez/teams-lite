@@ -29,6 +29,7 @@ import type { OutboundMention } from "./mentions";
 import type {
   AddressPeopleResult,
   AppSettings,
+  AvailableHours,
   BackendRestartResult,
   CalendarInfo,
   CalendarViewResult,
@@ -1243,17 +1244,25 @@ export class Backend {
     if (patch.emojiAutoImport !== undefined) params.emoji_auto_import = patch.emojiAutoImport;
     return this.writeRequest<AppSettings>("set_settings", params);
   }
-  /** Turn "Always available" on or off, which publishes the user's OWN presence:
-   *  on registers this machine as an endpoint reporting Available (the backend then
-   *  refreshes it on a heartbeat), off removes that registration and hands the status
-   *  back to whatever Teams computes.
+  /** Turn "Always available" on or off — and say which HOURS it keeps — which publishes
+   *  the user's OWN presence: inside those hours the backend registers this machine as an
+   *  endpoint reporting Available (and refreshes it on a heartbeat), outside them it
+   *  removes that registration and hands the status back to whatever Teams computes.
+   *
+   *  `hours` is both ends or `null` for all day; the backend refuses a half window. What
+   *  it publishes is what the pair says about the minute the call arrives, so turning the
+   *  setting on at 03:00 with 08:00-19:00 set changes nothing visible until the morning.
    *
    *  Its own call rather than a `setSettings` field, because it is outward — every
    *  colleague reads the green dot — so it is gated like a send and a read-only
    *  backend refuses it (see OUTWARD_METHODS in src/bin/server.rs). Returns the fresh
    *  settings view, so the switch only moves once Teams was actually told. */
-  setAlwaysAvailable(enabled: boolean): Promise<AppSettings> {
-    return this.writeRequest<AppSettings>("set_always_available", { enabled });
+  setAlwaysAvailable(enabled: boolean, hours: AvailableHours | null): Promise<AppSettings> {
+    return this.writeRequest<AppSettings>("set_always_available", {
+      enabled,
+      from: hours?.from ?? null,
+      to: hours?.to ?? null,
+    });
   }
   /** Enrich a tracker link with metadata for a rich preview card. Resolves with
    *  `{ metadata: null }` when no integration recognizes the link (or the resource
