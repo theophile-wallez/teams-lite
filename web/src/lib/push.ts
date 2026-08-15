@@ -162,11 +162,13 @@ export function pushBlocker(environment: PushEnvironment, backendSupports: boole
   return null;
 }
 
-/** A sentence for each blocker, so the pane never has to guess the wording. */
+/** A sentence for each blocker — WHAT is in the way, in one line, because the sidebar row
+ *  that carries it is eleven-pixel text at the foot of a list of chats. What to DO about it
+ *  is {@link pushBlockerRemedy}, where there is room for it. */
 export function pushBlockerMessage(blocker: PushBlocker, reason?: string): string | null {
   switch (blocker) {
     case "insecure":
-      return "Notifications need a secure connection, and this page is on plain http:// — no browser offers them there. Open teams-lite over https, or at http://127.0.0.1 on the machine it runs on.";
+      return "Notifications need a secure connection, and this page is on plain http:// — no browser offers them there.";
     case "needs-install":
       return "On iPhone and iPad, notifications need the app on your Home Screen. Tap Share, then “Add to Home Screen”, and open teams-lite from there.";
     case "unsupported":
@@ -178,6 +180,32 @@ export function pushBlockerMessage(blocker: PushBlocker, reason?: string): strin
     default:
       return null;
   }
+}
+
+/**
+ * What to DO about a blocker, for the one blocker whose answer is longer than a line.
+ *
+ * Settings shows it and the sidebar row does not, which is the one place those two surfaces
+ * differ on purpose: a paragraph of instructions at the foot of a chat list is a wall of
+ * eleven-pixel text, and somebody reading it has already gone to Settings to fix something.
+ * Every other blocker's message names its own fix inside its one line, so this answers null.
+ *
+ * All three remedies are here because this app is reached three ways and they do not
+ * overlap: a real https front, loopback on the machine itself, and — the case that brought
+ * this here — a PRIVATE address (a VPN or an overlay network like NetBird or Tailscale,
+ * `http://100.x.y.z:19440`), where no certificate is possible and Chromium's own
+ * per-origin allowance is the only thing that works. Apple publishes no such switch, so a
+ * phone is told the truth rather than sent hunting for one.
+ */
+export function pushBlockerRemedy(blocker: PushBlocker): string | null {
+  if (blocker !== "insecure") return null;
+  return (
+    "Reach teams-lite over https, or at http://127.0.0.1 on the machine it runs on. " +
+    "On a private address — a VPN or an overlay network — Brave and Chrome can allow this " +
+    "one page instead: open flags/#unsafely-treat-insecure-origin-as-secure, paste this " +
+    "page's address into it, and restart the browser. An iPhone has no such switch and " +
+    "needs real https."
+  );
 }
 
 /** What the sidebar says about notifications, or `null` for nothing at all. */

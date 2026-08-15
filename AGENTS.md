@@ -2455,6 +2455,15 @@ an outward action, so it is gated on purpose:
     is the whole of `pushBlocker`. HTTPS beats Apple's rule because an `http` page cannot
     be added to the Home Screen either. An ABSENT flag reads as secure: the capability
     check is what really decides, and this one only picks which sentence explains it.
+    **The PROBLEM and the REMEDY are two sentences, and only Settings draws the second**
+    (`pushBlockerMessage` / `pushBlockerRemedy`). The remedy is a paragraph — this app is
+    reached three ways and they do not overlap: a real https front, loopback on the machine
+    itself, and a PRIVATE address on a VPN or an overlay network (NetBird, Tailscale,
+    `http://100.x.y.z:19440`), where no certificate is possible and Chromium's own
+    per-origin allowance is the only thing that works. That belongs in a pane somebody
+    opened to mend something, not in eleven-pixel text at the foot of a list of chats, and
+    the row states the problem alone. Every other blocker names its fix inside its own one
+    line, so the remedy answers null for all of them.
   - **A refusal is said AT the press**, in the browser's own words (a push service switched
     off, a worker that will not register). The composer's rule: an action that did not
     happen must never be left looking like it did.

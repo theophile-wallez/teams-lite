@@ -6,6 +6,7 @@ import {
   deviceLabel,
   pushBlocker,
   pushBlockerMessage,
+  pushBlockerRemedy,
   pushOffer,
   readPushEnvironment,
   type PushBlocker,
@@ -156,8 +157,23 @@ describe("pushBlocker", () => {
     expect(pushBlocker({ ...http, appleMobile: true }, true)).toBe("insecure");
     const message = pushBlockerMessage("insecure") ?? "";
     expect(message).toContain("secure connection");
-    expect(message).toContain("127.0.0.1");
     expect(message).not.toContain("cannot receive");
+  });
+
+  it("keeps the remedy apart from the message, and covers all three ways in", () => {
+    // The MESSAGE is one line, because the sidebar row that carries it is eleven-pixel text
+    // at the foot of a list of chats; the REMEDY is the paragraph, and only Settings draws
+    // it. The private overlay address is why it exists at all: no certificate is possible
+    // there, so Chromium's own per-origin allowance is the only thing that works, and Apple
+    // publishes no equivalent.
+    const remedy = pushBlockerRemedy("insecure") ?? "";
+    expect(remedy).toContain("https");
+    expect(remedy).toContain("127.0.0.1");
+    expect(remedy).toContain("unsafely-treat-insecure-origin-as-secure");
+    expect(remedy).toContain("iPhone");
+    // Every other blocker's own line already names its fix, so there is nothing to add.
+    const others: PushBlocker[] = [null, "needs-install", "unsupported", "denied", "backend"];
+    for (const other of others) expect(pushBlockerRemedy(other)).toBe(null);
   });
 
   it("reports a refused permission, which only the OS can undo", () => {

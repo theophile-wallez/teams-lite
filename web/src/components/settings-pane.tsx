@@ -31,7 +31,7 @@ import {
   zoneOptions,
 } from "~/lib/presence-hours";
 import type { AvailableHours, SettingsPatch } from "~/lib/protocol";
-import { pushBlockerMessage } from "~/lib/push";
+import { pushBlockerMessage, pushBlockerRemedy } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { AiProvidersSettings } from "./ai-providers-settings";
 import { CallRecordingsSettings } from "./call-recordings-settings";
@@ -908,6 +908,7 @@ function NotificationSettings() {
   const enabled = push.endpoint !== null;
   const blocked = push.blocker !== null;
   const blockerMessage = pushBlockerMessage(push.blocker, push.error ?? undefined);
+  const blockerRemedy = pushBlockerRemedy(push.blocker);
   const otherDevices = push.devices.filter((device) => device.endpoint !== push.endpoint);
 
   const toggle = async () => {
@@ -951,9 +952,20 @@ function NotificationSettings() {
 
       <div className="flex flex-col gap-4 rounded-xl bg-card p-4 shadow-chip">
         {blocked ? (
-          <p data-testid="push-blocked" className="text-[13px] text-text-dim">
-            {blockerMessage}
-          </p>
+          <div className="flex flex-col gap-2">
+            <p data-testid="push-blocked" className="text-[13px] text-text-dim">
+              {blockerMessage}
+            </p>
+            {/* What to DO about it, for the blocker whose answer does not fit a line. This
+                pane is where it belongs: the sidebar row states the same problem in
+                eleven-pixel text, and somebody reading this has already come here to mend
+                something (see `pushBlockerRemedy`). */}
+            {blockerRemedy && (
+              <p data-testid="push-remedy" className="text-[12px] leading-snug text-text-faint">
+                {blockerRemedy}
+              </p>
+            )}
+          </div>
         ) : (
           <div className="flex items-center justify-between gap-4">
             <div className="flex min-w-0 flex-col">

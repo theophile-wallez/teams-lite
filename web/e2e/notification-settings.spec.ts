@@ -75,12 +75,19 @@ test.describe("The notification offer", () => {
     await expect(offer).toHaveAttribute("data-shape", "insecure");
     const advice = offer.locator('[data-testid="notification-offer-advice"]');
     await expect(advice).toContainText("secure connection");
-    await expect(advice).toContainText("127.0.0.1");
     await expect(advice).not.toContainText("cannot receive");
+    // The row states the problem and no more: the remedy is a paragraph, and this row is
+    // eleven-pixel text at the foot of a list of chats.
+    await expect(advice).not.toContainText("127.0.0.1");
 
-    // And Settings says the same thing, since both read the one sentence.
+    // Settings states the same problem — one sentence, read by both — and carries the
+    // remedy, including the one thing that works on a private overlay address.
     await page.locator('[data-testid="open-settings"]').click();
     await expect(page.locator('[data-testid="push-blocked"]')).toContainText("secure connection");
+    const remedy = page.locator('[data-testid="push-remedy"]');
+    await expect(remedy).toContainText("127.0.0.1");
+    await expect(remedy).toContainText("unsafely-treat-insecure-origin-as-secure");
+    await expect(remedy).toContainText("iPhone");
   });
 });
 
