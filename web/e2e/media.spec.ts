@@ -395,6 +395,52 @@ test.describe("media (images + attachments)", () => {
     }
   });
 
+  test("draws a tall picture at its own shape, with no room left beside it", async ({ page }) => {
+    await gotoApp(page);
+    await openByPalette(page, "Media Gallery");
+
+    // The whiteboard fixture is a photo from a phone, and its message states its size — the
+    // commonest picture in a real chat and the one the mat used to frame with a hand's width of
+    // hatch either side of it. The gaps measured above cannot see that: `object-contain` fits
+    // the picture INSIDE the box, so the box stays flush with the mat while the picture floats
+    // in it. The box's own ratio is what says there is nothing left over.
+    const message = page
+      .locator("[data-message-id]")
+      .filter({ has: page.locator('img[alt="whiteboard"]') });
+    const picture = message.locator('[data-testid="message-image"]');
+    await expect(picture).toBeVisible();
+    await expect
+      .poll(() => picture.evaluate((img: HTMLImageElement) => img.naturalWidth), {
+        timeout: 10_000,
+      })
+      .toBeGreaterThan(0);
+
+    const drawn = await picture.evaluate((img: HTMLImageElement) => {
+      const rect = img.getBoundingClientRect();
+      return {
+        box: rect.width / rect.height,
+        picture: img.naturalWidth / img.naturalHeight,
+        height: rect.height,
+      };
+    });
+    expect(drawn.box).toBeCloseTo(drawn.picture, 2);
+    // And it really is the CEILING doing the capping here — the fixture states 1000 px of
+    // height — so this test would say nothing if the fixture stopped being a tall picture. The
+    // last pixel of it belongs to the bytes rather than to the stated size: a loaded picture's
+    // own ratio wins over the one its attributes describe, which is why the box is measured
+    // against `naturalWidth` above.
+    expect(drawn.height).toBeLessThanOrEqual(321);
+    expect(drawn.height).toBeGreaterThan(300);
+
+    // The mat around it hugs that box, so the picture is the width of its own message.
+    const mat = message.locator('[data-testid="image-mat"]');
+    const room = await mat.evaluate((el) => {
+      const img = el.querySelector("img")!;
+      return el.getBoundingClientRect().width - img.getBoundingClientRect().width;
+    });
+    expect(room).toBeLessThan(16);
+  });
+
   test("renders a meeting recording as a video card without a bubble", async ({ page }) => {
     await gotoApp(page);
     await openByPalette(page, "Media Gallery");

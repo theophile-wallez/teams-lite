@@ -209,13 +209,27 @@ JPEG ringing every single time. The whole picture costs **3.90x the bytes** over
   when it cannot use both — an aspect ratio needs the pair. Before this the words around a
   picture re-flowed when its bytes landed, which is the defect a GitLab upload's own
   `{width=… height=…}` was already fixed for.
+- **And that stated size is brought UNDER the height ceiling before it is drawn, in BOTH
+  directions** (`drawnPictureBox` in `web/src/lib/media-size.ts`, the one place `max-h-80` is
+  spelled as a number). A stated width makes the CSS width DEFINITE, so `max-height` clamped the
+  height alone and `object-contain` fitted the picture inside a box far too wide for it: a photo
+  from a phone — 640x1000, the commonest picture in a real chat — was drawn 204 px wide inside a
+  640 px box, so the mat framed it with a hand's width of hatch either side and the words below
+  reserved room nothing used. Scaling BOTH numbers keeps the ratio the browser derives from them,
+  so the box is the picture. Three things follow, and each is pinned by a test: the LOADING box
+  is that same box (one clamp, not two, or the room reserved is again wider than what lands in
+  it), the cap FLOORS the width (rounded up, the height sits a fraction over the ceiling and the
+  clamp is back), and a picture that states NOTHING is untouched — with no definite width the
+  browser shrinks the box itself, which is why a landscape fixture could never show this.
 
 `web/mock/server.ts` reproduces the object store's two resolutions with no tenant
 (`mockInlinePicture`: 160px for a reduced view, 640px for the whole one) and REFUSES the full
 view of its second inline fixture (`MOCK_NO_FULL_VIEW`), so both rules are numbers a spec can
-measure — `web/e2e/media.spec.ts` reads `naturalWidth` rather than trusting either. That
-refusal rides an existing fixture on purpose: one mock process serves the whole run, and a
-picture added to the seeded history moves every row a later spec counts on.
+measure — `web/e2e/media.spec.ts` reads `naturalWidth` rather than trusting either. That same
+fixture is the TALL one (`MOCK_TALL_PICTURE`): a photo from a phone, stating its own size, in
+the ratio its bytes really hold, so any room left beside it is the app's own doing. Both facts
+ride an existing fixture on purpose: one mock process serves the whole run, and a picture added
+to the seeded history moves every row a later spec counts on.
 
 ## A quote is a POINTER to a message (click it, and three lines of it)
 

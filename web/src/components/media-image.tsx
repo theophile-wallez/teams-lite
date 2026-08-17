@@ -8,6 +8,7 @@ import {
   Loading02Icon,
   PlayIcon,
 } from "@hugeicons/core-free-icons";
+import { drawnPictureBox } from "~/lib/media-size";
 import { formatCallDuration, mediaNeedsProxy, type Attachment } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
@@ -43,6 +44,10 @@ export function MediaImage(props: {
   const controller = useController();
   const { source } = props;
   const proxied = source ? true : mediaNeedsProxy(props.src);
+  // The room the picture really takes: the size it states, brought under the height ceiling —
+  // one box for the placeholder and for the picture, so nothing moves when the bytes land and
+  // nothing is left over around them (see `drawnPictureBox`).
+  const box = drawnPictureBox(props.width, props.height);
   // Public images render straight from their URL; proxied ones wait for a blob.
   const [objectUrl, setObjectUrl] = useState<string | null>(proxied ? null : props.src);
   const [failed, setFailed] = useState(false);
@@ -104,16 +109,16 @@ export function MediaImage(props: {
         data-testid="message-image-loading"
         className={cn(
           "flex items-center justify-center rounded-lg bg-element",
-          // A picture whose size is known holds exactly its own room, capped like the drawn
-          // one — so nothing around it moves when the bytes land. One whose size nobody stated
-          // keeps the box this has always drawn.
-          props.width && props.height ? "h-auto max-h-80 w-full" : "h-32 w-40",
+          // A picture whose size is known holds exactly its own room, already under the
+          // ceiling — so nothing around it moves when the bytes land. One whose size nobody
+          // stated keeps the box this has always drawn. No `max-h-80` here: the box is capped
+          // in both directions already, and a second clamp on the height alone is what left
+          // the reserved room wider than the picture that arrived in it.
+          box ? "h-auto w-full" : "h-32 w-40",
           props.className,
         )}
         style={
-          props.width && props.height
-            ? { aspectRatio: `${props.width} / ${props.height}`, maxWidth: props.width }
-            : undefined
+          box ? { aspectRatio: `${box.width} / ${box.height}`, maxWidth: box.width } : undefined
         }
       >
         <HugeiconsIcon
@@ -145,10 +150,11 @@ export function MediaImage(props: {
           alt={alt}
           loading="lazy"
           // The size the author asked for, when they did — the aspect the browser reserves
-          // room by. `max-w-full` below still wins over it, so a 777px screenshot fits a
-          // 320px column instead of widening it.
-          width={props.width}
-          height={props.height}
+          // room by — brought under the height ceiling first, so the box is the picture's own
+          // shape rather than one `max-h-80` clamped on one side only. `max-w-full` below still
+          // wins over it, so a 777px screenshot fits a 320px column instead of widening it.
+          width={box?.width ?? props.width}
+          height={box?.height ?? props.height}
           onError={() => setFailed(true)}
           className="block h-auto max-h-80 max-w-full rounded-xl object-contain shadow-card transition-opacity duration-150 ease-out hover:opacity-90"
           // The picture is in the lightbox while it is open: leaving it drawn here

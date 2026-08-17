@@ -1218,13 +1218,18 @@ function seedMediaSamples(): void {
   //    screenshot inside a block (`<p><img></p>` or `<div><img></div>`), never as a
   //    bare <img>, which pushes the image one level deeper in the rendered tree.
   //    A bare-<img> fixture hid a mat-padding bug that every real message had.
+  //    It is a PHOTO FROM A PHONE, and it STATES its own size, which is the one shape a
+  //    landscape fixture cannot show: taller than the ceiling the thumbnail is drawn under,
+  //    so a box capped on the height alone is far too wide for the picture in it (see
+  //    `drawnPictureBox`). Every real message carries that attribute pair.
   push(
     {
       sender: other.name,
       sender_mri: other.mri,
       content:
         `<p><img itemtype="http://schema.skype.com/AMSImage" ` +
-        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-2/views/imgo" alt="whiteboard"/></p>`,
+        `src="https://eu-api.asm.skype.com/v1/objects/mock-inline-2/views/imgo" ` +
+        `width="640" height="1000" alt="whiteboard"/></p>`,
       is_self: false,
     },
     300_000,
@@ -2861,6 +2866,13 @@ const MOCK_FULL_VIEW = "imgpsh_fullsize_anim";
  *  the seeded history moves every row a later spec counts on. */
 const MOCK_NO_FULL_VIEW = "mock-inline-2";
 
+/** The object whose picture is TALLER than it is wide — a photo from a phone, which is the
+ *  commonest picture in a real chat and the one shape that shows whether the height ceiling on
+ *  a thumbnail also brings its width down (see `drawnPictureBox`). It rides the same fixture as
+ *  the refusal above, and its RATIO is the one the message states, so any room left around the
+ *  picture is the app's own doing rather than the bytes'. */
+const MOCK_TALL_PICTURE = "mock-inline-2";
+
 /**
  * An inline picture, in the two resolutions the real object store really serves.
  *
@@ -2876,7 +2888,18 @@ function mockInlinePicture(url: string): { content_type: string; data_base64: st
   if (whole && url.includes(MOCK_NO_FULL_VIEW)) {
     throw new Error("hosted-content media -> 404 Not Found");
   }
-  const [width, height] = whole ? [640, 400] : [160, 100];
+  // The second fixture is a PHONE PHOTO — the same ratio its message states, so the picture
+  // fills the box it is drawn in and any leftover room is the app's own doing. The first stays
+  // landscape: two shapes, and the widths are unchanged either way, which is what the specs
+  // measuring a view's resolution read.
+  const tall = url.includes(MOCK_TALL_PICTURE);
+  const [width, height] = whole
+    ? tall
+      ? [640, 1000]
+      : [640, 400]
+    : tall
+      ? [160, 250]
+      : [160, 100];
   return {
     content_type: "image/png",
     data_base64: solidPng(width, height, hslToRgb(hue, 0.65, 0.52)).toString("base64"),
