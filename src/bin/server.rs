@@ -102,6 +102,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use futures_util::{stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -660,6 +661,14 @@ const WRITE_TOKEN_ENV: &str = "TEAMS_LITE_WRITE_TOKEN";
 /// that does not hold this backend's token — and by nothing else, because the policy it
 /// records lives in `write_token`.
 static WRITE_TOKEN_PINNED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether this process has already said that a sign-in resolved no display name.
+///
+/// A session is re-minted every `SESSION_TTL` and after every 401, so the repair in
+/// [`Ctx::directory_name`] runs again and again on a tenant that has stopped sending
+/// `userDetails` — one line is the record of that, and a repeat every fifty minutes is
+/// noise nobody reads.
+static NAMELESS_SIGN_IN_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Was the token handed to us? False until [`write_token`] has resolved one.
 fn write_token_pinned() -> bool {
@@ -2160,17 +2169,42 @@ impl Ctx {
         // stale, or never established: rebuild (skypetoken from a fresh skype token
         // via the broker)
         let fresh = teams::connect(&self.http).await?;
-        self.adopt_session(fresh.clone()).await;
-        Ok(fresh)
+        Ok(self.adopt_session(fresh).await)
     }
 
     /// Hold on to a session this process just established, and remember the account
-    /// it belongs to.
+    /// it belongs to. Returns the session as adopted, which is what every caller must
+    /// go on to use — it may carry a name the sign-in itself could not resolve.
     ///
     /// The one place a session is stored, so the store's copy of the identity can
     /// never fall behind the live one — that copy is what `identity` answers from
     /// during a sign-in outage.
-    async fn adopt_session(&self, session: Session) {
+    ///
+    /// A sign-in that came back with the account's mri but NO display name is repaired
+    /// here, from the DIRECTORY — the same short-profile read every colleague's name in
+    /// this app comes from (`teams_profiles::fetch_profiles`), asked for our own mri.
+    /// `/v1/users/ME/properties` used to carry the name in `userDetails` and no longer
+    /// sends that field at all, and an empty `self_name` is not a cosmetic loss:
+    /// `teams_send::build_body` puts it in `imdisplayname`, so every message this app
+    /// sent was authorless in every other teams-lite, and `Store::conversations` could
+    /// not derive a 1:1's title either.
+    ///
+    /// **The directory rather than the store**, which was the first shape and could not
+    /// answer the case this exists for. The store's own copy of a name is read off our
+    /// stored messages, and the boot order is store → serve → sign in → sync — so on a
+    /// FRESH store there is no message of ours yet and every send for the next
+    /// `SESSION_TTL` went out authorless, which is precisely the bug. The directory
+    /// answers on an empty store, it is the tenant's own spelling of the name rather
+    /// than whatever a past frame happened to carry, and the token is already warm:
+    /// `sign_in` and `force_refresh_auth` both resolve `PROFILE_SCOPE` immediately
+    /// before this. It is BEST-EFFORT — a broker outage costs the repair and nothing
+    /// else, and `Ctx::identity` then falls back to the name the store remembers.
+    async fn adopt_session(&self, mut session: Session) -> Session {
+        if session.self_name.trim().is_empty() && !session.self_mri.trim().is_empty() {
+            if let Some(name) = self.directory_name(&session).await {
+                session.self_name = name;
+            }
+        }
         if !read_only() {
             if let Ok(store) = self.store() {
                 if let Err(e) = store.remember_self(&session.self_name, &session.self_mri) {
@@ -2179,8 +2213,52 @@ impl Ctx {
             }
         }
         let mut cell = self.session.lock().await;
-        cell.session = Some(session);
+        cell.session = Some(session.clone());
         cell.minted = std::time::Instant::now();
+        session
+    }
+
+    /// Our own display name from the directory, or None when it cannot be had.
+    ///
+    /// Says so in the journal ONCE per process (`NAMELESS_SIGN_IN_REPORTED`): a session is
+    /// re-minted on every `SESSION_TTL` and after every 401, so a tenant that has stopped
+    /// sending `userDetails` would otherwise print the same non-news some thirty times a
+    /// day, for ever, on the always-on service. One line is the record; a repeat says
+    /// nothing new — the rule the release poll already follows ("silence unless something
+    /// moved").
+    async fn directory_name(&self, session: &Session) -> Option<String> {
+        let resolved: Result<Option<String>> = async {
+            let token = self.tokens.get(teams_profiles::PROFILE_SCOPE).await?;
+            let mris = [session.self_mri.trim().to_string()];
+            let profiles =
+                teams_profiles::fetch_profiles(&self.http, session, &token, &mris).await?;
+            Ok(profiles
+                .iter()
+                .map(|p| p.display_name.trim())
+                .find(|name| !name.is_empty())
+                .map(String::from))
+        }
+        .await;
+        // One report site for all three outcomes: a token this backend could not mint, a
+        // directory that refused, and a directory that simply names nobody are three
+        // different things to read in a journal, and each explains a message that will go
+        // out without an author.
+        if !NAMELESS_SIGN_IN_REPORTED.swap(true, Ordering::Relaxed) {
+            match &resolved {
+                Ok(Some(name)) => {
+                    eprintln!("[auth] sign-in resolved no display name; the directory says {name:?}")
+                }
+                Ok(None) => eprintln!(
+                    "[auth] sign-in resolved no display name, and the directory names nobody \
+                     for this account — messages will go out without one"
+                ),
+                Err(e) => eprintln!(
+                    "[auth] sign-in resolved no display name, and the directory could not be \
+                     read: {e:#}"
+                ),
+            }
+        }
+        resolved.ok().flatten()
     }
 
     /// Who the user is, WITHOUT touching the network.
@@ -2201,11 +2279,22 @@ impl Ctx {
     /// one-to-one thread ids name the account (`Store::derived_self`), and what is
     /// derived is written down, so the derivation runs once rather than per read.
     async fn identity(&self) -> Result<store::SelfIdentity> {
+        // A live session answers — UNLESS its sign-in resolved no mri at all. Signing in
+        // reads the identity best-effort (see `fetch_self_identity` in src/teams.rs), so
+        // one unparseable answer from `/v1/users/ME/properties` yields a session with both
+        // halves empty, and that session is then cached for SESSION_TTL. An empty mri is
+        // not a missing name but a WRONG answer to "which stored messages are ours": no
+        // row is `is_self`, so the user's own messages are drawn as a colleague's, `delete`
+        // refuses their own message, push sends them their own words, and
+        // `OTHER_PARTY_MRI` titles a 1:1 after them. The store's copy is the same pair
+        // from the last sign-in that did resolve one, which is what this fallback is for.
         if let Some(session) = self.session.lock().await.session.as_ref() {
-            return Ok(store::SelfIdentity {
-                name: session.self_name.to_string(),
-                mri: session.self_mri.to_string(),
-            });
+            if !session.self_mri.trim().is_empty() {
+                return Ok(store::SelfIdentity {
+                    name: session.self_name.to_string(),
+                    mri: session.self_mri.to_string(),
+                });
+            }
         }
         let store = self.store()?;
         if let Some(me) = store.remembered_self()? {
@@ -2234,8 +2323,7 @@ impl Ctx {
         let _ = self.tokens.refresh(teams_profiles::PROFILE_SCOPE).await;
         let _ = self.tokens.refresh(teams_media::GRAPH_SCOPE).await;
         let fresh = teams::connect(&self.http).await?;
-        self.adopt_session(fresh.clone()).await;
-        Ok(fresh)
+        Ok(self.adopt_session(fresh).await)
     }
 
     /// A valid Microsoft Graph token, for the read-only mail and calendar surfaces
@@ -2480,8 +2568,7 @@ async fn sign_in(ctx: &Ctx) -> Result<Session> {
     ctx.tokens.get(teams_read::CSA_SCOPE).await.context("csa token")?;
     ctx.tokens.get(teams_profiles::PROFILE_SCOPE).await.context("profile token")?;
     let session = teams::connect(&ctx.http).await?;
-    ctx.adopt_session(session.clone()).await;
-    Ok(session)
+    Ok(ctx.adopt_session(session).await)
 }
 
 #[tokio::main]
@@ -14623,6 +14710,22 @@ mod lifecycle_tests {
         // message in the store to somebody else.
         store.remember_self("", "").unwrap();
         assert_eq!(store.remembered_self().unwrap().unwrap().mri, "8:orgid:abc");
+
+        // A sign-in that resolved the mri and NO name keeps the name already remembered.
+        // `/v1/users/ME/properties` stopped sending `userDetails`, so every sign-in since
+        // arrives in exactly this shape — and `teams_send::build_body` puts `self_name`
+        // in `imdisplayname`, so overwriting it with nothing made this account authorless
+        // in every other teams-lite.
+        store.remember_self("", "8:orgid:abc").unwrap();
+        assert_eq!(store.remembered_self().unwrap().unwrap().name, "Théophile WALLEZ");
+
+        // But NOT across a change of account. The pair is handed to `Store::conversations`
+        // as "who we are", so one account's name beside another's mri titles every 1:1
+        // after the wrong party — keeping a name is only honest for the same identity.
+        store.remember_self("", "8:orgid:someone-else").unwrap();
+        let moved = store.remembered_self().unwrap().unwrap();
+        assert_eq!(moved.mri, "8:orgid:someone-else");
+        assert_eq!(moved.name, "", "a name may never outlive the account it belongs to");
     }
 
     // The local-first reads must not reach the broker for the identity. `identity()`
@@ -14642,6 +14745,14 @@ mod lifecycle_tests {
             .next()
             .expect("the body ends");
         assert!(identity.contains("remembered_self"), "scanned the wrong text");
+        assert!(
+            identity.contains("self_mri.trim().is_empty()"),
+            "Ctx::identity returns the live session unconditionally again. A sign-in whose \
+             identity read failed leaves BOTH halves empty (teams::connect is best-effort) \
+             and that session is cached for SESSION_TTL — read as authoritative it makes no \
+             stored message ours, so the user's own messages are drawn as a colleague's and \
+             push sends them their own words. An empty mri must fall through to the store."
+        );
         assert!(
             identity.contains("derived_self"),
             "Ctx::identity no longer falls back to the derivation. A store synced before \
@@ -14866,7 +14977,6 @@ mod lifecycle_tests {
         assert!(AGENT_REPAIR_INTERVAL <= AGENT_RUN_ABANDONED_AFTER);
     }
 
-    #[test]
     /// What a CUSTOM AGENT really changes about the run — the one wiring between
     /// `agent_persona` and `agent::Request`, and each half of it is a way to get the feature
     /// wrong silently.

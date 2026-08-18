@@ -1232,6 +1232,26 @@ pub struct Store {
 ///
 /// The name is a local override and never travels back to Teams. See the
 /// `person_overrides` note in [`SCHEMA`].
+///
+/// When the row itself carries NO name, the newest name Teams has EVER given that MRI
+/// answers instead — the SQL twin of [`Store::display_name_for_mri`], and what makes
+/// the promise in [`crate::teams_read::sender_display_name`] true. A frame reaches
+/// ingestion nameless more often than it looks: `imdisplayname` is the only field that
+/// holds a name, and a teams-lite whose own sign-in could not read the account's
+/// display name sends every message with an empty one (see
+/// [`crate::teams_send::build_body`]) — so a whole group chat went authorless, in the
+/// bubble label and in the sidebar preview alike, for people this store had 500 named
+/// messages from. Resolving here rather than at ingestion is deliberate: the name is
+/// frozen at insert and no sync refreshes it, and this way the fix reaches the rows
+/// already stored.
+///
+/// The fallback costs one probe of `idx_msg_sender_mri`, and only for a row whose name
+/// is missing — `COALESCE` stops at the first argument that answers.
+///
+/// An EMPTY MRI resolves to nothing, as it does in [`Store::display_name_for_mri`]: it
+/// is the absence of an identity, not an identity that several people share, and
+/// without that guard every authorless frame in the store would answer for every other
+/// one — a meeting notice would be signed by whoever wrote the last nameless message.
 macro_rules! nicknamed {
     ($mri:expr, $name:expr) => {
         concat!(
@@ -1293,10 +1313,12 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
 }
 
 /// The columns [`row_to_msg`] reads, in its order. `sender` is resolved through the
-/// user's own nickname for the author (see [`nicknamed`]) rather than read raw, so a
-/// person the user renamed is renamed on every message of theirs ever stored — which
-/// is the only way a rename can hold, since [`Store::insert_message`] freezes a
-/// message's `sender` at first insert and no sync ever refreshes it.
+/// user's own nickname for the author, and through the newest name Teams has given
+/// that MRI when the row holds none (see [`nicknamed`]), rather than read raw — so a
+/// person the user renamed is renamed on every message of theirs ever stored, and a
+/// message that arrived nameless is still attributed. Both only work at READ time,
+/// since [`Store::insert_message`] freezes a message's `sender` at first insert and no
+/// sync ever refreshes it.
 const SELECT_COLS: &str = concat!(
     "id, conversation_id, seq, compose_time, ",
     nicknamed!("messages.sender_mri", "sender"),
@@ -3517,11 +3539,33 @@ impl Store {
     /// of history into an app that could answer nothing — see `Ctx::identity` in
     /// src/bin/server.rs. The pair never changes for a given account, so writing it
     /// on every successful sign-in costs one statement and covers every later outage.
+    ///
+    /// A sign-in that resolved no NAME never clears one already remembered — **for the
+    /// same account**. The two halves of the identity come from different fields of the
+    /// same response and fail independently: `/v1/users/ME/properties` dropped
+    /// `userDetails` (its only name) while keeping `skypeName`, so every sign-in since
+    /// has been overwriting a good name with nothing — and an empty `self_name` is what
+    /// [`crate::teams_send::build_body`] then puts in `imdisplayname`, leaving this
+    /// account authorless in every other teams-lite.
+    ///
+    /// The mri is what makes keeping that name honest, and it is checked rather than
+    /// assumed: a name kept across a CHANGE of mri would pair one account's name with
+    /// another's identity, and `Ctx::identity` hands that pair to `Store::conversations`
+    /// as "who we are" — so every 1:1 would be titled after the wrong party. A second
+    /// account signed into one store is the shape that does it. The mri still gates the
+    /// write entirely: without one there is no account to be remembering anything about.
     pub fn remember_self(&self, name: &str, mri: &str) -> Result<()> {
-        if mri.trim().is_empty() {
+        let mri = mri.trim();
+        if mri.is_empty() {
             return Ok(());
         }
-        self.set_setting(SETTING_SELF_NAME, name)?;
+        let name = name.trim();
+        // Short-circuits, so the ordinary sign-in — which HAS a name — reads no setting.
+        let keep_remembered_name =
+            name.is_empty() && self.get_setting(SETTING_SELF_MRI)?.as_deref() == Some(mri);
+        if !keep_remembered_name {
+            self.set_setting(SETTING_SELF_NAME, name)?;
+        }
         self.set_setting(SETTING_SELF_MRI, mri)?;
         Ok(())
     }
@@ -6383,6 +6427,52 @@ mod tests {
             s.teams_display_name_for_mri("8:orgid:rob").unwrap().as_deref(),
             Some("Robert SMITH")
         );
+    }
+
+    /// A message can arrive with an identity and NO name — `imdisplayname` is the only
+    /// field that carries one, and a teams-lite whose sign-in could not resolve the
+    /// account's display name sends every message with it empty. Whoever the store
+    /// already knows that MRI as is who those messages are from.
+    #[test]
+    fn a_nameless_message_is_attributed_to_whoever_that_mri_is_known_as() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation_full(&upd("grp", "Team chat", 500, ConversationKind::Group)).unwrap();
+        s.insert_message(&msg_from("grp", 1, "Clément BOSLE", "8:orgid:clem")).unwrap();
+        // The nameless ones: same person, and somebody this store has never seen named.
+        s.insert_message(&msg_from("grp", 2, "", "8:orgid:clem")).unwrap();
+        s.insert_message(&msg_from("grp", 3, "", "8:orgid:stranger")).unwrap();
+
+        let senders = || -> Vec<String> {
+            s.newest_messages("grp", 50).unwrap().into_iter().map(|m| m.sender).collect()
+        };
+        assert_eq!(senders(), vec!["Clément BOSLE", "Clément BOSLE", ""]);
+
+        // A name Teams gave them LATER still answers for the message that came nameless
+        // before it: the resolution runs on the way out, per read.
+        s.insert_message(&msg_from("grp", 4, "Cédric STRANGE", "8:orgid:stranger")).unwrap();
+        assert_eq!(
+            senders(),
+            vec!["Clément BOSLE", "Clément BOSLE", "Cédric STRANGE", "Cédric STRANGE"],
+        );
+
+        // The user's own name for them still wins over both.
+        s.set_person_name("8:orgid:clem", Some("Bibou"), 1_000).unwrap();
+        assert_eq!(senders()[1], "Bibou");
+        // And Teams' own name is still readable underneath it, from a named row only.
+        assert_eq!(
+            s.teams_display_name_for_mri("8:orgid:clem").unwrap().as_deref(),
+            Some("Clément BOSLE"),
+        );
+
+        // The sidebar preview attributes the same way — a nameless last message used to
+        // leave the whole row unattributed ("hello" instead of "Clément: hello").
+        let mut u = upd("grp", "Team chat", 500, ConversationKind::Group);
+        u.last_message_preview = "someone approve this please";
+        u.last_message_sender = "";
+        u.last_message_sender_mri = "8:orgid:stranger";
+        s.upsert_conversation_full(&u).unwrap();
+        let row = s.conversations("").unwrap().into_iter().find(|c| c.id == "grp").unwrap();
+        assert_eq!(row.last_message_sender, "Cédric STRANGE");
     }
 
     /// The roster the GitLab page matches its people against: Teams' own names, every name

@@ -73,6 +73,18 @@ pub async fn connect(client: &reqwest::Client) -> Result<Session> {
 
 /// Fetch our own display name + mri from chatService /v1/users/ME/properties.
 /// `userDetails.name` holds the display name; `skypeName` is the mri (minus "8:").
+///
+/// **The name half no longer arrives.** As of 2026-08 that response carries no
+/// `userDetails` at all — its only name — so this returns the mri and an EMPTY name.
+/// The field is still read here, because it costs nothing and may come back; what
+/// resolves the name instead is `Ctx::adopt_session`, from the DIRECTORY, and
+/// `Store::remember_self` will not overwrite a good name with this empty one. That
+/// matters beyond cosmetics: `self_name` is what `build_body` sends as `imdisplayname`,
+/// and an empty one leaves this account authorless in every other teams-lite.
+///
+/// `examples/self_identity_recon.rs` is what re-measures the response — every field it
+/// carries, and whether the directory answers for our own mri — rather than this comment
+/// asserting a field nothing reads.
 async fn fetch_self_identity(client: &reqwest::Client, session: &Session) -> Result<(String, String)> {
     let chat = session.endpoint("chatService").context("no chatService endpoint")?.trim_end_matches('/');
     let resp = client
