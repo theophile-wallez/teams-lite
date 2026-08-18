@@ -39,6 +39,12 @@ pub enum BrokerFailure {
     Refused,
     /// Works, but holds no account — the device enrolment is gone.
     NoAccount,
+    /// On the bus and answering, but its login keyring is locked, so it can read
+    /// neither the account nor the tokens it holds. A container restart unlocks it,
+    /// so this is repairable — unlike `NoAccount`, which it looks exactly like from
+    /// `getAccounts` alone (an empty account list), and is told apart from only by
+    /// reading the keyring's own `Locked` property. The ~18h re-lock, named.
+    KeyringLocked,
     /// Anything else. Never repaired automatically.
     Other,
 }
@@ -54,6 +60,7 @@ impl BrokerFailure {
             Self::Unreachable => "The identity broker is not reachable on the D-Bus session bus.",
             Self::Refused => "The identity broker refused to sign in silently.",
             Self::NoAccount => "The identity broker holds no account for this device.",
+            Self::KeyringLocked => "The identity broker's keyring is locked.",
             Self::Other => "The identity broker could not mint a token.",
         }
     }
@@ -67,15 +74,18 @@ impl BrokerFailure {
             Self::Unreachable => "unreachable",
             Self::Refused => "refused",
             Self::NoAccount => "no_account",
+            Self::KeyringLocked => "keyring_locked",
             Self::Other => "other",
         }
     }
 
-    /// Can restarting the Intune container plausibly fix this? Only the signature
-    /// whose known cause is the locked keyring. Everything else either needs a
-    /// human (`Refused`, `NoAccount`) or is not about the container at all.
+    /// Can restarting the Intune container plausibly fix this? The two signatures whose
+    /// known cause is the locked keyring — the broker dropping the call (`Disconnected`),
+    /// and the broker answering but holding no readable account (`KeyringLocked`).
+    /// Everything else either needs a human (`Refused`, `NoAccount`) or is not about the
+    /// container at all.
     pub fn is_repairable(self) -> bool {
-        matches!(self, Self::Disconnected)
+        matches!(self, Self::Disconnected | Self::KeyringLocked)
     }
 }
 
@@ -338,6 +348,25 @@ pub async fn get_token(scope: &str) -> Result<String> {
     outcome
 }
 
+// The login keyring, as org.freedesktop.secrets exposes it inside the container — the
+// same names bin/teams-lite-broker-check.sh reads over busctl.
+const SECRETS_NAME: &str = "org.freedesktop.secrets";
+const SECRETS_PATH: &str = "/org/freedesktop/secrets/collection/login";
+const SECRETS_IFACE: &str = "org.freedesktop.Secret.Collection";
+
+/// Is the container's login keyring locked? `Some(true)`/`Some(false)` when the secret
+/// service answers, `None` when it cannot be told — no service, an older interface, a
+/// property that would not decode. `None` is deliberately NOT "locked": this only ever
+/// escalates a refusal to a repairable one, and a repair must never fire on a guess (the
+/// discipline bin/teams-lite-broker-check.sh keeps for the shell path). Asked over the
+/// broker's own bus connection, so it costs no second handshake.
+async fn keyring_locked(conn: &zbus::Connection) -> Option<bool> {
+    let proxy = zbus::Proxy::new(conn, SECRETS_NAME, SECRETS_PATH, SECRETS_IFACE)
+        .await
+        .ok()?;
+    proxy.get_property::<bool>("Locked").await.ok()
+}
+
 async fn acquire_token(scope: &str) -> Result<String> {
     let conn = connect_broker_bus().await?;
     let proxy = zbus::Proxy::new(&conn, BROKER_NAME, BROKER_PATH, BROKER_IFACE)
@@ -349,13 +378,29 @@ async fn acquire_token(scope: &str) -> Result<String> {
         "clientId": EDGE_CLIENT_ID,
         "redirectUri": sid,
     })).await?;
-    let account = accounts
+    let account = match accounts
         .get("accounts")
         .and_then(|a| a.as_array())
         .and_then(|a| a.first())
-        .ok_or_else(|| {
-            anyhow!("no account registered with the broker").context(BrokerFailure::NoAccount)
-        })?;
+    {
+        Some(account) => account,
+        None => {
+            // An empty account list is ambiguous. The device may truly be unenrolled
+            // (`NoAccount`, which needs a human sign-in) — or the container keyring
+            // re-locked and the broker, though answering, cannot READ the account it
+            // holds (`KeyringLocked`, which a container restart fixes). The two want
+            // opposite remedies and look identical here, so ask the keyring's own
+            // `Locked` property to tell them apart — the same cause
+            // bin/teams-lite-broker-check.sh tests. Unknown is never "locked": a repair
+            // must not fire on a guess.
+            let failure = if keyring_locked(&conn).await == Some(true) {
+                BrokerFailure::KeyringLocked
+            } else {
+                BrokerFailure::NoAccount
+            };
+            return Err(anyhow!("broker returned no account").context(failure));
+        }
+    };
     let username = account.get("username").and_then(|u| u.as_str()).unwrap_or_default();
 
     let req = json!({
@@ -495,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_dropped_call_is_repairable() {
+    fn only_the_locked_keyring_signatures_are_repairable() {
         for failure in [
             BrokerFailure::Unresponsive,
             BrokerFailure::Unreachable,
@@ -505,7 +550,10 @@ mod tests {
         ] {
             assert!(!failure.is_repairable(), "{failure:?} must not be auto-repaired");
         }
+        // Both point at a locked keyring, which a container restart unlocks: the broker
+        // dropping the call, and the broker answering with no account it can read.
         assert!(BrokerFailure::Disconnected.is_repairable());
+        assert!(BrokerFailure::KeyringLocked.is_repairable());
     }
 
     #[test]
@@ -516,6 +564,7 @@ mod tests {
             BrokerFailure::Unreachable,
             BrokerFailure::Refused,
             BrokerFailure::NoAccount,
+            BrokerFailure::KeyringLocked,
             BrokerFailure::Other,
         ];
         let mut tags: Vec<&str> = all.iter().map(|f| f.tag()).collect();
