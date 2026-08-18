@@ -891,6 +891,64 @@ export async function expectCardFitsItsPane(card: Locator, pane: Locator): Promi
   expect(overflow).toBeLessThanOrEqual(1);
 }
 
+// ---- chess ------------------------------------------------------------------
+//
+// A game needs two machines and the suite has one, so the mock plays the OPPONENT: it accepts a
+// challenge and answers each move with a legal reply (see `maybeAnswerMockChess`). These aim it.
+
+/**
+ * Aim the chess opponent: name the move it answers with, or silence it.
+ *
+ * ALWAYS finish with `resetChess`. One mock process serves the complete E2E run, and an opponent
+ * left silent leaves every later game unanswered.
+ */
+export async function setChessOpponent(
+  page: Page,
+  body: { reply?: string; silent?: boolean } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "chess", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Put the chess opponent back the way the mock declares it. */
+export async function resetChess(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "chess", reset: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Challenge from the open conversation's header and wait for the mock to accept.
+ *
+ * The colour is asked for explicitly rather than left random: a spec that did not know which
+ * side it was on could not know whose move it is, and would have to branch on the answer.
+ */
+export async function startChessGame(page: Page, color: "w" | "b" = "w"): Promise<void> {
+  await page.locator('[data-testid="chess-button"]').click();
+  await page.locator(`[data-testid="chess-color-${color}"]`).click();
+  await page.locator('[data-testid="chess-challenge"]').click();
+  await page.locator('[data-testid="chess-game"]').waitFor();
+  // The board is playable only once somebody is opposite.
+  await expect(page.locator('[data-testid="chess-status"]')).not.toContainText(
+    /waiting for somebody to accept/i,
+    { timeout: 10_000 },
+  );
+}
+
+/** Play a move by pressing the piece's square and then its target — the tap-tap a phone uses. */
+export async function playChessMove(page: Page, from: string, to: string): Promise<void> {
+  await page.locator(`[data-square="${from}"]`).click();
+  await page.locator(`[data-square="${to}"]`).click();
+}
+
+/** Whether a square holds a piece. */
+export async function chessSquareHasPiece(page: Page, square: string): Promise<boolean> {
+  return (await page.locator(`[data-square="${square}"] [data-piece]`).count()) > 0;
+}
+
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */
 export function realErrors(errors: string[]): string[] {
   return errors.filter(

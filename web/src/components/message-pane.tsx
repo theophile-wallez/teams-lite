@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -29,10 +39,12 @@ import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { defaultAgentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
 import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
 import { recordingsInConversation, type CallRecording } from "~/lib/call-recording";
+import { chessGamesInThread, type ChessGame } from "~/lib/chess-thread";
 import { CallRecordingCard } from "./call-recording-card";
 import { useAppState, useController } from "./controller-context";
 import { AgentMenu } from "./agent-menu";
 import { CallButton } from "./call-button";
+import { ChessButton } from "./chess-button";
 import { useCallOwnsComposer } from "./call-stage-context";
 import { AgentPendingBubble } from "./agent-reply";
 import { Avatar, conversationFallback, conversationPhoto, type AvatarPhoto } from "./avatar";
@@ -53,6 +65,14 @@ import { JumpToLatest } from "./jump-to-latest";
 import { TypingIndicator } from "./typing-indicator";
 import { Button } from "./ui/button";
 import { cn } from "~/lib/utils";
+
+/**
+ * The board is the only surface in this app that needs a chess engine, so `chess.js` is reached
+ * through a lazy chunk and never sits on the path of a chat — the rule `@pierre/diffs` holds
+ * for the diff renderer. The pure half (which games a thread holds, whose turn it is) carries
+ * no dependency, so the row and the header's turn dot are decided without loading any of this.
+ */
+const ChessGameCard = lazy(() => import("./chess-game-card"));
 
 // Start prefetching older history well before the user reaches the very top, so
 // pages stream in off-screen and a gap in the backlog is rarely perceived. The
@@ -77,6 +97,11 @@ const OVERSCAN_ROWS = 8;
 // measured, and a correction the reader has to watch is the twitch
 // `e2e/history.spec.ts` exists to catch.
 const TIME_MARK_ROW_PX = 36;
+// The room a chess board takes: a square board as wide as its card (max-w-80 = 320px), the two
+// names above and below it, the status line and the score sheet. A CONSTANT for the reason
+// TIME_MARK_ROW_PX is one — a row measured taller than its estimate is a `scrollTop` the reader
+// watches being corrected.
+const CHESS_ROW_PX = 470;
 // Height reserved at the top of the list for the "loading earlier messages"
 // row, so reserving (and releasing) it doesn't shift the rows below.
 const HISTORY_LOADER_PX = 32;
@@ -104,7 +129,8 @@ type HistoryRow =
   | { kind: "message"; key: string; message: ChatMessage; prev?: ChatMessage; next?: ChatMessage }
   | { kind: "thread"; key: string; thread: Thread }
   | { kind: "agent"; key: string; run: AgentRun }
-  | { kind: "recording"; key: string; recording: CallRecording };
+  | { kind: "recording"; key: string; recording: CallRecording }
+  | { kind: "chess"; key: string; game: ChessGame };
 
 /**
  * The right pane: conversation title, the scrolling message history (virtualized,
@@ -286,6 +312,16 @@ export function MessagePane(props: { onBack?: () => void }) {
     [threads, messages],
   );
 
+  // Every game of chess this thread holds. A game IS its messages (see lib/chess-thread.ts),
+  // so this is a pass over the history exactly as `timeMarks` is, and for its reason: the pane
+  // re-renders on every scroll that mounts a row while a game changes only when the messages
+  // do. A CHANNEL is excluded — its history is drawn as threads, and a board inside one is a
+  // different surface (see AGENTS.md § Chess in a conversation).
+  const chessGames = useMemo(
+    () => (threads ? [] : chessGamesInThread(messages)),
+    [threads, messages],
+  );
+
   // Deep-linking to a reply inside a collapsed thread: expand that thread so the
   // scroll effect can find and center the target node.
   useEffect(() => {
@@ -315,12 +351,36 @@ export function MessagePane(props: { onBack?: () => void }) {
         rows.push({ kind: "thread", key: thread.rootId, thread });
       });
     } else {
+      // Every message of a game is ABSORBED into that game's own row, so a sixty-move game
+      // adds nothing to the thread's length and the board does not move under the reader as it
+      // is played.
+      const absorbedBy = new Map<string, ChessGame>();
+      for (const game of chessGames) {
+        for (const id of game.absorbed) absorbedBy.set(id, game);
+      }
       messages.forEach((message, i) => {
-        rowOfMessage.set(message.id, i);
+        const game = absorbedBy.get(message.id);
+        if (game) {
+          // The board sits where the game STARTED, and every later message of it points at
+          // that row — so a deep link from a notification lands on the board rather than on a
+          // row that is not drawn.
+          if (message.id === game.challengeMessageId) {
+            rows.push({ kind: "chess", key: `chess:${game.id}`, game });
+          }
+          rowOfMessage.set(message.id, rows.length - 1);
+          return;
+        }
+        // The row INDEX, not the message index: with a game absorbing several messages into
+        // one row the two are no longer the same number, and a deep link taken from the
+        // message index would land on whatever row happens to sit there.
+        rowOfMessage.set(message.id, rows.length);
         rows.push({
           kind: "message",
           key: message.id,
           message,
+          // `prev`/`next` stay the neighbouring MESSAGES rather than the neighbouring rows:
+          // they feed the same-author run and the time mark, and a board between two messages
+          // does not make them two different people.
           prev: messages[i - 1],
           next: messages[i + 1],
         });
@@ -350,10 +410,16 @@ export function MessagePane(props: { onBack?: () => void }) {
       rowOfMessage.clear();
       rows.forEach((row, index) => {
         if (row.kind === "message") rowOfMessage.set(row.message.id, index);
+        // A game's own messages are drawn by its board row, so they point at it — a rebuild
+        // that only re-mapped message rows would drop every one of them, and a deep link to a
+        // move would then scroll to nothing.
+        if (row.kind === "chess") {
+          for (const id of row.game.absorbed) rowOfMessage.set(id, index);
+        }
       });
     }
     return { rows, rowOfMessage };
-  }, [threads, messages, agentRun, conversationRecordings]);
+  }, [threads, messages, agentRun, conversationRecordings, chessGames]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -363,6 +429,9 @@ export function MessagePane(props: { onBack?: () => void }) {
     // measure, once per marked row, all the way up a scroll.
     estimateSize: (index) => {
       const row = rows[index];
+      // A board is nothing like a bubble in height, and it is the one row whose size is known
+      // before it is measured — so the estimate is its own constant rather than a bubble's.
+      if (row?.kind === "chess") return CHESS_ROW_PX;
       const marked = row?.kind === "message" && timeMarks.has(row.message.id);
       return ROW_ESTIMATE_PX + (marked ? TIME_MARK_ROW_PX : 0);
     },
@@ -873,6 +942,7 @@ export function MessagePane(props: { onBack?: () => void }) {
         {openId && (
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <CallButton conversationId={openId} />
+            <ChessButton conversationId={openId} games={chessGames} />
             <AgentMenu conversationId={openId} />
           </div>
         )}
@@ -966,6 +1036,28 @@ export function MessagePane(props: { onBack?: () => void }) {
                       // Its own row and its own card: a recording is not a message, so it
                       // takes no side, no bubble and no sender (see CallRecordingCard).
                       <CallRecordingCard recording={row.recording} className="my-2" />
+                    ) : row.kind === "chess" ? (
+                      // The game, drawn where it was started. It is not a message either: it
+                      // takes no bubble, no side and no sender, because the row IS the game
+                      // the thread holds rather than one thing somebody said.
+                      <Suspense
+                        fallback={
+                          <div
+                            data-testid="chess-loading"
+                            aria-hidden
+                            className="mx-auto my-2 w-full max-w-80 animate-pulse rounded-xl border border-border-subtle bg-panel"
+                            // The room the board is about to take, so the history does not
+                            // shift when the chunk lands.
+                            style={{ height: `${CHESS_ROW_PX - 16}px` }}
+                          />
+                        }
+                      >
+                        <ChessGameCard
+                          game={row.game}
+                          conversationId={openId}
+                          className="my-2"
+                        />
+                      </Suspense>
                     ) : row.kind === "agent" ? (
                       <AgentPendingBubble
                         run={row.run}

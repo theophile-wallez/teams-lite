@@ -2316,7 +2316,11 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/ask --answer-with`. For the user's own CUSTOM AGENTS — the
   Settings section, the form, the name a persona may not take, the "@" list that offers them
   beside the providers, the chip and one answering under its own face:
-  `bun run preview -- --out /tmp/ca --custom-agents`. For a tracker REFERENCE drawn as a
+  `bun run preview -- --out /tmp/ca --custom-agents`. For a game of CHESS — the header's
+  control, the challenge popover, the board in both themes, a game in progress with its score
+  sheet, the armed resignation and the board at a phone's width:
+  `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`: the pawn in the header is
+  20px). For a tracker REFERENCE drawn as a
   chip — in a chat message, in an agent's own answer and in a merge request's
   description: `bun run preview -- --out /tmp/ref --tracker-refs`. For the typing hint above the
   composer, one typist then three: `bun run preview -- --out /tmp/typ --typing`
@@ -4072,6 +4076,111 @@ pins every rule above, including that the instruction reaches no message. **What
 against the tenant is the pairing**: the signature, the trigger and the prompt are pinned in
 Rust and against the mock, so what is untested is one real `@bebou` run in the user's own app.
 
+## Chess in a conversation (a game IS the thread)
+
+The user can play chess against anybody in a conversation who also runs teams-lite, from a
+shortcut in that conversation's own header. Every challenge, acceptance, move, draw offer and
+resignation is an ordinary Teams message; the board is one row in the history, derived from
+those messages. `web/src/lib/chess-wire.ts` is the line a chess message signs itself with,
+`chess-thread.ts` the games a thread holds, `web/src/components/chess-game-card.tsx` the board
+(and the only place `chess.js` is imported), `chess-button.tsx` the header's control.
+
+**Teams has no private data channel, and that constraint is the whole design.** A move has to
+reach another machine and a message in the conversation is the only carrier — so a game is
+played in the thread, under the user's name, visible to everybody in it. What that buys is that
+**nothing about a game is stored**: the position replays out of the thread's own history, so a
+reload, a phone and a game played while this app was closed all draw the same board, and there
+is nothing to reconcile when a frame is lost. It is the property the agent's overlay has ("the
+row in the history IS the Teams message") with no overlay left at all — no RPC, no schema, no
+new gate.
+
+- **It needs no consent gate of its own, and gets no relaxation either.** `send` is already an
+  `OUTWARD_METHODS` entry and a move rides in its params, exactly as a mention and a picture do.
+  What that rests on is that a move IS the click the user just made — the same argument as
+  pressing Enter in the composer, or the one-click approval. The two ends of a game are explicit
+  presses: the challenge (whose popover says, before the press, that a message goes out under
+  their name and everybody in the conversation sees it) and the acceptance. The automation hook
+  already blocks a script that names `send` against a live port, so the guardrails needed no
+  change.
+- **The wire is read from the WORDS, never from markup** — the choice `agent-message.ts`,
+  `agent-tag.ts` and `tracker-ref.ts` all make. A chess message ends with one
+  `<p><em>— chess <game> <kind>, via teams-lite</em></p>`, the shape `agent_policy::Signature`
+  writes, and carries above it the words a stock Teams client shows (`♟ 1. e4`). So every game
+  already in a thread renders, nothing is added to the wire, and a colleague's client shows
+  exactly what the user's account posted. The kinds are `open w` / `open b` / `join` /
+  `<ply> <san>` / `draw` / `draw-ok` / `resign`, and a line this build cannot parse leaves an
+  ordinary message rather than a game with a hole in it. The game id is six lowercase hex
+  characters — narrow on purpose, so `— claude, via teams-lite` can never be read as a game.
+- **The PLY NUMBER is explicit, so a duplicate is detectable.** Two messages claiming one ply is
+  a real state — two clients, one racing reconnect — and the earlier one wins because the walk
+  is in order; the later is refused rather than applied on top. A move is accepted only from the
+  player whose turn it is and only once somebody accepted, which is what keeps a third person in
+  a group chat out of the game: that is the derivation rather than a rule the UI applies.
+- **RANDOM is resolved at the press.** The wire never says "random" — a colour nothing decided
+  is a game whose two clients could disagree about who moves first.
+- **A game the rules cannot replay is SAID, naming the ply**, never drawn as a board that
+  silently disagrees with the other player's. And the message-decided outcomes — a resignation,
+  an agreed draw — are stated BEFORE the position is consulted at all: asking the rules about a
+  game somebody resigned would answer "your move".
+- **A move is drawn before it lands and TAKEN BACK if the send fails**, with the sentence at the
+  BOARD (`chessError`, over `sendFailureMessage`). It is the composer's rule — this app never
+  posts without the user, so it must never leave them believing it did — and the board is where
+  it belongs rather than over a composer holding words nobody typed. A board that waited for a
+  round trip before the piece moved would feel broken, which is why the pending move is drawn;
+  it is forgotten when the thread really holds it, and never from a frame.
+- **A game is ONE row, at the message that started it**, and every later message of it is
+  ABSORBED into that row — so a sixty-move game adds nothing to the thread's length and the
+  board does not move under the reader as it is played. Two things follow in `message-pane.tsx`:
+  `rowOfMessage` maps from the ROW index rather than the message index (with a game absorbing
+  several messages the two are no longer the same number), and the recordings rebuild re-maps a
+  chess row's absorbed ids too — without that a deep link to a move would scroll to nothing.
+  `CHESS_ROW_PX` is a constant the estimate knows, for the reason `TIME_MARK_ROW_PX` is one.
+- **A CONVERSATION holds a game; a team CHANNEL does not.** A channel's history is drawn as
+  THREADS, so a board there would have to live inside one and answer a different question about
+  where it sits — a later feature, never a quiet addition. It costs nothing: the sandbox thread
+  `19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2` is a group CHAT, so the one place a send is
+  pre-authorized is covered. Notes offers no game either — nobody to play.
+- **One game in flight per conversation.** A challenge is refused while a game is unfinished
+  there; a finished one leaves its board where it is and lets the next challenge start.
+- **`chess.js` is a LAZY chunk** (1.4.0, BSD-2-Clause, zero dependencies). The pure halves — the
+  wire and the derivation — carry no dependency at all, which is what lets the pane decide a
+  board row exists and the header draw its turn dot without a rules engine on the path of every
+  chat. It is the rule `@pierre/diffs` holds for the diff renderer.
+- **The pieces are the Unicode chess glyphs, and hugeicons was tried FIRST.** That set does ship
+  a complete chess set, but a piece there is several OPEN paths (a pawn is its base, two curves
+  and a bare line), so `fill` cannot make a solid body — each subpath fills to its own implied
+  closure. Drawn instead as line art in two inks with a heavier halo behind, **both armies came
+  out looking identical at board size**: that was captured, looked at, and rejected. So the
+  pieces are `♚♛♜♝♞♟` — the SOLID glyphs for both sides — coloured near-white or near-black with
+  a 1px outline in the opposite ink, asked for in the TEXT presentation so no system draws a
+  colourful emoji instead. The hollow glyphs (`♔♕♖♗♘♙`) are deliberately unused: they are
+  outlines, so they vanish on a light square and bring the same problem back. § Project shape is
+  kept where it matters — no second icon PACKAGE is installed, `icon-library.test.ts` still
+  passes, and every glyph in the app's own chrome is still hugeicons'. Board art is not a row of
+  UI icons. The two inks are FIXED rather than themed, because "white piece" is a fact about
+  chess and a set that swapped sides with the app's appearance would be a board whose armies
+  change colour under the reader; the SQUARES follow the theme.
+- **The board is presentational and controlled**, and a square is a BUTTON only where a press
+  means something: a spectator's board and a settled game are a grid of squares. Moves are
+  played by tap-tap as well as by pointer, because this app is read from a phone.
+
+`web/mock/server.ts` plays the OPPONENT (`maybeAnswerMockChess`), because a game needs two
+machines and the suite has one: it accepts a challenge, opens as white when the challenger took
+black — without that a game the user asked to play as black would sit waiting for a first move
+nobody was going to make — and answers each move with a legal reply, replayed out of the thread's
+own messages rather than a position it keeps. Its `{kind:"chess"}` test hook aims that reply or
+silences it, and **a spec MUST reset it**: the reset also truncates the `Chess Club` fixture back
+to its seed, because one game left unfinished means the next test's header offers no challenge at
+all. That thread exists for the reason the ten-picture message taught this suite — a game posts
+several messages and the board absorbs them, so played in a shared fixture it would move the rows
+a later spec counts on. `cd web && bun run preview -- --out /tmp/chess --chess` captures the
+control, the popover, the board in both themes, a game in progress with its score sheet, the
+armed resignation and the board at a phone's width; `web/e2e/chess.spec.ts` pins every rule
+above. **What is unverified against the tenant is the pairing**: the wire rides `send`, which is
+measured, and everything else is pinned in unit tests and against the mock — so what is untested
+is one real challenge accepted by a colleague who also runs teams-lite, which is the user's own
+click, in the sandbox chat.
+
 ## Renaming a person, and giving them a face (LOCAL, and gated)
 
 The user can call somebody whatever they like and hand them any picture, in this app
@@ -4266,7 +4375,14 @@ user's. What changes is only what is asked.
     rather than installing one. A vendored component that ships its OWN pack is held to
     the same rule through its own seam rather than exempted: `@pierre/trees` draws the
     merge-request diff's file tree with hugeicons, serialized into the sprite it injects
-    (`web/src/lib/tree-icons.ts`, see § The DIFF).
+    (`web/src/lib/tree-icons.ts`, see § The DIFF). The one thing in this app NOT drawn from it
+    is a chess PIECE, and only because that set cannot tell two armies apart at board size —
+    the reasoning, and what was tried first, is in § Chess in a conversation. No second icon
+    package is installed, so the test above still holds.
+  - The game of CHESS is entirely the page's: `chess-wire.ts` reads the line a chess message
+    signs itself with, `chess-thread.ts` derives every game from the thread's own messages, and
+    `chess.js` is reached only through the board's lazy chunk (see § Chess in a conversation).
+    There is no backend half at all — a move rides the `send` that is already gated.
   - There was a terminal UI (OpenTUI + Solid, in `ui/`) until 2026-08-03. It is gone,
     and the web app is the only client: do not re-add a second front-end, and read a
     comment that names one as history rather than as a place to keep in sync.

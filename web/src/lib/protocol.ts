@@ -9,6 +9,10 @@
 // second copy that would drift.
 import type { TrackerPerson } from "./tracker-people";
 
+// A chess message signs itself with a trailing marker, and the chat list must show the move
+// rather than the line that carries it (see lib/chess-wire.ts).
+import { chessPreviewText } from "./chess-wire";
+
 // Mirrors the Rust `ConversationKind` (src/store.rs).
 export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
 
@@ -1728,7 +1732,10 @@ function firstName(full: string): string {
  * bare snippet in a 1:1 / Notes where the sender is implicit.
  */
 export function previewLine(c: Conversation): string {
-  const body = c.last_message_preview ?? "";
+  // A chess message's trailing marker is the machine-readable half and nothing a reader of
+  // the chat list wants: left in, a row would read "♟ 1. e4 — chess 7f3a1c 1 e4, via
+  // teams-lite".
+  const body = chessPreviewText(c.last_message_preview ?? "");
   if (!body) return "";
   if (c.last_message_from_me) return `You: ${body}`;
   if (isGroupChat(c) && c.last_message_sender) {
@@ -1910,7 +1917,9 @@ export function channelLabel(c: Channel): string {
  * Empty when the channel has no displayable last message.
  */
 export function channelPreviewLine(c: Channel): string {
-  const body = c.last_message_preview ?? "";
+  // A channel holds no board, but a colleague running teams-lite may still have posted a
+  // chess message into one — and the marker is no more readable here than in a chat.
+  const body = chessPreviewText(c.last_message_preview ?? "");
   if (!body) return "";
   if (c.last_message_from_me) return `You: ${body}`;
   if (c.last_message_sender) return `${firstName(c.last_message_sender)}: ${body}`;

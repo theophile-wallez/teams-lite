@@ -1,0 +1,284 @@
+import { describe, expect, it } from "vitest";
+import {
+  activeChessGame,
+  chessGameIsSettled,
+  chessGamesInThread,
+  chessPlayerOf,
+  chessTurnIsOurs,
+} from "./chess-thread";
+import { chessMessageHtml, type ChessWire } from "./chess-wire";
+import type { ChatMessage } from "./protocol";
+
+const ME = { mri: "8:orgid:me", name: "Clement" };
+const ADA = { mri: "8:orgid:ada", name: "Ada Lovelace" };
+const GRACE = { mri: "8:orgid:grace", name: "Grace Hopper" };
+
+let seq = 0;
+
+/** One chess message from somebody. `who === ME` is the reader's own. */
+function chess(who: { mri: string; name: string }, wire: ChessWire): ChatMessage {
+  seq += 1;
+  return {
+    id: `m${seq}`,
+    conversation_id: "19:c@thread.v2",
+    seq,
+    compose_time: 1_700_000_000_000 + seq * 1000,
+    sender: who.name,
+    sender_mri: who.mri,
+    content: chessMessageHtml(wire),
+    ...(who === ME ? { is_self: true } : {}),
+  };
+}
+
+/** An ordinary message, which a game must leave alone. */
+function chat(who: { mri: string; name: string }, text: string): ChatMessage {
+  seq += 1;
+  return {
+    id: `m${seq}`,
+    conversation_id: "19:c@thread.v2",
+    seq,
+    compose_time: 1_700_000_000_000 + seq * 1000,
+    sender: who.name,
+    sender_mri: who.mri,
+    content: `<p>${text}</p>`,
+    ...(who === ME ? { is_self: true } : {}),
+  };
+}
+
+describe("chessGamesInThread", () => {
+  it("finds a game from its challenge alone, with nobody opposite yet", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+    ]);
+    expect(game?.id).toBe("aaa111");
+    expect(game?.challenger).toEqual({ mri: ME.mri, name: ME.name, isSelf: true });
+    expect(game?.challengerColor).toBe("w");
+    expect(game?.opponent).toBeNull();
+    expect(game?.ourColor).toBe("w");
+    expect(game?.turn).toBe("w");
+    expect(game?.moves).toEqual([]);
+  });
+
+  it("names the other player from the ACCEPT, and gives them the other colour", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "b" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+    ]);
+    expect(game?.opponent).toEqual({ mri: ADA.mri, name: ADA.name, isSelf: false });
+    expect(game && chessPlayerOf(game, "b")?.mri).toBe(ME.mri);
+    expect(game && chessPlayerOf(game, "w")?.mri).toBe(ADA.mri);
+    expect(game?.ourColor).toBe("b");
+  });
+
+  it("keeps the moves in ply order and follows the turn", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ME, { game: "aaa111", body: { kind: "move", ply: 1, san: "e4" } }),
+      chat(ADA, "nice"),
+      chess(ADA, { game: "aaa111", body: { kind: "move", ply: 2, san: "e5" } }),
+      chess(ME, { game: "aaa111", body: { kind: "move", ply: 3, san: "Nf3" } }),
+    ]);
+    expect(game?.moves).toEqual(["e4", "e5", "Nf3"]);
+    expect(game?.turn).toBe("b");
+    expect(game && chessTurnIsOurs(game)).toBe(false);
+  });
+
+  it("absorbs every message of the game and nothing else", () => {
+    const messages = [
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chat(ADA, "your move"),
+      chess(ME, { game: "aaa111", body: { kind: "move", ply: 1, san: "e4" } }),
+    ];
+    const [game] = chessGamesInThread(messages);
+    expect(game?.absorbed).toEqual([messages[0]?.id, messages[1]?.id, messages[3]?.id]);
+    expect(game?.challengeMessageId).toBe(messages[0]?.id);
+  });
+
+  it("REFUSES a move from the player whose turn it is not", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      // Ada is black and it is white's move.
+      chess(ADA, { game: "aaa111", body: { kind: "move", ply: 1, san: "e4" } }),
+    ]);
+    expect(game?.moves).toEqual([]);
+    expect(game?.refusedPlies).toEqual([1]);
+  });
+
+  it("REFUSES a move from somebody who is not in the game at all", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(GRACE, { game: "aaa111", body: { kind: "move", ply: 1, san: "e4" } }),
+    ]);
+    expect(game?.moves).toEqual([]);
+  });
+
+  it("REFUSES a move before the game was accepted", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ME, { game: "aaa111", body: { kind: "move", ply: 1, san: "e4" } }),
+    ]);
+    expect(game?.moves).toEqual([]);
+  });
+
+  it("keeps the FIRST of two messages claiming one ply, and refuses the later", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ME, { game: "aaa111", body: { kind: "move", ply: 1, san: "e4" } }),
+      chess(ME, { game: "aaa111", body: { kind: "move", ply: 1, san: "d4" } }),
+    ]);
+    expect(game?.moves).toEqual(["e4"]);
+    expect(game?.refusedPlies).toEqual([1]);
+  });
+
+  it("refuses a SECOND accept — the first colleague to answer is the opponent", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(GRACE, { game: "aaa111", body: { kind: "join" } }),
+    ]);
+    expect(game?.opponent?.mri).toBe(ADA.mri);
+  });
+
+  it("refuses an accept from the CHALLENGER: a game needs two people", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ME, { game: "aaa111", body: { kind: "join" } }),
+    ]);
+    expect(game?.opponent).toBeNull();
+  });
+
+  it("carries a draw offer, and settles the game when the OTHER player accepts it", () => {
+    const offered = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ME, { game: "aaa111", body: { kind: "draw" } }),
+    ])[0];
+    expect(offered?.drawOfferedBy).toBe("w");
+    expect(offered && chessGameIsSettled(offered)).toBe(false);
+
+    const agreed = chessGamesInThread([
+      chess(ME, { game: "bbb222", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "bbb222", body: { kind: "join" } }),
+      chess(ME, { game: "bbb222", body: { kind: "draw" } }),
+      chess(ADA, { game: "bbb222", body: { kind: "drawAccepted" } }),
+    ])[0];
+    expect(agreed?.outcome).toEqual({ kind: "drawAgreed" });
+    expect(agreed && chessGameIsSettled(agreed)).toBe(true);
+
+    // Accepting one's OWN offer settles nothing.
+    const alone = chessGamesInThread([
+      chess(ME, { game: "ccc333", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "ccc333", body: { kind: "join" } }),
+      chess(ME, { game: "ccc333", body: { kind: "draw" } }),
+      chess(ME, { game: "ccc333", body: { kind: "drawAccepted" } }),
+    ])[0];
+    expect(alone?.outcome).toEqual({ kind: "playing" });
+  });
+
+  it("lets a MOVE decline an open draw offer, which is what a move means", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "draw" } }),
+      chess(ME, { game: "aaa111", body: { kind: "move", ply: 1, san: "e4" } }),
+    ]);
+    expect(game?.drawOfferedBy).toBeNull();
+    expect(game?.moves).toEqual(["e4"]);
+  });
+
+  it("settles the game on a resignation, naming who resigned", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "resign" } }),
+    ]);
+    expect(game?.outcome).toEqual({ kind: "resigned", by: "b" });
+    expect(game && chessGameIsSettled(game)).toBe(true);
+  });
+
+  it("ignores anything after the game is settled, but still absorbs it", () => {
+    const messages = [
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "resign" } }),
+      chess(ME, { game: "aaa111", body: { kind: "move", ply: 1, san: "e4" } }),
+    ];
+    const [game] = chessGamesInThread(messages);
+    expect(game?.moves).toEqual([]);
+    expect(game?.absorbed).toContain(messages[3]?.id);
+  });
+
+  it("holds several games apart, in the order they were opened", () => {
+    const games = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "resign" } }),
+      chess(ADA, { game: "bbb222", body: { kind: "open", color: "w" } }),
+    ]);
+    expect(games.map((g) => g.id)).toEqual(["aaa111", "bbb222"]);
+  });
+
+  it("ignores a message for a game whose challenge it never saw", () => {
+    // The history pages older, so the challenge may simply not be loaded yet. A board
+    // built from the tail of a game would show a position that never happened.
+    expect(
+      chessGamesInThread([chess(ME, { game: "zzz999", body: { kind: "move", ply: 5, san: "e4" } })]),
+    ).toEqual([]);
+  });
+
+  it("finds nothing in a thread of ordinary messages", () => {
+    expect(chessGamesInThread([chat(ADA, "hello"), chat(ME, "hi")])).toEqual([]);
+  });
+});
+
+describe("activeChessGame", () => {
+  it("is the newest unfinished game, and null when every one is settled", () => {
+    const settled = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "resign" } }),
+    ]);
+    expect(activeChessGame(settled)).toBeNull();
+
+    const live = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "resign" } }),
+      chess(ADA, { game: "bbb222", body: { kind: "open", color: "w" } }),
+    ]);
+    expect(activeChessGame(live)?.id).toBe("bbb222");
+  });
+
+  it("is null in a thread with no game at all", () => {
+    expect(activeChessGame([])).toBeNull();
+  });
+});
+
+describe("chessTurnIsOurs", () => {
+  it("is false for a spectator and while the game waits for an opponent", () => {
+    const [waiting] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+    ]);
+    expect(waiting && chessTurnIsOurs(waiting)).toBe(false);
+
+    const [theirs] = chessGamesInThread([
+      chess(ADA, { game: "bbb222", body: { kind: "open", color: "w" } }),
+      chess(GRACE, { game: "bbb222", body: { kind: "join" } }),
+    ]);
+    expect(theirs?.ourColor).toBeNull();
+    expect(theirs && chessTurnIsOurs(theirs)).toBe(false);
+  });
+
+  it("is true when the game is accepted and it is the reader's move", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+    ]);
+    expect(game && chessTurnIsOurs(game)).toBe(true);
+  });
+});

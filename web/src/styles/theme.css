@@ -161,6 +161,14 @@
    * week view draws 24 of them and they must recede behind the events. */
   --calendar-line: #eeeef0;
 
+  /* A chess board's two squares. They follow the THEME while the pieces do not
+   * (see components/chess-pieces.tsx): the board is a surface in this app and has
+   * to sit in a light or a dark page, while "white piece" is a fact about chess.
+   * A muted green rather than a brown, so the board belongs beside the app's own
+   * indigo instead of reading as a photograph of a different product. */
+  --chess-light: #eae9e0;
+  --chess-dark: #92a68a;
+
   /* Elevation — "shadow as a border": a crisp 1px ring + a 1–2px micro-drop.
    * Elevation scales by opacity + tiny offset, never by wide blur. */
   --elev-chip: 0 0 0 1px rgba(17, 17, 17, 0.04), 0 1px 1px rgba(17, 17, 17, 0.04);
@@ -214,6 +222,12 @@
   --row-selected: #262626;
   --row-hovered: #232323;
   --row-open: #2a2a2a;
+
+  /* The board, dimmed for a dark page. The two squares keep their relationship —
+   * light against dark — so the pieces' fixed inks read on both, exactly as they do
+   * in the light theme. */
+  --chess-light: #6f6e66;
+  --chess-dark: #435240;
 
   --bubble-mine: #2f3569;
   --bubble-mine-foreground: #ffffff;

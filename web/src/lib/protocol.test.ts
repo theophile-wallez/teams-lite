@@ -922,6 +922,22 @@ describe("previewLine", () => {
   it("returns an empty string when there is no preview", () => {
     expect(previewLine(conversation({ last_message_preview: "" }))).toBe("");
   });
+
+  it("shows the words of a chess message and not the marker that carries them", () => {
+    const c = conversation({
+      last_message_preview: "♟ 1. e4 — chess 7f3a1c 1 e4, via teams-lite",
+      last_message_from_me: true,
+    });
+    expect(previewLine(c)).toBe("You: ♟ 1. e4");
+  });
+
+  it("leaves an agent's own signature alone: it is not ours to strip", () => {
+    const c = conversation({
+      last_message_preview: "done — claude, via teams-lite",
+      last_message_from_me: true,
+    });
+    expect(previewLine(c)).toBe("You: done — claude, via teams-lite");
+  });
 });
 
 describe("convLabel", () => {

@@ -1635,6 +1635,92 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // A game of CHESS played in a conversation. Every challenge, accept and move is an ordinary
+  // Teams message carrying a trailing marker, and the whole run of them collapses into ONE
+  // board row where the game started (see AGENTS.md § Chess in a conversation). The mock plays
+  // the opponent, so the capture walks a real game: the header's control, the popover that
+  // says what the press costs, the board once somebody accepted, a few moves with the score
+  // sheet under them, and the board at a phone's width.
+  if (args.includes("--chess")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openConversation(page, "Agent Sandbox");
+      const button = page.locator('[data-testid="chess-button"]');
+      await button.waitFor();
+      // The control up close: a 20px pawn in a row of 20px glyphs is where this is right or
+      // wrong, so it is captured at a raised pixel density.
+      await shot(`${out}-button-light.png`, '[data-testid="chess-button"]');
+      await setTheme("dark");
+      await shot(`${out}-button-dark.png`, '[data-testid="chess-button"]');
+      await setTheme("light");
+
+      // The challenge: the colour, and the sentence that says a message goes out under the
+      // user's name and everybody in the conversation sees it.
+      await button.click();
+      await page.locator('[data-testid="chess-challenge"]').waitFor();
+      await page.waitForTimeout(200);
+      await shot(`${out}-challenge-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-challenge-dark.png`);
+      await setTheme("light");
+
+      // Sent, and the mock accepts: the board arrives as one row in the history.
+      await page.locator('[data-testid="chess-challenge"]').click();
+      const board = page.locator('[data-testid="chess-game"]');
+      await board.waitFor();
+      // Wait for the opponent's accept, which is what turns "waiting" into a playable board.
+      // Polled from here rather than with `waitForFunction`: this file is type-checked without
+      // the DOM lib, so a predicate running in the page cannot name `document`.
+      const status = page.locator('[data-testid="chess-status"]');
+      for (let i = 0; i < 50; i += 1) {
+        if (!/waiting for somebody to accept/i.test((await status.textContent()) ?? "")) break;
+        await page.waitForTimeout(100);
+      }
+      await page.waitForTimeout(200);
+      await shot(`${out}-board-light.png`, '[data-testid="chess-game"]');
+      await setTheme("dark");
+      await shot(`${out}-board-dark.png`, '[data-testid="chess-game"]');
+      await setTheme("light");
+
+      // A few moves in, so the score sheet under the board has something to say. Only when it
+      // is really our move: the challenge picks a colour at random.
+      const ourMove = async (): Promise<boolean> =>
+        /your move/i.test((await page.locator('[data-testid="chess-status"]').textContent()) ?? "");
+      if (await ourMove()) {
+        for (const [from, to] of [
+          ["e2", "e4"],
+          ["g1", "f3"],
+        ] as const) {
+          if (!(await ourMove())) break;
+          await page.locator(`[data-square="${from}"]`).click();
+          await page.locator(`[data-square="${to}"]`).click();
+          await page.waitForTimeout(900);
+        }
+      }
+      await page.waitForTimeout(300);
+      await shot(`${out}-mid-game-light.png`, '[data-testid="chess-game"]');
+      // The armed resignation, which says on the control that nothing takes it back.
+      const resign = page.locator('[data-testid="chess-resign"]');
+      if ((await resign.count()) > 0) {
+        await resign.click();
+        await page.waitForTimeout(150);
+        await shot(`${out}-resign-armed-light.png`, '[data-testid="chess-game"]');
+      }
+
+      // A phone: the board is a square in a column 390px wide, and it must not widen the pane.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(400);
+      await shot(`${out}-mobile-light.png`);
+      await page.setViewportSize(VIEWPORT);
+
+      console.log(
+        `[preview] wrote ${out}-button-{light,dark}.png, ${out}-challenge-{light,dark}.png, ` +
+          `${out}-board-{light,dark}.png, ${out}-mid-game-light.png, ` +
+          `${out}-resign-armed-light.png and ${out}-mobile-light.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // A MERGE REQUEST in a message: the two rows its ⋯ menu grows. "Review !44 with
   // Claude", which drafts like "Answer with" does, and the approval — the one action in
   // this app that writes to a tracker, so the capture walks its whole shape: the row, the

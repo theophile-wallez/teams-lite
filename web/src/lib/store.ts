@@ -78,6 +78,7 @@ import {
   type WriteLock,
   UNKNOWN_WRITE_LOCK,
 } from "./protocol";
+import { chessMessageHtml, chessMessageText, type ChessWire } from "./chess-wire";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import type { AgentPersonaPatch } from "./agent-persona";
 import {
@@ -367,6 +368,18 @@ export type AppState = {
    *  at the foot of the sidebar, which is not on screen at all on a phone — so a refused
    *  send read as a button that chimed and did nothing. */
   sendError: string | null;
+  /** Why the last CHESS message did not leave, in the same one sentence and for the same
+   *  reason (see {@link sendFailureMessage}). It is its own slice rather than `sendError`
+   *  because it is drawn somewhere else — at the board, where the player pressed — and a
+   *  failed move reported over the composer would be a sentence about words nobody typed. */
+  chessError: string | null;
+  /** A chess move that has left this page and whose message has not come back yet.
+   *
+   *  The board draws it at once, because a board that waits for a round trip before the piece
+   *  moves feels broken — and it is taken back if the send fails, which is the rule
+   *  `removeSentWords` follows for the words. It names the conversation and the game as well
+   *  as the ply, so a move pending in one thread can never be drawn onto another one's board. */
+  chessPending: { conversation: string; game: string; ply: number; san: string } | null;
   replyingTo: PendingReply | null;
   /** The notifications panel's three activity streams (newest-first each), one
    *  per tab: Activity, Mentions, Following. */
@@ -810,6 +823,8 @@ function initialState(): AppState {
     updateProgress: null,
     draft: "",
     sendError: null,
+    chessError: null,
+    chessPending: null,
     replyingTo: null,
     notifications: { activity: [], mentions: [], following: [] },
     notificationsUnread: 0,
@@ -4394,6 +4409,11 @@ export class TeamsController {
       draft: nextDraft,
       // A send fails in one thread; the sentence about it belongs to that thread alone.
       sendError: null,
+      // Both halves of a chess send are the open conversation's too: a sentence about a
+      // refused move must not hang over another chat, and a move pending in the thread the
+      // reader just left must not be drawn onto the board of the one they opened.
+      chessError: null,
+      chessPending: null,
       messages: cached?.messages ?? [],
       hasMoreOlder: cached?.has_more ?? false,
       loadingMessages: !cached,
@@ -4539,14 +4559,16 @@ export class TeamsController {
       this.flushDraft(id);
       this.trimCachedHistory(id);
     }
-    // The read-receipts, mention and send-failure slices are single-conversation — drop
-    // them when nothing is open.
+    // The read-receipts, mention, send-failure and chess slices are single-conversation —
+    // drop them when nothing is open.
     this.set({
       openId: null,
       replyingTo: null,
       readReceipts: [],
       mentionCandidates: [],
       sendError: null,
+      chessError: null,
+      chessPending: null,
     });
   }
 
@@ -5877,6 +5899,72 @@ export class TeamsController {
       });
     }
     return true;
+  }
+
+  // ---- chess (a game played in the conversation) ---------------------------
+  //
+  // A move has to reach another machine and Teams has no private data channel, so every
+  // challenge, accept, move, draw offer and resignation is an ordinary message in the thread
+  // (see lib/chess-wire.ts). Nothing about the game is stored: the position replays out of
+  // the history.
+
+  /**
+   * Post one chess message.
+   *
+   * It rides the existing `send`, which is already the `OUTWARD_METHODS` entry that gates
+   * every post this app makes: a move is the click the user just made, exactly as pressing
+   * Enter in the composer is. Nothing here widens that gate, and this feature has no RPC of
+   * its own.
+   *
+   * A MOVE is drawn before it lands and TAKEN BACK if the send fails, which is the rule
+   * `removeSentWords` follows for the words — and the failure is reported at the board rather
+   * than swallowed into a cue, because a move that did not leave is otherwise invisible.
+   */
+  async sendChessMessage(conversationId: string, wire: ChessWire): Promise<boolean> {
+    const pending: AppState["chessPending"] =
+      wire.body.kind === "move"
+        ? {
+            conversation: conversationId,
+            game: wire.game,
+            ply: wire.body.ply,
+            san: wire.body.san,
+          }
+        : null;
+    this.set({ chessError: null, ...(pending ? { chessPending: pending } : {}) });
+    try {
+      await this.backend.send(
+        conversationId,
+        chessMessageText(wire),
+        undefined,
+        chessMessageHtml(wire),
+      );
+    } catch (e) {
+      // Both surfaces, and each has its reader: the status line keeps the RAW failure for
+      // whoever reads a screenshot, the board gets the sentence the player acts on.
+      this.set({
+        status: `chess send failed: ${errText(e)}`,
+        chessError: sendFailureMessage(e),
+        // The move never left, so the board must not keep showing it.
+        ...(pending && this.get().chessPending === pending ? { chessPending: null } : {}),
+      });
+      playCue("error");
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Forget a pending move once the thread really holds it.
+   *
+   * The message itself is what clears it: it arrives on the live feed, the derivation picks it
+   * up, and from then on the board is drawing the thread rather than a guess. Called by the
+   * card with the ply count the thread states.
+   */
+  settleChessMove(conversationId: string, game: string, plies: number): void {
+    const pending = this.get().chessPending;
+    if (!pending) return;
+    if (pending.conversation !== conversationId || pending.game !== game) return;
+    if (plies >= pending.ply) this.set({ chessPending: null });
   }
 
   // ---- appearance (Light / Dark / System) ---------------------------------

@@ -79,6 +79,8 @@
   --color-reaction-chip-border: var(--reaction-chip-border);
   --color-calendar-weekend: var(--calendar-weekend);
   --color-calendar-line: var(--calendar-line);
+  --color-chess-light: var(--chess-light);
+  --color-chess-dark: var(--chess-dark);
 
   /* The reading column of a conversation. The history is capped at
    * `max-w-chat`; the composer at `max-w-composer`, which is 10px wider on each

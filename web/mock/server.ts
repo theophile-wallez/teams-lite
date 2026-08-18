@@ -41,6 +41,10 @@
 
 import type { ServerWebSocket } from "bun";
 import { deflateSync } from "node:zlib";
+// The mock plays the chess OPPONENT, so it needs the rules for exactly one thing: a legal reply
+// to whatever the page just played (see `maybeAnswerMockChess`). It is the same package the
+// board uses, so the mock can never answer a move the app would refuse to replay.
+import { Chess } from "chess.js";
 
 // ---------------------------------------------------------------------------
 // Protocol types — mirror web/src/lib/protocol.ts exactly.
@@ -2393,6 +2397,40 @@ function seedPlainTextSamples(): void {
   push({ sender: other.name, sender_mri: other.mri, content: "", is_self: false }, 180_000);
 
   addFixtureConversation(convId, "Plain Text", messages);
+}
+
+/**
+ * Register a thread the CHESS spec plays in, of its own for the reason the ten-picture message
+ * taught this suite: one mock process serves the whole run, and a game posts a challenge, an
+ * accept and a move per turn. Played in a shared fixture, every one of those would move the rows
+ * a later spec counts on — and the board absorbs its own messages, so it changes the row count
+ * as well as the message count.
+ *
+ * One plain message so the thread is not empty: a board is drawn where the game STARTED, and a
+ * row with nothing above it says nothing about where a game sits in a conversation.
+ */
+const MOCK_CHESS_THREAD = "19:chess-demo@thread.v2";
+
+/** How many messages the seed put in that thread, so `resetMockChess` can put it back. */
+let mockChessSeedCount = 0;
+
+function seedChessThread(): void {
+  const convId = MOCK_CHESS_THREAD;
+  const base = Date.now() - 20 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[0]!;
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: "<p>Fancy a game?</p>",
+      is_self: false,
+    },
+    0,
+  );
+  addFixtureConversation(convId, "Chess Club", messages);
+  mockChessSeedCount = messages.length;
 }
 
 /** Register a thread the "stop a run" spec drives, of its own so a reply it leaves behind
@@ -8608,7 +8646,152 @@ function scheduleSendEcho(
     broadcast("message", nicknamed(msg));
     broadcast(t.changedEvent, {});
     maybeRunMockAgent(convId, msg);
+    maybeAnswerMockChess(convId, msg);
   }, SEND_ECHO_DELAY_MS);
+}
+
+// ---------------------------------------------------------------------------
+// Chess, answered.
+//
+// The whole feature is the page's — no RPC, no backend half — so there is nothing here to
+// mirror. What the mock has to supply is the OTHER MACHINE: a game needs two, and this one has
+// one. So it plays the opponent, accepting a challenge and answering every move with a legal
+// one, which is what makes the board, the turn dot and a whole game reviewable with no tenant
+// and no colleague.
+//
+// It reads the same trailing line the page writes and replays the game out of the thread's own
+// messages, because a mock that invented its own wire — or kept its own idea of the position —
+// would hide a bug instead of failing a test.
+// ---------------------------------------------------------------------------
+
+/** How long the opponent takes to answer. Slow enough to watch, quick enough for a spec. */
+const MOCK_CHESS_DELAY_MS = Number(process.env.MOCK_CHESS_DELAY_MS ?? 350);
+
+/** Armed by the `{kind:"chess"}` test hook. A spec MUST reset: one mock process serves the whole
+ *  run, and an opponent left refusing to answer breaks every later spec. */
+let mockChessReply: string | null = null;
+let mockChessSilent = false;
+
+/**
+ * Put the opponent back the way this file declares it, and the chess THREAD back to its seed.
+ *
+ * The thread matters as much as the aim: one game in flight per conversation is a real rule of
+ * the feature, so a game a test left unfinished means the next test's header offers no challenge
+ * at all. Truncating the fixture is the same discipline `resetMockPersonas` follows — put the
+ * seeded state back rather than leaving one test's leftovers in front of the next.
+ */
+function resetMockChess(): void {
+  mockChessReply = null;
+  mockChessSilent = false;
+  const cs = store.get(MOCK_CHESS_THREAD);
+  if (cs && cs.messages.length > mockChessSeedCount) {
+    cs.messages.length = mockChessSeedCount;
+    recomputeSummary(cs);
+    broadcast("conversations_changed", {});
+  }
+}
+
+/** The chess line a message carries, read the way the page reads it. */
+function mockChessWire(content: string): { game: string; rest: string } | null {
+  const signature = /<p>\s*<em>\s*([^<]*?)\s*<\/em>\s*<\/p>\s*$/i.exec(content);
+  if (!signature) return null;
+  const line = /^—\s*chess\s+([0-9a-f]{6})\s+(.+?),\s*via teams-lite$/i.exec(signature[1] ?? "");
+  return line ? { game: line[1] as string, rest: (line[2] as string).trim() } : null;
+}
+
+/** The `<ply> <san>` half of a move line. */
+function mockChessMove(rest: string): { ply: number; san: string } | null {
+  const move = /^(\d{1,3})\s+(\S+)$/.exec(rest);
+  return move ? { ply: Number(move[1]), san: move[2] as string } : null;
+}
+
+/** Answer the user's chess message as the other player would. */
+function maybeAnswerMockChess(convId: string, msg: ChatMessage): void {
+  if (mockChessSilent) return;
+  const wire = mockChessWire(msg.content);
+  if (!wire) return;
+  const t = threadFor(convId);
+  // The non-self party of this conversation is the opponent — the mock's own idea of who else
+  // is in a thread, so no second notion of "the other person" is invented here.
+  const other = t?.participants[0];
+  if (!t || !other) return;
+
+  // A challenge is accepted — and when the challenger took BLACK the opponent is white, so it
+  // opens. Without that a game the user asked to play as black would sit waiting for a first
+  // move nobody was going to make, which is a dead board rather than an opponent.
+  if (wire.rest.startsWith("open ")) {
+    const opponentIsWhite = wire.rest === "open b";
+    setTimeout(() => {
+      postMockChess(convId, other, wire.game, "join", "♟ Chess — accepted.");
+      if (opponentIsWhite) {
+        setTimeout(() => {
+          const opening = new Chess().moves()[0];
+          if (opening) {
+            postMockChess(convId, other, wire.game, `1 ${opening}`, `♟ 1. ${opening}`);
+          }
+        }, MOCK_CHESS_DELAY_MS);
+      }
+    }, MOCK_CHESS_DELAY_MS);
+    return;
+  }
+  if (!mockChessMove(wire.rest)) return;
+
+  // A move is answered with a legal reply, replayed out of the thread rather than out of any
+  // position this file keeps: the messages are the game.
+  setTimeout(() => {
+    const chess = new Chess();
+    let plies = 0;
+    for (const m of t.messages) {
+      const w = mockChessWire(m.content);
+      if (!w || w.game !== wire.game) continue;
+      const played = mockChessMove(w.rest);
+      if (!played) continue;
+      try {
+        chess.move(played.san);
+        plies += 1;
+      } catch {
+        // The thread holds a move that is not legal there — the page says so, and the
+        // opponent has nothing to answer.
+        return;
+      }
+    }
+    if (chess.isGameOver()) return;
+    const legal = chess.moves();
+    // The armed reply when a spec named one, otherwise the first legal move — deterministic,
+    // so a spec can assert on what comes back.
+    const san = (mockChessReply && legal.includes(mockChessReply) ? mockChessReply : legal[0]) ?? "";
+    if (!san) return;
+    const ply = plies + 1;
+    const words = `♟ ${Math.ceil(ply / 2)}${ply % 2 === 1 ? "." : "…"} ${san}`;
+    postMockChess(convId, other, wire.game, `${ply} ${san}`, words);
+  }, MOCK_CHESS_DELAY_MS);
+}
+
+/** Post one chess message as the other party, on the live feed the page really reads. */
+function postMockChess(
+  convId: string,
+  who: Person,
+  game: string,
+  kind: string,
+  words: string,
+): void {
+  const t = threadFor(convId);
+  if (!t) return;
+  const seq = nextSeq(t.messages);
+  const msg: ChatMessage = {
+    id: `${convId}#${seq}`,
+    conversation_id: convId,
+    seq,
+    compose_time: Date.now(),
+    sender: who.name,
+    sender_mri: who.mri,
+    content: `<p>${words}</p><p><em>— chess ${game} ${kind}, via teams-lite</em></p>`,
+    is_self: false,
+  };
+  t.messages.push(msg);
+  t.recompute();
+  broadcast("message", nicknamed(msg));
+  broadcast(t.changedEvent, {});
 }
 
 // ---------------------------------------------------------------------------
@@ -9376,6 +9559,22 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       broadcast("agent_personas_changed", {});
       return Response.json({ ok: true, personas: mockPersonasView() }, { status: 200 });
     }
+    // Aim the chess OPPONENT: name the move it answers with (`reply`), or make it stop
+    // answering at all (`silent`), which is how a spec reaches a board waiting on somebody.
+    // A spec MUST reset it (`{kind:"chess", reset:true}`): one mock process serves the whole
+    // run, and an opponent left silent leaves every later game unanswered.
+    if (body.kind === "chess") {
+      if (body.reset === true) {
+        resetMockChess();
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      if (typeof body.reply === "string") mockChessReply = body.reply;
+      if (typeof body.silent === "boolean") mockChessSilent = body.silent;
+      return Response.json(
+        { ok: true, reply: mockChessReply, silent: mockChessSilent },
+        { status: 200 },
+      );
+    }
     // Arm where this page stands with the write lock, so the banner that says "this window
     // can read, but not send" can be driven (see write-lock-banner.tsx). A spec MUST reset
     // it: one mock process serves the whole run, and a left-behind banner sits above every
@@ -10104,6 +10303,7 @@ seedThreadActivity();
 seedForwardedMessages();
 seedPlainTextSamples();
 seedStopAgentThread();
+seedChessThread();
 seedAgentSandbox();
 seedMergeRequestReview();
 seedCustomEmojiThread();
