@@ -484,7 +484,7 @@ export type LiveStatus = "connecting" | "connected" | "disconnected";
 export type BrokerStatus = {
   ok: boolean;
   /** The classified failure: `disconnected`, `unresponsive`, `unreachable`,
-   *  `refused`, `no_account`, `other`. Empty when `ok`. */
+   *  `refused`, `no_account`, `keyring_locked`, `other`. Empty when `ok`. */
   signature: string;
   /** One English sentence, from the backend, safe to show as-is. */
   message: string;
