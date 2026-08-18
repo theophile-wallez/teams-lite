@@ -19,6 +19,7 @@ import { Loading02Icon, SecurityIcon } from "@hugeicons/core-free-icons";
 import { Button } from "./ui/button";
 import { useAppState, useController } from "./controller-context";
 import { brokerNeedsAttention } from "~/lib/protocol";
+import { brokerRemedy } from "~/lib/signin";
 
 type RepairState = { kind: "idle" | "asking" } | { kind: "error"; message: string };
 
@@ -32,6 +33,10 @@ export function BrokerBanner() {
   if (!brokerNeedsAttention(broker) || !broker) return null;
 
   const busy = repair.kind === "asking" || broker.repairing;
+  // Exactly one remedy, ever, and the choice is a pure function so it can be tested: a banner
+  // offering both "restart the container" and "sign in here" would ask the reader to know
+  // which failure they have, which is the thing they opened the app to be told.
+  const remedy = brokerRemedy(broker);
 
   const onRepair = async () => {
     setRepair({ kind: "asking" });
@@ -69,7 +74,36 @@ export function BrokerBanner() {
         </div>
       </div>
 
-      {broker.can_repair ? (
+      {remedy.kind === "signin" ? (
+        // The failure a container restart cannot fix, and the whole reason this banner grew a
+        // second button: the broker is asking a human, and this brings its own sign-in window
+        // to whichever browser the app is being read in (see signin-panel.tsx and SIGN-IN.md).
+        // Where the words used to say "it needs you to sign in to Intune again" — true, and a
+        // dead end that cost the reader an SSH session, an Xvfb, a VNC server and about forty
+        // minutes — there is now a button that does it.
+        <div className="flex flex-col gap-1.5">
+          <Button size="sm" data-testid="broker-signin" onClick={() => void controller.startSignin()}>
+            Sign in here
+          </Button>
+          <p data-testid="broker-repair-hint" className="text-[11px] leading-snug text-text-dim">
+            This opens Microsoft's own sign-in page, running on the machine. Usually it finishes
+            on its own; if not, you type your password and match the number on your phone.
+          </p>
+        </div>
+      ) : remedy.kind === "blocked" ? (
+        // A sign-in IS what this failure needs, and this machine cannot serve one: the broker's
+        // display is gone, or it has none. The button stays visible and inert for the reason the
+        // old branch below gives, and the backend's own sentence says what to do — in flow, so a
+        // phone gets it too.
+        <div className="flex flex-col gap-1.5">
+          <Button size="sm" disabled data-testid="broker-signin" className="pointer-events-none">
+            Sign in here
+          </Button>
+          <p data-testid="broker-repair-hint" className="text-[11px] leading-snug text-text-dim">
+            {remedy.message}
+          </p>
+        </div>
+      ) : remedy.kind === "repair" ? (
         <div className="flex flex-col gap-1.5">
           <Button
             size="sm"

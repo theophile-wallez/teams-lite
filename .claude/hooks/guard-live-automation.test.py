@@ -433,6 +433,29 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19430');\n"
         "ws.send(JSON.stringify({ method: 'custom_emoji' }));\n"
     ),
+    # Serving the broker's sign-in window: one call authenticates as the user, one answers
+    # with a picture of a sign-in page, one presses keys into it. A script must reach none of
+    # them on a live backend — that is a password being watched, or typed.
+    "signin-starter.ts": (
+        "// Starts an interactive sign-in through the live backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'signin_start' }));\n"
+    ),
+    "signin-watcher.ts": (
+        "// Asks the live app for a frame of the sign-in page.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19440');\n"
+        "ws.send(JSON.stringify({ method: 'signin_frame' }));\n"
+    ),
+    "signin-typist.ts": (
+        "// Presses a key into whatever sign-in page is open.\n"
+        "const ws = new WebSocket('wss://box.taild26c06.ts.net');\n"
+        "ws.send(JSON.stringify({ method: 'signin_input', char: 'a' }));\n"
+    ),
+    "signin-asker.ts": (
+        "// Only asks how a sign-in is going, which publishes nothing.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'signin_status' }));\n"
+    ),
     # Custom agents: a row decides what a later `@bebou` does in an opted-in thread — which
     # CLI starts, which model reads it, what instruction leads the prompt — so a script that
     # could write one could put words in the mouth of a program that answers as the user.
@@ -460,6 +483,26 @@ FIXTURES = {
 # Cargo examples, written into the repo's own examples/ directory by the test (an
 # example only exists there, and the hook resolves `--example NAME` to that path).
 EXAMPLE_FIXTURES = {
+    # Reading the broker's sign-in window is measurement — that is what
+    # examples/signin_window_recon.rs is for — while typing into it or closing it is the act the
+    # four signin_* RPCs are gated for, and an example reaches the window with no port, no RPC
+    # and no write token in the way. Those two really were flags on the recon example once.
+    "guard-test-signin-read.rs": (
+        "// Reports the display, the window and one frame's size. Read-only.\n"
+        "use teams_lite::xwindow::SigninWindow;\n"
+        "fn main() { let w = SigninWindow::find(\":77\").unwrap().unwrap(); w.capture().unwrap(); }\n"
+    ),
+    "guard-test-signin-type.rs": (
+        "// Types into whatever sign-in window is open, past every gate.\n"
+        "use teams_lite::xwindow::{Key, SigninWindow};\n"
+        "fn main() { let w = SigninWindow::find(\":77\").unwrap().unwrap();\n"
+        "  w.focus().unwrap(); w.type_key(&Key::Char('a')).unwrap(); }\n"
+    ),
+    "guard-test-signin-close.rs": (
+        "// Closes a sign-in the user may be halfway through.\n"
+        "use teams_lite::xwindow::SigninWindow;\n"
+        "fn main() { SigninWindow::find(\":77\").unwrap().unwrap().close().unwrap(); }\n"
+    ),
     # A send whose target comes from an argument: the shape that must never run.
     "guard-test-loose-send.rs": (
         "// A probe that posts wherever it is told.\n"
@@ -591,6 +634,11 @@ def cases(tmp: Path):
         # Writing the emoji pack decides the art this app can post, so a script that could
         # plant it could post a picture under the user's name on the next send.
         ("BLOCK", PROJECT, f"bun run {tmp}/emoji-adder.ts"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-signin-type"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-signin-close"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/signin-starter.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/signin-watcher.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/signin-typist.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/persona-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/persona-remover.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/emoji-importer.ts"),
@@ -847,6 +895,9 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/person-override-reader.ts"),
         # …and so is reading back the emoji pack the user built themselves.
         ("ALLOW", PROJECT, f"bun run {tmp}/emoji-reader.ts"),
+        ("ALLOW", PROJECT, "cargo run --example guard-test-signin-read"),
+        ("ALLOW", PROJECT, "cargo run --example signin_window_recon"),
+        ("ALLOW", PROJECT, f"bun run {tmp}/signin-asker.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/persona-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/update-checker.ts"),
         # Reading the call state names no write and reaches nobody.

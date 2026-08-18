@@ -16,6 +16,28 @@ use uuid::Uuid;
 /// Broker access tokens live ~1h; refresh well before that to avoid 401s mid-use.
 const TOKEN_TTL: Duration = Duration::from_secs(50 * 60);
 
+/// How long the AUTOMATIC rescue waits for the broker before it gives up and takes back
+/// whatever window went up (see {@link rescue}).
+///
+/// Short on purpose: this attempt runs inside a token call nobody is watching — the
+/// real-time client's own retry, a mail poll — and a caller that blocked here would freeze
+/// that feature for as long as a human takes. What the deadline separates is "the broker
+/// could do it from the PRT" (measured: well under a second) from "the broker is waiting for
+/// a person", and those two are seconds and minutes apart.
+const RESCUE_DEADLINE: Duration = Duration::from_secs(8);
+
+/// How often the automatic rescue may run. Every attempt that needs a human puts a window on
+/// the broker's display and is then taken back, so an unbounded one would open and close a
+/// window every 30 seconds for as long as the outage lasts. `REPAIR_MIN_INTERVAL` in
+/// src/bin/server.rs is the same idea for the container restart.
+const RESCUE_MIN_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// How long a sign-in a HUMAN is watching may take. Generous: they have to read a page, type
+/// a password and reach for a phone, and the one thing this must not do is give up while
+/// somebody is still typing. Ours rather than the bus's — zbus imposes no timeout of its own
+/// (`Connection::method_timeout` defaults to `None`), so this is the whole of the deadline.
+pub const SIGNIN_DEADLINE: Duration = Duration::from_secs(10 * 60);
+
 /// Why the broker could not mint a token — as far as the failure itself shows.
 ///
 /// Each variant is named for what was OBSERVED, never for the cause it suggests.
@@ -151,6 +173,14 @@ pub struct BrokerState {
     pub detail: String,
     /// How many acquisitions have failed in a row.
     pub consecutive_failures: u32,
+    /// The scope that last failed, empty when the last acquisition succeeded.
+    ///
+    /// A failure here is per RESOURCE — measured: Graph minted fine while the skype scope
+    /// refused (SIGN-IN.md § 1) — so "sign-in is broken" is really "this one resource's refresh
+    /// token has died". A served sign-in acquires THIS scope (`Ctx::signin_scope`), because a
+    /// sign-in that answered a different resource would report success over a feature still
+    /// broken.
+    pub scope: String,
 }
 
 impl BrokerState {
@@ -179,7 +209,7 @@ pub fn observe_broker(observer: impl Fn(BrokerState) + Send + Sync + 'static) {
 }
 
 /// Fold one acquisition outcome into the state, and notify on a change.
-fn record(outcome: &Result<String>) {
+fn record(outcome: &Result<String>, scope: &str) {
     let next = match outcome {
         Ok(_) => BrokerState::default(),
         Err(e) => {
@@ -195,6 +225,7 @@ fn record(outcome: &Result<String>) {
                 failure: Some(failure),
                 detail: format!("{e:#}"),
                 consecutive_failures: previous.saturating_add(1),
+                scope: scope.to_string(),
             }
         }
     };
@@ -344,7 +375,7 @@ async fn call(proxy: &zbus::Proxy<'_>, method: &str, sid: &str, payload: &Value)
 /// chats with nothing to explain why.
 pub async fn get_token(scope: &str) -> Result<String> {
     let outcome = acquire_token(scope).await;
-    record(&outcome);
+    record(&outcome, scope);
     outcome
 }
 
@@ -373,17 +404,53 @@ async fn acquire_token(scope: &str) -> Result<String> {
         .await
         .context("create broker proxy")?;
     let sid = Uuid::new_v4().to_string();
+    let account = broker_account(&conn, &proxy, &sid).await?;
 
-    let accounts = call(&proxy, "getAccounts", &sid, &json!({
+    let resp = call(&proxy, "acquireTokenSilently", &sid, &token_request(&account, scope)).await?;
+    if let Some(token) = access_token(&resp) {
+        return Ok(token);
+    }
+
+    // The broker answered and said no. Its own words decide whether a human has to act (a
+    // sign-in the PRT can no longer do silently) or whether this is something else entirely.
+    let reason = broker_failure(&resp);
+    let failure = classify_refusal(&reason);
+    if failure == BrokerFailure::Refused {
+        // Measured on this tenant: the SILENT path refuses a resource whose own refresh
+        // token has died, and the INTERACTIVE one mints it from the PRT with nobody in front
+        // of it (SIGN-IN.md § 2). So the refusal is not the answer yet.
+        if let Some(token) = rescue(scope, &proxy, &sid, &account).await {
+            return Ok(token);
+        }
+    }
+    Err(anyhow!("no accessToken for scope {scope}: {reason}").context(failure))
+}
+
+/// The access token in a broker answer, wherever the broker put it.
+fn access_token(resp: &Value) -> Option<String> {
+    let btr = resp.get("brokerTokenResponse").unwrap_or(resp);
+    btr.get("accessToken")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
+/// The one account the broker holds, or the failure that says which kind of nothing it is.
+async fn broker_account(
+    conn: &zbus::Connection,
+    proxy: &zbus::Proxy<'_>,
+    sid: &str,
+) -> Result<Value> {
+    let accounts = call(proxy, "getAccounts", sid, &json!({
         "clientId": EDGE_CLIENT_ID,
         "redirectUri": sid,
     })).await?;
-    let account = match accounts
+    match accounts
         .get("accounts")
         .and_then(|a| a.as_array())
         .and_then(|a| a.first())
     {
-        Some(account) => account,
+        Some(account) => Ok(account.clone()),
         None => {
             // An empty account list is ambiguous. The device may truly be unenrolled
             // (`NoAccount`, which needs a human sign-in) — or the container keyring
@@ -393,17 +460,29 @@ async fn acquire_token(scope: &str) -> Result<String> {
             // `Locked` property to tell them apart — the same cause
             // bin/teams-lite-broker-check.sh tests. Unknown is never "locked": a repair
             // must not fire on a guess.
-            let failure = if keyring_locked(&conn).await == Some(true) {
+            let failure = if keyring_locked(conn).await == Some(true) {
                 BrokerFailure::KeyringLocked
             } else {
                 BrokerFailure::NoAccount
             };
-            return Err(anyhow!("broker returned no account").context(failure));
+            Err(anyhow!("broker returned no account").context(failure))
         }
-    };
-    let username = account.get("username").and_then(|u| u.as_str()).unwrap_or_default();
+    }
+}
 
-    let req = json!({
+/// The request both acquisitions send, byte for byte.
+///
+/// ONE builder for the silent call and the interactive one, and that is the measurement
+/// rather than tidiness: what proved the whole feature is that the two calls differ in their
+/// METHOD NAME and in nothing else (SIGN-IN.md § 2), so a second builder that drifted by a
+/// field would make the interactive path fail for a reason no log would name.
+///
+/// `authorizationType: 1` is `CachedRefreshToken` — the PRT. On the interactive method the
+/// broker refuses a "non-interactive authorization type" (its own binary says so) and does
+/// NOT refuse this one: it is what returned a token.
+fn token_request(account: &Value, scope: &str) -> Value {
+    let username = account.get("username").and_then(|u| u.as_str()).unwrap_or_default();
+    json!({
         "authParameters": {
             "account": account,
             "additionalQueryParametersForAuthorization": {},
@@ -415,20 +494,217 @@ async fn acquire_token(scope: &str) -> Result<String> {
             "username": username,
             "uxContextHandle": -1,
         }
-    });
-    let resp = call(&proxy, "acquireTokenSilently", &sid, &req).await?;
-    let btr = resp.get("brokerTokenResponse").unwrap_or(&resp);
-    btr.get("accessToken")
-        .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            // The broker answered and said no. Its own words decide whether a human
-            // has to act (a sign-in the PRT can no longer do silently) or whether
-            // this is something else entirely.
-            let reason = broker_failure(&resp);
-            let failure = classify_refusal(&reason);
-            anyhow!("no accessToken for scope {scope}: {reason}").context(failure)
-        })
+    })
+}
+
+/// How an interactive acquisition ended.
+///
+/// `StillWaiting` is OURS, not the broker's: it means our own deadline passed while the
+/// broker had a window up. There is no signal from the broker that says "I am asking a
+/// human" — the window going up is the signal, and a call that has not answered is the
+/// nearest thing to it from this side.
+#[derive(Debug)]
+pub enum Interactive {
+    /// The broker minted a token. Nobody had to do anything.
+    Token(String),
+    /// The window was closed — by the reader, or by us taking it back.
+    Cancelled,
+    /// Our deadline passed with the broker still waiting for a person.
+    StillWaiting,
+}
+
+/// Acquire `scope` interactively: the broker mints from the PRT if it can, and asks a human
+/// if it cannot. Waits at most `wait`.
+///
+/// This is the whole of what the served sign-in does. The window it may put up is found and
+/// driven separately (`src/xwindow.rs`), because the broker offers no handle on it.
+pub async fn interactive_token(
+    _turn: &InteractiveTurn,
+    scope: &str,
+    wait: Duration,
+) -> Result<Interactive> {
+    // The turn is a parameter rather than something taken in here, so the caller cannot forget
+    // it and — more to the point — knows WHEN its own call is the one out. Two at once would put
+    // two windows on the broker's display and `SigninWindow::find` answers with one of them.
+    let conn = connect_broker_bus().await?;
+    let proxy = zbus::Proxy::new(&conn, BROKER_NAME, BROKER_PATH, BROKER_IFACE)
+        .await
+        .context("create broker proxy")?;
+    let sid = Uuid::new_v4().to_string();
+    let account = broker_account(&conn, &proxy, &sid).await?;
+    interactive_on(_turn, &proxy, &sid, &account, scope, wait).await
+}
+
+/// The interactive call itself, on a broker session somebody else opened.
+async fn interactive_on(
+    _turn: &InteractiveTurn,
+    proxy: &zbus::Proxy<'_>,
+    sid: &str,
+    account: &Value,
+    scope: &str,
+    wait: Duration,
+) -> Result<Interactive> {
+    let request = token_request(account, scope);
+    let call = call(proxy, "acquireTokenInteractively", sid, &request);
+
+    let Ok(answered) = tokio::time::timeout(wait, call).await else {
+        return Ok(Interactive::StillWaiting);
+    };
+    let resp = answered?;
+    if let Some(token) = access_token(&resp) {
+        return Ok(Interactive::Token(token));
+    }
+    if was_cancelled(&resp) {
+        return Ok(Interactive::Cancelled);
+    }
+    Err(anyhow!(
+        "the interactive sign-in did not mint a token for {scope}: {}",
+        broker_failure(&resp)
+    )
+    .context(BrokerFailure::Refused))
+}
+
+/// Did the flow end because its window was closed?
+///
+/// Measured (SIGN-IN.md § 3): closing the window ends the pending call with
+/// `status: 7` and the context "The InteractiveRequest was canceled by the user". Both are
+/// read, the number first — a status is a contract, and the sentence is prose that may be
+/// translated or reworded by a broker update.
+fn was_cancelled(resp: &Value) -> bool {
+    let error = resp
+        .get("brokerTokenResponse")
+        .and_then(|b| b.get("error"))
+        .or_else(|| resp.get("error"));
+    let Some(error) = error else { return false };
+    if error.get("status").and_then(Value::as_u64) == Some(7) {
+        return true;
+    }
+    error
+        .get("context")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c.to_ascii_lowercase().contains("canceled by the user"))
+}
+
+/// One interactive attempt on a refusal, with nobody watching.
+///
+/// This is the automatic half of the whole feature, and the reason most outages should now
+/// end without anybody being told there was one: measured on this tenant, the resource whose
+/// refresh token had died came back from the PRT in under a second, and the app — which had
+/// been retrying every 30 s for hours — reconnected on its own.
+///
+/// Bounded three ways, because it can also be the case that a human really is needed: a read
+/// only backend never tries, at most one attempt runs at a time, and at most one every
+/// {@link RESCUE_MIN_INTERVAL}. A window that goes up is taken back before returning, so the
+/// broker's display does not collect abandoned sign-ins.
+async fn rescue(
+    scope: &str,
+    proxy: &zbus::Proxy<'_>,
+    sid: &str,
+    account: &Value,
+) -> Option<String> {
+    if crate::read_only() {
+        return None;
+    }
+    if !rescue_is_due() {
+        return None;
+    }
+    // Never waits, unlike the sign-in a reader started: if an interactive call is already out —
+    // theirs, or another failing token call's — this one has nothing to add and would only put a
+    // second window on the broker's display.
+    let turn = try_interactive_turn()?;
+    eprintln!(
+        "[broker] the silent path refuses {scope} — trying an interactive acquisition, which \
+         needs nobody when the PRT can still do it"
+    );
+    let outcome = interactive_on(&turn, proxy, sid, account, scope, RESCUE_DEADLINE).await;
+    // The rate limit is charged on an attempt that did NOT work. It used to be charged on every
+    // attempt, which meant a successful rescue for one scope locked out the next nine and a half
+    // minutes for all the others — and a PRT event kills several resources at once, so the
+    // sidebar's own scope could stay broken behind a sign-in that had already succeeded.
+    if !matches!(outcome, Ok(Interactive::Token(_))) {
+        charge_rescue();
+    }
+    match outcome {
+        Ok(Interactive::Token(token)) => {
+            eprintln!("[broker] the interactive acquisition minted {scope} with nobody in front of it");
+            Some(token)
+        }
+        Ok(Interactive::StillWaiting) => {
+            // The broker is showing its window to an empty display. Take it back and let the
+            // app offer the served sign-in instead — that one has a reader in front of it.
+            let closed = tokio::task::spawn_blocking(crate::xwindow::close_open_signin_window)
+                .await
+                .unwrap_or(false);
+            eprintln!(
+                "[broker] the broker is asking a human to sign in{} — the app offers it now",
+                if closed { ", so its window was taken back" } else { "" }
+            );
+            None
+        }
+        Ok(Interactive::Cancelled) => {
+            eprintln!("[broker] the interactive acquisition was cancelled");
+            None
+        }
+        Err(e) => {
+            eprintln!("[broker] the interactive acquisition failed: {e:#}");
+            None
+        }
+    }
+}
+
+/// The one interactive acquisition this process may have out at a time.
+///
+/// Held by every path that calls `acquireTokenInteractively`: the sign-in a reader started
+/// WAITS for it, and the automatic rescue only tries. Two at once would put two windows on the
+/// broker's display, and `SigninWindow::find` answers with one of them — so the reader could be
+/// typing into the flow whose token nobody is listening for.
+fn interactive_gate() -> &'static std::sync::Arc<tokio::sync::Mutex<()>> {
+    static GATE: OnceLock<std::sync::Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    GATE.get_or_init(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+}
+
+/// Proof that the holder is the one interactive acquisition out right now.
+///
+/// It is a VALUE rather than a hidden lock inside the call because the session needs to know
+/// when its own call is the one out: only then may it look for a window and let a reader type
+/// into it. Without that, a session promoted itself the moment ANY broker window was viewable —
+/// including the one the automatic rescue had put up and was about to close, which is the
+/// reader typing their password into the flow whose token nobody reads.
+pub struct InteractiveTurn(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>);
+
+/// Wait for the turn. For a sign-in a person is watching: an automatic attempt is bounded by
+/// {@link RESCUE_DEADLINE} and will be out of the way in seconds.
+pub async fn interactive_turn() -> InteractiveTurn {
+    InteractiveTurn(interactive_gate().clone().lock_owned().await)
+}
+
+/// Take the turn, or nothing. For the automatic rescue, which has nothing to add when a call is
+/// already out.
+fn try_interactive_turn() -> Option<InteractiveTurn> {
+    interactive_gate().clone().try_lock_owned().ok().map(InteractiveTurn)
+}
+
+/// When the last automatic rescue that did not work was tried.
+///
+/// Single-flight is the turn above; this is only the rate limit, and it is the automatic path's
+/// alone — a reader pressing the button is never told to come back in ten minutes. Two plain
+/// functions rather than a guard struct: nothing is RELEASED here, and a `let _slot = …` binding
+/// implied a lifetime it did not have.
+static RESCUE_STATE: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// May the automatic rescue try again?
+fn rescue_is_due() -> bool {
+    RESCUE_STATE
+        .lock()
+        .map(|last| !last.is_some_and(|at| at.elapsed() < RESCUE_MIN_INTERVAL))
+        .unwrap_or(false)
+}
+
+/// Record an attempt that did not mint a token, so the next one waits.
+fn charge_rescue() {
+    if let Ok(mut last) = RESCUE_STATE.lock() {
+        *last = Some(Instant::now());
+    }
 }
 
 /// Classify a refusal the broker described itself, from the codes it returned.
@@ -592,6 +868,133 @@ mod tests {
         for reason in ["errorCode=something_new", "broker gave no error detail (keys: a, b)"] {
             assert_eq!(classify_refusal(reason), BrokerFailure::Other, "{reason}");
         }
+    }
+
+    #[test]
+    fn a_closed_window_reads_as_a_cancellation_rather_than_a_failure() {
+        // The exact answer the broker gave when its window was closed, measured on 2026-08-18
+        // (SIGN-IN.md § 3). Telling this from a failure is what lets the app say "nothing
+        // changed" instead of reporting a fault the reader caused on purpose.
+        let cancelled = json!({"brokerTokenResponse": {"error": {
+            "context": "The InteractiveRequest was canceled by the user",
+            "diagnostics": null, "errorCode": 0, "status": 7, "subStatus": 0, "tag": 557155398
+        }}});
+        assert!(was_cancelled(&cancelled));
+        // The status alone is enough, because prose can be reworded by a broker update.
+        assert!(was_cancelled(&json!({"error": {"status": 7}})));
+        // And the sentence alone is enough, because a status could move.
+        assert!(was_cancelled(&json!({"error": {"context": "the request was CANCELED BY THE USER"}})));
+        // A real refusal is not a cancellation: it must not be reported as one, or an expired
+        // account would read as the reader having closed a window they never saw.
+        let refused = json!({"brokerTokenResponse": {"error": {
+            "context": "Recieved an error from AAD. Code: 'interaction_required'",
+            "errorCode": 0, "status": 2, "subStatus": 0
+        }}});
+        assert!(!was_cancelled(&refused));
+        assert!(!was_cancelled(&json!({})));
+    }
+
+    #[test]
+    fn an_empty_access_token_is_no_token() {
+        assert_eq!(access_token(&json!({"accessToken": "abc"})).as_deref(), Some("abc"));
+        // Where the broker really puts it.
+        assert_eq!(
+            access_token(&json!({"brokerTokenResponse": {"accessToken": "abc"}})).as_deref(),
+            Some("abc")
+        );
+        // An empty string is a refusal wearing a success's shape: returned as a token it would
+        // be sent to Teams as `Authorization: Bearer `, and the failure would surface as a 401
+        // somewhere else entirely.
+        assert_eq!(access_token(&json!({"brokerTokenResponse": {"accessToken": ""}})), None);
+        assert_eq!(access_token(&json!({"brokerTokenResponse": {}})), None);
+    }
+
+    #[test]
+    fn both_acquisitions_send_the_one_request_builder() {
+        // The measurement this whole feature rests on is that the silent call and the
+        // interactive one differ in their METHOD NAME and in nothing else (SIGN-IN.md § 2). A
+        // second request builder that drifted by a field would make the interactive path fail
+        // for a reason no log would name, so the source is held to one.
+        let whole = include_str!("auth.rs");
+        let source = &whole[..whole.find("\n#[cfg(test)]").unwrap_or(whole.len())];
+        assert_eq!(
+            source.matches("\"authParameters\"").count(),
+            1,
+            "the request is built in exactly one place"
+        );
+        for method in ["acquireTokenSilently", "acquireTokenInteractively"] {
+            let at = source.find(&format!("\"{method}\", ")).unwrap_or_else(|| panic!("{method}"));
+            let line_end = source[at..].find('\n').map(|n| at + n).unwrap_or(source.len());
+            assert!(
+                source[at..line_end].contains("token_request") || source[at..line_end].contains("request"),
+                "{method} must send the shared request: {}",
+                &source[at..line_end]
+            );
+        }
+        // And the type the broker refuses on the interactive method is the one it accepts, with
+        // the measurement written beside it.
+        assert!(source.contains("\"authorizationType\": 1"));
+    }
+
+    #[test]
+    fn only_the_sign_in_a_reader_started_waits_for_its_turn() {
+        // Two interactive calls at once would put two windows on the broker's display, and the
+        // reader could type their password into the flow whose token nobody reads. So one turn
+        // holds both paths — and which of them WAITS is the whole of the policy: a person is
+        // waiting for theirs, and an automatic attempt has nothing to add.
+        let whole = include_str!("auth.rs");
+        let source = &whole[..whole.find("\n#[cfg(test)]").unwrap_or(whole.len())];
+        let rescue = source.find("async fn rescue(").expect("rescue");
+        let after_rescue = &source[rescue..];
+        assert!(
+            after_rescue.contains("try_interactive_turn()"),
+            "the automatic rescue must never wait"
+        );
+        assert!(
+            !after_rescue.contains("interactive_turn().await"),
+            "the automatic rescue must not block a token call on a human"
+        );
+        // And the waiting half exists for the session to call, taking the turn as a VALUE — so a
+        // caller cannot forget it, and knows when its own call is the one out.
+        assert!(source.contains("pub async fn interactive_turn() -> InteractiveTurn"));
+        assert!(source.contains("_turn: &InteractiveTurn"), "the call is passed the turn");
+    }
+
+    #[test]
+    fn a_rescue_that_worked_does_not_spend_the_next_ten_minutes() {
+        // The rate limit is charged on an attempt that did NOT mint a token. Charged on every
+        // attempt — which it was — a successful rescue for one scope locked out every other
+        // scope for the next ten minutes, and a PRT event kills several resources at once, so
+        // the sidebar could stay dark behind a sign-in that had already succeeded.
+        let whole = include_str!("auth.rs");
+        let source = &whole[..whole.find("\n#[cfg(test)]").unwrap_or(whole.len())];
+        let rescue = source.find("async fn rescue(").expect("rescue");
+        let body = &source[rescue..];
+        let charge = body.find("charge_rescue()").expect("the charge");
+        let guarded = &body[..charge];
+        assert!(
+            guarded.contains("if !matches!(outcome, Ok(Interactive::Token(_)))"),
+            "the charge must be guarded on the outcome"
+        );
+        // And the check that reads it never writes: the two are separate on purpose.
+        let due = source.find("fn rescue_is_due()").expect("rescue_is_due");
+        let due_body = &source[due..due + source[due..].find("\n}").unwrap_or(0)];
+        assert!(!due_body.contains("*last ="), "reading the limit must not charge it");
+    }
+
+    #[test]
+    fn the_automatic_rescue_stands_down_on_a_read_only_backend() {
+        // It signs in as the user, so it is as much out of bounds for a screenshot backend as a
+        // send is. Asserted on the ORDER, because `read_only()` caches the environment: the
+        // refusal is decided before anything reaches the broker.
+        let whole = include_str!("auth.rs");
+        let source = &whole[..whole.find("\n#[cfg(test)]").unwrap_or(whole.len())];
+        let rescue = source.find("async fn rescue(").expect("rescue");
+        let body = &source[rescue..];
+        let read_only_at = body.find("crate::read_only()").expect("the read-only gate");
+        let turn_at = body.find("try_interactive_turn()").expect("the single-flight turn");
+        let call_at = body.find("interactive_on(").expect("the call");
+        assert!(read_only_at < turn_at && turn_at < call_at, "read-only comes first");
     }
 
     #[test]

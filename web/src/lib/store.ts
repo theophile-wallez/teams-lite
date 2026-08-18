@@ -39,6 +39,8 @@ import {
   type PresenceSchedule,
   type LinearWorkspace,
   type BrokerStatus,
+  type SigninState,
+  INITIAL_SIGNIN,
   type CalendarEvent,
   type BackendRestartResult,
   type CalendarInfo,
@@ -340,6 +342,22 @@ export type AppState = {
    *  the empty sidebar it replaces. Disjoint from `fatal`: that one means the socket
    *  is gone, this one means the socket works and the credentials do not. */
   brokerStatus: BrokerStatus | null;
+  /** How an interactive sign-in is going, if one is (see src/signin.rs and SIGN-IN.md).
+   *
+   *  Always a shape, never null: the backend's own "nothing is going on" is `idle`, so one
+   *  field decides whether the panel is drawn and a backend too old to answer is never
+   *  mistaken for a sign-in in progress. It lives here rather than in the panel because a
+   *  sign-in is exactly when a reader changes device — press it on the laptop, pick up the
+   *  phone for the Authenticator — so every open page follows the same flow. The FRAMES are
+   *  deliberately not here: they are one component's business and would put a PNG a second
+   *  through the whole app's state. */
+  signin: SigninState;
+  /** True once the reader put the panel away, until they ask for another sign-in.
+   *
+   *  Dismissing does not touch the flow (see `dismissSignin`), so the backend keeps reporting
+   *  it — and without this the modal came BACK on its own when the flow settled, possibly ten
+   *  minutes later, over whatever the reader was doing by then. */
+  signinDismissed: boolean;
   /** Where this page stands with the backend's write lock, or null until it answers.
    *
    *  It is a state about the whole app rather than about one button: `foreign` means
@@ -828,6 +846,8 @@ function initialState(): AppState {
     live: "connecting",
     backendIsMock: false,
     brokerStatus: null,
+    signin: INITIAL_SIGNIN,
+    signinDismissed: false,
     writeLock: null,
     ready: false,
     splashMessage: "connecting",
@@ -1705,6 +1725,13 @@ export class TeamsController {
       const next = raw as BrokerStatus | null;
       if (!next || typeof next.ok !== "boolean") return;
       this.set({ brokerStatus: next });
+    });
+    // How a sign-in is going. Pushed when it settles and in the greeting while one is
+    // running, so a page that connects mid-flow draws the panel it never started.
+    on("signin_status", (raw) => {
+      const next = raw as SigninState | null;
+      if (!next || typeof next.phase !== "string") return;
+      this.set({ signin: next });
     });
     on("disconnected", () => {
       this.connectionDropped = true;
@@ -5630,6 +5657,87 @@ export class TeamsController {
       playCue("error");
       throw e;
     }
+  }
+
+  // ---- signing in again, from here ---------------------------------------------
+  // The remedy for the sign-in failure a container restart cannot fix: the identity broker
+  // asks a human, and these bring its own window to whichever browser this app is being read
+  // in (see src/signin.rs, SIGN-IN.md, and components/signin-panel.tsx).
+
+  /** Start one. The answer is the FIRST state, not the outcome: most sign-ins finish with
+   *  nobody typing anything, and the rest take as long as a person takes. */
+  async startSignin(): Promise<void> {
+    // Optimistic, and only as far as `starting`: the panel has to appear on the press, or the
+    // reader presses again. Every later phase arrives from the backend.
+    this.set({ signin: { ...INITIAL_SIGNIN, phase: "starting" }, signinDismissed: false });
+    try {
+      const answer = await this.backend.startSignin();
+      if (answer.signin) this.set({ signin: answer.signin });
+    } catch (e) {
+      // A refusal is the whole answer here — the broker has no display, or this backend is
+      // read-only — so it is shown in the panel the press opened rather than swallowed.
+      this.set({
+        signin: {
+          ...INITIAL_SIGNIN,
+          phase: "failed",
+          detail: e instanceof Error ? e.message : String(e),
+        },
+      });
+      playCue("error");
+    }
+  }
+
+  /** Re-read the phase. The panel polls this while it waits, because the transition that
+   *  matters — the broker putting a window up — is one the backend can only notice when it is
+   *  asked: there is no signal that says "I am asking a human". */
+  async refreshSignin(): Promise<void> {
+    try {
+      const next = await this.backend.signinStatus();
+      if (next && typeof next.phase === "string") this.set({ signin: next });
+    } catch {
+      // A poll that failed says nothing: the socket blinking is not a sign-in failing, and
+      // the next tick answers. What the app holds stays the last phase the backend stated.
+    }
+  }
+
+  /** One frame of the broker's window. Held by the panel, never by this state: it is a PNG a
+   *  second, and the rest of the app has no use for it. */
+  signinFrame(): Promise<{ width: number; height: number; png: string }> {
+    return this.backend.signinFrame();
+  }
+
+  /** One keystroke, or one click, into that window. */
+  signinInput(
+    input: { char: string } | { key: string } | { x: number; y: number; button?: string },
+  ): Promise<{ sent: boolean }> {
+    return this.backend.signinInput(input);
+  }
+
+  /** Put the panel away without touching the sign-in.
+   *
+   *  Not the same act as cancelling, and keeping them apart is the point: a reader may want
+   *  the app back while the broker still holds their window — they are reaching for their
+   *  phone — and the banner offers the panel again. Only Cancel ends the flow. */
+  dismissSignin(): void {
+    // The flow is left alone and so is its state, so the reader can be shown how it ended if
+    // they open the panel again — what is remembered is that they closed it.
+    this.set({ signinDismissed: true });
+  }
+
+  /** Close the window, which is how a flow is ended. */
+  async cancelSignin(): Promise<void> {
+    try {
+      await this.backend.cancelSignin();
+    } catch (e) {
+      // Report it and leave the phase alone: the backend decides what a sign-in became, and a
+      // cancel that failed has ended nothing.
+      this.set({ status: e instanceof Error ? e.message : String(e) });
+      playCue("error");
+      return;
+    }
+    // The phase itself arrives as the backend's own `cancelled`, once the broker's pending
+    // call comes back — one spelling of "how it ended", never this page's guess.
+    void this.refreshSignin();
   }
 
   /** Ask GitHub now whether a newer build exists — Settings › This app.

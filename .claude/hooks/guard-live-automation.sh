@@ -303,6 +303,13 @@ command_line_sans_tracked_paths() {
 # from a post to a colleague.
 SANDBOX_THREAD='19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2'
 
+# Does this source DRIVE the identity broker's sign-in window — type into it, click in it,
+# focus it or close it? Reading it (`find`, `capture`, `size`) is measurement and stays allowed:
+# `examples/signin_window_recon.rs` is what re-measures SIGN-IN.md § 3.
+drives_the_signin_window() {
+  grep -qE '\.(type_key|click|focus|close)\(|close_open_signin_window|signin::Signin::start|interactive_token' "$1"
+}
+
 # The Rust sources a `cargo run --example NAME` is about to execute.
 #
 # Rule 1 scans INTERPRETED scripts, which left a hole this feature opened: a cargo
@@ -377,6 +384,7 @@ writes_to_a_tracker() {
 examples_that_send=""
 examples_publishing_presence=""
 examples_writing_to_a_tracker=""
+examples_driving_the_signin_window=""
 while IFS= read -r source; do
   [ -z "$source" ] && continue
   path="$project_dir/$source"
@@ -392,6 +400,14 @@ while IFS= read -r source; do
   # approval would land.
   if writes_to_a_tracker "$path"; then
     examples_writing_to_a_tracker="$examples_writing_to_a_tracker $source"
+  fi
+  # Driving the broker's own sign-in window is a THIRD shape with no sandbox: there is one
+  # window, it is the user's live sign-in, and an example reaches it with no port, no RPC and
+  # no write token in the way. `examples/signin_window_recon.rs` had exactly that as two flags
+  # (`--type`, `--close`) until they were removed — reading the window is measurement, typing
+  # into it or closing it is the act the four `signin_*` methods are gated for.
+  if drives_the_signin_window "$path"; then
+    examples_driving_the_signin_window="$examples_driving_the_signin_window $source"
   fi
   # Does it act outward at all? Through this crate's send path, by naming the
   # chatService messages endpoint itself, by publishing our read position — a
@@ -541,6 +557,14 @@ if ! sanctioned_automation; then
     # pack: a script that could plant art in the pack could post a picture under the
     # user's name on the next send (MACHINE_METHODS in src/bin/server.rs).
     #
+    # `signin_start`, `signin_frame`, `signin_input` and `signin_cancel` serve the identity
+    # broker's own sign-in window to a browser (MACHINE_METHODS in src/bin/server.rs, over
+    # src/signin.rs and SIGN-IN.md). Each one is its own reason: `signin_start` authenticates
+    # as the user, `signin_frame` answers with a PICTURE of a sign-in page, and `signin_input`
+    # presses keys into that page — so a script reaching a live backend with them could watch
+    # a password being typed, or type one. Asking how a sign-in is GOING (`signin_status`)
+    # publishes nothing and is not listed.
+    #
     # `agent_persona_save` and `agent_persona_remove` write the user's own CUSTOM AGENTS
     # (MACHINE_METHODS in src/bin/server.rs, over src/agent_persona.rs). A row there decides
     # what a later `@bebou` in an opted-in thread does: which CLI starts, which model reads
@@ -548,7 +572,7 @@ if ! sanctioned_automation; then
     # could put words in the mouth of a program that answers as the user. Reading the list
     # back is not a write and is not listed.
     if grep -qE '(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|signin_start|signin_frame|signin_input|signin_cancel|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|signin_start|signin_frame|signin_input|signin_cancel|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that
@@ -757,6 +781,31 @@ READING a tracker is fine and is what the page and the preview cards are built o
 GET of an issue, a merge request, its pipeline or its comments is untouched by this rule.
 To exercise a write, use the mock: cd web && bun run preview -- --gitlab. Against the
 real account it goes through the app's own gated RPCs, from the user's own click."
+fi
+
+# --- 1d-bis. the broker's sign-in window is driven by the gated RPCs, or not at all ---
+# There is ONE sign-in window on this machine and it is the user's live sign-in: typing into it
+# is typing into their password field, and closing it cancels a flow they may be halfway
+# through. The app reaches it through four MACHINE methods (rule 1 covers those by name), and a
+# cargo example reaches it with no port, no RPC and no write token in the way — which
+# `examples/signin_window_recon.rs` really did, behind `--type` and `--close`, until they were
+# removed. READING the window is measurement and stays allowed, which is what that example is
+# for now.
+if [ -n "$examples_driving_the_signin_window" ]; then
+  printf 'note: the sign-in window is driven inside%s\n' "$examples_driving_the_signin_window" >&2
+  block "This command would DRIVE the identity broker's sign-in window from a command line
+(typing into it, clicking in it, focusing it, closing it, or starting an interactive
+acquisition).
+
+That window is the user's live sign-in. Typing into it is typing into their password field;
+closing it cancels the flow. The app does all of this through four gated RPCs — signin_start,
+signin_frame, signin_input, signin_cancel — behind the write token, refused read-only, and
+refused by this hook against a live port (AGENTS.md § Signing in again). A cargo example has
+none of those in the way.
+
+READING the window is fine and is what the measurements rest on: cargo run --example
+signin_window_recon reports the display, the window and one frame's size, and is untouched by
+this rule. To exercise the driving half, use the mock: cd web && bun run preview -- --signin."
 fi
 
 # --- 1e. our own presence is published by the gated RPC, or not at all ----------

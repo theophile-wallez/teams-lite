@@ -54,6 +54,7 @@ import type {
   ReadReceiptsResult,
   ReplyTo,
   SettingsPatch,
+  SigninState,
   UpdateCheckResult,
   UpdateProgress,
   WriteLock,
@@ -654,6 +655,46 @@ export class Backend {
    *  and drops this socket on the way; recovery is the page's own reconnect. */
   repairBroker(): Promise<{ started: boolean; reason?: string }> {
     return this.writeRequest<{ started: boolean; reason?: string }>("repair_broker", {});
+  }
+
+  /** Start signing in again through the identity broker's own window — the remedy for the
+   *  failure a container restart cannot fix (see src/signin.rs and SIGN-IN.md).
+   *
+   *  A WRITE request: it authenticates as the user. It answers with the first state rather
+   *  than with the outcome, because most sign-ins finish with nobody typing anything and the
+   *  rest take as long as a person does. */
+  startSignin(): Promise<{ started: boolean; reason?: string; signin: SigninState }> {
+    return this.writeRequest("signin_start", {});
+  }
+
+  /** How the sign-in is going. OPEN, like `write_lock_status`: it publishes no pixels and no
+   *  keystrokes, only which phase the flow is in — and a page must be able to ask that
+   *  without holding the token the rest of this needs. */
+  signinStatus(): Promise<SigninState> {
+    return this.request<SigninState>("signin_status", {});
+  }
+
+  /** One frame of the sign-in window, as a PNG.
+   *
+   *  A WRITE request even though it reads: its answer is a picture of a sign-in page, which
+   *  is not something a client that merely found this socket may have. */
+  signinFrame(): Promise<{ width: number; height: number; png: string }> {
+    return this.writeRequest("signin_frame", {});
+  }
+
+  /** Send one keystroke, or one click, into the sign-in window.
+   *
+   *  One character per call, deliberately — the backend refuses more (`parse_key` in
+   *  src/signin.rs), because a whole password in one field is what this design avoids. */
+  signinInput(
+    input: { char: string } | { key: string } | { x: number; y: number; button?: string },
+  ): Promise<{ sent: boolean }> {
+    return this.writeRequest("signin_input", input as Record<string, unknown>);
+  }
+
+  /** Close the sign-in window, which is how a flow is ended. */
+  cancelSignin(): Promise<{ closed: boolean }> {
+    return this.writeRequest("signin_cancel", {});
   }
 
   /** Ask GitHub, now, whether a newer build than this one has been published — Settings ›

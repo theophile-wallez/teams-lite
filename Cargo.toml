@@ -51,6 +51,14 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `teams_presence::minute_of_day`). `chrono::Local` answers only "this machine's zone",
 # which is the wrong answer for somebody who set 08:00-19:00 in Paris and is now in Tokyo.
 chrono-tz = "0.10"
+# X11, for exactly one feature: bringing the identity broker's own sign-in window to the
+# browser this app is read in (see SIGN-IN.md and `src/xwindow.rs`). The broker renders that
+# window itself, in a WebKitGTK view on an X display, and no API redirects it — so reaching
+# it means reading one window's pixels and sending keys and clicks back, which is `xtest`.
+# Pure Rust, like `rustls` and `p256` above: the binary links no system Xlib and stays
+# portable, and nothing here spawns `xdotool`, `scrot`, `x11vnc` or `websockify` — the four
+# binaries the same job took by hand.
+x11rb = { version = "0.13", features = ["xtest"] }
 
 [dev-dependencies]
 # `test-util` is tokio's paused clock, and it is here for one rule: the agent stops a

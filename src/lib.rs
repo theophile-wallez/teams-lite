@@ -4,6 +4,20 @@
 /// reason of its own (see `sender_icon`) must still sound like the rest of the app.
 pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
 
+/// Is this a read-only backend (`TEAMS_LITE_READ_ONLY=1`)?
+///
+/// One spelling, for the whole crate. It lived in src/bin/server.rs, where it gates every
+/// write at the dispatch choke point; the LIBRARY needs the same answer now that
+/// `auth::rescue` exists — an automatic interactive sign-in is an act on the user's account,
+/// and a screenshot backend must no more do that than it may send a message.
+///
+/// Read once: the mode is a property of the process, and re-reading the environment per
+/// request would let it drift mid-session.
+pub fn read_only() -> bool {
+    static READ_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READ_ONLY.get_or_init(|| std::env::var("TEAMS_LITE_READ_ONLY").as_deref() == Ok("1"))
+}
+
 pub mod agent;
 pub mod agent_markdown;
 pub mod agent_models;
@@ -24,11 +38,13 @@ pub mod linear;
 pub mod link_preview;
 pub mod mail;
 pub mod mail_html;
+pub mod png;
 pub mod push;
 pub mod push_policy;
 pub mod restart;
 pub mod retry;
 pub mod sender_icon;
+pub mod signin;
 pub mod teams;
 pub mod teams_activity;
 pub mod teams_avatars;
@@ -45,5 +61,6 @@ pub mod teams_unfurl;
 pub mod tracker_people;
 pub mod trouter;
 pub mod trouter_events;
+pub mod xwindow;
 pub mod store;
 pub mod update;

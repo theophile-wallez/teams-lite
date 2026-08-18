@@ -5968,7 +5968,186 @@ let mockBrokerStatus: {
   consecutive_failures: number;
   can_repair: boolean;
   repairing: boolean;
+  can_sign_in?: boolean;
+  signin_blocker?: string;
 } | null = null;
+
+// ---- signing in again (see src/signin.rs, src/xwindow.rs and SIGN-IN.md) --------
+// The whole flow with no identity broker, no X display and no tenant: a sign-in that goes
+// `starting`, puts a WINDOW up, takes keystrokes into it, and ends when the reader presses the
+// page's own Sign in button. The frames are a real PNG, drawn here — which is what makes this
+// surface reviewable at all, since the one thing a reader has to be able to do is READ A NUMBER
+// off somebody else's window.
+//
+// The mock draws its own page rather than shipping a fixture screenshot for two reasons: the
+// dots have to appear as keys arrive (otherwise nothing proves the input path), and a picture
+// of a real sign-in page is a picture of somebody's account.
+
+/** The window the mock pretends the broker drew, at the size the real one was measured at. */
+const MOCK_SIGNIN_WINDOW = { width: 550, height: 675 };
+
+/** The number a mock sign-in asks the reader to match. Constant, so a spec can assert it and a
+ *  capture always shows the same page. */
+const MOCK_SIGNIN_NUMBER = "42";
+
+/** How long the mock takes to put its window up. Long enough for a spec to see `starting` and
+ *  short enough that nobody waits — the real broker showed its window in about two seconds. */
+const MOCK_SIGNIN_WINDOW_DELAY_MS = 300;
+
+type MockSignin = {
+  phase: "starting" | "waiting" | "done" | "cancelled" | "failed";
+  detail: string;
+  started: number;
+  /** How many characters have been typed into the pretend password field. */
+  typed: number;
+  /** Which pixels the mock's own Sign in button covers, so a click can land on it. */
+  window: { width: number; height: number } | null;
+};
+
+let mockSignin: MockSignin | null = null;
+/** What the NEXT sign-in does, for a spec: finish on its own without a window (the common case
+ *  in real life), refuse to start, or fail after the window is up. Armed through the
+ *  `{kind:"signin"}` hook, and a spec MUST reset it — one mock process serves the whole run. */
+let mockSigninOutcome: "window" | "immediate" | "refuse" | "fail" | "hold" = "window";
+
+/** Where the pretend Sign in button is, in window pixels. */
+const MOCK_SIGNIN_BUTTON = { x: 362, y: 278, width: 110, height: 30 };
+
+/** A 3x5 bitmap digit, so the mock can draw the number a reader has to match. Enough of a font
+ *  for ten glyphs and nothing more — the alternative was a fixture picture, which cannot show
+ *  the dots arriving as keys are typed. */
+const DIGITS: Record<string, string[]> = {
+  "0": ["111", "101", "101", "101", "111"],
+  "1": ["010", "110", "010", "010", "111"],
+  "2": ["111", "001", "111", "100", "111"],
+  "3": ["111", "001", "111", "001", "111"],
+  "4": ["101", "101", "111", "001", "001"],
+  "5": ["111", "100", "111", "001", "111"],
+  "6": ["111", "100", "111", "101", "111"],
+  "7": ["111", "001", "010", "010", "010"],
+  "8": ["111", "101", "111", "101", "111"],
+  "9": ["111", "101", "111", "001", "111"],
+};
+
+/** Draw the mock's own sign-in page and encode it as a PNG, over the same `pngChunk` writer
+ *  the inline-picture fixtures already use.
+ *
+ *  Deliberately crude — bands, a field, a button and the number — because what it has to prove
+ *  is that a picture of the broker's window arrives, scales, takes clicks in the right place and
+ *  CHANGES as keys are typed. It is not pretending to be Microsoft's page, and a fixture
+ *  screenshot could not show the dots appear.
+ */
+function mockSigninFrame(typed: number): string {
+  const { width, height } = MOCK_SIGNIN_WINDOW;
+  const stride = width * 3;
+  const rgb = Buffer.alloc(stride * height, 0xff);
+  const box = (x: number, y: number, w: number, h: number, ink: [number, number, number]) => {
+    for (let dy = 0; dy < h; dy += 1) {
+      const py = y + dy;
+      if (py < 0 || py >= height) continue;
+      for (let dx = 0; dx < w; dx += 1) {
+        const px = x + dx;
+        if (px < 0 || px >= width) continue;
+        const at = py * stride + px * 3;
+        rgb[at] = ink[0];
+        rgb[at + 1] = ink[1];
+        rgb[at + 2] = ink[2];
+      }
+    }
+  };
+
+  const ink: [number, number, number] = [0x24, 0x24, 0x24];
+  const blue: [number, number, number] = [0x00, 0x67, 0xb8];
+  const grey: [number, number, number] = [0xd0, 0xd0, 0xd0];
+
+  // A header band and a couple of text-ish bands, so the page reads as a form.
+  box(60, 36, 120, 14, ink);
+  box(60, 78, 240, 10, grey);
+  box(60, 108, 180, 18, ink);
+  // The field, and one dot per character typed.
+  box(60, 160, 410, 1, ink);
+  for (let i = 0; i < typed; i += 1) box(62 + i * 10, 150, 6, 6, ink);
+  // The number to match, drawn large from the bitmap font above.
+  const scale = 8;
+  let penX = 60;
+  for (const glyph of MOCK_SIGNIN_NUMBER) {
+    const rows = DIGITS[glyph];
+    if (!rows) continue;
+    rows.forEach((row, ry) =>
+      [...row].forEach((cell, rx) => {
+        if (cell === "1") box(penX + rx * scale, 200 + ry * scale, scale, scale, ink);
+      }),
+    );
+    penX += 4 * scale;
+  }
+  box(
+    MOCK_SIGNIN_BUTTON.x,
+    MOCK_SIGNIN_BUTTON.y,
+    MOCK_SIGNIN_BUTTON.width,
+    MOCK_SIGNIN_BUTTON.height,
+    blue,
+  );
+
+  // Filter each row against the one above (PNG filter 2, Up), exactly as src/png.rs does — so
+  // the mock exercises the same shape the backend really sends rather than an easier one.
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const at = y * (stride + 1);
+    raw[at] = y === 0 ? 0 : 2;
+    for (let x = 0; x < stride; x += 1) {
+      const here = rgb[y * stride + x]!;
+      const above = y === 0 ? 0 : rgb[(y - 1) * stride + x]!;
+      raw[at + 1 + x] = (here - above) & 0xff;
+    }
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]).toString("base64");
+}
+
+/** The `signin_status` payload, in the backend's own shape. */
+function mockSigninPayload(): Record<string, unknown> {
+  if (!mockSignin) {
+    return { phase: "idle", detail: "", scope: "", display: "", waited_ms: 0, window: null };
+  }
+  return {
+    phase: mockSignin.phase,
+    detail: mockSignin.detail,
+    scope: "https://api.spaces.skype.com/.default",
+    display: ":77",
+    waited_ms: Date.now() - mockSignin.started,
+    window: mockSignin.phase === "waiting" ? mockSignin.window : null,
+  };
+}
+
+/** Settle a mock sign-in and tell every page, the way the backend does. */
+function settleMockSignin(phase: MockSignin["phase"], detail = "") {
+  if (!mockSignin) return;
+  mockSignin = { ...mockSignin, phase, detail };
+  broadcast("signin_status", mockSigninPayload());
+  // A sign-in that worked puts the broker right, which is what makes the banner go away.
+  if (phase === "done") {
+    mockBrokerStatus = {
+      ok: true,
+      signature: "",
+      message: "",
+      detail: "",
+      consecutive_failures: 0,
+      can_repair: false,
+      repairing: false,
+      can_sign_in: false,
+    };
+    broadcast("broker_status", mockBrokerStatus);
+  }
+}
 
 // ---- a pending update (see src/update.rs, and update-button.tsx) ---------------
 // The whole two-click flow with no GitHub and no binary: a release that exists, a
@@ -7013,6 +7192,116 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       cs.conv.is_muted = muted;
       broadcast("conversations_changed", {});
       return { muted };
+    }
+
+    // ---- signing in again (see src/signin.rs and SIGN-IN.md) ---------------------
+    // The remedy for the sign-in failure a container restart cannot fix. The mock has no
+    // broker and no X display, so it plays both: a flow that may finish on its own, and a
+    // WINDOW the reader types into when it cannot.
+    case "signin_start": {
+      if (mockSignin && (mockSignin.phase === "starting" || mockSignin.phase === "waiting")) {
+        return { started: false, reason: "already_running", signin: mockSigninPayload() };
+      }
+      if (mockSigninOutcome === "refuse") {
+        // What the real backend answers when the broker has no display to draw on: a
+        // refusal, not a phase — there is nothing to show.
+        throw new Error(
+          "The identity broker draws its sign-in window on display :77, and nothing is " +
+            "serving that display, so the window cannot appear at all. Restarting Intune on " +
+            "this machine puts it back.",
+        );
+      }
+      mockSignin = {
+        phase: "starting",
+        detail: "",
+        started: Date.now(),
+        typed: 0,
+        window: { ...MOCK_SIGNIN_WINDOW },
+      };
+      const first = mockSigninPayload();
+      broadcast("signin_status", first);
+      // What happens next: the common case in real life is that the broker answers from the
+      // machine's own token and nobody is ever shown a page.
+      setTimeout(() => {
+        if (!mockSignin || mockSignin.phase !== "starting") return;
+        if (mockSigninOutcome === "immediate") settleMockSignin("done");
+        else if (mockSigninOutcome === "fail")
+          settleMockSignin("failed", "The sign-in was not finished in time.");
+        // `hold` stays in `starting` with no window, which is where most sign-ins live and where
+        // Cancel used to do nothing at all.
+        else if (mockSigninOutcome === "hold") return;
+        else {
+          mockSignin = { ...mockSignin, phase: "waiting" };
+          broadcast("signin_status", mockSigninPayload());
+        }
+      }, MOCK_SIGNIN_WINDOW_DELAY_MS);
+      return { started: true, signin: first };
+    }
+
+    case "signin_status":
+      return mockSigninPayload();
+
+    case "signin_frame": {
+      if (!mockSignin || mockSignin.phase !== "waiting") {
+        throw new Error("no sign-in is running — press Sign in again to start one");
+      }
+      return {
+        width: MOCK_SIGNIN_WINDOW.width,
+        height: MOCK_SIGNIN_WINDOW.height,
+        png: mockSigninFrame(mockSignin.typed),
+      };
+    }
+
+    case "signin_input": {
+      if (!mockSignin || mockSignin.phase !== "waiting") {
+        throw new Error("no sign-in is running — press Sign in again to start one");
+      }
+      const p = asObject(params);
+      if (typeof p.char === "string") {
+        // One character, exactly as the backend requires: a whole password in one field is
+        // what that rule exists to prevent (`parse_key` in src/signin.rs).
+        if ([...p.char].length !== 1) throw new Error("`char` must be exactly one character");
+        mockSignin = { ...mockSignin, typed: mockSignin.typed + 1 };
+        return { sent: true };
+      }
+      if (typeof p.key === "string") {
+        if (p.key === "Backspace") {
+          mockSignin = { ...mockSignin, typed: Math.max(0, mockSignin.typed - 1) };
+          return { sent: true };
+        }
+        // Enter submits the pretend page, exactly as pressing its button does.
+        if (p.key === "Enter") {
+          settleMockSignin("done");
+          return { sent: true };
+        }
+        return { sent: true };
+      }
+      if (typeof p.x === "number" && typeof p.y === "number") {
+        const onButton =
+          p.x >= MOCK_SIGNIN_BUTTON.x &&
+          p.x <= MOCK_SIGNIN_BUTTON.x + MOCK_SIGNIN_BUTTON.width &&
+          p.y >= MOCK_SIGNIN_BUTTON.y &&
+          p.y <= MOCK_SIGNIN_BUTTON.y + MOCK_SIGNIN_BUTTON.height;
+        // Pressing the page's own Sign in button is what finishes the flow — which is what
+        // makes the click path really testable: a tap that landed somewhere else does nothing,
+        // exactly as it would on the real page.
+        if (onButton) settleMockSignin("done");
+        return { sent: true };
+      }
+      throw new Error("send either `char` (one character) or `key` (a key name)");
+    }
+
+    case "signin_cancel": {
+      if (!mockSignin || (mockSignin.phase !== "starting" && mockSignin.phase !== "waiting")) {
+        throw new Error("no sign-in is running — press Sign in again to start one");
+      }
+      // `closed` answers whether a WINDOW was closed, which is false while the broker has not
+      // drawn one — and the flow ends either way, because the backend stops the run as well
+      // (`Signin::cancel`). The mock answers both halves the way the backend does: reporting
+      // `closed: true` from `starting` would hide the one thing this state is about.
+      const closed = mockSignin.phase === "waiting";
+      settleMockSignin("cancelled");
+      return { closed };
     }
 
     case "repair_broker": {
@@ -9604,9 +9893,40 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           typeof body.consecutive_failures === "number" ? body.consecutive_failures : ok ? 0 : 3,
         can_repair: body.can_repair === undefined ? !ok : Boolean(body.can_repair),
         repairing: Boolean(body.repairing),
+        // Whether this pretend machine can serve the broker's own sign-in window. Off unless
+        // a spec asks, because the real backend answers false for every failure but the one
+        // only a human can move on — see `can_sign_in` in src/bin/server.rs.
+        can_sign_in: Boolean(body.can_sign_in),
+        signin_blocker:
+          typeof body.signin_blocker === "string" ? body.signin_blocker : undefined,
       };
       broadcast("broker_status", mockBrokerStatus);
       return Response.json({ ok: true, broker: mockBrokerStatus }, { status: 200 });
+    }
+    // What the NEXT sign-in does. `window` (the default) puts a window up and waits for the
+    // reader; `immediate` finishes with nobody typing, which is the common case against the
+    // real broker; `refuse` answers the refusal a machine with no display gives; `fail` ends
+    // the flow after the window is up. A spec MUST reset it (`{kind:"signin", reset:true}`),
+    // which also forgets any session in flight: one mock process serves the whole run, and a
+    // sign-in left running would put a dialog over every later spec.
+    if (body.kind === "signin") {
+      if (body.reset === true) {
+        mockSigninOutcome = "window";
+        mockSignin = null;
+        // Back to NULL, not to a healthy object: a sign-in that finished sets `mockBrokerStatus`
+        // so the banner goes away, and a non-null status is then announced in the greeting of
+        // every later connection — which makes the banner's own "null means silence" rule
+        // untestable for the rest of the run.
+        mockBrokerStatus = null;
+        broadcast("signin_status", mockSigninPayload());
+        return Response.json({ ok: true, outcome: mockSigninOutcome }, { status: 200 });
+      }
+      const outcome = typeof body.outcome === "string" ? body.outcome : "window";
+      if (!["window", "immediate", "refuse", "fail", "hold"].includes(outcome)) {
+        return Response.json({ error: `unknown sign-in outcome: ${outcome}` }, { status: 400 });
+      }
+      mockSigninOutcome = outcome as typeof mockSigninOutcome;
+      return Response.json({ ok: true, outcome: mockSigninOutcome }, { status: 200 });
     }
     // Arm which CLIs this pretend machine holds and which provider is the default, so a
     // spec can put two usable providers in front of the app — the state that proves the ⋯
@@ -10445,6 +10765,9 @@ const server = Bun.serve({
       // Only when something is wrong, like the real backend: a mock that announced a
       // healthy broker would make the banner's "null means silence" rule untestable.
       if (mockBrokerStatus) sendJson(ws, { event: "broker_status", data: mockBrokerStatus });
+      // And whether a sign-in is going on, for the reason the backend sends it: a reader
+      // presses this on the laptop and finishes it on the phone.
+      if (mockSignin) sendJson(ws, { event: "signin_status", data: mockSigninPayload() });
       // A pending update, and how far it has got — replayed on connect exactly like the
       // Rust backend replays it, so a page that opens mid-download draws the bar it is
       // already in rather than an untouched button.

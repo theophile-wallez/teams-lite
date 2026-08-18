@@ -6,7 +6,11 @@ use serde_json::Value;
 
 use crate::auth;
 
-const SKYPE_SCOPE: &str = "https://api.spaces.skype.com/.default";
+/// The scope every live feature needs: the real-time feed, presence, calling. Public
+/// because it is also the scope a served sign-in acquires (see `Ctx::signin_scope`) — the
+/// one the app is broken on when the broker refuses, so the token that comes back is the
+/// token that was missing.
+pub const SKYPE_SCOPE: &str = "https://api.spaces.skype.com/.default";
 const AUTHZ_HOSTS: &[&str] = &[
     "https://teams.cloud.microsoft/api/authsvc/v1.0/authz",
     "https://teams.microsoft.com/api/authsvc/v1.0/authz",

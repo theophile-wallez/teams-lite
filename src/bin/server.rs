@@ -115,7 +115,7 @@ use teams_lite::{
     agent, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
     custom_emoji,
     mail, push, push_policy, retry,
-    sender_icon, store, teams,
+    sender_icon, signin, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
@@ -430,8 +430,19 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// meanwhile. Nothing that merely found this socket gets to do that to the app the user is
 /// reading — and `update_check`, which only ASKS GitHub whether a newer build exists,
 /// deliberately stays open beside it: it changes nothing on this machine.
-const MACHINE_METHODS: [&str; 22] = [
+/// `signin_start` / `signin_frame` / `signin_input` / `signin_cancel` serve the identity
+/// broker's own sign-in window to the browser the app is read in (see [`teams_lite::signin`]
+/// and SIGN-IN.md). They post nothing to Teams, so they are not outward — but each one is a
+/// long way past what a client that merely found this socket may do: `signin_start`
+/// authenticates as the user, `signin_frame` answers with a picture of a sign-in page, and
+/// `signin_input` presses keys into it. `signin_frame` is gated as hard as the rest for that
+/// reason: a read whose answer is the pixels of somebody's password field is not a read.
+const MACHINE_METHODS: [&str; 26] = [
     "repair_broker",
+    "signin_start",
+    "signin_frame",
+    "signin_input",
+    "signin_cancel",
     "restart_backend",
     "update_download",
     "update_apply",
@@ -462,6 +473,10 @@ const MACHINE_METHODS: [&str; 22] = [
 fn machine_effect(method: &str) -> &'static str {
     match method {
         "repair_broker" => "restarts the Intune container on this machine",
+        "signin_start" => "signs in to the user's own Entra account from this machine",
+        "signin_frame" => "answers with a picture of the sign-in page open on this machine",
+        "signin_input" => "presses keys into the sign-in page open on this machine",
+        "signin_cancel" => "closes the sign-in window open on this machine",
         "restart_backend" => {
             "restarts this app's backend on this machine, which drops every open page's \
              connection and cuts off a local agent that is writing a reply"
@@ -600,8 +615,9 @@ const RESTART_ANSWER_GRACE: Duration = Duration::from_millis(250);
 /// Read once: the mode is a property of the process, and re-reading the
 /// environment per request would let it drift mid-session.
 fn read_only() -> bool {
-    static READ_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *READ_ONLY.get_or_init(|| std::env::var("TEAMS_LITE_READ_ONLY").as_deref() == Ok("1"))
+    // The library owns the answer, because `auth::rescue` needs it too: an automatic
+    // interactive sign-in is an act on the user's account. One spelling, two callers.
+    teams_lite::read_only()
 }
 
 /// Resolve the port to listen on: an explicit `TEAMS_LITE_PORT` wins, else
@@ -964,6 +980,11 @@ fn write_lock_payload(presented: Option<&str>, token: Option<&str>, pinned: bool
 /// the tab mid-outage has to learn about it too, and a page that reconnects after a
 /// repair has to learn that the trouble is over. One shape for both.
 fn broker_status_payload(repairing: bool) -> Value {
+    // Resolved ONCE and handed to both readers. `broker_display()` walks all of /proc — a
+    // `read_dir` plus a `cmdline` read per process — and this payload is built in the greeting of
+    // every connection and inside the observer that runs from a failing token call, so doing it
+    // per field paid for the whole walk twice each time.
+    let display = teams_lite::xwindow::broker_display();
     let state = auth::broker_state().unwrap_or_default();
     // Only the one signature whose known cause a container restart fixes, and never
     // from a read-only backend. Not checked here: whether this host HAS an Intune
@@ -977,6 +998,16 @@ fn broker_status_payload(repairing: bool) -> Value {
         .unwrap_or(false);
     json!({
         "ok": state.is_ok(),
+        // Whether this app can serve the broker's own sign-in for this failure. Answered
+        // here rather than in the page, because all three halves of it are the backend's:
+        // which failure needs a human, whether this backend may act as the user at all, and
+        // whether the broker has a display to draw its window on. A hopeful `true` would
+        // offer the reader a button that opens a panel nothing can ever appear in.
+        "can_sign_in": can_sign_in(&state, &display),
+        // What a sign-in cannot do here, in the words the reader needs, or empty. Carried on
+        // this event so the banner can say WHY it is offering nothing, which is the half the
+        // old dead button never had.
+        "signin_blocker": signin_blocker(&state, &display),
         "signature": state.failure.map(|f| f.tag()).unwrap_or(""),
         "message": state.failure.map(|f| f.message()).unwrap_or(""),
         // The full cause chain. Useful in a bug report, and never a secret: the
@@ -985,6 +1016,51 @@ fn broker_status_payload(repairing: bool) -> Value {
         "consecutive_failures": state.consecutive_failures,
         "can_repair": can_repair,
         "repairing": repairing,
+    })
+}
+
+/// Which broker failures a served sign-in can actually answer.
+///
+/// `Refused` only, and that narrowness is deliberate. It is the measured shape: the broker
+/// reached AAD, AAD said `interaction_required`, and the account it holds is the one the
+/// interactive request is built from (SIGN-IN.md § 1). `NoAccount` looks like the case that
+/// needs a sign-in most and is NOT offered: with no account the request has nobody to name,
+/// the device's enrolment is what is gone, and that is `intune-container`'s business rather
+/// than a token's. Every other failure is about the broker being unreachable or asleep, where
+/// a sign-in window could not be drawn anyway.
+fn failure_needs_a_human(failure: Option<auth::BrokerFailure>) -> bool {
+    matches!(failure, Some(auth::BrokerFailure::Refused))
+}
+
+/// Can this app serve the broker's sign-in for the state it is in?
+fn can_sign_in(state: &auth::BrokerState, display: &teams_lite::xwindow::DisplayState) -> bool {
+    failure_needs_a_human(state.failure)
+        && !read_only()
+        && matches!(display, teams_lite::xwindow::DisplayState::Ready { .. })
+}
+
+/// Why a sign-in cannot be served, when it cannot. Empty when it can, and empty when the
+/// question does not arise — a failure a container restart fixes has its own remedy, and two
+/// sentences offering two different repairs would leave the reader choosing between them.
+fn signin_blocker(state: &auth::BrokerState, display: &teams_lite::xwindow::DisplayState) -> String {
+    if !failure_needs_a_human(state.failure) || read_only() {
+        return String::new();
+    }
+    display.refusal().unwrap_or_default()
+}
+
+/// The `signin_status` payload when no sign-in is going on.
+///
+/// A shape rather than `null`, so a page reads one field to decide whether to draw the panel
+/// and an older backend's silence is not mistaken for a sign-in that is running.
+fn signin_idle() -> Value {
+    json!({
+        "phase": "idle",
+        "detail": "",
+        "scope": "",
+        "display": "",
+        "waited_ms": 0,
+        "window": Value::Null,
     })
 }
 
@@ -1242,6 +1318,13 @@ struct Ctx {
     /// When this process last asked systemd for a broker repair, so it cannot loop.
     /// See {@link REPAIR_MIN_INTERVAL} and `start_broker_repair`.
     last_repair: Arc<Mutex<Option<std::time::Instant>>>,
+    /// The one interactive sign-in this backend may be serving, and nothing else.
+    ///
+    /// One at a time, because the broker draws one window and a second flow would fight it
+    /// for the display. Its presence is also the whole authorization to serve a frame: with
+    /// no live session there is no window to read and no keystroke to deliver, so this app
+    /// can never be asked for a picture of the machine's screen (see [`teams_lite::signin`]).
+    signin: Arc<Mutex<Option<Arc<signin::Signin>>>>,
     /// The audio-calling plane: the calling connection's own address, and the one
     /// call this machine is in. Empty and idle on a backend that does not call at all
     /// ({@link calling_available}) — see [`CallingPlane`].
@@ -1656,6 +1739,173 @@ impl Ctx {
         );
         self.emit("broker_status", broker_status_payload(true));
         Ok(json!({ "started": true }))
+    }
+
+    // ---- signing in again, from the app ---------------------------------------
+    // The other half of `start_broker_repair`: that one restarts the container for the
+    // failure whose cause is a locked keyring, and these serve the broker's own sign-in
+    // window for the failure only a human can answer. See [`teams_lite::signin`] for what
+    // is deliberately narrow about them, and SIGN-IN.md for the measurements.
+
+    /// The scope a sign-in should acquire: the one the app is actually broken on.
+    ///
+    /// Not the caller's choice — a client naming a scope would be choosing what this machine
+    /// authenticates for. It is the scope every live feature needs, which is the one the
+    /// failure was recorded against.
+    fn signin_scope() -> String {
+        // The recorded failure names its own scope (`auth::BrokerState::scope`), because a
+        // refusal is per RESOURCE: measured, Graph minted while the skype scope refused. Signing
+        // in for a scope that was not the broken one would mint a token, clear the broker state
+        // and report "sign-in works again" over a feature still dark. Empty — a state recorded
+        // by an older build, or a failure with no scope — falls back to the one every live
+        // feature needs.
+        let recorded = auth::broker_state().map(|s| s.scope).unwrap_or_default();
+        if recorded.is_empty() { teams::SKYPE_SCOPE.to_string() } else { recorded }
+    }
+
+    /// Start an interactive sign-in, and say what the reader should expect.
+    async fn start_signin(&self, _params: &Value) -> Result<Value> {
+        // Read the display before the lock: it walks /proc, and nothing else may happen while
+        // the claim below is held. Handed to `spawn_blocking` for the same reason — a
+        // `read_dir` plus a read per process is not work for an async worker.
+        let display = tokio::task::spawn_blocking(teams_lite::xwindow::broker_display)
+            .await
+            .context("read the display the broker draws on")?;
+        let watcher = self.clone();
+
+        // Claiming the slot and starting the flow happen under ONE guard, with no await
+        // between them. Two presses in the same instant would otherwise both pass the check
+        // and both start a flow — and since one interactive call is out at a time
+        // (`auth::interactive_gate`), the loser would sit holding a window nobody reads. A
+        // sign-in already going is not replaced: the broker draws one window, and a second
+        // flow would fight the first for it. A SPENT one is, so a reader whose sign-in failed
+        // can start another without waiting.
+        let started = {
+            let mut held = self.signin.lock().map_err(|_| anyhow::anyhow!("sign-in lock poisoned"))?;
+            match held.as_ref().filter(|s| s.is_live()).map(Arc::clone) {
+                Some(running) => Err(running),
+                None => {
+                    // Synchronous: it spawns the run and returns, so nothing awaits in here.
+                    let session = signin::Signin::start(&Self::signin_scope(), &display, move |_phase| {
+                        // Every open page hears how it ended, and the broker's own status goes
+                        // out with it: a sign-in that worked makes the banner go away, and that
+                        // fact belongs to the whole app rather than to the page that pressed
+                        // the button.
+                        watcher.emit_signin_status();
+                        watcher.emit("broker_status", broker_status_payload(false));
+                    })
+                    .map(Arc::new);
+                    if let Ok(session) = &session {
+                        *held = Some(Arc::clone(session));
+                    }
+                    Ok(session)
+                }
+            }
+        };
+
+        match started {
+            Err(running) => Ok(json!({
+                "started": false,
+                "reason": "already_running",
+                "signin": running.payload().await,
+            })),
+            Ok(Err(signin::Refusal(words))) => Err(anyhow::anyhow!(words)),
+            Ok(Ok(session)) => {
+                let payload = session.payload().await;
+                eprintln!("[signin] started for {}", Self::signin_scope());
+                self.emit("signin_status", payload.clone());
+                Ok(json!({ "started": true, "signin": payload }))
+            }
+        }
+    }
+
+    /// What the app draws while a sign-in is going, and what became of the last one.
+    async fn signin_status(&self) -> Result<Value> {
+        Ok(self.signin_payload().await)
+    }
+
+    /// The current sign-in's payload, or the "nothing is going on" shape.
+    ///
+    /// Never `null`: the page reads one field to decide whether to draw the panel, and an
+    /// absent object would make "no sign-in" and "an older backend" the same answer.
+    async fn signin_payload(&self) -> Value {
+        // The session is behind a std Mutex and its payload is async, so the guard cannot be
+        // held across the await: clone the handle out and let go of the lock first.
+        let session = {
+            let mut held = match self.signin.lock() {
+                Ok(held) => held,
+                Err(_) => return signin_idle(),
+            };
+            // Forget a session whose outcome nobody came back for, so this cannot report a
+            // sign-in from an hour ago as the current one.
+            if held.as_ref().is_some_and(|s| s.is_spent()) {
+                *held = None;
+            }
+            held.as_ref().map(Arc::clone)
+        };
+        match session {
+            None => signin_idle(),
+            Some(session) => session.payload().await,
+        }
+    }
+
+    fn emit_signin_status(&self) {
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            let payload = ctx.signin_payload().await;
+            ctx.emit("signin_status", payload);
+        });
+    }
+
+    /// One frame of the sign-in window.
+    async fn signin_frame(&self) -> Result<Value> {
+        self.with_live_signin(|session| async move { session.frame().await }).await
+    }
+
+    /// A keystroke or a click into the sign-in window.
+    async fn signin_input(&self, params: &Value) -> Result<Value> {
+        // Parsed BEFORE the session is touched, so a malformed request is refused without
+        // pressing anything: this is the one RPC whose side effect is a key going into
+        // somebody's password field.
+        let input = signin::parse_input(params)?;
+        self.with_live_signin(|session| async move {
+            match input {
+                signin::Input::Key(key) => session.type_key(key).await?,
+                signin::Input::Click(x, y, button) => session.click(x, y, button).await?,
+            }
+            Ok(json!({ "sent": true }))
+        })
+        .await
+    }
+
+    /// Close the sign-in window, which is how a flow is ended.
+    async fn cancel_signin(&self) -> Result<Value> {
+        self.with_live_signin(|session| async move {
+            Ok(json!({ "closed": session.cancel().await? }))
+        })
+        .await
+    }
+
+    /// Run `f` against the live sign-in, or refuse.
+    ///
+    /// The one gate every frame and every keystroke passes: no live sign-in, nothing served.
+    /// That is what keeps this from being a way to read the machine's display — the window
+    /// has to be one THIS backend asked the broker to draw.
+    async fn with_live_signin<F, Fut>(&self, f: F) -> Result<Value>
+    where
+        F: FnOnce(Arc<signin::Signin>) -> Fut,
+        Fut: std::future::Future<Output = Result<Value>>,
+    {
+        let session = {
+            let held = self.signin.lock().map_err(|_| anyhow::anyhow!("sign-in lock poisoned"))?;
+            match held.as_ref() {
+                Some(session) if session.is_live() => Arc::clone(session),
+                _ => anyhow::bail!(
+                    "no sign-in is running — press Sign in again to start one"
+                ),
+            }
+        };
+        f(session).await
     }
 
     // ---- the update, in the two steps the user takes -------------------------
@@ -2674,6 +2924,7 @@ async fn main() -> Result<()> {
         mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         calendar_watch: Arc::new(Mutex::new(None)),
         last_repair: Arc::new(Mutex::new(None)),
+        signin: Arc::new(Mutex::new(None)),
         calling: Arc::new(Mutex::new(CallingPlane::default())),
         gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         tracker_people: Arc::new(Mutex::new(None)),
@@ -2876,6 +3127,18 @@ async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTrac
         write.send(WsMessage::Text(ev.to_string().into())).await?;
     }
 
+    // And say whether a sign-in is going on right now, for the same reason and with the same
+    // rule: only when there is one. A sign-in is exactly the moment a reader switches device
+    // — they press it on the laptop and pick up the phone for the Authenticator — so a page
+    // that connects mid-flow has to be able to draw the panel it never started.
+    {
+        let signin = ctx.signin_payload().await;
+        if signin["phase"] != "idle" {
+            let ev = json!({ "event": "signin_status", "data": signin });
+            write.send(WsMessage::Text(ev.to_string().into())).await?;
+        }
+    }
+
     loop {
         tokio::select! {
             // incoming requests from the UI
@@ -2968,6 +3231,17 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // network: token-gated as a MACHINE method, refused read-only, and refused
         // again inside the primitive so the automatic caller inherits both.
         "repair_broker" => ctx.start_broker_repair(false).await,
+
+        // Sign in again, from here. The remedy for the failure a container restart cannot
+        // fix: the broker asks a human, and this brings its own window to whichever browser
+        // the app is being read in (see [`teams_lite::signin`] and SIGN-IN.md). Four MACHINE
+        // methods — one signs in as the user, one answers with a picture of a sign-in page,
+        // one presses keys into it, one closes it.
+        "signin_start" => ctx.start_signin(params).await,
+        "signin_status" => ctx.signin_status().await,
+        "signin_frame" => ctx.signin_frame().await,
+        "signin_input" => ctx.signin_input(params).await,
+        "signin_cancel" => ctx.cancel_signin().await,
 
         // The update, in the two steps the user takes: fetch the release binary, then
         // put it in place and restart onto it (see `Ctx::start_update_download` /
@@ -13795,6 +14069,125 @@ mod tests {
     fn repair_broker_passes_with_the_published_token() {
         let params = json!({ "write_token": "tok" });
         assert!(check_write_allowed("repair_broker", &params, Some("tok")).is_ok());
+    }
+
+    #[test]
+    fn serving_a_sign_in_is_gated_but_is_not_outward_facing() {
+        // Nothing here posts to Teams, so none of the four belongs in OUTWARD_METHODS — but
+        // each is far past what a client that merely found this socket may do, so all four
+        // are MACHINE methods. `signin_frame` especially: its answer is a picture of a
+        // password field, which is not a read.
+        for method in ["signin_start", "signin_frame", "signin_input", "signin_cancel"] {
+            assert!(!OUTWARD_METHODS.contains(&method), "{method} posts nothing to Teams");
+            assert_eq!(write_class(method), Some(WriteClass::Machine), "{method}");
+            let err = check_write_allowed(method, &json!({}), Some("tok"))
+                .expect_err("a missing token must refuse");
+            assert!(err.contains("write token"), "{method}: {err}");
+            let refused = check_write_allowed(method, &json!({ "write_token": "tok" }), None)
+                .expect_err("read-only must refuse");
+            assert!(refused.contains("read-only"), "{method}: {refused}");
+            // The refusal has to say what THIS method does, or it reads as boilerplate.
+            assert!(!machine_effect(method).is_empty(), "{method} has no effect sentence");
+        }
+        // Asking how a sign-in is going publishes nothing and presses nothing, so it stays
+        // open — the reading `write_lock_status` already takes for the same reason.
+        assert_eq!(write_class("signin_status"), None);
+    }
+
+    #[test]
+    fn only_the_failure_a_human_can_answer_offers_a_sign_in() {
+        use auth::BrokerFailure::*;
+        // Measured: the broker reached AAD and AAD said `interaction_required`. That is the
+        // one state where the account exists and only a person can move it on.
+        assert!(failure_needs_a_human(Some(Refused)));
+        // NoAccount reads like the case that needs a sign-in most, and is deliberately not
+        // offered: the enrolment is what is gone, and the interactive request has nobody to
+        // name. Everything else is the broker being asleep or unreachable.
+        for failure in [Disconnected, Unresponsive, Unreachable, NoAccount, KeyringLocked, Other] {
+            assert!(!failure_needs_a_human(Some(failure)), "{failure:?}");
+            let state = auth::BrokerState {
+                failure: Some(failure),
+                detail: String::new(),
+                consecutive_failures: 1,
+                scope: teams::SKYPE_SCOPE.to_string(),
+            };
+            // A display that WOULD work, so the only thing deciding here is the failure.
+            let ready = teams_lite::xwindow::DisplayState::Ready { display: ":77".into() };
+            assert!(!can_sign_in(&state, &ready), "{failure:?}");
+            assert!(signin_blocker(&state, &ready).is_empty(), "{failure:?}");
+        }
+        // And a healthy broker offers nothing at all.
+        let ready = teams_lite::xwindow::DisplayState::Ready { display: ":77".into() };
+        assert!(!can_sign_in(&auth::BrokerState::default(), &ready));
+        assert!(signin_blocker(&auth::BrokerState::default(), &ready).is_empty());
+        // The one that DOES offer it — and the display is what can still take it away, with the
+        // reason carried in the same payload.
+        let refused = auth::BrokerState {
+            failure: Some(Refused),
+            detail: String::new(),
+            consecutive_failures: 1,
+            scope: teams::SKYPE_SCOPE.to_string(),
+        };
+        assert!(can_sign_in(&refused, &ready));
+        assert!(signin_blocker(&refused, &ready).is_empty());
+        let gone = teams_lite::xwindow::DisplayState::Missing { display: ":77".into() };
+        assert!(!can_sign_in(&refused, &gone));
+        assert!(signin_blocker(&refused, &gone).contains(":77"));
+    }
+
+    #[test]
+    fn the_idle_signin_payload_is_a_shape_rather_than_a_null() {
+        // The page reads one field to decide whether to draw the panel. `null` would make
+        // "no sign-in" and "a backend too old to know about sign-ins" the same answer.
+        let idle = signin_idle();
+        assert_eq!(idle["phase"], "idle");
+        assert!(idle["window"].is_null());
+        assert_eq!(idle["waited_ms"], 0);
+        // The phase tags the page switches on, in both spellings, so neither side can drift.
+        for phase in [
+            signin::Phase::Starting,
+            signin::Phase::Waiting,
+            signin::Phase::Done,
+            signin::Phase::Cancelled,
+            signin::Phase::Failed(String::new()),
+        ] {
+            assert_ne!(phase.tag(), "idle", "a live phase must not read as idle");
+        }
+    }
+
+    #[test]
+    fn two_presses_in_the_same_instant_cannot_both_start_a_sign_in() {
+        // The claim and the start are under one guard with nothing awaited between them. Two
+        // presses would otherwise both pass the check, and since one interactive call is out at
+        // a time (`auth::interactive_gate`), the loser would sit holding a window nobody reads.
+        let whole = include_str!("server.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        let start = source.find("async fn start_signin").expect("start_signin");
+        let body = &source[start..];
+        let lock = body.find("self.signin.lock()").expect("the claim");
+        let store = body.find("*held = Some(Arc::clone(session))").expect("the store");
+        assert!(lock < store, "the slot is claimed before the session is stored");
+        assert!(
+            !body[lock..store].contains(".await"),
+            "nothing may be awaited between claiming the slot and storing the session"
+        );
+    }
+
+    #[test]
+    fn a_sign_in_acquires_the_scope_the_app_is_broken_on() {
+        // Not the caller's choice: a client naming a scope would be choosing what this machine
+        // authenticates for. With nothing recorded — a healthy broker, or a build that never
+        // stored one — it falls back to the scope every live feature needs.
+        assert_eq!(Ctx::signin_scope(), teams::SKYPE_SCOPE);
+        assert!(Ctx::signin_scope().contains("api.spaces.skype.com"));
+        // And what it really reads is the scope the failure was recorded against, because a
+        // refusal is per resource: a sign-in for the wrong one would mint a token, clear the
+        // state and report success over a feature still dark.
+        let whole = include_str!("server.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        let at = source.find("fn signin_scope()").expect("signin_scope");
+        let body = &source[at..at + source[at..].find("\n    }").unwrap_or(0)];
+        assert!(body.contains("broker_state()"), "the recorded scope decides: {body}");
     }
 
     #[test]

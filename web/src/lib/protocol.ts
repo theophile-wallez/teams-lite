@@ -507,6 +507,51 @@ export type BrokerStatus = {
   can_repair: boolean;
   /** True while a repair runs, so every open client disables its button. */
   repairing: boolean;
+  /** Whether this app can serve the broker's OWN sign-in window for this failure — the
+   *  remedy for the one a container restart cannot fix (see `can_sign_in` in
+   *  src/bin/server.rs, and SIGN-IN.md). All three halves of it are the backend's: which
+   *  failure needs a human, whether this backend may act as the user at all, and whether the
+   *  broker has a display to draw on. Absent on a backend too old to answer, which reads as
+   *  false — the app must not offer a panel nothing can appear in. */
+  can_sign_in?: boolean;
+  /** Why a sign-in cannot be served, when a failure would otherwise call for one: the
+   *  broker's display is gone, or it has none at all. Empty when there is nothing to say. */
+  signin_blocker?: string;
+};
+
+/** Where an interactive sign-in has got to (see `Phase` in src/signin.rs).
+ *
+ *  `idle` is the backend's own "nothing is going on" — a shape rather than a null, so a
+ *  page reads one field and an older backend's silence is never mistaken for a live flow.
+ *  `starting` is the interesting one: the broker may still answer from the machine's own
+ *  Primary Refresh Token, in which case the reader is never shown a page at all. */
+export type SigninPhase = "idle" | "starting" | "waiting" | "done" | "cancelled" | "failed";
+
+/** Wire shape of the backend `signin_status` event and of `signin_status`. */
+export type SigninState = {
+  phase: SigninPhase;
+  /** Why it failed, in words for the reader. Empty unless `phase` is `failed`. */
+  detail: string;
+  /** The scope being acquired — the one the app is broken on. */
+  scope: string;
+  /** The X display the broker draws on, for a bug report. Never chosen by this app. */
+  display: string;
+  waited_ms: number;
+  /** The size of the broker's own window, once it is up. Null in every other phase. */
+  window: { width: number; height: number } | null;
+};
+
+/** What the app holds before the backend has said anything about a sign-in.
+ *
+ *  `idle`, never a hopeful `starting`: a panel that appeared by default would claim a
+ *  sign-in is running on a machine where none is. */
+export const INITIAL_SIGNIN: SigninState = {
+  phase: "idle",
+  detail: "",
+  scope: "",
+  display: "",
+  waited_ms: 0,
+  window: null,
 };
 
 /** Where this page stands with the backend's write lock (its `write_lock_status`

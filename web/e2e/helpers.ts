@@ -504,10 +504,33 @@ export async function emitBrokerStatus(
     consecutive_failures?: number;
     can_repair?: boolean;
     repairing?: boolean;
+    /** Whether this pretend machine can serve the broker's own sign-in window — the remedy
+     *  for the failure a container restart cannot fix (see e2e/signin.spec.ts). */
+    can_sign_in?: boolean;
+    signin_blocker?: string;
   } = {},
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "broker", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Arm what the mock's NEXT sign-in does, or reset the hook.
+ *
+ *  `window` (the default) puts a window up and waits for the reader; `immediate` finishes with
+ *  nobody typing, which is the common case against the real broker; `refuse` answers the
+ *  refusal a machine with no display gives; `fail` ends the flow after the window is up; `hold`
+ *  stays in `starting` with no window, which is where most sign-ins live.
+ *
+ *  A spec MUST reset it, which also forgets a session in flight: one mock process serves the
+ *  whole run, and a sign-in left running would put a dialog over every later spec. */
+export async function armSignin(
+  page: Page,
+  body: { outcome?: "window" | "immediate" | "refuse" | "fail" | "hold"; reset?: boolean },
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "signin", ...body },
   });
   expect(res.ok()).toBeTruthy();
 }

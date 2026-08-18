@@ -2478,7 +2478,10 @@ user. Two independent mechanisms enforce that split:
   `setAvailableHours` from the same file (both assert the MOCK sentinel: against a real backend
   those fields decide when the user's own status is published). For the
   write-lock banner, in both of its
-  causes: `bun run preview -- --out /tmp/wl --write-lock`. For the notification offer —
+  causes: `bun run preview -- --out /tmp/wl --write-lock`. For SIGNING IN AGAIN — the offer,
+  the sign-in that needed nobody, the broker's own window served into the app in both themes,
+  the words typed into it, a phone's width, the cancel and the machine that cannot serve one:
+  `bun run preview -- --out /tmp/si --signin`. For the notification offer —
   the row that asks once, in both themes and at a phone's width:
   `bun run preview -- --out /tmp/notif --notifications`. To review a detail too
   small to read in a
@@ -4491,7 +4494,12 @@ user's. What changes is only what is asked.
   § The local agent) and the user's own CUSTOM AGENTS that answer to a name they chose
   (`src/agent_persona.rs`, see § CUSTOM AGENTS) and the app's own update — the check, the download and the swap
   (`src/update.rs`, see § Updating the app from inside it) — plus the restart the user can
-  ask for without a new build at all (`src/restart.rs`, see § Settings › This app).
+  ask for without a new build at all (`src/restart.rs`, see § Settings › This app), and
+  SIGNING IN AGAIN when the identity broker asks a human — the automatic interactive
+  acquisition that usually needs nobody (in `src/auth.rs`), the session that serves the
+  broker's own window (`src/signin.rs`), the one window it reads and drives over X11
+  (`src/xwindow.rs`) and the frames it sends (`src/png.rs`, a PNG encoder over the `flate2`
+  this crate already carries) — see § Signing in again and SIGN-IN.md.
   A message the service is HOLDING for later carries the moment it is due
   (`store::Message::scheduled_time`, schema v17) so the history can leave it out until then,
   and `scheduled_messages` lists what is waiting — see § Sending a message LATER.
@@ -5152,9 +5160,11 @@ and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
   arrives or leaves until sign-in works — it used to claim the app could read nothing,
   which was the sentence that made a stale app read as a broken one.
 - **What a restart cannot fix says so IN FLOW, never behind a hover.** Only
-  `Disconnected` is repairable here (`BrokerFailure::is_repairable`); `Refused` and
-  `NoAccount` need the user to sign in to Intune again, which is the one remedy on this
-  banner that is theirs to carry out. The button stays visible and inert — a missing one
+  `Disconnected` is repairable here (`BrokerFailure::is_repairable`); `Refused` is now
+  answered by the app itself — the banner offers a sign-in in the browser instead (see
+  § Signing in again) — and `NoAccount` still needs the user to sign in to Intune again,
+  which is the one remedy on this banner that is theirs to carry out. The button stays
+  visible and inert — a missing one
   would read as "nothing can be done" without saying so — and the sentence beside it sits
   in the same slot the repairable branch puts its own footnote in
   (`broker-repair-hint`), because it was a Radix TOOLTIP once and this app is read from a
@@ -5162,6 +5172,132 @@ and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
   button and no words at all. In flow it also lands inside the banner's `aria-live` region
   rather than waiting for a focus. `web/e2e/broker-banner.spec.ts` pins that the words are
   visible with no pointer anywhere near them.
+
+## Signing in again, from the app (the broker's own window, in the browser)
+
+A sign-in breaks in two ways and only one of them is a locked keyring. The other is Entra
+answering `interaction_required` for a resource whose refresh token has died — and until this
+change the app's whole answer was a dead button and the sentence "it needs you to sign in to
+Intune again", which in practice meant SSH to the machine, an `Xvfb`, `x11vnc`, `websockify`,
+noVNC, `openbox` (without a window manager a click focuses nothing, so the password could not
+be typed at all) and `xdotool`. Measured once, by hand: about forty minutes, and it did not
+finish. **SIGN-IN.md is the measured map** — read it before touching any of this.
+`src/auth.rs` holds the automatic half, `src/signin.rs` the session, `src/xwindow.rs` the X
+half, `src/png.rs` the frames, `web/src/lib/signin.ts` every pure decision and
+`web/src/components/signin-panel.tsx` the surface.
+
+**MOST OUTAGES NOW END WITH NOBODY BEING TOLD THERE WAS ONE, and that is one method name.**
+Measured on this tenant on 2026-08-18, on a live outage that had been failing every 30 s for
+hours: `acquireTokenSilently` refused the skype scope with `interaction_required` /
+`token_expired`, and `acquireTokenInteractively` — **the same request, byte for byte** — minted
+the token in under a second with **no window and nobody typing**. The silent path only
+refreshes the resource's own refresh token, which is the thing that had died; the interactive
+one redeems the machine's Primary Refresh Token for that resource. The silent path then worked
+again for both scopes, and the backend reconnected to Teams on its own. So `auth::acquire_token`
+retries interactively on exactly the refusal codes that mean "a human may be needed"
+(`auth::rescue`), and three bounds hold it: a read-only backend never tries, one attempt runs
+at a time, and at most one every `RESCUE_MIN_INTERVAL`. A window that goes up with nobody
+watching is taken back before returning, so the broker's display never collects abandoned
+sign-ins.
+
+**WHEN A HUMAN REALLY IS NEEDED, THE WINDOW COMES TO THE BROWSER.** There is no way around
+the window and it is not for want of looking: the broker refuses a device-code flow on Linux
+(its own binary carries "AcquireTokenWithDeviceCodeFlow is not implemented on Linux platform"),
+it renders the sign-in itself in an embedded WebKitGTK view, an ordinary browser is refused by
+this tenant's Conditional Access, and the Company Portal answers `4rfhk` on an enrolled device.
+So the app serves that one window: a PNG a second, and the reader's keys and taps back.
+Nine rules hold it, and each is pinned by a test:
+
+- **THERE IS NO PASSWORD FIELD, and that is the design.** The reader types into Microsoft's own
+  page and every keystroke travels as one key press (`signin_input`, one character at a time —
+  `parse_key` refuses more). Nothing in this app or its backend assembles, stores or logs a
+  password. A field here would have been the easy shape and the wrong one.
+- **Nothing is served unless THIS backend started a sign-in and it is still running**
+  (`Ctx::with_live_signin`). That is the whole authorization: with no live session there is no
+  frame and no keystroke, so the app can never be asked for a picture of the machine's screen.
+- **A frame is ONE WINDOW, found by the broker's own `WM_CLASS`** — and by its MAP STATE, which
+  only the real thing showed: after a flow ends the broker leaves an **unmapped 10x10 window
+  behind carrying the same class**, and `GetImage` on it is a `BadMatch`. Matched on the class
+  alone, this app reported an X error code where the honest answer was "no sign-in window is
+  open". Never the root window: the display it lives on held six other windows when this was
+  measured, and forty on the container's own.
+- **The display is READ from the broker, never chosen** (`/proc/<pid>/environ`, measured
+  `DISPLAY=:77`). The broker is D-Bus activated and its environment is frozen at activation, so
+  a display chosen here would either be ignored or, worse, strand it — `intune-container` ships
+  a whole script for that bug. A display the broker names and nothing serves is a stated state
+  with a remedy, not a mystery. **This process's own `DISPLAY` is not a fallback either**: on a
+  desktop session it answers `:0`, whose socket exists, so the app offered a sign-in and then
+  watched a display the broker never draws on — ten minutes at `starting`, with the real window
+  left standing somewhere else.
+- **A flow is ended by CLOSING ITS WINDOW, never by `cancelInteractiveFlow`.** Measured: that
+  D-Bus call with an empty body took the broker OFF THE BUS — which is `BrokerFailure::Disconnected`,
+  the one signature whose automatic remedy is restarting the user's whole Intune container. A
+  closed window ends the pending call as a named cancellation (`status: 7`) and the broker stays
+  up. **Cancel also STOPS THE RUN**, because during `starting` there is no window yet: closing
+  alone made Cancel a silent no-op in the phase most sign-ins live in, and left the session live,
+  so no new sign-in could be started for ten minutes.
+- **The window is looked for only while THIS session's own call is out** (`auth::InteractiveTurn`,
+  taken as a value rather than hidden inside the call). Promoted on any viewable broker window, a
+  session drew the one the automatic rescue had put up and was about to close — the reader typing
+  their password into the flow whose token nobody reads, which is the very thing the
+  single-flight turn exists to prevent.
+- **Reading the phase is a READ**: no X, no promotion. `signin_status` is open, so a client that
+  merely found the socket could otherwise flip the recorded phase and set the backend to work on
+  the broker's display, once per call, with no token.
+- **The scope a sign-in acquires is the one that FAILED** (`auth::BrokerState::scope`). A refusal
+  is per resource — measured, Graph minted while the skype scope refused — so signing in for a
+  different one would mint a token, clear the broker's state and report "sign-in works again"
+  over a feature still dark.
+- **A keystroke queue, because a password is a sequence.** The page sends one character per
+  request and CHAINS them: a phone's keyboard (or a password manager) inserts a whole word at
+  once, and fanned out un-awaited against a backend that serves requests concurrently, `Hunter2!`
+  can arrive as `Hnu2te!r` — refused by Microsoft, with nothing in the app able to say why.
+- **The four write methods are `MACHINE_METHODS`; asking how it is GOING is open.**
+  `signin_start` authenticates as the user, `signin_frame` answers with a picture of a sign-in
+  page and `signin_input` presses keys into it — so `signin_frame` is gated as hard as the
+  rest, because a read whose answer is somebody's password field is not a read. `signin_status`
+  publishes no pixels and no keys, so it stays open like `write_lock_status`. The automation
+  hook blocks all four against a live port.
+- **The banner offers exactly ONE remedy** (`brokerRemedy`, pure and unit-tested): the container
+  restart where a restart is the cause, the sign-in where a human is, and where a sign-in is
+  what is needed and the machine cannot serve one, the button stays visible and inert with the
+  backend's own sentence under it — IN FLOW, because on a phone a hover is a sentence that does
+  not exist. Two buttons would ask the reader to know which failure they have, which is the
+  thing they opened the app to be told.
+- **`NoAccount` is deliberately NOT offered a sign-in**, though it reads like the case that
+  needs one most: with no account the interactive request has nobody to name, and what is gone
+  is the device's enrolment — `intune-container`'s business rather than a token's.
+- **The state is the APP's, not the panel's**, and it rides the greeting. A sign-in is exactly
+  when a reader changes device — press it on the laptop, pick the phone up for the
+  Authenticator — so a page that connects mid-flow draws the panel it never started. The FRAMES
+  are the panel's alone: a PNG a second has no business in the whole app's state.
+
+The scope a sign-in acquires is the backend's choice and never the caller's
+(`Ctx::signin_scope`): a client naming one would be choosing what this machine authenticates
+for. The panel is bounded and scrolls, because the content is a picture 675 px tall and the
+Cancel button was off the screen below it — the spec caught that by not being able to click it.
+
+`web/mock/server.ts` reproduces the whole flow with no broker, no X display and no tenant: it
+DRAWS its own sign-in page as a real PNG (`mockSigninFrame`, over the same `pngChunk` writer the
+inline-picture fixtures use), with a number to match and one dot per character typed — which is
+what makes this surface reviewable at all, since the one thing a reader must be able to do is
+read a number off somebody else's window. Its `{kind:"signin"}` hook arms what the next sign-in
+does (`window`, `immediate`, `refuse`, `fail`) and **a spec MUST reset it**: one mock process
+serves the whole run, and a sign-in left running puts a dialog over every later spec.
+`cd web && bun run preview -- --out /tmp/si --signin` captures the offer in both themes, the
+sign-in that needed nobody, the window in both themes, the words typed into it, a phone's width,
+the cancel and the machine that cannot serve one; `web/e2e/signin.spec.ts` pins every rule
+above, and `examples/signin_window_recon.rs` re-measures the window against the real broker,
+read-only.
+
+**What is UNVERIFIED against the tenant is the pairing.** The automatic half is measured end to
+end on a real outage (above). Of the served half, every piece is measured through this crate's
+own code — the display, the window's identity, a 34 KB frame of the real branded page, typing
+six characters into it (three shifted) and seeing six dots, and the close that cancels cleanly
+— but **nobody has typed a real password into a teams-lite frame and come out with a token**,
+because that needs a PRT this side cannot expire on purpose. Number matching through the served
+window is unmeasured for the same reason. Do not write a number into SIGN-IN.md that nothing
+measured; run `examples/signin_window_recon.rs` instead.
 
 ## Conventions
 

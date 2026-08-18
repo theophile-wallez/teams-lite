@@ -15,6 +15,7 @@ import { GitLabDiffPage } from "./gitlab-diff-page";
 import { GitLabJobLogPage } from "./gitlab-job-log-page";
 import { IncomingCallBanner } from "./incoming-call-banner";
 import { AppToaster } from "./app-toaster";
+import { SigninPanel } from "./signin-panel";
 import { Splash } from "./splash";
 import { TrackerRefsProvider } from "./tracker-refs-context";
 import { useChatSections } from "./use-chat-sections";
@@ -439,6 +440,12 @@ function AppInner() {
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+
+      {/* Signing in again, when the identity broker asks a human. It draws itself off the
+          app's own `signin` state, so it appears on whichever page is open — including one
+          that connects mid-flow, which is the normal way this is used: press it on the
+          laptop, finish it on the phone (see signin-panel.tsx and SIGN-IN.md). */}
+      <SigninPanel />
 
       {/* The real call, over the awareness banner: one is a call this machine can
           answer, the other is a note that a call happened somewhere. */}

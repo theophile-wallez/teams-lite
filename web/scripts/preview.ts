@@ -1231,6 +1231,92 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // Signing in again: the banner's second button, the panel that usually needs nobody, the
+  // broker's own window served into the app, the words a reader acts on, and the two ways a
+  // sign-in ends. Driven through the mock's own control plane — the real thing needs a Primary
+  // Refresh Token that has expired, which is not a state a capture can arrange (SIGN-IN.md § 4).
+  if (args.includes("--signin")) {
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      const panel = '[data-testid="signin-panel"]';
+      const broken = {
+        kind: "broker",
+        ok: false,
+        signature: "refused",
+        message: "The identity broker refused to sign in silently.",
+        can_repair: false,
+        can_sign_in: true,
+      };
+
+      // The offer: the failure a container restart cannot fix, with the button that answers it.
+      await emit(broken);
+      await page.locator('[data-testid="broker-signin"]').waitFor({ state: "visible" });
+      await shot(`${out}-offered-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-offered-dark.png`, '[data-testid="broker-banner"]');
+      await setTheme("light");
+
+      // The common case, and the one worth capturing first: the machine does it on its own and
+      // no page is ever shown.
+      await emit({ kind: "signin", outcome: "immediate" });
+      await page.locator('[data-testid="broker-signin"]').click();
+      await page.locator(`${panel}[data-phase="done"]`).waitFor();
+      await shot(`${out}-done-light.png`, panel);
+      await page.locator('[data-testid="signin-close"]').click();
+
+      // The window itself: Microsoft's own page, served into the app. Both themes, because the
+      // frame is somebody else's white page and how it sits in a dark app is the thing a
+      // screenshot answers.
+      await emit(broken);
+      await emit({ kind: "signin", outcome: "window" });
+      await page.locator('[data-testid="broker-signin"]').click();
+      await page.locator(`${panel}[data-phase="waiting"]`).waitFor();
+      await page.locator('[data-testid="signin-frame"]').waitFor({ state: "visible" });
+      await shot(`${out}-window-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-window-dark.png`, panel);
+
+      // Typed into: the mock draws a dot per character, so this is the state a reader sees
+      // while they work — and it is what proves the keystrokes reach the page.
+      await page.locator('[data-testid="signin-keyboard"]').fill("hunter2");
+      await page.waitForTimeout(1200);
+      await shot(`${out}-typed-dark.png`, panel);
+
+      // A phone, which is where this is really used: press it on the laptop, finish it here.
+      await page.setViewportSize({ width: 390, height: 780 });
+      await page.waitForTimeout(300);
+      await shot(`${out}-phone-dark.png`);
+      await page.setViewportSize({ width: 1200, height: 900 });
+      await page.locator('[data-testid="signin-cancel"]').click();
+      await page.locator(`${panel}[data-phase="cancelled"]`).waitFor();
+      await shot(`${out}-cancelled-dark.png`, panel);
+      await page.locator('[data-testid="signin-close"]').click();
+
+      // And the machine that cannot serve one at all: the button is there and inert, with the
+      // backend's own sentence under it — in flow, because a phone has no hover.
+      await emit({
+        ...broken,
+        can_sign_in: false,
+        signin_blocker:
+          "The identity broker draws its sign-in window on display :77, and nothing is serving " +
+          "that display, so the window cannot appear at all. Restarting Intune on this machine " +
+          "puts it back.",
+      });
+      await page.locator('[data-testid="broker-signin"]').waitFor({ state: "visible" });
+      await shot(`${out}-blocked-dark.png`, '[data-testid="broker-banner"]');
+
+      // Leave the shared mock healthy, and its sign-in hook reset: one mock process serves the
+      // whole run, and a sign-in left running puts a dialog over every later capture.
+      await emit({ kind: "signin", reset: true });
+      await emit({ kind: "broker", ok: true });
+      console.log(
+        `[preview] wrote ${out}-offered-{light,dark}.png, ${out}-done-light.png, ` +
+          `${out}-window-{light,dark}.png, ${out}-typed-dark.png, ${out}-phone-dark.png, ` +
+          `${out}-cancelled-dark.png and ${out}-blocked-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // The write-lock banner: what the sidebar says when this page holds a token its backend
   // does not accept — every read answers, every send is refused, and nothing else in the app
   // shows it. Driven through the mock's own control plane, and reloaded after arming because
