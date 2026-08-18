@@ -196,6 +196,7 @@ import {
   type Appearance,
   type ResolvedTheme,
 } from "./appearance";
+import { scheduledNote } from "./schedule-send";
 import { sendFailureMessage } from "./send-failure";
 import {
   DEFAULT_SOUNDS_ENABLED,
@@ -380,6 +381,14 @@ export type AppState = {
    *  `removeSentWords` follows for the words. It names the conversation and the game as well
    *  as the ply, so a move pending in one thread can never be drawn onto another one's board. */
   chessPending: { conversation: string; game: string; ply: number; san: string } | null;
+  /** Where the words went when the last send in the OPEN conversation was SCHEDULED, in
+   *  one sentence naming the moment (see {@link scheduledNote}), or null when nothing is
+   *  waiting.
+   *
+   *  It is the mirror of {@link sendError} and it is drawn in the same place, for the same
+   *  reason: the box is cleared and the message is NOT in the thread yet — Teams is
+   *  holding it — so without this line the words simply vanished. */
+  scheduleNote: string | null;
   replyingTo: PendingReply | null;
   /** The notifications panel's three activity streams (newest-first each), one
    *  per tab: Activity, Mentions, Following. */
@@ -825,6 +834,7 @@ function initialState(): AppState {
     sendError: null,
     chessError: null,
     chessPending: null,
+    scheduleNote: null,
     replyingTo: null,
     notifications: { activity: [], mentions: [], following: [] },
     notificationsUnread: 0,
@@ -4414,6 +4424,8 @@ export class TeamsController {
       // reader just left must not be drawn onto the board of the one they opened.
       chessError: null,
       chessPending: null,
+      // And so does the note about a message that is waiting to go out.
+      scheduleNote: null,
       messages: cached?.messages ?? [],
       hasMoreOlder: cached?.has_more ?? false,
       loadingMessages: !cached,
@@ -4569,6 +4581,7 @@ export class TeamsController {
       sendError: null,
       chessError: null,
       chessPending: null,
+      scheduleNote: null,
     });
   }
 
@@ -5843,12 +5856,19 @@ export class TeamsController {
    *
    * `mentions` says who the body's mention spans name (the spans themselves carry only
    * an index), which is what makes Teams notify those people.
+   *
+   * `scheduledAt` (epoch ms) hands the message to Teams to deliver at that moment instead
+   * of now. It is the same request either way — the service holds it, so nothing here
+   * waits and the app may be closed when it goes out — and it is reported the same way: a
+   * failure at the composer, and for a scheduled one a note saying where the words went,
+   * because they leave the box and the message is not in the thread yet.
    */
   async sendDraft(
     text: string,
     html?: string,
     images: SendImage[] = [],
     mentions?: OutboundMention[],
+    scheduledAt?: number,
   ): Promise<boolean> {
     const id = this.get().openId;
     if (!id) return false;
@@ -5863,7 +5883,7 @@ export class TeamsController {
       : undefined;
 
     try {
-      await this.backend.send(id, clean, replyTo, richHtml, images, mentions);
+      await this.backend.send(id, clean, replyTo, richHtml, images, mentions, scheduledAt);
     } catch (e) {
       // Both surfaces, and each has its reader. The status line keeps the RAW failure,
       // which is what a developer reads off a screenshot; the composer gets one sentence
@@ -5871,7 +5891,9 @@ export class TeamsController {
       // lib/send-failure.ts). Only the open conversation is told: the message failed in
       // this one, and a sentence about it hanging over another thread would name nothing.
       this.set({ status: `send failed: ${errText(e)}` });
-      if (this.get().openId === id) this.set({ sendError: sendFailureMessage(e) });
+      if (this.get().openId === id) {
+        this.set({ sendError: sendFailureMessage(e), scheduleNote: null });
+      }
       playCue("error");
       return false;
     }
@@ -5896,6 +5918,9 @@ export class TeamsController {
         scrollToBottomNonce: this.get().scrollToBottomNonce + 1,
         // A message that left answers the last one that did not.
         sendError: null,
+        // A scheduled one is the only send that leaves nothing in the thread, so it says
+        // so; an ordinary one takes that note back, because the message IS there now.
+        scheduleNote: scheduledAt ? scheduledNote(scheduledAt) : null,
       });
     }
     return true;

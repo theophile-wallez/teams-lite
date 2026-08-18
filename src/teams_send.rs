@@ -347,6 +347,11 @@ fn validate_dimension(name: &str, value: Option<u32>) -> Result<()> {
 /// Send a message to a conversation. Returns the clientmessageid used (useful
 /// for optimistic echo correlation).
 ///
+/// `scheduled_ms`, when set, hands the message to Teams to DELIVER LATER: the service
+/// holds it and posts it at that moment, so nothing on this machine has to be running
+/// then. It is the same POST either way — see [`parse_scheduled_time`] for the field and
+/// what measured it.
+///
 /// `text` is the raw user input for a plain-text send. `content_html`, when set,
 /// is the rich message body already normalized to the Teams-safe HTML subset by
 /// the web client (see web/src/lib/rich-text.ts `serializeTeamsHtml`); it is
@@ -380,6 +385,7 @@ pub async fn send_message(
     images: &[ImageUpload],
     emoji_ids: &[String],
     mentions: &[Mention],
+    scheduled_ms: Option<i64>,
 ) -> Result<Sent> {
     let chat = session
         .endpoint("chatService")
@@ -416,6 +422,7 @@ pub async fn send_message(
         &ams_images,
         emoji_ids,
         mentions,
+        scheduled_ms,
     )?;
 
     let resp = http
@@ -930,6 +937,7 @@ fn build_body(
     images: &[AmsImage],
     emoji_ids: &[String],
     mentions: &[Mention],
+    scheduled_ms: Option<i64>,
 ) -> Result<serde_json::Value> {
     let content = message_content(text, reply_to, content_html, images);
     let mut body = json!({
@@ -949,7 +957,29 @@ fn build_body(
         body["amsreferences"] = json!(ams_refs);
     }
     attach_mentions(&mut body, &content, mentions)?;
+    if let Some(ms) = scheduled_ms {
+        // Teams reads it as a quoted string, and only under `properties` — the top-level
+        // spellings are ignored and the message posts at once (see `parse_scheduled_time`).
+        set_property(&mut body, SCHEDULED_SEND_TIME, json!(ms.to_string()));
+    }
     Ok(body)
+}
+
+/// Write ONE `properties` field without dropping the others already there.
+///
+/// `properties` carries both halves this app writes — who a mention names, and when Teams
+/// is to deliver the message — so an assignment would silently drop whichever was written
+/// first. That is not a hypothetical: a scheduled send that also mentions somebody is the
+/// exact shape it would break, and it fails invisibly (blue text notifying nobody, or a
+/// message that goes out at once).
+fn set_property(body: &mut Value, name: &str, value: Value) {
+    let Some(object) = body.as_object_mut() else { return };
+    let properties = object
+        .entry("properties")
+        .or_insert_with(|| json!({}));
+    if let Some(properties) = properties.as_object_mut() {
+        properties.insert(name.to_string(), value);
+    }
 }
 
 /// Write `properties.mentions` onto a message body, refusing a mention the body does not
@@ -981,8 +1011,49 @@ fn attach_mentions(body: &mut Value, content: &str, mentions: &[Mention]) -> Res
             })
         })
         .collect();
-    body["properties"] = json!({ "mentions": Value::Array(list).to_string() });
+    set_property(body, "mentions", json!(Value::Array(list).to_string()));
     Ok(())
+}
+
+/// The `properties` field that makes Teams HOLD a message until a moment in the future.
+///
+/// MEASURED against the real tenant (2026-08-17, `examples/scheduled_send_probe.rs`): six
+/// candidate spellings over two encodings. `properties.scheduledsendtime` as a quoted
+/// epoch-millisecond string is what the service acts on; every top-level spelling —
+/// `scheduledsendtime`, `scheduledSendTime`, `deliverytime` — is ignored and the message
+/// posts immediately, which is the failure mode this constant exists to prevent. The
+/// `/scheduledmessages` collection paths all answer 404: there is no separate resource,
+/// and a held message is read back with `?view=scheduled` on the ordinary messages
+/// endpoint.
+pub const SCHEDULED_SEND_TIME: &str = "scheduledsendtime";
+
+/// The furthest ahead a message may be scheduled — Slack's own ceiling, 120 days.
+///
+/// It is a sanity bound rather than a service limit: the point is that a caller which
+/// sent SECONDS where milliseconds were meant lands in 1970 and is refused as past, and
+/// one that multiplied by a thousand lands in the year 56 000 and is refused here.
+pub const MAX_SCHEDULE_AHEAD_MS: i64 = 120 * 24 * 60 * 60 * 1000;
+
+/// Read the optional `scheduled_time` a `send` may carry: epoch milliseconds, in the
+/// future, within [`MAX_SCHEDULE_AHEAD_MS`]. Absent means "post it now".
+///
+/// This is the trust boundary — a client supplies the moment — so a value that could not
+/// be delivered is refused HERE rather than handed to Teams, which would either post it
+/// at once or hold it beyond any horizon the user could see.
+pub fn parse_scheduled_time(params: &Value) -> Result<Option<i64>> {
+    let Some(value) = params.get("scheduled_time").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let ms = value
+        .as_i64()
+        .context("scheduled_time must be epoch milliseconds")?;
+    let now = now_ms();
+    anyhow::ensure!(ms > now, "that moment has already passed");
+    anyhow::ensure!(
+        ms - now <= MAX_SCHEDULE_AHEAD_MS,
+        "a message can be scheduled at most 120 days ahead"
+    );
+    Ok(Some(ms))
 }
 
 /// Build the edit request body (pure, unit-tested). There is no reply markup and —
@@ -1199,6 +1270,7 @@ mod tests {
             std::slice::from_ref(&image),
             &[],
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(body["amsreferences"], json!(["0-weu-d1-image"]));
@@ -1227,7 +1299,7 @@ mod tests {
             height: None,
         };
         let images = [image(1), image(2), image(3)];
-        let body = build_body("9", "", "Me", None, Some("<p>three shots</p>"), &images, &[], &[]).unwrap();
+        let body = build_body("9", "", "Me", None, Some("<p>three shots</p>"), &images, &[], &[], None).unwrap();
         assert_eq!(body["amsreferences"], json!(["id-1", "id-2", "id-3"]));
         let content = body["content"].as_str().unwrap();
         assert!(content.starts_with("<p>three shots</p>"));
@@ -1375,7 +1447,7 @@ mod tests {
 
     #[test]
     fn body_has_required_fields() {
-        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, &[], &[], &[]).unwrap();
+        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, &[], &[], &[], None).unwrap();
         assert_eq!(b["clientmessageid"], "12345");
         assert_eq!(b["content"], "hi &lt;there&gt;");
         assert_eq!(b["messagetype"], "RichText/Html");
@@ -1386,13 +1458,13 @@ mod tests {
     #[test]
     fn rich_content_html_is_forwarded_as_content() {
         let html = "<p>hi <strong>bold</strong> <a href=\"https://x\">link</a></p>";
-        let b = build_body("9", "", "Me", None, Some(html), &[], &[], &[]).unwrap();
+        let b = build_body("9", "", "Me", None, Some(html), &[], &[], &[], None).unwrap();
         assert_eq!(b["content"], html);
     }
 
     #[test]
     fn empty_rich_content_html_falls_back_to_plain() {
-        let b = build_body("9", "plain", "Me", None, Some(""), &[], &[], &[]).unwrap();
+        let b = build_body("9", "plain", "Me", None, Some(""), &[], &[], &[], None).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1422,7 +1494,7 @@ mod tests {
             after: "new <reply>".into(),
         };
 
-        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, &[], &[], &[]).unwrap();
+        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, &[], &[], &[], None).unwrap();
 
         assert_eq!(
             b["content"],
@@ -1476,10 +1548,10 @@ mod tests {
 
     #[test]
     fn plain_text_is_trimmed_before_it_goes_out() {
-        let b = build_body("1", "  hi there\n\n", "Me", None, None, &[], &[], &[]).unwrap();
+        let b = build_body("1", "  hi there\n\n", "Me", None, None, &[], &[], &[], None).unwrap();
         assert_eq!(b["content"], "hi there");
         // A body of whitespace only becomes empty rather than a blank message.
-        let b = build_body("1", " \n\t ", "Me", None, None, &[], &[], &[]).unwrap();
+        let b = build_body("1", " \n\t ", "Me", None, None, &[], &[], &[], None).unwrap();
         assert_eq!(b["content"], "");
         // An edit trims the same way.
         let b = build_edit_body("\n updated \n", None, "Me", &[]).unwrap();
@@ -1507,13 +1579,13 @@ mod tests {
 
     #[test]
     fn html_body_is_trimmed_on_send_and_on_edit() {
-        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), &[], &[], &[]).unwrap();
+        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), &[], &[], &[], None).unwrap();
         assert_eq!(b["content"], "<p>hi</p>");
         let b = build_edit_body("", Some(" <p>answer</p><p></p>"), "Me", &[]).unwrap();
         assert_eq!(b["content"], "<p>answer</p>");
         // An html body of spacers only falls back to the plain text, as an empty
         // one already did.
-        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), &[], &[], &[]).unwrap();
+        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), &[], &[], &[], None).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1549,7 +1621,7 @@ mod tests {
             display_name: "John".into(),
         }];
         let html = mention_html(0, "John");
-        let body = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions).unwrap();
+        let body = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None).unwrap();
         assert_eq!(body["content"], html, "the span stays in the body verbatim");
         // `properties.mentions` is a JSON-encoded STRING — the shape the read path
         // decodes and the shape the tenant accepted.
@@ -1569,7 +1641,7 @@ mod tests {
 
     #[test]
     fn a_message_with_no_mention_carries_no_properties() {
-        let body = build_body("9", "hi", "Me", None, None, &[], &[], &[]).unwrap();
+        let body = build_body("9", "hi", "Me", None, None, &[], &[], &[], None).unwrap();
         assert!(body.get("properties").is_none());
     }
 
@@ -1583,8 +1655,8 @@ mod tests {
             display_name: "John".into(),
         }];
         let html = mention_html(0, "John");
-        assert!(build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions).is_err());
-        assert!(build_body("9", "plain text", "Me", None, None, &[], &[], &mentions).is_err());
+        assert!(build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None).is_err());
+        assert!(build_body("9", "plain text", "Me", None, None, &[], &[], &mentions, None).is_err());
     }
 
     #[test]
@@ -1597,7 +1669,7 @@ mod tests {
             display_name: "John".into(),
         }];
         let html = mention_html(0, "John");
-        let sent = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions).unwrap();
+        let sent = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None).unwrap();
         let edited = build_edit_body("", Some(&html), "Me", &mentions).unwrap();
         assert_eq!(edited["properties"], sent["properties"]);
         assert_eq!(edited["content"], html);
@@ -1606,6 +1678,64 @@ mod tests {
         assert!(build_edit_body("", Some(&html), "Me", &invisible).is_err());
         // An edit with no mention carries no `properties`, as before.
         assert!(build_edit_body("hi", None, "Me", &[]).unwrap().get("properties").is_none());
+    }
+
+    #[test]
+    fn a_scheduled_send_carries_the_one_property_the_service_reads() {
+        // The MEASURED shape: `properties.scheduledsendtime`, a QUOTED epoch-millisecond
+        // string. A number, or the same name at the top level, is ignored by the service
+        // and the message posts at once — which is the one outcome this must never have.
+        let at = 1_800_000_000_000_i64;
+        let body = build_body("9", "later", "Me", None, None, &[], &[], &[], Some(at)).unwrap();
+        assert_eq!(body["properties"][SCHEDULED_SEND_TIME], json!(at.to_string()));
+        assert!(body["properties"][SCHEDULED_SEND_TIME].is_string());
+        assert!(body.get(SCHEDULED_SEND_TIME).is_none());
+        // And an ordinary send carries no trace of it, so nothing is ever held by accident.
+        let now = build_body("9", "now", "Me", None, None, &[], &[], &[], None).unwrap();
+        assert!(now.get("properties").is_none());
+    }
+
+    #[test]
+    fn a_scheduled_send_that_mentions_somebody_keeps_both_halves() {
+        // `properties` carries both, so an assignment would silently drop whichever was
+        // written first — a mention notifying nobody, or a message posted immediately.
+        // Neither failure is visible, which is why this test exists.
+        let mentions = vec![Mention {
+            itemid: 0,
+            mri: "8:orgid:abc-123".into(),
+            display_name: "John".into(),
+        }];
+        let html = mention_html(0, "John");
+        let at = 1_800_000_000_000_i64;
+        let body =
+            build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, Some(at)).unwrap();
+        assert_eq!(body["properties"][SCHEDULED_SEND_TIME], json!(at.to_string()));
+        let named: Value =
+            serde_json::from_str(body["properties"]["mentions"].as_str().unwrap()).unwrap();
+        assert_eq!(named[0]["mri"], "8:orgid:abc-123");
+    }
+
+    #[test]
+    fn a_scheduled_moment_is_bounded_at_the_trust_boundary() {
+        let now = now_ms();
+        // Absent means "post it now", which is every send this app made before the feature.
+        assert_eq!(parse_scheduled_time(&json!({})).unwrap(), None);
+        assert_eq!(parse_scheduled_time(&json!({ "scheduled_time": null })).unwrap(), None);
+        // A moment in the future is taken verbatim.
+        let ahead = now + 60_000;
+        assert_eq!(parse_scheduled_time(&json!({ "scheduled_time": ahead })).unwrap(), Some(ahead));
+        // A moment that has passed is refused rather than posted at once.
+        assert!(parse_scheduled_time(&json!({ "scheduled_time": now - 1 })).is_err());
+        // SECONDS where milliseconds were meant lands in 1970 — caught as past.
+        assert!(parse_scheduled_time(&json!({ "scheduled_time": now / 1000 })).is_err());
+        // And milliseconds multiplied again lands past every horizon a reader could see.
+        assert!(parse_scheduled_time(&json!({ "scheduled_time": now * 1000 })).is_err());
+        assert!(
+            parse_scheduled_time(&json!({ "scheduled_time": now + MAX_SCHEDULE_AHEAD_MS + 1_000 }))
+                .is_err()
+        );
+        // Not a number at all.
+        assert!(parse_scheduled_time(&json!({ "scheduled_time": "tomorrow" })).is_err());
     }
 
     #[test]
@@ -1708,7 +1838,7 @@ mod tests {
     }
 
     fn build_body_for_test_with_refs(refs: &[String]) -> Value {
-        build_body("1", "", "Me", None, None, &[], refs, &[]).unwrap()
+        build_body("1", "", "Me", None, None, &[], refs, &[], None).unwrap()
     }
 
     #[tokio::test]

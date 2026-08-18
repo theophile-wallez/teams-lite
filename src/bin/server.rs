@@ -3919,6 +3919,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(teams_send::parse_mentions)
                 .transpose()?
                 .unwrap_or_default();
+            // When Teams is to deliver it, if not now. It rides in this method's params
+            // exactly as the pictures and the mentions do: `send` is already an
+            // OUTWARD_METHODS entry, the consent is the user's own click on Schedule, and
+            // one POST is the whole feature — the service holds the message and posts it
+            // at that moment, so nothing on this machine has to be running then.
+            let scheduled_ms = teams_send::parse_scheduled_time(params)?;
 
             // Custom emoji: read the pack's art for each code in the outbound body, so
             // the `:shipit:` codes become Teams' own inline emoji markup with the bytes
@@ -3974,6 +3980,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &images,
                             &emoji_ids,
                             &mentions,
+                            scheduled_ms,
                         )
                         .await
                     }
@@ -10205,6 +10212,9 @@ async fn agent_send(
                 // An agent's answer mentions nobody: it is a reply, and a machine must
                 // not be able to notify a colleague.
                 &[],
+                // Never scheduled: the answer is posted now and EDITED as it is written,
+                // and a message Teams is holding has no body to edit.
+                None,
             )
             .await
         }

@@ -263,6 +263,10 @@ type CapturedSend = {
   /** Who the body's mention spans name, by the itemid each span carries. What a spec
    *  asserts on to prove a mention actually left the composer. */
   mentions?: OutboundMention[];
+  /** When Teams is to DELIVER the message, in epoch milliseconds — absent for an ordinary
+   *  send. What a spec asserts on to prove the moment the reader picked really left the
+   *  composer, since a held message appears in no thread. */
+  scheduled_time?: number;
 };
 
 /** One @mention as the composer sends it (mirrors the Rust `teams_send::Mention`). */
@@ -5774,6 +5778,29 @@ function parseSendMentions(value: unknown): OutboundMention[] {
   return out;
 }
 
+/** How far ahead a send may be scheduled — `teams_send::MAX_SCHEDULE_AHEAD_MS`. */
+const MOCK_MAX_SCHEDULE_AHEAD_MS = 120 * 24 * 60 * 60 * 1000;
+
+/**
+ * Read the optional moment a send is FOR, mirroring `teams_send::parse_scheduled_time`
+ * refusal for refusal: epoch milliseconds, in the future, inside the 120-day ceiling.
+ *
+ * The refusals are the point. A mock that took a moment which has already passed would let
+ * a spec prove a control that the real backend rejects.
+ */
+function parseScheduledTime(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error("scheduled_time must be epoch milliseconds");
+  }
+  const now = Date.now();
+  if (value <= now) throw new Error("that moment has already passed");
+  if (value - now > MOCK_MAX_SCHEDULE_AHEAD_MS) {
+    throw new Error("a message can be scheduled at most 120 days ahead");
+  }
+  return value;
+}
+
 /** Build the AMS inline-image HTML Teams returns after a successful upload. */
 function sentImageContent(image: SendImage): string {
   nextSentImage += 1;
@@ -6853,6 +6880,10 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const contentHtml = typeof rawHtml === "string" && rawHtml.length > 0 ? rawHtml : undefined;
       const images = parseSendImages(input);
       const mentions = parseSendMentions(input.mentions);
+      // When Teams is to deliver it. Refused here exactly as
+      // `teams_send::parse_scheduled_time` refuses it: a mock that accepts what the
+      // backend would not hides the bug instead of failing a test.
+      const scheduledTime = parseScheduledTime(input.scheduled_time);
       if (TEST_HOOKS) {
         capturedSends.push({
           conversation: id,
@@ -6861,18 +6892,26 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           ...(contentHtml ? { content_html: contentHtml } : {}),
           ...(images.length > 0 ? { images } : {}),
           ...(mentions.length > 0 ? { mentions } : {}),
+          ...(scheduledTime !== undefined ? { scheduled_time: scheduledTime } : {}),
         });
         if (testSendError) throw new Error(testSendError);
         if (testSendDelayMs > 0) {
           return new Promise((resolve) => {
             setTimeout(() => {
-              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
+              if (scheduledTime === undefined) {
+                scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
+              }
               resolve({ sent: true });
             }, testSendDelayMs);
           });
         }
       }
-      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
+      // A SCHEDULED message never echoes into the thread: the real service is holding it,
+      // and a mock that showed it at once would make the note the composer draws — "it is
+      // not here yet, Teams sends it later" — read as a bug.
+      if (scheduledTime === undefined) {
+        scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
+      }
       return { sent: true };
     }
 

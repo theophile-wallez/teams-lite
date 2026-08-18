@@ -3042,6 +3042,49 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // Sending later: the moments the composer offers, the picker for any other one, and
+  // the line that says where the words went once Teams is holding the message.
+  //
+  // Nothing leaves the machine: the mock takes the moment and refuses the same ones the
+  // backend would (see `parseScheduledTime` in web/mock/server.ts).
+  if (args.includes("--schedule")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openFirstConversation(page);
+      await typeInComposer(page, "Ship it in the morning");
+      await page.locator('[data-testid="composer-schedule"]').click();
+      await page.locator('[data-testid="composer-schedule-menu"]').waitFor();
+      await shot(`${out}-menu-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-menu-dark.png`);
+      await setTheme("light");
+      // A moment that has passed, refused before the send rather than by one.
+      const custom = page.locator('[data-testid="composer-schedule-custom"]');
+      const gone = new Date(Date.now() - 3 * 60 * 60 * 1000);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      await custom.fill(
+        `${gone.getFullYear()}-${pad(gone.getMonth() + 1)}-${pad(gone.getDate())}` +
+          `T${pad(gone.getHours())}:${pad(gone.getMinutes())}`,
+      );
+      await page.locator('[data-testid="composer-schedule-confirm"]').click();
+      await page.locator('[data-testid="composer-schedule-error"]').waitFor();
+      await shot(`${out}-refused-light.png`);
+      // And the queued state: the box is empty, the thread has nothing new, and the one
+      // line under the field is what accounts for the words.
+      await page.keyboard.press("Escape");
+      await page.locator('[data-testid="composer-schedule"]').click();
+      await page.locator('[data-testid="composer-schedule-preset"]').first().click();
+      await page.locator('[data-testid="composer-schedule-note"]').waitFor();
+      await shot(`${out}-queued-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-queued-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-menu-{light,dark}.png, ${out}-refused-light.png and ` +
+          `${out}-queued-{light,dark}.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // The chat list's own sections and the "…" menu that fills them: Teams' settings
   // for one chat (pin, mute, hide, mark read), and what each one does to the list.
   //

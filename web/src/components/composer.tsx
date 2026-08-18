@@ -22,6 +22,7 @@ import {
 import { agentCandidatesFor, type OutboundMention } from "~/lib/mentions";
 import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
+import { ScheduleSendMenu } from "./schedule-send-menu";
 import { useAppState, useController } from "./controller-context";
 import type { CustomEmoji } from "~/lib/custom-emoji";
 import { unicodeShortcodes } from "~/lib/emoji-shortcodes";
@@ -92,6 +93,9 @@ export function Composer(props: {
   // Why the last send in this thread did not leave, in one sentence. The controller
   // sets it and clears it on the next send that works (see `sendDraft`).
   const sendError = useAppState((s) => s.sendError);
+  // Where the words went when the last send here was SCHEDULED. The mirror of `sendError`,
+  // in the same place: the box is empty and the message is not in the thread yet.
+  const scheduleNote = useAppState((s) => s.scheduleNote);
   const replyingTo = useAppState((s) => s.replyingTo);
   const openId = useAppState((s) => s.openId);
   // Who this thread can @mention. Loaded on the first "@" (see
@@ -131,6 +135,11 @@ export function Composer(props: {
   // only writes back when it is still the newest one for this conversation.
   const selectionVersion = useRef(0);
   const sendVersion = useRef(0);
+  // The moment the NEXT send is for, or null for now. A ref rather than an argument
+  // because the rich editor serializes itself and calls back into `send`, so nothing can
+  // be threaded through that hop — and it is read once and cleared, so a scheduled press
+  // can never make the Enter after it a scheduled send too.
+  const scheduledAtRef = useRef<number | null>(null);
 
   // Restore the format bar preference on the client (kept out of SSR to avoid a
   // hydration mismatch — the server renders the bar closed, which is the default).
@@ -258,6 +267,8 @@ export function Composer(props: {
     html?: string,
     mentions?: OutboundMention[],
   ): Promise<boolean> => {
+    const scheduledAt = scheduledAtRef.current;
+    scheduledAtRef.current = null;
     if (sendingRef.current || imageLoading) return false;
     const clean = text.trim();
     const richHtml = html?.trim() || undefined;
@@ -267,7 +278,13 @@ export function Composer(props: {
     const version = ++sendVersion.current;
     sendingRef.current = true;
     setSending(true);
-    const sent = await controller.sendDraft(text, richHtml, submitted.map(sendImage), mentions);
+    const sent = await controller.sendDraft(
+      text,
+      richHtml,
+      submitted.map(sendImage),
+      mentions,
+      scheduledAt ?? undefined,
+    );
     if (sendVersion.current !== version) return sent;
     sendingRef.current = false;
     setSending(false);
@@ -281,8 +298,12 @@ export function Composer(props: {
 
   const canSend = !sending && !imageLoading && (images.length > 0 || !richEmpty);
 
-  const submit = () => {
+  /** Send the composer's snapshot — now, or at `scheduledAt` if the reader picked a
+   *  moment. One path for both, so a scheduled message carries the same pictures, the
+   *  same mentions and the same reply as the one Enter would have sent. */
+  const submit = (scheduledAt: number | null = null) => {
     if (!canSend) return;
+    scheduledAtRef.current = scheduledAt;
     // An empty field with a picked image is a valid send: the image travels with an
     // empty body, so the editor has nothing to serialize.
     if (richEmpty) void send("");
@@ -425,6 +446,14 @@ export function Composer(props: {
               {sendError}
             </div>
           )}
+          {/* Where the words went when the last send here was queued for later. It sits
+              where a failure does, because it answers the same question — the box is empty
+              and nothing has appeared in the thread. */}
+          {scheduleNote && (
+            <div data-testid="composer-schedule-note" className="text-xs text-text-dim">
+              {scheduleNote}
+            </div>
+          )}
 
           {/* The one input field: a bare-looking rich editor that hands a pasted image
               to `handlePaste` instead of inserting it as content. The placeholder under
@@ -517,30 +546,36 @@ export function Composer(props: {
               </button>
             </div>
 
-            <button
-              type="button"
-              aria-label={sending ? "Sending message" : "Send message"}
-              title="Send (Enter)"
-              data-testid="composer-send"
-              disabled={!canSend}
-              onClick={submit}
-              className={cn(
-                "grid size-8 shrink-0 cursor-pointer place-items-center rounded-full transition-all disabled:cursor-default",
-                canSend
-                  ? "bg-primary text-primary-foreground shadow-chip hover:brightness-110 active:brightness-95"
-                  : "bg-element text-text-faint",
-              )}
-            >
-              {sending ? (
-                <HugeiconsIcon
-                  icon={Loading02Icon}
-                  className="size-4 animate-spin"
-                  strokeWidth={1.8}
-                />
-              ) : (
-                <HugeiconsIcon icon={SentIcon} className="size-4" strokeWidth={1.8} />
-              )}
-            </button>
+            <div className="flex items-center gap-1.5">
+              {/* "Send later" — the same send, with a moment in it (see
+                  schedule-send-menu.tsx). It sits beside Send because that is the choice
+                  it offers: now, or then. */}
+              <ScheduleSendMenu canSend={canSend} onSchedule={(at) => submit(at)} />
+              <button
+                type="button"
+                aria-label={sending ? "Sending message" : "Send message"}
+                title="Send (Enter)"
+                data-testid="composer-send"
+                disabled={!canSend}
+                onClick={() => submit()}
+                className={cn(
+                  "grid size-8 shrink-0 cursor-pointer place-items-center rounded-full transition-all disabled:cursor-default",
+                  canSend
+                    ? "bg-primary text-primary-foreground shadow-chip hover:brightness-110 active:brightness-95"
+                    : "bg-element text-text-faint",
+                )}
+              >
+                {sending ? (
+                  <HugeiconsIcon
+                    icon={Loading02Icon}
+                    className="size-4 animate-spin"
+                    strokeWidth={1.8}
+                  />
+                ) : (
+                  <HugeiconsIcon icon={SentIcon} className="size-4" strokeWidth={1.8} />
+                )}
+              </button>
+            </div>
           </div>
         </div>
       </div>

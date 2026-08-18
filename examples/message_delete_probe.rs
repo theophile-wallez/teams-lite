@@ -45,6 +45,8 @@ async fn main() -> Result<()> {
         &[],
         // A probe mentions nobody: a mention notifies the person it names.
         &[],
+        // Posted now: this probe deletes what it posts.
+        None,
     )
     .await
     .context("post the message to delete")?;

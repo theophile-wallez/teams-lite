@@ -154,6 +154,10 @@ export type CapturedSend = {
     width?: number;
     height?: number;
   }[];
+  /** When Teams is to DELIVER the message, in epoch milliseconds. Present only when the
+   *  reader scheduled it — a held message appears in no thread, so this is the only proof
+   *  the moment they picked really left the composer. */
+  scheduled_time?: number;
 };
 
 /** Configure the mock's next sends. Always reset the control after a failure test,

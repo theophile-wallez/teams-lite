@@ -547,12 +547,17 @@ export class Backend {
     contentHtml?: string,
     images: SendImage[] = [],
     mentions?: OutboundMention[],
+    scheduledTime?: number,
   ): Promise<{ sent: boolean }> {
     return this.writeRequest<{ sent: boolean }>("send", {
       conversation,
       text,
       reply_to: replyTo,
       content_html: contentHtml,
+      // When Teams is to DELIVER it, in epoch milliseconds — absent means now. The
+      // service holds the message until then, so this is one ordinary send with one more
+      // field in it rather than a queue on this machine.
+      scheduled_time: scheduledTime,
       // Who the message @mentions. The body's mention spans carry only an index; this
       // list is what tells Teams whom each index names, so they are notified.
       mentions: mentions && mentions.length > 0 ? mentions : undefined,

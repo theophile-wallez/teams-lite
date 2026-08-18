@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         &[],
         &[],
         &mentions,
+        None,
     )
     .await
     .context("send the mention")?;
