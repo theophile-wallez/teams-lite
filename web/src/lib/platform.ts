@@ -42,6 +42,32 @@ export function hasModifier(event: Pick<KeyboardEvent, "ctrlKey" | "metaKey">): 
 }
 
 /**
+ * Whether a modal DIALOG is open right now — the one thing the app's own global shortcuts
+ * have to stand aside for.
+ *
+ * A dialog dismisses itself on Escape, and the primitive behind it (`@radix-ui/react-dialog`)
+ * keeps a layer stack so only the top one reacts. What that stack cannot reach is a listener
+ * on `document` that is not part of it: the app shell's own Escape, which leaves the open pane
+ * (see components/app.tsx). Both fired, so Escape in a form inside Settings closed the form
+ * AND navigated out of Settings — taking the reader's place with it.
+ *
+ * It asks the DOM rather than tracking state, because the alternative is every dialog in the
+ * app remembering to tell the shell it exists, and the one that forgets is the bug. The
+ * selector is the primitive's own contract: its content carries `role="dialog"`.
+ *
+ * `data-state` is deliberately NOT tested, and that is the whole of why a first attempt at
+ * this did nothing. Radix listens for Escape in the CAPTURE phase, so by the time this
+ * bubble-phase handler runs the dialog it just dismissed already reads `closed` — the
+ * element is still mounted (it has an exit animation) but the state has moved. Matching a
+ * dialog in EITHER state is also the right rule rather than a workaround: while one is
+ * animating away it is still what the reader's Escape was aimed at.
+ */
+export function aModalIsOpen(): boolean {
+  if (typeof document === "undefined") return false;
+  return document.querySelector('[role="dialog"]') !== null;
+}
+
+/**
  * The modifier label to render in a hint, resolved on the client only.
  *
  * The page is server-rendered, and the server has no idea which keyboard will read

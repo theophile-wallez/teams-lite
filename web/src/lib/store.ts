@@ -79,6 +79,7 @@ import {
   UNKNOWN_WRITE_LOCK,
 } from "./protocol";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
+import type { AgentPersonaPatch } from "./agent-persona";
 import {
   AGENT_RUN_STALE_MS,
   agentRunIsLive,
@@ -1057,6 +1058,11 @@ export class TeamsController {
   // a replaced emoji shows its new art rather than keeping the old one until reload.
   private customEmojiCache = new Map<string, Promise<string | null>>();
   private customEmojiObjectUrls: string[] = [];
+  /** One custom agent's face as a blob URL, keyed by `<name>@<updated_ms>` so a REPLACED
+   *  picture is a different key: a persona's row changes far more often than an emoji's, and
+   *  a cache keyed by name alone would draw the old face until a reload. */
+  private personaAvatarCache = new Map<string, Promise<string | null>>();
+  private personaAvatarObjectUrls: string[] = [];
 
   // The pack ITSELF, one promise for the whole page (see `loadCustomEmoji`).
   private customEmojiList: Promise<CustomEmoji[]> | null = null;
@@ -1469,6 +1475,14 @@ export class TeamsController {
     // The custom emoji pack changed — here, or in the other backend sharing this store.
     // Evict the blob URLs and notify listeners, so a replaced emoji shows its new art
     // rather than keeping the old one until a reload.
+    // Another page — or the other backend on this machine — changed a custom agent. The
+    // status is re-read rather than patched: the personas ride inside it, so one read keeps
+    // the composer's "@", every chip and the Settings pane in step at once.
+    on("agent_personas_changed", () => {
+      this.forgetPersonaAvatars();
+      void this.loadAgentStatus();
+    });
+
     on("custom_emoji_changed", () => {
       this.forgetCustomEmoji();
     });
@@ -5243,6 +5257,71 @@ export class TeamsController {
     this.set({ agent: status });
     playCue("success");
     return status;
+  }
+
+  /**
+   * Create or change one of the user's CUSTOM AGENTS, and adopt the status it answers with.
+   *
+   * The whole status comes back, exactly as it does from the other agent setters, so the
+   * pane draws the backend's own answer rather than a local guess — a refused write leaves
+   * what is really stored on screen. Rejects with the backend's reason (a name already
+   * taken, a picture that is not an image), which the dialog says.
+   */
+  async saveAgentPersona(patch: AgentPersonaPatch): Promise<AgentStatus> {
+    const status = await this.backend.agentPersonaSave(patch);
+    this.set({ agent: status });
+    // The face may have been replaced, and its cache key moves with `updated_ms` — but the
+    // OLD blob is still held, so it is dropped here rather than left for the page's life.
+    this.forgetPersonaAvatars();
+    return status;
+  }
+
+  /** Forget one custom agent. `@bebou` is a plain word from the next message on. */
+  async removeAgentPersona(name: string): Promise<AgentStatus> {
+    const status = await this.backend.agentPersonaRemove(name);
+    this.set({ agent: status });
+    this.forgetPersonaAvatars();
+    return status;
+  }
+
+  /**
+   * Resolve one custom agent's face to a local blob object URL, fetching the bytes through
+   * the backend. Null when it has none.
+   *
+   * Cached and de-duplicated per name AND per version: a history of forty bubbles from one
+   * persona costs one request, and replacing the picture costs exactly one more. A "no face"
+   * miss is cached so it is never re-requested; a transient failure is evicted for a retry —
+   * the shape {@link customEmojiUrl} already has, because it is the same problem.
+   */
+  agentPersonaAvatarUrl(name: string, version: number): Promise<string | null> {
+    if (!name) return Promise.resolve(null);
+    const key = `${name}@${version}`;
+    const cached = this.personaAvatarCache.get(key);
+    if (cached) return cached;
+
+    const pending = (async () => {
+      const res = await this.backend.agentPersonaAvatar(name);
+      if (!res.data_base64) return null;
+      const blob = new Blob([base64ToArrayBuffer(res.data_base64)], {
+        type: res.content_type || "application/octet-stream",
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      this.personaAvatarObjectUrls.push(objectUrl);
+      return objectUrl;
+    })();
+
+    this.personaAvatarCache.set(key, pending);
+    pending.catch(() => this.personaAvatarCache.delete(key));
+    return pending;
+  }
+
+  /** Drop every cached face. Called when this app changes a persona and when the other
+   *  backend sharing this store does (`agent_personas_changed`), so two open pages agree —
+   *  the reason `forgetCustomEmoji` exists, for the same failure. */
+  private forgetPersonaAvatars(): void {
+    this.personaAvatarCache.clear();
+    for (const objectUrl of this.personaAvatarObjectUrls) URL.revokeObjectURL(objectUrl);
+    this.personaAvatarObjectUrls = [];
   }
 
   /**

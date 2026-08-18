@@ -49,6 +49,10 @@ async fn main() -> Result<()> {
         "`{}` is not on PATH",
         backend.program
     );
+    // The probe drives a PROVIDER run, so the line every body signs itself with is the
+    // provider's own. A custom agent's is the same one function with its name in it (see
+    // `agent_policy::Signature`), and nothing here needs a second spelling of it.
+    let signer = agent_policy::Signature::of(backend);
 
     let http = reqwest::Client::new();
     let session = teams::connect(&http).await.context("connect to Teams")?;
@@ -63,7 +67,7 @@ async fn main() -> Result<()> {
         SANDBOX_THREAD,
         "",
         None,
-        Some(&agent_policy::thinking_html(backend)),
+        Some(&agent_policy::thinking_html(&signer)),
         &[],
         &[],
         &[],
@@ -77,7 +81,7 @@ async fn main() -> Result<()> {
     let request = agent::Request {
         backend,
         prompt: prompt.clone(),
-        system_prompt: agent_policy::system_prompt(backend, "teams-lite sandbox"),
+        system_prompt: agent_policy::system_prompt(backend.name, "teams-lite sandbox"),
         resume_session: None,
         workspace: agent::default_workspace(),
         // The read-only default, never what the store happens to hold: a probe that
@@ -125,7 +129,7 @@ async fn main() -> Result<()> {
             }
             // `reply_html` mentions nobody, which is what this probe wants: it posts
             // to the sandbox channel and a mention notifies a real person.
-            let html = agent_policy::reply_html(backend, &current.text, false);
+            let html = agent_policy::reply_html(&signer, &current.text, false);
             teams_send::edit_message(
                 &http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html), &[],
             )
@@ -141,8 +145,8 @@ async fn main() -> Result<()> {
 
     // 3. Land the authoritative answer.
     let html = match &outcome {
-        Ok(outcome) => agent_policy::reply_html(backend, &outcome.text, true),
-        Err(e) => agent_policy::failure_html(backend, &e.to_string()),
+        Ok(outcome) => agent_policy::reply_html(&signer, &outcome.text, true),
+        Err(e) => agent_policy::failure_html(&signer, &e.to_string()),
     };
     teams_send::edit_message(&http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html), &[])
         .await

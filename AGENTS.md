@@ -524,6 +524,12 @@ Five rules hold it together. Each one is load-bearing, and each is pinned by a t
   with the user's files in reach, so a trigger a colleague could type is remote code
   execution with a friendly syntax. Never relax this to "a mention of the app", and
   never to "an allowlist of colleagues".
+- **The user can NAME their own agents, and each name is one more address.** `@bebou` runs a
+  provider this machine already holds, wearing a face, a label, a model and an instruction the
+  user wrote (see § CUSTOM AGENTS). Every rule in this section applies to one unchanged,
+  because a persona changes only WHICH NAME is looked for — the program still comes from the
+  static table, the conversation still has to be opted in, and the reply still signs itself,
+  with the persona's name inside the signature.
 - **The address may sit ANYWHERE in the message, and that is all it takes.** `@claude` is
   read as a word of its own wherever it stands, and the prompt is the whole message minus
   that word (`agent_policy::split_prefix` / `address_in` / `prompt_without`): "which port
@@ -2307,7 +2313,10 @@ user. Two independent mechanisms enforce that split:
   For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
-  `bun run preview -- --out /tmp/ask --answer-with`. For a tracker REFERENCE drawn as a
+  `bun run preview -- --out /tmp/ask --answer-with`. For the user's own CUSTOM AGENTS — the
+  Settings section, the form, the name a persona may not take, the "@" list that offers them
+  beside the providers, the chip and one answering under its own face:
+  `bun run preview -- --out /tmp/ca --custom-agents`. For a tracker REFERENCE drawn as a
   chip — in a chat message, in an agent's own answer and in a merge request's
   description: `bun run preview -- --out /tmp/ref --tracker-refs`. For the typing hint above the
   composer, one typist then three: `bun run preview -- --out /tmp/typ --typing`
@@ -3930,6 +3939,12 @@ notifies a colleague, a tag starts a program on this machine.
   `@claude` in this app and not two). It never says a stranger started a program on the
   user's machine — nothing on their bubble names this machine, and the reply that follows is
   attributed to the account it went out under, which is theirs.
+- **The user's own CUSTOM AGENTS are offered here too, after the providers** (see
+  § CUSTOM AGENTS). A persona is that provider wearing a name, so its row draws its own face
+  and label while the chip keeps the vendor's palette — and it is offered on exactly the terms
+  its provider is, since `@bebou` would otherwise summon nothing. The providers come FIRST
+  because they are a fixed short list a reader learns once, and the personas grow: a menu whose
+  first row moved as agents were added would have to be read every time.
 - `web/mock/server.ts` seeds the sandbox thread as a conversation of its own
   (`seedAgentSandbox`), so the tag is exercised in the state a fresh backend is really in:
   one thread opted in, every other off — plus the other machine's half, a colleague's own
@@ -3937,6 +3952,125 @@ notifies a colleague, a tag starts a program on this machine.
   pair reviewable with no second tenant. `cd web && bun run preview -- --out /tmp/tag
   --agent-tag` captures the list, both chips, the sent bubble and theirs, and
   `web/e2e/agent-tag.spec.ts` pins every rule above.
+
+## CUSTOM AGENTS (`@bebou` — a name of the user's own, in Settings › Custom agents)
+
+`@claude` summons a CLI. `@bebou` summons the same CLI wearing a face, a name and a standing
+instruction the user wrote — so a thread can hold a review bot, a French boomer aunt and an
+ordinary assistant, each addressed by WHO it is rather than by which program runs it.
+`src/agent_persona.rs` is the record and every rule about it, `web/src/lib/agent-persona.ts`
+the page's half, and `web/src/components/custom-agents-settings.tsx` the pane that makes one.
+
+**A PERSONA IS AN ADDRESS, NEVER A PROGRAM.** That is the whole safety story, and it is why
+this feature needed no new gate of its own. `agent_policy::BACKENDS` is a static table for a
+stated reason — the program a Teams message can start is not something a message, or a client
+that found the socket, gets to choose — and a persona is a row that POINTS at one of its
+entries. What it adds is a name to summon it by, a picture, a model already inside
+`is_valid_model`, and text prepended to the prompt. So `@bebou` goes through the same
+`command_for` as `@claude`: the `from_me` gate holds, the conversation still has to be opted
+in, the provider switch still silences it, and a stale frame is still a replay. A stored row
+naming a provider this build does not hold is DROPPED by the read rather than defaulted
+(`Store::agent_personas`), because falling back would start a program the user never named.
+
+- **The PREPROMPT leads the prompt, and appears in no message.** It is the point of the
+  feature: `/bebou` turns every request into that character, and a paragraph of review
+  instructions turns one into a review bot. It leads rather than trails and sits OUTSIDE the
+  context blocks (`Persona::lead`, applied in `agent_request`) for three reasons — instructions
+  before the material is the shape every prompt in this app takes, it is the one position where
+  a SLASH COMMAND still reads as a command, and it works identically for both CLIs, since
+  opencode has no `--append-system-prompt` and reads its instructions at the top of the message.
+  The system prompt names the agent instead (`system_prompt` takes `Command::identity`, the
+  persona's own label), so a model is told it is Natacha rather than claude.
+- **The reply signs itself with its own name, and that ONE spelling is the whole feature's
+  identity.** `agent_policy::Signature` writes `— bebou (claude), via teams-lite` where a
+  provider run writes `— claude, via teams-lite` — byte for byte what it always wrote, so every
+  reply already in a thread keeps rendering. Three readers depend on the two forms agreeing:
+  the bodies write it, the LOOP GUARD reads it back (`is_agent_answer`, so a run cannot answer
+  itself), and the page reads it back (`agentAuthorship`, which is how a reply answered from a
+  phone draws under its agent's face). The guard recognises the persona form by its SHAPE —
+  `<word> (<a provider we know>)` — and never by looking the persona up: a run whose persona
+  the user deleted mid-answer still signed itself, and reading that answer as a request is
+  exactly the loop it exists to prevent. A run a restart abandoned is closed from the two names
+  its `agent_runs` row wrote down (`Signature::stored`), for the same reason.
+- **A SESSION is per agent, not per provider.** `agent_session_key` gains a segment, because a
+  review bot and a boomer aunt in one thread must not be handed each other's context — with the
+  preprompt of one leading a conversation the other has been having. A provider run keeps
+  EXACTLY the key it always had, so no thread loses the session it is in the middle of.
+- **A persona may not take a provider's name.** `@claude` resolves to the provider before any
+  persona (`split_address` prefers the earliest address and a provider breaks a tie), so a row
+  called `claude` would be one the user can see, edit and never summon — with an instruction
+  they believe leads every `@claude` run. `agent_persona::check_name` refuses it, and the
+  dialog says so as the name is typed.
+- **The name is the ADDRESS and the LABEL is what a reader sees.** The name is one lowercase
+  word, because it becomes part of a `@…` the backend has to find in a sentence and see END —
+  a `.` would collide with a sentence ending on an address, a space would make it two words.
+  The label is free ("Natacha"), and a case-only difference is KEPT: an address must be
+  lowercase and a name a reader sees should not be, so folding the case dropped exactly the
+  labels the field exists for. The dialog repairs what it can as it is typed ("@Review Bot" →
+  `review-bot`) rather than teaching the charset one keystroke at a time.
+- **A persona with no face wears the mark of the provider it runs** (`AgentMark`). Never a
+  blank square and never a letter in a circle: a persona is a program answering, not a person
+  in the thread. That fallback is also what a message whose persona this machine no longer
+  holds draws — and it is the honest answer, because that message really was answered by that
+  CLI. The face rides its own read (`agent_persona_avatar`, base64, the shape
+  `custom_emoji_image` already has) and is cached per name AND per `updated_ms`, so a replaced
+  picture is a different key rather than one that draws the old face until a reload.
+- **The face and the name arrive from the STORE, and a body renders without one.**
+  `useOptionalAppState` is the seam: `RichContent` is pure given its props (which is what lets
+  it be server-rendered and unit-tested with no DOM), so a chip in a message resolves what it
+  can and falls back to the address and the provider's mark. That is the same answer a deleted
+  persona gets, so it adds no state to reason about.
+- **The tool allowlist stays MACHINE-WIDE, deliberately.** A persona cannot widen what an agent
+  may DO — `agent_set_tools` is the one consent surface for that — because a name and a picture
+  are not a consent gate: a "deploy bot" must not hold permissions its author granted by naming
+  it. A persona's MODEL is per agent (it inherits the provider's when it names none, so a
+  persona that is only a character does not go stale the day the user changes it in Settings).
+- **NOTHING about a persona travels, and that is the user's own decision.** Teams holds no
+  notion of one, so there is no upstream to publish to and nothing to reconcile — it is a local
+  override like a nickname or a pinned chat. A colleague's own `@bebou` is therefore a WORD
+  here, exactly as `@natacha` is on a machine that never made one: marking it from OUR list
+  would draw their message under a face the user chose, for an agent they did not address. What
+  their reply DOES carry is its own signature, which is where their agent's name really comes
+  from.
+- **`agent_persona_save` and `agent_persona_remove` are `MACHINE_METHODS` entries**, gated for
+  the reason `agent_set_tools` is: a row decides what a later `@bebou` will do in a thread the
+  user opted in. The automation hook blocks a script that names either against a live port.
+  Reading the list stays open — it rides inside `agent_status`, so every surface that already
+  offers an agent gets it with no second read, and both writes answer with the whole fresh
+  status exactly as the other four agent setters do. The PREPROMPT travels to the page, unlike
+  a token in `get_settings`: it is not a credential but the user's own instruction, and the
+  pane that edits one has to show what is there.
+- **The composer's "@" offers them; a message's "…" menu does NOT.** The providers come first
+  (a fixed short list a reader learns once, so the first row does not move as agents are added),
+  then the personas, each offered only where its own provider would answer. A row per agent in
+  the message menu would turn a column of actions on one message into a directory of programs
+  before the reader has said what they want — the rule the default provider already exists for.
+- **The LIVE bubble draws the persona from the FIRST frame** (`persona` on `agent_stream`), and
+  the phase line names it too. A bubble that wore the vendor's mark until the run ended and then
+  swapped to the persona's face would show the reader a change for no reason, and "Claude is
+  thinking" over a message sent to Bebou reads as the wrong agent having picked it up.
+- **A dialog owns Escape, and the shell stands aside** (`aModalIsOpen` in
+  `web/src/lib/platform.ts`). The app's own Escape leaves the open pane and is not part of the
+  dialog's layer stack, so both fired: Escape in this form — and in Add emoji, which had the
+  same defect — closed the form AND navigated out of Settings, taking the reader's place with
+  it. It matches a dialog in EITHER state, because Radix dismisses on CAPTURE and the one it
+  just closed already reads `closed` by the time a bubble-phase handler runs.
+- **The composer's chip owns its own DOM** (`ignoreMutation` on the node view). A custom agent's
+  face arrives one round trip after the chip is drawn, and ProseMirror re-parses the node a
+  mutation it did not make landed in — so that swap was read as the reader editing the
+  document.
+
+`web/mock/server.ts` reproduces the whole feature with no CLI and no tenant: two agents, and
+the PAIR is deliberate — `bebou` has a real PNG face and an instruction, `natacha` has neither
+and therefore wears Claude's own mark, so both halves of the fallback rule are on screen at
+once. Its trigger resolves a persona exactly as the backend does (`mockAgentAddress`), and the
+`{kind:"agent_personas"}` test hook resets the set — a spec that adds, edits or removes one
+MUST call it, since one mock process serves the whole run. `cd web && bun run preview -- --out
+/tmp/ca --custom-agents` captures the Settings section in both themes, the form, the name a
+persona may not take, the "@" list, the chip and a persona answering; `web/e2e/custom-agents.spec.ts`
+pins every rule above, including that the instruction reaches no message. **What is unverified
+against the tenant is the pairing**: the signature, the trigger and the prompt are pinned in
+Rust and against the mock, so what is untested is one real `@bebou` run in the user's own app.
 
 ## Renaming a person, and giving them a face (LOCAL, and gated)
 
@@ -4108,7 +4242,8 @@ user's. What changes is only what is asked.
   those trackers got first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
-  § The local agent) and the app's own update — the check, the download and the swap
+  § The local agent) and the user's own CUSTOM AGENTS that answer to a name they chose
+  (`src/agent_persona.rs`, see § CUSTOM AGENTS) and the app's own update — the check, the download and the swap
   (`src/update.rs`, see § Updating the app from inside it) — plus the restart the user can
   ask for without a new build at all (`src/restart.rs`, see § Settings › This app).
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).

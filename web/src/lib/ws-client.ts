@@ -8,6 +8,7 @@
 //   event    <- { event, data }        (server push)
 
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
+import type { AgentPersonaPatch } from "./agent-persona";
 import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { CallPreparation, CallStatus, MeetingAddress } from "./call";
 import type { SendImage } from "./composer-image";
@@ -920,6 +921,32 @@ export class Backend {
    *  itself is finalized with the answer so far by the run's own path, not by this call. */
   agentStop(runId: string): Promise<{ stopped: boolean }> {
     return this.writeRequest<{ stopped: boolean }>("agent_stop", { run_id: runId });
+  }
+  /** Create or change one of the user's CUSTOM AGENTS (see lib/agent-persona.ts). The name
+   *  is the key: an unknown one creates, a known one edits.
+   *
+   *  A WRITE request: a row here decides what a later `@bebou` does in a thread the user
+   *  opted in — which CLI starts, which model reads it, what instruction leads the prompt (a
+   *  `MACHINE_METHODS` entry in src/bin/server.rs, refused read-only). Returns the whole
+   *  status, like the four setters above, so the pane draws the backend's own answer. */
+  agentPersonaSave(patch: AgentPersonaPatch): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_persona_save", { ...patch });
+  }
+  /** Forget one custom agent. `@bebou` is a plain word again from the next message on; a
+   *  reply it already posted still draws under its own name, which is read out of that
+   *  message's own signature rather than out of this list.
+   *
+   *  A WRITE request, gated like the save above. */
+  agentPersonaRemove(name: string): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_persona_remove", { name });
+  }
+  /** One custom agent's face, or empty strings when it has none. An open read, and kept out
+   *  of the status for the reason emoji art is kept out of the pack: a list is asked for on
+   *  every connect and ten faces is megabytes. */
+  agentPersonaAvatar(name: string): Promise<{ content_type: string; data_base64: string }> {
+    return this.request<{ content_type: string; data_base64: string }>("agent_persona_avatar", {
+      name,
+    });
   }
   /** Fetch the notifications panel's three activity streams — Activity, Mentions
    *  and Following — in one round-trip. None is a chat: the backend fetches them

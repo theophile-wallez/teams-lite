@@ -41,6 +41,8 @@ declare module "@tiptap/core" {
       insertAgentTag: (options: {
         backend: string;
         prefix: string;
+        /** The custom agent this tag summons, by address, or absent for the provider. */
+        persona?: string | null;
         from: number;
         to: number;
       }) => ReturnType;
@@ -59,6 +61,7 @@ declare module "@tiptap/core" {
       leadAgentTag: (options: {
         backend: string;
         prefix: string;
+        persona?: string | null;
         request: string;
       }) => ReturnType;
     };
@@ -88,6 +91,20 @@ export const AgentTagNode = Node.create({
         parseHTML: (element) => element.textContent ?? "",
         renderHTML: () => ({}),
       },
+      // Which CUSTOM AGENT the tag summons, by address — what makes the chip draw its own
+      // face and label rather than the vendor's mark (see components/agent-tag.tsx).
+      //
+      // It is written to the markup and read back, unlike `prefix`, because the prefix
+      // cannot answer it: `@bebou` says the address without saying it is a persona, and a
+      // draft re-parsed from `editor.getHTML()` would otherwise come back as a plain
+      // provider tag with the wrong mark on it. Nothing about it reaches TEAMS — the node's
+      // own text is all `renderText` and the send path carry (see the module note above).
+      persona: {
+        default: "",
+        parseHTML: (element) => element.getAttribute("data-agent-persona") ?? "",
+        renderHTML: (attributes) =>
+          attributes.persona ? { "data-agent-persona": attributes.persona } : {},
+      },
     };
   },
 
@@ -110,26 +127,37 @@ export const AgentTagNode = Node.create({
   },
 
   addNodeView() {
-    return ReactNodeViewRenderer(AgentTagView, { as: "span" });
+    return ReactNodeViewRenderer(AgentTagView, {
+      as: "span",
+      // The node view owns every DOM change inside itself, and this is NOT a nicety: a
+      // CUSTOM AGENT's chip draws that agent's FACE, which arrives one round trip later
+      // (`usePersonaAvatar`) and replaces the vendor's `<svg>` with an `<img>`. ProseMirror
+      // watches the editable for mutations it did not make and re-parses the node they
+      // landed in — so that swap was read as the reader editing the document, and the atom
+      // was re-parsed out of existence: the chip vanished the moment the next character was
+      // typed. Nothing here is editable content, so there is no mutation this view wants
+      // ProseMirror to act on.
+      ignoreMutation: () => true,
+    });
   },
 
   addCommands() {
     return {
       insertAgentTag:
-        ({ backend, prefix, from, to }) =>
+        ({ backend, prefix, persona, from, to }) =>
         ({ chain }) =>
           chain()
             .focus()
             .insertContentAt({ from, to }, [
-              { type: this.name, attrs: { backend, prefix } },
+              { type: this.name, attrs: { backend, prefix, persona: persona ?? "" } },
               { type: "text", text: " " },
             ])
             .run(),
 
       leadAgentTag:
-        ({ backend, prefix, request }) =>
+        ({ backend, prefix, persona, request }) =>
         ({ chain, state }) => {
-          const tag = { type: this.name, attrs: { backend, prefix } };
+          const tag = { type: this.name, attrs: { backend, prefix, persona: persona ?? "" } };
           // The tag is followed by a space either way: a prefix glued to the next word
           // summons nothing.
           const words = { type: "text", text: request ? ` ${request}` : " " };

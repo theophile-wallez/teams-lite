@@ -54,6 +54,15 @@ export function agentDisplayName(backend: string): string {
 export type AgentAuthorship = {
   /** Which CLI wrote it. */
   backend: AgentBackendName;
+  /** The CUSTOM AGENT that answered, by address (`bebou`), or null for a plain provider
+   *  run — read out of the `bebou (claude)` form the backend signs one with
+   *  (`agent_policy::Signature`).
+   *
+   *  It is a NAME and never a lookup: a reply is read back out of the message itself, so a
+   *  persona the user has since renamed or deleted still draws under the name it answered
+   *  as. What the local record adds, when it still holds one, is the label and the face
+   *  (see components/agent-persona-mark.tsx). */
+  persona: string | null;
   /** The message with the signature line removed — the answer itself. Empty while the
    *  reply is still only a placeholder. */
   bodyHtml: string;
@@ -69,9 +78,19 @@ export type AgentAuthorship = {
 const SIGNATURE = /<p>\s*<em>\s*([^<]*?)\s*<\/em>\s*<\/p>\s*$/i;
 /** A backend name, as a signature spells it. */
 const NAME = "[a-z0-9][a-z0-9._-]{0,23}";
-const SIGNED = new RegExp(`^—\\s*(${NAME}),\\s*via teams-lite$`, "i");
-const WRITING = new RegExp(`^(${NAME}) is (?:writing|thinking)…?$`, "i");
-const FAILED = new RegExp(`^(${NAME}) could not answer:\\s*(.*)$`, "i");
+/**
+ * WHO signed, in either shape the backend writes: `claude`, or `bebou (claude)` for one of
+ * the user's own custom agents.
+ *
+ * The persona half is optional in the pattern rather than a fourth set of regexes, so the
+ * three states below (signed, writing, failed) each keep ONE spelling — the backend has one
+ * too (`agent_policy::Signature`), and three of these times two shapes is where a body
+ * signed one way and recognised another would come from.
+ */
+const SIGNER = `(?:(${NAME}) \\((${NAME})\\)|(${NAME}))`;
+const SIGNED = new RegExp(`^—\\s*${SIGNER},\\s*via teams-lite$`, "i");
+const WRITING = new RegExp(`^${SIGNER} is (?:writing|thinking)…?$`, "i");
+const FAILED = new RegExp(`^${SIGNER} could not answer:\\s*(.*)$`, "i");
 
 /**
  * Read a message's agent signature, or null when it has none.
@@ -94,27 +113,43 @@ export function agentAuthorship(message: ChatMessage): AgentAuthorship | null {
 
   const signed = SIGNED.exec(line);
   if (signed) {
-    const backend = knownBackend(signed[1]);
-    return backend && { backend, bodyHtml, pending: false, failure: null };
+    const who = signerIn(signed);
+    return who && { ...who, bodyHtml, pending: false, failure: null };
   }
   const writing = WRITING.exec(line);
   if (writing) {
-    const backend = knownBackend(writing[1]);
-    return backend && { backend, bodyHtml, pending: true, failure: null };
+    const who = signerIn(writing);
+    return who && { ...who, bodyHtml, pending: true, failure: null };
   }
   const failed = FAILED.exec(line);
   if (failed) {
-    const backend = knownBackend(failed[1]);
+    const who = signerIn(failed);
     return (
-      backend && {
-        backend,
+      who && {
+        ...who,
         bodyHtml,
         pending: false,
-        failure: (failed[2] ?? "").trim() || `${backend} could not answer`,
+        failure: (failed[4] ?? "").trim() || `${who.persona ?? who.backend} could not answer`,
       }
     );
   }
   return null;
+}
+
+/**
+ * Who a matched signature names: the backend, and the custom agent when there is one.
+ *
+ * Null when the CLI is one this app does not know, which is the rule that makes "a message
+ * signed by a name we know" different from "a message ending in a dash and the words via
+ * teams-lite". The persona name is NOT checked against anything — it is whatever the machine
+ * that wrote the reply called its own agent, and the whole point is that this app can draw
+ * it without holding that record.
+ */
+function signerIn(match: RegExpExecArray): { backend: AgentBackendName; persona: string | null } | null {
+  // Groups 1–2 are the persona form (`bebou (claude)`), group 3 the plain one.
+  const persona = (match[1] ?? "").toLowerCase() || null;
+  const backend = knownBackend(persona ? match[2] : match[3]);
+  return backend && { backend, persona };
 }
 
 /** The backend a signature names, when we know it. */

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { agentDisplayName } from "~/lib/agent-message";
 import {
   mentionOptionKey,
   type AgentCandidate,
@@ -6,7 +7,7 @@ import {
   type MentionOption,
 } from "~/lib/mentions";
 import { cn } from "~/lib/utils";
-import { AgentLogo } from "./agent-logo";
+import { AgentMark } from "./agent-persona-mark";
 import { Avatar } from "./avatar";
 
 /**
@@ -58,6 +59,7 @@ export function MentionSuggestions(props: {
             data-kind={option.kind}
             data-mri={option.kind === "person" ? option.person.mri : undefined}
             data-agent={option.kind === "agent" ? option.agent.backend : undefined}
+            data-persona={option.kind === "agent" ? option.agent.persona ?? undefined : undefined}
             // Keep the caret where it is: the click must not blur the editor before
             // the mention is inserted.
             onMouseDown={(event) => event.preventDefault()}
@@ -110,13 +112,20 @@ function PersonRow(props: { person: MentionCandidate }) {
  * A listed agent is one that really would answer; see `agentCandidatesFor`.
  */
 function AgentRow(props: { agent: AgentCandidate }) {
+  const { agent } = props;
   return (
     <>
       <span className="grid size-7 shrink-0 place-items-center">
-        <AgentLogo backend={props.agent.backend} className="size-4" />
+        <AgentMark backend={agent.backend} persona={agent.persona} className="size-4" />
       </span>
-      <RowName>{props.agent.name}</RowName>
-      <span className="shrink-0 text-xs text-text-faint">runs here</span>
+      <RowName>{agent.name}</RowName>
+      {/* A CUSTOM AGENT says which CLI is behind it, because that is the one thing its own
+          name cannot say — and it is what the reader is choosing between when two of their
+          agents differ only in that. A provider's own row says "runs here": the mark has
+          already named the CLI, and repeating it would be the same fact twice. */}
+      <span className="shrink-0 text-xs text-text-faint">
+        {agent.persona ? agentDisplayName(agent.backend) : "runs here"}
+      </span>
     </>
   );
 }

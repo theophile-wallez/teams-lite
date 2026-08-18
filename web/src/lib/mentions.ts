@@ -20,6 +20,7 @@ import {
   type AgentStatus,
 } from "./agent";
 import { agentDisplayName } from "./agent-message";
+import { agentPersonas } from "./agent-persona";
 
 /** Somebody a message can @mention: their MRI, and the name to show. */
 export type MentionCandidate = {
@@ -157,10 +158,16 @@ export function shortenMentionLabel(label: string): string | null {
 export type AgentCandidate = {
   /** The backend name (`claude`, `opencode`): the mark it wears and the palette it uses. */
   backend: string;
-  /** How it is named to a reader — each vendor's own casing. */
+  /** How it is named to a reader — each vendor's own casing, or a custom agent's label. */
   name: string;
   /** The prefix that summons it wherever a message writes it, as the BACKEND spelled it. */
   prefix: string;
+  /** The CUSTOM AGENT this row is, by address (`bebou`), or null for the provider itself.
+   *
+   *  It is what makes a persona's row draw its own face rather than the vendor's mark — and
+   *  the reason `backend` still names the provider: a persona IS that provider wearing a
+   *  name, so the palette, the chip and the fallback artwork are the vendor's. */
+  persona?: string | null;
 };
 
 /**
@@ -176,7 +183,38 @@ export function agentCandidatesFor(
   status: AgentStatus | null,
   conversationId: string | null,
 ): AgentCandidate[] {
-  return candidatesFrom(status, conversationId, usableBackends);
+  const providers = candidatesFrom(status, conversationId, usableBackends);
+  // The user's own CUSTOM AGENTS follow the providers — see {@link personaCandidates} for
+  // why they are here and not in the list below, and why they come second.
+  if (providers.length === 0) return providers;
+  return [...providers, ...personaCandidates(status, usableBackends(status))];
+}
+
+/**
+ * The custom agents that would really answer, as rows of the "@" list.
+ *
+ * Each is offered on exactly the terms its own PROVIDER is: a persona whose CLI this machine
+ * lacks — or whose provider the user switched off — is not offered, because `@bebou` would
+ * then summon nothing, which is the lie this whole list exists to avoid. `usable` is passed
+ * in rather than recomputed so the two halves of one list cannot disagree about which
+ * providers are live.
+ *
+ * They come SECOND, after the providers, even though the user made them: `@claude` and
+ * `@opencode` are a fixed short list a reader learns once, and the personas grow. A menu
+ * whose first row moves as agents are added is one that has to be read every time.
+ */
+function personaCandidates(
+  status: AgentStatus | null,
+  usable: readonly AgentBackend[],
+): AgentCandidate[] {
+  return agentPersonas(status)
+    .filter((persona) => usable.some((backend) => backend.name === persona.backend))
+    .map((persona) => ({
+      backend: persona.backend,
+      name: persona.label,
+      prefix: persona.prefix,
+      persona: persona.name,
+    }));
 }
 
 /**
@@ -200,7 +238,16 @@ export function defaultAgentCandidatesFor(
   return candidatesFrom(status, conversationId, defaultUsableBackends);
 }
 
-/** The two lists above, minus the one line they differ in: which backends to draw from. */
+/**
+ * The two lists above, minus the one line they differ in: which backends to draw from.
+ *
+ * PROVIDERS only, deliberately. The composer adds the user's own custom agents on top
+ * ({@link agentCandidatesFor}) because that list is what the reader is looking at while they
+ * type; a message's ⋯ menu must NOT — it is a column of actions on one message, and the rule
+ * that keeps it to one row is the same rule that keeps a row per vendor out of it. A machine
+ * with six personas would otherwise turn that menu into a directory of programs before the
+ * reader has said what they want.
+ */
 function candidatesFrom(
   status: AgentStatus | null,
   conversationId: string | null,
@@ -212,6 +259,7 @@ function candidatesFrom(
     backend: backend.name,
     name: agentDisplayName(backend.name),
     prefix: backend.prefix,
+    persona: null,
   }));
 }
 
@@ -223,8 +271,12 @@ export function matchAgentCandidates(
 ): AgentCandidate[] {
   const needle = fold(query);
   if (needle.length === 0) return [...candidates];
-  return candidates.filter(
-    (agent) => fold(agent.name).startsWith(needle) || fold(agent.backend).startsWith(needle),
+  return candidates.filter((agent) =>
+    // The label, the address, and the provider behind it: "@Beb", "@bebou" and — for a
+    // provider's own row — "@cl" all find what the reader means. A persona is deliberately
+    // NOT found by its provider's name: typing "@claude" would then offer every persona
+    // that runs on Claude, which buries the provider's own row under the user's own agents.
+    [agent.name, agent.persona ?? agent.backend].some((word) => fold(word).startsWith(needle)),
   );
 }
 
@@ -235,7 +287,11 @@ export type MentionOption =
 
 /** A stable key for one row, per kind, so two lists never collide on one id. */
 export function mentionOptionKey(option: MentionOption): string {
-  return option.kind === "agent" ? `agent:${option.agent.backend}` : `person:${option.person.mri}`;
+  if (option.kind === "person") return `person:${option.person.mri}`;
+  // A custom agent is keyed on its own address, not on the provider behind it: several
+  // personas share one provider, and keying on that would collapse them into one row.
+  const { agent } = option;
+  return agent.persona ? `persona:${agent.persona}` : `agent:${agent.backend}`;
 }
 
 /**

@@ -22,6 +22,7 @@
 //          | calendars | calendar_view
 //          | agent_status | agent_set_mode | agent_set_tools | agent_set_provider
 //          | agent_set_unrestricted
+//          | agent_persona_avatar | agent_persona_save | agent_persona_remove
 //          | person_override | person_overrides | set_person_name | set_person_avatar
 //          | update_check | update_download | update_apply | restart_backend
 // Events:  status | message | conversations_changed | notifications_changed | typing
@@ -30,6 +31,7 @@
 //          | mail_folders_changed | mail_list_updated | mail_list_error
 //          | calendars_changed | calendar_view_updated | calendar_view_error
 //          | gitlab_list_updated | gitlab_mr_updated | gitlab_read_error
+//          | agent_personas_changed
 //          | agent_stream | person_override_changed | settings_changed
 //
 // The `mail_*` methods are the READ-ONLY Outlook surface (see `mail`): the same
@@ -109,7 +111,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_markdown, agent_models, agent_policy, auth, calendar, calling, custom_emoji,
+    agent, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
+    custom_emoji,
     mail, push, push_policy, retry,
     sender_icon, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
@@ -396,6 +399,16 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// approved under the user's own name on the next send. Reading the pack back stays open:
 /// it returns what the user themselves put in.
 ///
+/// `agent_persona_save` and `agent_persona_remove` write the user's own CUSTOM AGENTS (see
+/// [`teams_lite::agent_persona`]). They touch only the store, and they are gated for the
+/// reason `agent_set_tools` is: a row here decides what a later `@bebou` in a thread the
+/// user opted in will do — which CLI starts, which model reads the thread, and what
+/// instruction leads the prompt. A client that could write one could put words in the mouth
+/// of a program that answers as the user, so it is their own act. Reading the list back
+/// stays open: it returns what they themselves made. They can never widen what an agent may
+/// DO — the tool allowlist is machine-wide and has its own gate — and they can never name a
+/// program, because a persona points at an entry of the static provider table.
+///
 /// `call_prepare` is the calling entry that posts nothing: it reserves the one call slot
 /// this machine has and hands the page the relay credentials its `RTCPeerConnection`
 /// needs. The credentials are why it is gated rather than open, because a client that
@@ -411,7 +424,7 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// meanwhile. Nothing that merely found this socket gets to do that to the app the user is
 /// reading — and `update_check`, which only ASKS GitHub whether a newer build exists,
 /// deliberately stays open beside it: it changes nothing on this machine.
-const MACHINE_METHODS: [&str; 20] = [
+const MACHINE_METHODS: [&str; 22] = [
     "repair_broker",
     "restart_backend",
     "update_download",
@@ -427,6 +440,8 @@ const MACHINE_METHODS: [&str; 20] = [
     "agent_set_provider",
     "agent_set_unrestricted",
     "agent_stop",
+    "agent_persona_save",
+    "agent_persona_remove",
     "set_person_name",
     "set_person_avatar",
     "custom_emoji_add",
@@ -468,6 +483,10 @@ fn machine_effect(method: &str) -> &'static str {
              configuration — every tool it holds"
         }
         "agent_stop" => "stops a local agent this machine is running mid-answer",
+        "agent_persona_save" | "agent_persona_remove" => {
+            "changes the custom agents this machine answers to, and what instruction leads \
+             their prompts"
+        }
         "set_person_name" | "set_person_avatar" => {
             "decides the name and the face this machine puts on a colleague's messages"
         }
@@ -3097,6 +3116,102 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 eprintln!("[agent] stopping {run_id} — the user asked");
             }
             Ok(json!({ "stopped": stopped }))
+        }
+
+        // One custom agent's face, or empty strings when it has none — the shape
+        // `custom_emoji_image` already has, so the page's own blob cache needed no new
+        // idea. Kept out of the list above because ten faces is megabytes and a list is
+        // asked for on every connect.
+        "agent_persona_avatar" => {
+            let name = param_str(params, "name")?;
+            let store = ctx.store()?;
+            match store.agent_persona_avatar(&name)? {
+                Some((content_type, bytes)) => Ok(json!({
+                    "content_type": content_type,
+                    "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                })),
+                None => Ok(json!({ "content_type": "", "data_base64": "" })),
+            }
+        }
+
+        // Create or change one custom agent. The name is the address and the primary key,
+        // so it is checked against the reserved provider names and the ones already taken
+        // (`agent_persona::check_name`) — but only when the row is NEW: an edit of `bebou`
+        // must not be refused because `bebou` exists.
+        //
+        // Every field a client sends is normalized rather than trusted, and the provider
+        // MUST resolve: a persona that named an unknown one would be a row the user can see
+        // and never summon.
+        "agent_persona_save" => {
+            let name = param_str(params, "name")?.trim().to_lowercase();
+            let backend = param_str(params, "backend")?;
+            let store = ctx.store()?;
+            let existing = store.agent_personas()?;
+            if agent_persona::named(&existing, &name).is_none() {
+                let taken: Vec<String> = existing.iter().map(|p| p.name.clone()).collect();
+                agent_persona::check_name(&name, &taken)?;
+            }
+            let backend = agent_policy::backend_named(&backend).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`{backend}` is not an AI provider this machine knows — pick {}",
+                    agent_policy::BACKENDS
+                        .iter()
+                        .map(|b| b.name)
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                )
+            })?;
+            let text = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or_default();
+            let persona = agent_persona::Persona {
+                label: agent_persona::normalize_label(text("label"), &name),
+                name,
+                backend,
+                model: agent_persona::normalize_model(Some(text("model"))),
+                preprompt: agent_persona::normalize_preprompt(text("preprompt")),
+                avatar: None,
+                added_ms: 0,
+                updated_ms: 0,
+            };
+            // THREE answers, not two, and the difference is what stops an edit of a
+            // preprompt from silently deleting the face: absent LEAVES the picture alone,
+            // `""` clears it, and bytes replace it.
+            let avatar = match params.get("avatar_base64").and_then(Value::as_str) {
+                None => None,
+                Some("") => Some(None),
+                Some(encoded) => {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(encoded.trim())
+                        .context("that picture is not valid base64")?;
+                    let measured = agent_persona::measure_avatar(&bytes)?;
+                    Some(Some((measured, bytes)))
+                }
+            };
+            store.set_agent_persona(
+                &persona,
+                avatar.as_ref().map(|face| {
+                    face.as_ref().map(|(measured, bytes)| {
+                        (measured.content_type.as_str(), bytes.as_slice(), measured.width, measured.height)
+                    })
+                }),
+                now_ms(),
+            )?;
+            ctx.emit("agent_personas_changed", json!({}));
+            eprintln!("[agent] saved the custom agent @{} ({})", persona.name, backend.name);
+            agent_status_json(&store)
+        }
+
+        // Forget one custom agent. `@bebou` is a plain word again from the next message on,
+        // and a reply it already posted still renders under its own name: that is read back
+        // out of the message's own signature, never out of this table.
+        "agent_persona_remove" => {
+            let name = param_str(params, "name")?.trim().to_lowercase();
+            let store = ctx.store()?;
+            let removed = store.remove_agent_persona(&name)?;
+            if removed {
+                ctx.emit("agent_personas_changed", json!({}));
+                eprintln!("[agent] removed the custom agent @{name}");
+            }
+            agent_status_json(&store)
         }
 
         // full conversation list — LOCAL-FIRST: answer instantly from the SQLite
@@ -9322,24 +9437,35 @@ fn agent_live_message(ctx: &Ctx, store: &Store, message: &Message, from_me: bool
     let providers = agent_policy::Providers::parse(
         store.get_setting(agent_policy::SETTING_PROVIDERS).unwrap_or_default().as_deref(),
     );
-    let Some(command) = agent_policy::command_for(message, from_me, mode, &providers, now_ms())
+    // The user's own custom agents, so `@bebou` is an address rather than a word (see
+    // `agent_persona`). Read per trigger rather than cached: the list is a handful of rows
+    // on the machine the message just arrived on, and a persona saved a second ago must
+    // answer the very next message.
+    let personas = store.agent_personas().unwrap_or_else(|e| {
+        eprintln!("[agent] could not read the custom agents: {e}");
+        Vec::new()
+    });
+    let Some(command) =
+        agent_policy::command_for(message, from_me, mode, &providers, &personas, now_ms())
     else {
         // Say when the user's own request was dropped by one of their own settings.
         // Silence here reads as a broken feature, and neither cause — `off` is the
         // default in every conversation, and a provider can be switched off in Settings
         // — is visible from the thread.
-        if let Some(backend) = agent_policy::ignored_trigger(message, from_me, now_ms()) {
+        // The name NAMED is what the user wrote — `bebou (claude)` for a custom agent —
+        // because a line about `claude` answers the wrong question for somebody who typed
+        // `@bebou`.
+        if let Some(named) = agent_policy::ignored_trigger(message, from_me, &personas, now_ms()) {
             if mode == agent_policy::Mode::Off {
                 eprintln!(
-                    "[agent] {} is `off` in {} — ignoring the trigger. Turn it on from that \
-                     conversation's own header.",
-                    backend.name, message.conversation_id
+                    "[agent] {named} is `off` in {} — ignoring the trigger. Turn it on from \
+                     that conversation's own header.",
+                    message.conversation_id
                 );
-            } else if !providers.is_enabled(backend.name) {
+            } else {
                 eprintln!(
-                    "[agent] the {} provider is disabled — ignoring the trigger. Turn it on \
-                     under Settings › AI providers.",
-                    backend.name
+                    "[agent] the provider behind {named} is disabled — ignoring the trigger. \
+                     Turn it on under Settings › AI providers."
                 );
             }
         }
@@ -9400,32 +9526,64 @@ fn agent_request(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(agent::default_workspace);
     Ok(agent::Request {
+        // The PROGRAM is the provider's, whether or not a custom agent was addressed: a
+        // persona points at an entry of the static table and adds no path of its own (see
+        // `agent_persona`). So `agent.rs` needed no change for this feature at all — what a
+        // persona decides is the three fields below.
         backend: command.backend,
-        prompt: agent_policy::prompt_with_context(
+        // The preprompt LEADS what the CLI is handed, outside the context blocks, so a
+        // `/review` is still the first thing it reads. It appears in no message body.
+        prompt: command.lead_prompt(&agent_policy::prompt_with_context(
             &command.prompt,
             &transcript,
             command.answering.as_deref(),
-        ),
-        system_prompt: agent_policy::system_prompt(command.backend, &title),
+        )),
+        system_prompt: agent_policy::system_prompt(command.identity(), &title),
         resume_session: store
-            .get_setting(&agent_session_key(&command.conversation_id, command.backend.name))?
+            .get_setting(&agent_session_key(
+                &command.conversation_id,
+                command.backend.name,
+                command.persona.as_ref().map_or("", |persona| persona.name.as_str()),
+            ))?
             .filter(|session| !session.trim().is_empty()),
         workspace,
+        // The tool allowlist stays MACHINE-WIDE. A persona is a name and a preprompt, and
+        // naming an agent must not be a way to grant it more than the user granted the
+        // machine — `agent_set_tools` is the one consent surface for that.
         permissions: agent::permissions_from_settings(
             store.get_setting(agent::SETTING_TOOLS)?.as_deref(),
             store.get_setting(agent::SETTING_UNRESTRICTED)?.as_deref(),
         ),
-        model: agent_policy::Providers::parse(
-            store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
-        )
-        .model(command.backend.name),
+        // The persona's own model wins over the provider's, and inherits it when it names
+        // none: a persona is often only a character, and one that had to restate the model
+        // would go stale the day the user changes it in Settings.
+        model: command.persona.as_ref().and_then(|persona| persona.model.clone()).or_else(|| {
+            agent_policy::Providers::parse(
+                store.get_setting(agent_policy::SETTING_PROVIDERS).ok().flatten().as_deref(),
+            )
+            .model(command.backend.name)
+        }),
     })
 }
 
-/// The setting key holding one thread's agent session, per backend — asking claude a
-/// follow-up must not resume an opencode session.
-fn agent_session_key(conversation_id: &str, backend: &str) -> String {
-    format!("{}{backend}:{conversation_id}", agent::SETTING_SESSION_PREFIX)
+/// The setting key holding one thread's agent session, per backend AND per custom agent —
+/// asking claude a follow-up must not resume an opencode session, and asking `@bebou` must
+/// not resume the ordinary assistant's.
+///
+/// That second half is what a persona would otherwise break: one thread can hold a review
+/// bot and a boomer aunt, and a shared session would hand each of them the other's context
+/// — with the preprompt of one leading a conversation the other has been having. A persona
+/// is a different agent to the reader, so it is a different session.
+///
+/// A provider run keeps EXACTLY the key it always had (`claude:<conversation>`), so no
+/// thread loses the session it is in the middle of; a persona's is a segment longer.
+fn agent_session_key(conversation_id: &str, backend: &str, persona: &str) -> String {
+    let prefix = agent::SETTING_SESSION_PREFIX;
+    if persona.is_empty() {
+        format!("{prefix}{backend}:{conversation_id}")
+    } else {
+        format!("{prefix}{backend}/{persona}:{conversation_id}")
+    }
 }
 
 /// Post the answer, then keep editing that one message as the answer grows.
@@ -9503,7 +9661,11 @@ async fn agent_reply(
         });
     request.system_prompt.push_str(&agent_markdown::mention_note(&people));
 
-    let placeholder = agent_policy::thinking_html(backend);
+    // Who this answer says wrote it: the CLI, or the custom agent that was addressed. One
+    // value for every body of the run, so the placeholder, each streamed edit and the final
+    // one cannot disagree — and so the loop guard recognises all three.
+    let signer = command.signature();
+    let placeholder = agent_policy::thinking_html(&signer);
     let sent = agent_send(ctx, command, &placeholder).await?;
     if sent.id.is_empty() {
         anyhow::bail!("the reply was posted but Teams returned no message id to edit");
@@ -9528,6 +9690,9 @@ async fn agent_reply(
         conversation_id: command.conversation_id.clone(),
         message_id: sent.id.clone(),
         trigger_id: command.message_id.clone(),
+        // By NAME, so a repair can sign the interrupted body as `bebou (claude)` even if the
+        // user deleted that persona while the run was writing.
+        persona: command.persona.as_ref().map_or(String::new(), |p| p.name.clone()),
         backend: backend.name.to_string(),
         started_ms: now_ms(),
         heartbeat_ms: now_ms(),
@@ -9623,18 +9788,19 @@ async fn agent_run_to_completion(
     // user ended the run. `watch_local` holds the last streamed progress, so the partial
     // is exactly what the bubble was showing — and an empty one (stopped while thinking)
     // falls back to the note alone inside `stopped_body`.
+    let signer = command.signature();
     let stopped = outcome.as_ref().err().is_some_and(|e| e.is::<AgentStopped>());
     let (final_body, session_id, cost) = if stopped {
         let partial = watch_local.borrow().text.clone();
-        (agent_policy::stopped_body(backend, &partial, people), None, None)
+        (agent_policy::stopped_body(&signer, &partial, people), None, None)
     } else {
         match &outcome {
             Ok(outcome) => (
-                agent_policy::reply_body(backend, &outcome.text, true, people),
+                agent_policy::reply_body(&signer, &outcome.text, true, people),
                 outcome.session_id.clone(),
                 outcome.cost_usd,
             ),
-            Err(e) => (agent_policy::failure_body(backend, &e.to_string()), None, None),
+            Err(e) => (agent_policy::failure_body(&signer, &e.to_string()), None, None),
         }
     };
     // The answer lands in the thread, and only THEN does the stream say it is over.
@@ -9682,7 +9848,11 @@ async fn agent_run_to_completion(
 
     // Remember the session so a follow-up in this thread continues the conversation.
     if let (Some(session), Ok(store)) = (session_id, ctx.store()) {
-        let key = agent_session_key(&command.conversation_id, backend.name);
+        let key = agent_session_key(
+            &command.conversation_id,
+            backend.name,
+            command.persona.as_ref().map_or("", |persona| persona.name.as_str()),
+        );
         if let Err(e) = store.set_setting(&key, &session) {
             eprintln!("[agent] could not remember the session for {key}: {e}");
         }
@@ -9788,7 +9958,12 @@ async fn repair_abandoned_agent_runs(ctx: &Ctx) {
         }
         let backend =
             agent_policy::backend_named(&run.backend).unwrap_or(&agent_policy::BACKENDS[0]);
-        let body = agent_policy::interrupted_body(backend);
+        // The interrupted body signs itself with what the thread has been WATCHING — the
+        // custom agent's own name when one was addressed — built from the two names the row
+        // wrote down rather than from the persona, which the user may have deleted while
+        // this run was quietly dying.
+        let signer = agent_policy::Signature::stored(&run.persona, backend.name);
+        let body = agent_policy::interrupted_body(&signer);
         if let Err(e) = agent_edit(ctx, &run.conversation_id, &run.message_id, &body).await {
             // Put it back rather than lose it: a transient 429 or a re-locked broker
             // must not be the reason a message stays "thinking…" for good.
@@ -9808,6 +9983,7 @@ async fn repair_abandoned_agent_runs(ctx: &Ctx) {
                 &run.trigger_id,
                 &run.message_id,
                 backend.name,
+                &run.persona,
                 "error",
                 &agent::Progress::default(),
                 Some(agent_policy::INTERRUPTED_REASON),
@@ -9816,7 +9992,9 @@ async fn repair_abandoned_agent_runs(ctx: &Ctx) {
         remove_agent_run_marker(&run.message_id);
         eprintln!(
             "[agent] {} left a reply unfinished in {} — closed it ({})",
-            backend.name, run.conversation_id, agent_policy::INTERRUPTED_REASON
+            signer.as_str(),
+            run.conversation_id,
+            agent_policy::INTERRUPTED_REASON
         );
     }
 }
@@ -9847,7 +10025,7 @@ async fn agent_stream_edits(
         if text.trim().is_empty() || text == posted {
             continue;
         }
-        let body = agent_policy::reply_body(command.backend, &text, false, people);
+        let body = agent_policy::reply_body(&command.signature(), &text, false, people);
         agent_edit(ctx, &command.conversation_id, message_id, &body).await?;
         posted = text;
         edits += 1;
@@ -9918,6 +10096,7 @@ fn agent_stream_frame(
         &command.message_id,
         message_id,
         command.backend.name,
+        command.persona.as_ref().map_or("", |persona| persona.name.as_str()),
         phase,
         progress,
         error,
@@ -9933,6 +10112,7 @@ fn agent_run_frame(
     trigger_id: &str,
     message_id: &str,
     backend: &str,
+    persona: &str,
     phase: &str,
     progress: &agent::Progress,
     error: Option<&str>,
@@ -9942,6 +10122,11 @@ fn agent_run_frame(
         "conversation": conversation_id,
         "message_id": message_id,
         "backend": backend,
+        // The CUSTOM AGENT answering, or "" — so the LIVE bubble draws its face from the
+        // first frame. Without it the run would wear the vendor's mark all the way through
+        // and swap to the persona's the instant it ended, when the posted message's own
+        // signature takes over: a change the reader watches for no reason.
+        "persona": persona,
         "phase": phase,
         "text": progress.text,
         "steps": progress.steps.iter().map(agent_step_json).collect::<Vec<_>>(),
@@ -10065,7 +10250,37 @@ async fn agent_edit(
 /// What `agent_status` reports: which backends this machine can run, which of them the
 /// user left enabled and on which model, which conversations are opted in, and what an
 /// agent is allowed to do.
+/// The user's custom agents as a client reads them, in one place — the status carries them
+/// and both writes answer with the status.
+///
+/// `prefix` is stated rather than left to a client to spell: an address is `@` plus the name
+/// today, and a page that assembled its own would be a second spelling of the one thing a
+/// message has to carry for the backend to read it back (the rule `AgentBackend.prefix`
+/// already follows).
+fn agent_personas_json(store: &Store) -> Result<Vec<Value>> {
+    Ok(store
+        .agent_personas()?
+        .into_iter()
+        .map(|persona| {
+            json!({
+                "name": persona.name,
+                "label": persona.label(),
+                "prefix": persona.prefix(),
+                "backend": persona.backend.name,
+                "model": persona.model,
+                "preprompt": persona.preprompt,
+                // Whether to ASK for the face, so a persona with none costs no request and
+                // draws the provider's own mark instead.
+                "has_avatar": persona.avatar.is_some(),
+                "added_ms": persona.added_ms,
+                "updated_ms": persona.updated_ms,
+            })
+        })
+        .collect())
+}
+
 fn agent_status_json(store: &Store) -> Result<Value> {
+    let personas = agent_personas_json(store)?;
     let modes = store.get_setting(agent_policy::SETTING_MODES)?;
     let stored_providers = store.get_setting(agent_policy::SETTING_PROVIDERS)?;
     let providers = agent_policy::Providers::parse(stored_providers.as_deref());
@@ -10116,6 +10331,16 @@ fn agent_status_json(store: &Store) -> Result<Value> {
     Ok(json!({
         "backends": backends,
         "default_provider": default_provider.name,
+        // The user's own custom agents (see `teams_lite::agent_persona`). They ride in the
+        // STATUS rather than in a read of their own because every surface that offers an
+        // agent already holds this payload — the composer's "@", a bubble's chip, the
+        // Settings pane — and a second list would be a second thing to keep in step.
+        //
+        // The PREPROMPT travels, unlike a token in `get_settings`: it is not a credential
+        // but the user's own instruction, and the pane that edits one has to show what is
+        // there. The avatar BYTES do not — a status is answered on every connect, and ten
+        // faces is megabytes (see `agent_persona_avatar`).
+        "personas": personas,
         "conversations": conversations,
         "tools": agent::tools_from_setting(store.get_setting(agent::SETTING_TOOLS)?.as_deref()),
         "tool_grants": tool_grants,
@@ -12935,10 +13160,25 @@ mod tests {
     #[test]
     fn one_agent_session_is_kept_per_thread_and_per_backend() {
         // Asking claude a follow-up must not resume an opencode session.
-        let claude = agent_session_key("19:team@thread.v2", "claude");
-        let opencode = agent_session_key("19:team@thread.v2", "opencode");
+        let claude = agent_session_key("19:team@thread.v2", "claude", "");
+        let opencode = agent_session_key("19:team@thread.v2", "opencode", "");
         assert_ne!(claude, opencode);
         assert!(claude.starts_with(agent::SETTING_SESSION_PREFIX));
+    }
+
+    /// A custom agent is a different agent to the reader, so it gets a session of its own:
+    /// a review bot and a boomer aunt in one thread must not be handed each other's
+    /// context, with the preprompt of one leading the other's conversation.
+    #[test]
+    fn a_custom_agent_keeps_a_session_of_its_own() {
+        let plain = agent_session_key("19:team@thread.v2", "claude", "");
+        let bebou = agent_session_key("19:team@thread.v2", "claude", "bebou");
+        let natacha = agent_session_key("19:team@thread.v2", "claude", "natacha");
+        assert_ne!(plain, bebou);
+        assert_ne!(bebou, natacha);
+        // …and a provider run keeps EXACTLY the key it always had, so no thread loses the
+        // session it is in the middle of when this build lands.
+        assert_eq!(plain, format!("{}claude:19:team@thread.v2", agent::SETTING_SESSION_PREFIX));
     }
 
     #[test]
@@ -12987,6 +13227,79 @@ mod tests {
         for method in MACHINE_METHODS {
             assert_ne!(machine_effect(method), "changes this machine", "{method} has no phrase");
         }
+    }
+
+    /// Writing a CUSTOM AGENT is the user's own act; reading the list back is not.
+    ///
+    /// A row decides what a later `@bebou` does in a thread they opted in — which CLI
+    /// starts, which model reads the thread, what instruction leads the prompt — so a
+    /// client that merely found this socket must not be able to write one. Reading stays
+    /// open: it returns what the user themselves made, and a page that could not read it
+    /// could not draw their own agent at all.
+    #[test]
+    fn writing_a_custom_agent_needs_the_write_token_and_reading_one_does_not() {
+        for method in ["agent_persona_save", "agent_persona_remove"] {
+            let err = check_write_allowed(method, &json!({}), Some("tok")).unwrap_err().to_string();
+            assert!(err.contains("write token"), "{method}: {err}");
+            assert!(
+                check_write_allowed(method, &json!({ "write_token": "tok" }), Some("tok")).is_ok()
+            );
+            // A read-only backend refuses them whatever token it is shown.
+            assert!(check_write_allowed(method, &json!({ "write_token": "tok" }), None).is_err());
+            // They post nothing to Teams, so they are MACHINE methods and not outward ones.
+            assert!(MACHINE_METHODS.contains(&method), "{method}");
+            assert!(!OUTWARD_METHODS.contains(&method), "{method}");
+        }
+        for method in ["agent_status", "agent_persona_avatar"] {
+            assert!(check_write_allowed(method, &json!({}), Some("tok")).is_ok(), "{method}");
+            assert!(check_write_allowed(method, &json!({}), None).is_ok(), "{method}");
+            assert!(!MACHINE_METHODS.contains(&method), "{method}");
+        }
+    }
+
+    /// A custom agent survives a round trip through the store and comes back as something
+    /// a page can draw and a trigger can match.
+    #[test]
+    fn a_custom_agent_is_published_with_its_address_and_its_preprompt() {
+        let store = Store::open_in_memory().unwrap();
+        // Nothing to begin with: a fresh machine has no custom agents, exactly as it has
+        // no nicknames and no emoji.
+        assert!(agent_personas_json(&store).unwrap().is_empty());
+
+        store
+            .set_agent_persona(
+                &agent_persona::Persona {
+                    name: "bebou".into(),
+                    label: "Bebou".into(),
+                    backend: &agent_policy::BACKENDS[0],
+                    model: Some("haiku".into()),
+                    preprompt: "/bebou".into(),
+                    avatar: None,
+                    added_ms: 0,
+                    updated_ms: 0,
+                },
+                None,
+                1_000,
+            )
+            .unwrap();
+
+        let published = agent_personas_json(&store).unwrap();
+        assert_eq!(published.len(), 1);
+        let bebou = &published[0];
+        assert_eq!(bebou["name"], "bebou");
+        assert_eq!(bebou["label"], "Bebou");
+        // The ADDRESS is stated by the backend, so no client spells `@` itself.
+        assert_eq!(bebou["prefix"], "@bebou");
+        assert_eq!(bebou["backend"], "claude");
+        assert_eq!(bebou["model"], "haiku");
+        assert_eq!(bebou["preprompt"], "/bebou");
+        // No face: a client asks for bytes only when there are some.
+        assert_eq!(bebou["has_avatar"], false);
+
+        // …and the whole status carries them, which is what lets every surface that
+        // already holds it offer `@bebou` with no second read.
+        let status = agent_status_json(&store).unwrap();
+        assert_eq!(status["personas"].as_array().map(Vec::len), Some(1));
     }
 
     /// Downloading and installing a new build are the user's, and only the user's.
@@ -14544,6 +14857,65 @@ mod lifecycle_tests {
     }
 
     #[test]
+    /// What a CUSTOM AGENT really changes about the run — the one wiring between
+    /// `agent_persona` and `agent::Request`, and each half of it is a way to get the feature
+    /// wrong silently.
+    #[test]
+    fn a_custom_agent_leads_the_prompt_and_names_the_model_and_the_identity() {
+        let store = Store::open_in_memory().unwrap();
+        // The provider runs on a model of its own, so the persona's has something to win over.
+        let mut providers = agent_policy::Providers::default();
+        providers.set_model("claude", Some("sonnet"));
+        store
+            .set_setting(agent_policy::SETTING_PROVIDERS, &providers.to_json())
+            .unwrap();
+
+        let mut natacha = agent_persona::Persona {
+            name: "natacha".into(),
+            label: "Natacha".into(),
+            backend: &agent_policy::BACKENDS[0],
+            model: Some("haiku".into()),
+            preprompt: "/boomer".into(),
+            avatar: None,
+            added_ms: 0,
+            updated_ms: 0,
+        };
+        let command = |persona: Option<agent_persona::Persona>| agent_policy::Command {
+            conversation_id: "19:c@thread.v2".into(),
+            message_id: "1000".into(),
+            prompt: "coucou".into(),
+            answering: None,
+            sender: "Théophile".into(),
+            sender_mri: "8:orgid:me".into(),
+            compose_time: 1,
+            backend: &agent_policy::BACKENDS[0],
+            persona,
+        };
+
+        let asked = agent_request(&store, &command(Some(natacha.clone())), "8:orgid:me").unwrap();
+        // The PREPROMPT leads what the CLI is handed, and the request follows it.
+        assert!(asked.prompt.starts_with("/boomer"), "{}", asked.prompt);
+        assert!(asked.prompt.contains("coucou"));
+        // The persona's model wins over the provider's, and the model is who it says it is.
+        assert_eq!(asked.model.as_deref(), Some("haiku"));
+        assert!(asked.system_prompt.contains("You are Natacha"), "{}", asked.system_prompt);
+        // The PROGRAM is still the provider's: a persona names one and never becomes one.
+        assert_eq!(asked.backend.name, "claude");
+
+        // A persona naming no model INHERITS the provider's, so one that is only a character
+        // does not go stale the day the user changes it in Settings.
+        natacha.model = None;
+        let inherited = agent_request(&store, &command(Some(natacha)), "8:orgid:me").unwrap();
+        assert_eq!(inherited.model.as_deref(), Some("sonnet"));
+
+        // And a plain provider run is untouched: no lead, the provider's model, its own name.
+        let plain = agent_request(&store, &command(None), "8:orgid:me").unwrap();
+        assert!(plain.prompt.starts_with("coucou"), "{}", plain.prompt);
+        assert_eq!(plain.model.as_deref(), Some("sonnet"));
+        assert!(plain.system_prompt.contains("You are claude"), "{}", plain.system_prompt);
+    }
+
+    #[test]
     fn a_repair_frame_names_the_run_a_page_is_drawing() {
         // A repair has no `Command` left — only the stored row — and a frame whose
         // `run_id` did not match would leave the overlay writing forever.
@@ -14557,6 +14929,7 @@ mod lifecycle_tests {
             sender_mri: "8:orgid:ada".into(),
             compose_time: 1,
             backend: &agent_policy::BACKENDS[0],
+            persona: None,
         };
         let live = agent_stream_frame(&command, "2000", "thinking", &progress, None);
         let repaired = agent_run_frame(
@@ -14564,6 +14937,7 @@ mod lifecycle_tests {
             "1000",
             "2000",
             "claude",
+            "",
             "error",
             &progress,
             Some(agent_policy::INTERRUPTED_REASON),

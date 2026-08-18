@@ -91,6 +91,14 @@ export function agentTagsInMessage(
  *
  * **Never offer these in the composer.** They are read off a message that was already
  * sent; a tag is offered only from `agentCandidatesFor`, where the consent lives.
+ *
+ * **A colleague's own CUSTOM AGENT is a word here, and that is the honest reading.** A
+ * persona is local and nothing about one travels (see lib/agent-persona.ts), so a `@bebou`
+ * in their message names something this machine has no record of — exactly as `@natacha`
+ * does on a machine that never made one. Marking it from OUR list would be worse than not
+ * marking it: it would draw their message under a face the user chose, for an agent that is
+ * not the one they addressed. What their reply DOES carry is its own signature, which is
+ * where their agent's name really comes from (see lib/agent-message.ts).
  */
 function addressableAgents(status: AgentStatus | null): AgentCandidate[] {
   return (status?.backends ?? []).map((backend) => ({
@@ -340,7 +348,11 @@ function markAddressInText(
   out.push({
     type: "element",
     tag: "agent",
-    attrs: { backend: agent.backend },
+    // The CUSTOM AGENT rides beside the provider, so the chip in a sent message draws the
+    // face and the label the composer drew (see components/agent-persona-mark.tsx) rather
+    // than the vendor's mark and the address. `backend` still names the provider, because
+    // that is what really answered and what the palette and the fallback artwork come from.
+    attrs: { backend: agent.backend, persona: agent.persona ?? undefined },
     // The prefix stays the node's text, so everything that does not know this tag —
     // the outbound serializer, a renderer without the case — still shows what was typed.
     children: [{ type: "text", text: text.slice(start, start + agent.prefix.length) }],

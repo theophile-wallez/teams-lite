@@ -8,6 +8,14 @@ import { parseMessageBody, type RichNode } from "./rich-text";
 const CLAUDE: AgentCandidate = { backend: "claude", name: "Claude", prefix: "@claude" };
 const OPENCODE: AgentCandidate = { backend: "opencode", name: "opencode", prefix: "@opencode" };
 const AGENTS = [CLAUDE, OPENCODE];
+/** One of the user's own CUSTOM AGENTS, as the composer offers it: the persona's own address
+ *  and label, over the PROVIDER that really answers. */
+const BEBOU: AgentCandidate = {
+  backend: "claude",
+  name: "Bebou",
+  prefix: "@bebou",
+  persona: "bebou",
+};
 
 const OPTED_IN = "19:sandbox@thread.v2";
 
@@ -54,6 +62,18 @@ function tags(nodes: RichNode[]): string[] {
       : node.tag === "agent"
         ? [node.attrs.backend ?? ""]
         : tags(node.children),
+  );
+}
+
+/** The CUSTOM AGENT each `agent` node names, in document order — `""` for a plain provider
+ *  tag. It is what makes the chip draw a persona's own face rather than the vendor's mark. */
+function taggedPersonas(nodes: RichNode[]): string[] {
+  return nodes.flatMap((node) =>
+    node.type === "text"
+      ? []
+      : node.tag === "agent"
+        ? [node.attrs.persona ?? ""]
+        : taggedPersonas(node.children),
   );
 }
 
@@ -141,6 +161,50 @@ describe("agentTagsInMessage", () => {
 // `agentTagInText` is a port of `agent_policy::split_prefix` and the prompt rules
 // `trigger_for` applies around it, so these cases mirror the Rust tests one for one: what
 // the backend would answer is what wears a chip.
+describe("a custom agent's address", () => {
+  it("is read like any other, and carries which agent it is", () => {
+    const found = agentTagInText("@bebou which port?", [...AGENTS, BEBOU]);
+    expect(found?.persona).toBe("bebou");
+    // The PROVIDER behind it is what really answers, and what the chip's palette comes from.
+    expect(found?.backend).toBe("claude");
+  });
+
+  it("obeys every rule an address obeys", () => {
+    const agents = [...AGENTS, BEBOU];
+    // Anywhere in the sentence, in any case, with its own punctuation.
+    for (const text of ["@bebou hello", "hello @BEBOU", "hello, @bebou ?"]) {
+      expect(agentTagInText(text, agents)?.persona, text).toBe("bebou");
+    }
+    // …and none of the shapes that address nobody.
+    for (const text of ["@bebouette said hello", "write to ping@bebou.example", "@bebou", "hello"]) {
+      expect(agentTagInText(text, agents), text).toBeNull();
+    }
+  });
+
+  it("loses a tie to the provider's own address, and the earliest wins otherwise", () => {
+    const agents = [...AGENTS, BEBOU];
+    expect(agentTagInText("ask @bebou, not @claude", agents)?.persona).toBe("bebou");
+    expect(agentTagInText("ask @claude, not @bebou", agents)?.persona).toBeUndefined();
+  });
+
+  it("is a WORD on a machine that never made it", () => {
+    // Nothing about a persona travels, so a colleague's `@bebou` names something this machine
+    // has no record of — and marking it from OUR list would draw their message under a face
+    // the user chose for an agent they did not address.
+    expect(agentTagInText("@bebou which port?", AGENTS)).toBeNull();
+    expect(taggedPersonas(marked("<p>@bebou which port?</p>", AGENTS))).toEqual([]);
+  });
+
+  it("marks the chip with the agent, so a sent message draws the face it was written with", () => {
+    const tree = marked("<p>@bebou which port?</p>", [...AGENTS, BEBOU]);
+    expect(tags(tree)).toEqual(["claude"]);
+    expect(taggedPersonas(tree)).toEqual(["bebou"]);
+    // A provider tag carries no persona at all rather than an empty one, so nothing looks it
+    // up: `attrs.persona` is absent.
+    expect(taggedPersonas(marked("<p>@claude which port?</p>"))).toEqual([""]);
+  });
+});
+
 describe("agentTagInText", () => {
   it("names the agent a prefixed message summons", () => {
     expect(agentTagInText("@claude which port?", AGENTS)).toBe(CLAUDE);

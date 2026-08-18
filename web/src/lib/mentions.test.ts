@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentStatus } from "./agent";
+import type { AgentPersona } from "./agent-persona";
 import {
   agentCandidatesFor,
   dedupeCandidates,
@@ -21,8 +22,37 @@ const PEOPLE: MentionCandidate[] = [
   { mri: "8:orgid:duncan", name: "Duncan Charles" },
 ];
 
-const CLAUDE: AgentCandidate = { backend: "claude", name: "Claude", prefix: "@claude" };
-const OPENCODE: AgentCandidate = { backend: "opencode", name: "opencode", prefix: "@opencode" };
+const CLAUDE: AgentCandidate = {
+  backend: "claude",
+  name: "Claude",
+  prefix: "@claude",
+  persona: null,
+};
+const OPENCODE: AgentCandidate = {
+  backend: "opencode",
+  name: "opencode",
+  prefix: "@opencode",
+  persona: null,
+};
+/** One of the user's own CUSTOM AGENTS, as `agent_status` publishes it. */
+const BEBOU: AgentPersona = {
+  name: "bebou",
+  label: "Bebou",
+  prefix: "@bebou",
+  backend: "claude",
+  model: null,
+  preprompt: "/bebou",
+  has_avatar: true,
+  added_ms: 1,
+  updated_ms: 1,
+};
+/** The row {@link BEBOU} becomes in the "@" list. */
+const BEBOU_ROW: AgentCandidate = {
+  backend: "claude",
+  name: "Bebou",
+  prefix: "@bebou",
+  persona: "bebou",
+};
 
 /** An `agent_status` with both CLIs installed and one conversation opted in. */
 function status(overrides: Partial<AgentStatus> = {}): AgentStatus {
@@ -145,9 +175,9 @@ describe("shortenMentionLabel", () => {
 describe("agentCandidatesFor", () => {
   it("offers the installed, enabled agents of an opted-in conversation", () => {
     expect(agentCandidatesFor(status(), "19:on@thread.v2")).toEqual([
-      { backend: "claude", name: "Claude", prefix: "@claude" },
+      CLAUDE,
       // Each vendor's own casing: Claude is a proper noun, opencode is not.
-      { backend: "opencode", name: "opencode", prefix: "@opencode" },
+      OPENCODE,
     ]);
   });
 
@@ -168,6 +198,39 @@ describe("agentCandidatesFor", () => {
     partial.backends[1]!.enabled = false;
     expect(agentCandidatesFor(partial, "19:on@thread.v2")).toEqual([]);
   });
+
+  it("offers the user's own custom agents AFTER the providers", () => {
+    // The providers are a fixed short list a reader learns once; the personas grow. A menu
+    // whose first row moved as agents were added would have to be read every time.
+    expect(agentCandidatesFor(status({ personas: [BEBOU] }), "19:on@thread.v2")).toEqual([
+      CLAUDE,
+      OPENCODE,
+      BEBOU_ROW,
+    ]);
+  });
+
+  it("offers a custom agent only where its own provider would answer", () => {
+    // `@bebou` runs Claude Code, so everything true of `@claude` is true of it: a CLI this
+    // machine has not got, a provider switched off, and a conversation nobody opted in each
+    // take the row away. A row that summons nothing is the lie this list exists to avoid.
+    const missing = status({ personas: [BEBOU] });
+    missing.backends[0]!.available = false;
+    expect(agentCandidatesFor(missing, "19:on@thread.v2")).toEqual([OPENCODE]);
+
+    const off = status({ personas: [BEBOU] });
+    off.backends[0]!.enabled = false;
+    expect(agentCandidatesFor(off, "19:on@thread.v2")).toEqual([OPENCODE]);
+
+    expect(agentCandidatesFor(status({ personas: [BEBOU] }), "19:off@thread.v2")).toEqual([]);
+  });
+
+  it("offers none from a backend too old to publish any", () => {
+    // `personas` is absent there, and the feature then behaves exactly as it did before it
+    // existed rather than throwing on a missing field.
+    const older = status();
+    delete older.personas;
+    expect(agentCandidatesFor(older, "19:on@thread.v2")).toEqual([CLAUDE, OPENCODE]);
+  });
 });
 
 describe("defaultAgentCandidatesFor", () => {
@@ -187,6 +250,15 @@ describe("defaultAgentCandidatesFor", () => {
     expect(defaultAgentCandidatesFor(null, "19:on@thread.v2")).toEqual([]);
   });
 
+  it("never grows a row for a custom agent", () => {
+    // This menu is a column of actions on one message. The composer's "@" offers the user's
+    // own agents because that list is what they are reading while they type; a row per agent
+    // HERE would turn a message menu into a directory of programs.
+    expect(
+      defaultAgentCandidatesFor(status({ personas: [BEBOU] }), "19:on@thread.v2"),
+    ).toEqual([CLAUDE]);
+  });
+
   it("offers the other one when the default itself would never answer", () => {
     // A row that summons nothing is the one thing worse than two rows.
     const missing = status({ default_provider: "claude" });
@@ -196,6 +268,19 @@ describe("defaultAgentCandidatesFor", () => {
 });
 
 describe("matchAgentCandidates", () => {
+  it("finds a custom agent by its label and by its address", () => {
+    // "@Beb" is how somebody looks for the agent they named; "@bebou" is what they type when
+    // they already know it. Both are the same row.
+    expect(matchAgentCandidates([CLAUDE, BEBOU_ROW], "Beb")).toEqual([BEBOU_ROW]);
+    expect(matchAgentCandidates([CLAUDE, BEBOU_ROW], "bebou")).toEqual([BEBOU_ROW]);
+  });
+
+  it("does not offer a custom agent for the name of the provider it runs", () => {
+    // Otherwise "@claude" would offer every agent that happens to run on Claude Code, which
+    // buries the provider's own row under the user's.
+    expect(matchAgentCandidates([CLAUDE, BEBOU_ROW], "claude")).toEqual([CLAUDE]);
+  });
+
   it("offers every agent for a bare @", () => {
     expect(matchAgentCandidates([CLAUDE, OPENCODE], "")).toEqual([CLAUDE, OPENCODE]);
   });

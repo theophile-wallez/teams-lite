@@ -683,6 +683,21 @@ export async function setAgentProviders(
   expect(res.ok()).toBeTruthy();
 }
 
+/**
+ * Put the mock's CUSTOM AGENTS back the way it declares them — the two the seeded state holds
+ * (`bebou` with a face, `natacha` with a model and none).
+ *
+ * **Every spec that adds, edits or removes one must call this afterwards.** One mock process
+ * serves the whole run, and a third agent left behind changes what every later composer's "@"
+ * offers — and a `bebou` whose face was removed changes what every later chip draws.
+ */
+export async function resetAgentPersonas(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "agent_personas" },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Switch the sidebar to the Channels tab and wait for the tree to populate. */
 export async function openChannelsTab(page: Page): Promise<void> {
   await page.locator('[data-testid="tab-channels"]').click();

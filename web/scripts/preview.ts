@@ -56,6 +56,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/app --maintenance # Settings › This app
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
+//   bun run web/scripts/preview.ts --out /tmp/ca --custom-agents # the user's own agents
 //   bun run web/scripts/preview.ts --out /tmp/ref --tracker-refs # a reference as a chip
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
 //   bun run web/scripts/preview.ts --out /tmp/mr --merge-request # review + approve a merge request
@@ -1505,6 +1506,96 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-opencode-dark.png`, '.tiptap-message [data-testid="agent-tag"]');
       console.log(`[preview] wrote ${out}-opencode-{light,dark}.png`);
+    });
+    process.exit(0);
+  }
+
+  // The user's own CUSTOM AGENTS: the Settings section that makes one, the "@" list that
+  // offers it beside the providers, the chip a message carries, and the answer under its own
+  // name and face. The FALLBACK is half the feature, so both fixtures are on screen: `bebou`
+  // has a face and `natacha` wears Claude's own mark.
+  if (args.includes("--custom-agents")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openSettings(page);
+      const section = page.locator('[data-testid="custom-agents-settings"]');
+      await section.waitFor();
+      await section.scrollIntoViewIfNeeded();
+      await page.waitForSelector('[data-testid="custom-agent-row"] img[data-persona="bebou"]');
+      await page.waitForTimeout(250);
+      await shot(`${out}-settings-light.png`, '[data-testid="custom-agents-settings"]');
+      await setTheme("dark");
+      await shot(`${out}-settings-dark.png`, '[data-testid="custom-agents-settings"]');
+      await setTheme("light");
+
+      // The form, on an agent that already exists: the face beside the fields, and the
+      // instructions — the one thing about a custom agent no message ever shows.
+      await section.locator('[data-testid="custom-agent-edit"]').first().click();
+      await page.waitForSelector('[data-testid="custom-agent-dialog"]');
+      await page.waitForTimeout(250);
+      await shot(`${out}-dialog-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-dialog-dark.png`);
+      await setTheme("light");
+      await page.keyboard.press("Escape");
+      // The dialog's own close animation re-renders the section under it, so the next click
+      // has to wait for it to be gone rather than race the element out of the DOM.
+      await page.locator('[data-testid="custom-agent-dialog"]').waitFor({ state: "detached" });
+
+      // The name a persona may NOT take: `@claude` already summons the provider, so a form
+      // that accepted it would store a row nobody could ever summon.
+      await section.locator('[data-testid="add-custom-agent"]').click();
+      await page.waitForSelector('[data-testid="custom-agent-dialog"]');
+      await page.locator('[data-testid="custom-agent-name"]').fill("claude");
+      await page.waitForSelector('[data-testid="custom-agent-name-error"]');
+      await shot(`${out}-name-taken-light.png`, '[data-testid="custom-agent-dialog"]');
+      await page.keyboard.press("Escape");
+
+      // The "@" list: the two providers, then the user's own agents — each with its own face
+      // and the CLI behind it named, which is the one thing its name cannot say.
+      await page.locator('[data-testid="tab-chats"]').click();
+      await openConversation(page, "Agent Sandbox");
+      await clearComposer(page);
+      await typeInComposer(page, "@");
+      await page.waitForSelector('[data-testid="mention-suggestion"][data-persona="bebou"]');
+      await page.waitForTimeout(250);
+      await shot(`${out}-list-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-list-dark.png`);
+      await setTheme("light");
+
+      // Tagged, sent, and answered — the whole point of the feature in one bubble: the reply
+      // carries the persona's name and face rather than the vendor's, from the first frame.
+      await clearComposer(page);
+      await typeInComposer(page, "@bebou");
+      await page.waitForSelector('[data-testid="mention-suggestion"][data-persona="bebou"]');
+      await page.keyboard.press("Enter");
+      await page.waitForSelector('.tiptap-message [data-testid="agent-tag"][data-persona="bebou"]');
+      // The caret is already in the field, so the request is typed straight on rather than
+      // through `typeInComposer` — whose click is what a reader does not have to do here, and
+      // which lands dead centre on a document holding one atom (a click there selects it, the
+      // way it selects a person mention).
+      await page.keyboard.type("which port does the backend listen on?", { delay: 5 });
+      await shot(`${out}-chip-light.png`, '.tiptap-message [data-testid="agent-tag"]');
+      await setTheme("dark");
+      await shot(`${out}-chip-dark.png`, '.tiptap-message [data-testid="agent-tag"]');
+      await setTheme("light");
+      await page.keyboard.press("Enter");
+      await page.waitForSelector('[data-testid="agent-signature"][data-persona="bebou"]');
+      await page.waitForTimeout(600);
+      await shot(`${out}-answering-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-answering-dark.png`);
+      await setTheme("light");
+      await shot(
+        `${out}-signature-light.png`,
+        '[data-testid="agent-signature"][data-persona="bebou"]',
+      );
+      console.log(
+        `[preview] wrote ${out}-settings-{light,dark}.png, ${out}-dialog-{light,dark}.png, ` +
+          `${out}-name-taken-light.png, ${out}-list-{light,dark}.png, ` +
+          `${out}-chip-{light,dark}.png, ${out}-answering-{light,dark}.png and ` +
+          `${out}-signature-light.png`,
+      );
     });
     process.exit(0);
   }

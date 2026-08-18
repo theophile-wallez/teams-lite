@@ -26,7 +26,7 @@ import {
   parseMergeRequestId,
   sameMergeRequest,
 } from "~/lib/gitlab-mr";
-import { hasModifier } from "~/lib/platform";
+import { aModalIsOpen, hasModifier } from "~/lib/platform";
 import { cn } from "~/lib/utils";
 import { installVirtualKeyboardState } from "~/lib/virtual-keyboard";
 
@@ -287,6 +287,13 @@ function AppInner() {
         return;
       }
       if (e.key === "Escape") {
+        // A DIALOG owns the key while one is open, and this handler stands aside for it.
+        // Radix dismisses the top layer itself; what it cannot do is stop a listener on
+        // `document` that is not part of its layer stack — so Escape in the Add-emoji or the
+        // custom-agent form closed the dialog AND navigated out of Settings, taking the
+        // reader's place with it. It is the same failure the calendar's own popover documents
+        // ("Escape closes the MENU, and the panel takes the next one"), one layer up.
+        if (aModalIsOpen()) return;
         if (replyingTo) {
           controller.cancelReply();
           return;

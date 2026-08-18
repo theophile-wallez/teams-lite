@@ -50,6 +50,12 @@ export type AgentStreamFrame = {
   message_id: string;
   /** Which CLI is answering: "claude", "opencode". */
   backend: string;
+  /** The CUSTOM AGENT answering, by address (`bebou`), or null for a plain provider run.
+   *
+   *  It rides on every frame so the LIVE bubble draws its face from the first one: the
+   *  posted message's own signature carries it once the run ends, and a bubble that wore the
+   *  vendor's mark until then would swap faces in front of the reader for no reason. */
+  persona: string | null;
   phase: AgentPhase;
   /** The answer so far, as Markdown. */
   text: string;
@@ -118,6 +124,7 @@ export function parseAgentFrame(raw: unknown): AgentRun | null {
     conversation,
     message_id: messageId,
     backend: typeof f.backend === "string" ? f.backend : "claude",
+    persona: typeof f.persona === "string" && f.persona ? f.persona : null,
     phase,
     text: typeof f.text === "string" ? f.text : "",
     steps: parseSteps(f.steps),
@@ -314,11 +321,21 @@ function plural(count: number): string {
   return count === 1 ? "" : "s";
 }
 
-/** The label for a phase, written for somebody watching a thread rather than a
- *  terminal. The CLI is named the way it names itself (see {@link agentDisplayName}),
- *  because it is the CLI that is answering. */
+/**
+ * The label for a phase, written for somebody watching a thread rather than a terminal.
+ *
+ * WHO is named is whoever the reader addressed: the custom agent when they wrote `@bebou`,
+ * and the CLI otherwise (named the way it names itself — see {@link agentDisplayName}). The
+ * persona's ADDRESS is used rather than its label, because this is read off the run's own
+ * frames and the label lives in the local record; a surface that holds that record draws the
+ * label beside this line anyway (`AgentSignature`).
+ *
+ * It matters more here than it looks: this is the line under a live bubble, and "Claude is
+ * thinking" over a message the reader sent to Bebou reads as the wrong agent having picked it
+ * up.
+ */
 export function agentPhaseLabel(run: AgentRun): string {
-  const name = agentDisplayName(run.backend);
+  const name = run.persona ?? agentDisplayName(run.backend);
   switch (run.phase) {
     case "working": {
       const activity = run.activity;

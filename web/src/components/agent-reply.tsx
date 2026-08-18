@@ -12,8 +12,10 @@ import {
   type AgentTranscript,
 } from "~/lib/agent-run";
 import { agentDisplayName, type AgentBackendName } from "~/lib/agent-message";
+import { agentPersonaNamed } from "~/lib/agent-persona";
 import { cn } from "~/lib/utils";
 import { AgentCoin, agentShineColor } from "./agent-logo";
+import { useAppState } from "./controller-context";
 import { RichContent } from "./rich-content";
 import { ShineBorder } from "./magicui/shine-border";
 
@@ -800,21 +802,49 @@ export function AgentStoredStatus(props: {
  */
 export function AgentSignature(props: {
   backend: AgentBackendName;
+  /** The CUSTOM AGENT that answered, by address — read out of the message's own signature
+   *  (`agentAuthorship`), never looked up. So a reply keeps the name it answered under even
+   *  after the user renames or deletes that agent, and one answered on another machine draws
+   *  its name too. */
+  persona?: string | null;
   /** Whose message the agent answered — the account the reply went out under. */
   author?: string;
   busy?: boolean;
 }) {
   const author = props.author?.trim();
+  const label = usePersonaSignatureLabel(props.persona);
   return (
     <div
       data-testid="agent-signature"
+      data-persona={props.persona ?? undefined}
       className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-sender-name"
     >
-      <AgentCoin backend={props.backend} busy={props.busy} className="size-4" />
-      <span>{agentDisplayName(props.backend)}</span>
+      <AgentCoin
+        backend={props.backend}
+        persona={props.persona}
+        busy={props.busy}
+        className="size-4"
+      />
+      <span>{label ?? agentDisplayName(props.backend)}</span>
+      {/* A custom agent names the CLI behind it in the faint half of the line, where the
+          author's name goes: "Natacha · claude by Théophile". Which program answered is part
+          of the authorship this line exists to state — a name the user invented says nothing
+          about what ran. */}
+      {props.persona ? (
+        <span className="shrink-0 font-normal text-text-faint">{agentDisplayName(props.backend)}</span>
+      ) : null}
       {author ? <span className="min-w-0 truncate font-normal text-text-faint">by {author}</span> : null}
     </div>
   );
+}
+
+/** The name a persona's reply is drawn under: its label if this machine still holds the
+ *  record, else the address the signature carried. Never the provider's name — that would
+ *  rewrite a reply the reader watched being written. */
+function usePersonaSignatureLabel(name: string | null | undefined): string | null {
+  const agent = useAppState((s) => s.agent);
+  if (!name) return null;
+  return agentPersonaNamed(agent, name)?.label ?? name;
 }
 
 /**
@@ -860,6 +890,7 @@ export function AgentPendingBubble(props: {
             different layout would make that swap visible. */}
         <AgentSignature
           backend={props.run.backend as AgentBackendName}
+          persona={props.run.persona}
           author={props.author}
           busy
         />

@@ -83,10 +83,14 @@ test.describe("answer with an agent", () => {
       await expect(page.locator("body")).not.toHaveCSS("pointer-events", "none");
 
       // The composer's own "@" is the other case: the user is reading that list, so it
-      // still offers both. The menu narrows; it never narrows the keyboard.
+      // still offers both PROVIDERS — and their own custom agents under them, which this menu
+      // deliberately never grows a row for (see § CUSTOM AGENTS). The menu narrows; it never
+      // narrows the keyboard.
       await page.locator(editable).click();
       await page.keyboard.type("@");
-      const suggestions = page.locator('[data-testid="mention-suggestion"][data-kind="agent"]');
+      const suggestions = page.locator(
+        '[data-testid="mention-suggestion"][data-kind="agent"]:not([data-persona])',
+      );
       await expect(suggestions).toHaveCount(2);
 
       // Name the other provider, and the menu follows. The reload clears the "@" with it.

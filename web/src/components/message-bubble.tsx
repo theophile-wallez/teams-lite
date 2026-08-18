@@ -986,6 +986,7 @@ function MessageBubbleImpl(props: {
         {agent && !props.editing ? (
           <AgentSignature
             backend={agent.backend}
+            persona={agent.persona}
             author={props.message.sender}
             busy={props.agentRun ? agentRunIsLive(props.agentRun) : agent.pending}
           />

@@ -49,11 +49,15 @@ test.describe("agent tags", () => {
     await openSandbox(page);
     await page.keyboard.type("@");
     await expect(page.locator(suggestions)).toBeVisible();
-    // The mock holds `claude` and not `opencode`, so exactly one agent is offered: a row
-    // is drawn for a CLI that would really answer, never for one this machine lacks.
-    await expect(page.locator(agentOptions)).toHaveCount(1);
-    await expect(page.locator(agentOptions)).toHaveAttribute("data-agent", "claude");
+    // The mock holds `claude` and not `opencode`, so ONE PROVIDER is offered: a row is drawn
+    // for a CLI that would really answer, never for one this machine lacks. It comes first,
+    // and the user's own custom agents follow it (see custom-agents.spec.ts, and § CUSTOM
+    // AGENTS for why the fixed list leads).
+    const providerRows = page.locator(`${agentOptions}:not([data-persona])`);
+    await expect(providerRows).toHaveCount(1);
+    await expect(providerRows).toHaveAttribute("data-agent", "claude");
     await expect(page.locator(options).first()).toHaveAttribute("data-kind", "agent");
+    await expect(page.locator(options).first()).not.toHaveAttribute("data-persona", /./);
     // The people are still there, under it.
     await expect(page.locator(`${options}[data-kind="person"]`).first()).toBeVisible();
   });

@@ -217,6 +217,27 @@ describe("agentPhaseLabel", () => {
     );
   });
 
+  it("names the CUSTOM AGENT the reader addressed, when they addressed one", () => {
+    // "Claude is thinking" under a message somebody sent to `@bebou` reads as the wrong agent
+    // having picked it up. The ADDRESS is what a frame carries; the label lives in the local
+    // record, and the surfaces that hold it draw it beside this line.
+    expect(agentPhaseLabel(run({ persona: "bebou", phase: "thinking" }))).toBe(
+      "bebou is thinking",
+    );
+    expect(agentPhaseLabel(run({ persona: "bebou", phase: "writing" }))).toBe("bebou is writing");
+    expect(agentPhaseLabel(run({ persona: "bebou", phase: "done" }))).toBe("bebou");
+    // A tool call still names the tool: what is running is the same program either way.
+    expect(
+      agentPhaseLabel(
+        run({
+          persona: "bebou",
+          phase: "working",
+          activity: { tool: "Read", target: "src/agent.rs", done: false },
+        }),
+      ),
+    ).toBe("Read src/agent.rs");
+  });
+
   it("says what a folded transcript holds, counted from the run and not from the rows", () => {
     const thought = { kind: "thought", text: "the port is a constant" } as const;
     const call = { kind: "tool", tool: "Grep", target: "PORT", done: true } as const;

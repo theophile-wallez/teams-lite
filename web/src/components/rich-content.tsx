@@ -636,7 +636,13 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
       // node's own text — the `@claude` on the wire — is what the chip replaces: the mark
       // and the name say it in the vendor's own voice, which is what was on screen when
       // the message was written.
-      return <AgentTagChip key={key} backend={node.attrs.backend ?? ""} />;
+      return (
+        <AgentTagChip
+          key={key}
+          backend={node.attrs.backend ?? ""}
+          persona={node.attrs.persona}
+        />
+      );
     case "customEmoji":
       return (
         <CustomEmoji

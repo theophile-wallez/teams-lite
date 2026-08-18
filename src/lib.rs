@@ -7,6 +7,7 @@ pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) teams-lite/0.1";
 pub mod agent;
 pub mod agent_markdown;
 pub mod agent_models;
+pub mod agent_persona;
 pub mod agent_policy;
 pub mod auth;
 pub mod calendar;

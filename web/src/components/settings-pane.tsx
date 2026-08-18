@@ -35,6 +35,7 @@ import { pushBlockerMessage, pushBlockerRemedy } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { AiProvidersSettings } from "./ai-providers-settings";
 import { CallRecordingsSettings } from "./call-recordings-settings";
+import { CustomAgentsSettings } from "./custom-agents-settings";
 import { CustomEmojiSettings } from "./custom-emoji-settings";
 import { MaintenanceSettings } from "./maintenance-settings";
 import { RenamedPeopleSettings } from "./renamed-people-settings";
@@ -99,7 +100,8 @@ export function SettingsPane(props: { onBack?: () => void }) {
         <div className="flex min-w-0 flex-col">
           <h2 className="truncate text-sm font-medium text-foreground">Settings</h2>
           <p className="truncate text-[11px] text-text-faint">
-            AI providers, integrations, privacy, people, appearance, sounds, and this app
+            AI providers, custom agents, integrations, privacy, people, appearance, sounds, and
+            this app
           </p>
         </div>
       </header>
@@ -107,6 +109,9 @@ export function SettingsPane(props: { onBack?: () => void }) {
       <div className="flex-1 overflow-y-auto px-4 py-6 md:px-5">
         <div className="mx-auto flex max-w-xl flex-col gap-8 pb-[env(safe-area-inset-bottom)]">
           <AiProvidersSettings />
+          {/* Directly under the providers: a custom agent IS one of them wearing a name, so
+              the two read as one subject and the picker in the dialog names the rows above. */}
+          <CustomAgentsSettings />
           <GitLabSettings />
           <LinearSettings />
           <GhostModeSettings />

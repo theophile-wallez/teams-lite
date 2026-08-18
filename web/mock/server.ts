@@ -3540,6 +3540,132 @@ const mockAgentRunning = new Set<string>();
  *  the answer so far and a "stopped by you" note, exactly as the backend finalizes it. */
 const mockAgentStopped = new Set<string>();
 
+/**
+ * The user's own CUSTOM AGENTS, with no tenant and no CLI (see `agent_persona` in
+ * src/agent_persona.rs).
+ *
+ * Two of them, and the pair is deliberate: `bebou` has a FACE and an instruction, `natacha`
+ * has neither and therefore wears Claude's own mark — so both halves of the fallback rule are
+ * on screen at once, which is the only way a capture can show it. `bebou`'s face is a real
+ * PNG this file draws, because the whole point of the surface is that a persona's own picture
+ * is what the reader sees.
+ */
+type MockPersona = {
+  name: string;
+  label: string;
+  backend: string;
+  model: string | null;
+  preprompt: string;
+  /** The face, as raw PNG bytes, or null for one that wears the provider's mark. */
+  avatar: Uint8Array | null;
+  added_ms: number;
+  updated_ms: number;
+};
+
+/** A flat PNG in one colour, so the mock's faces are real bytes a browser really decodes —
+ *  the shape `mockInlinePicture` already uses for an inline picture. */
+function mockPersonaFace(rgb: [number, number, number]): Uint8Array {
+  return solidPng(48, 48, rgb);
+}
+
+const mockPersonas = new Map<string, MockPersona>([
+  [
+    "bebou",
+    {
+      name: "bebou",
+      label: "Bebou",
+      backend: "claude",
+      model: null,
+      preprompt: "/bebou",
+      avatar: mockPersonaFace([214, 119, 87]),
+      added_ms: 1_700_000_000_000,
+      updated_ms: 1_700_000_000_000,
+    },
+  ],
+  [
+    "natacha",
+    {
+      name: "natacha",
+      label: "Natacha",
+      backend: "claude",
+      model: "haiku",
+      preprompt: "Answer as an over-enthusiastic French aunt on Facebook.",
+      avatar: null,
+      added_ms: 1_700_000_100_000,
+      updated_ms: 1_700_000_100_000,
+    },
+  ],
+]);
+
+/** Put the custom agents back the way this file declares them. One mock process serves the
+ *  whole E2E run, so a spec that added, edited or removed one has to hand the next spec the
+ *  state it expects — the discipline `resetMockAgentProviders` already follows. */
+function resetMockPersonas(): void {
+  const declared = [...mockPersonas.keys()];
+  for (const name of declared) {
+    if (name !== "bebou" && name !== "natacha") mockPersonas.delete(name);
+  }
+  const bebou = mockPersonas.get("bebou");
+  if (bebou) {
+    bebou.label = "Bebou";
+    bebou.backend = "claude";
+    bebou.model = null;
+    bebou.preprompt = "/bebou";
+    bebou.avatar = mockPersonaFace([214, 119, 87]);
+    bebou.updated_ms = 1_700_000_000_000;
+  } else {
+    mockPersonas.set("bebou", {
+      name: "bebou",
+      label: "Bebou",
+      backend: "claude",
+      model: null,
+      preprompt: "/bebou",
+      avatar: mockPersonaFace([214, 119, 87]),
+      added_ms: 1_700_000_000_000,
+      updated_ms: 1_700_000_000_000,
+    });
+  }
+  const natacha = mockPersonas.get("natacha");
+  if (natacha) {
+    natacha.label = "Natacha";
+    natacha.backend = "claude";
+    natacha.model = "haiku";
+    natacha.preprompt = "Answer as an over-enthusiastic French aunt on Facebook.";
+    natacha.avatar = null;
+    natacha.updated_ms = 1_700_000_100_000;
+  } else {
+    mockPersonas.set("natacha", {
+      name: "natacha",
+      label: "Natacha",
+      backend: "claude",
+      model: "haiku",
+      preprompt: "Answer as an over-enthusiastic French aunt on Facebook.",
+      avatar: null,
+      added_ms: 1_700_000_100_000,
+      updated_ms: 1_700_000_100_000,
+    });
+  }
+}
+
+/** The custom agents as `agent_status` publishes them — the metadata, never the bytes, the
+ *  split the Rust `agent_personas_json` has for the reason a list is asked for on every
+ *  connect. */
+function mockPersonasView() {
+  return [...mockPersonas.values()]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((persona) => ({
+      name: persona.name,
+      label: persona.label || persona.name,
+      prefix: `@${persona.name}`,
+      backend: persona.backend,
+      model: persona.model,
+      preprompt: persona.preprompt,
+      has_avatar: persona.avatar !== null,
+      added_ms: persona.added_ms,
+      updated_ms: persona.updated_ms,
+    }));
+}
+
 /** The `agent_status` result, matching the Rust one. */
 function agentStatusView(): {
   backends: {
@@ -3551,6 +3677,7 @@ function agentStatusView(): {
     models: MockAgentModel[];
   }[];
   default_provider: string;
+  personas: ReturnType<typeof mockPersonasView>;
   conversations: { conversation: string; mode: string }[];
   tools: string[];
   tool_grants: { key: string; label: string; detail: string; tools: string[] }[];
@@ -3562,6 +3689,7 @@ function agentStatusView(): {
   return {
     backends: [...mockAgentProviders].map(([name, provider]) => ({ name, ...provider })),
     default_provider: mockAgentDefaultProvider,
+    personas: mockPersonasView(),
     conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
     tools: [...mockAgentTools],
     tool_grants: MOCK_AGENT_TOOL_GRANTS,
@@ -7329,6 +7457,80 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return agentStatusView();
     }
 
+    // ---- custom agents (see src/agent_persona.rs) ---------------------------
+
+    case "agent_persona_avatar": {
+      const persona = mockPersonas.get(requireString(params, "name").toLowerCase());
+      if (!persona?.avatar) return { content_type: "", data_base64: "" };
+      return {
+        content_type: "image/png",
+        data_base64: Buffer.from(persona.avatar).toString("base64"),
+      };
+    }
+
+    case "agent_persona_save": {
+      const o = asObject(params);
+      const name = requireString(params, "name").trim().toLowerCase();
+      const backend = requireString(params, "backend");
+      const existing = mockPersonas.get(name);
+      // Every refusal the Rust handler makes, in its own words: a mock that accepted what
+      // the backend refuses hides the bug instead of failing a test.
+      if (!existing) {
+        if (!/^[a-z0-9][a-z0-9_-]{0,23}$/.test(name)) {
+          throw new Error(
+            "a custom agent's name is lowercase letters, digits, - and _, up to 24 " +
+              "characters — it is what you type after the @",
+          );
+        }
+        const provider = mockAgentProviders.get(name);
+        if (provider) {
+          throw new Error(
+            `${name} is the name of an AI provider, so ${provider.prefix} already summons it ` +
+              "— pick another name",
+          );
+        }
+      }
+      if (!mockAgentProviders.has(backend)) {
+        throw new Error(`\`${backend}\` is not an AI provider this machine knows`);
+      }
+      const label = typeof o.label === "string" ? o.label.trim() : existing?.label ?? "";
+      const model = typeof o.model === "string" ? o.model.trim() : existing?.model ?? "";
+      if (model && !isValidMockModel(model)) throw new Error(`\`${model}\` is not a model name`);
+      // THREE answers, like the backend's: absent LEAVES the face alone, "" clears it, and
+      // base64 replaces it.
+      let avatar = existing?.avatar ?? null;
+      if (typeof o.avatar_base64 === "string") {
+        if (o.avatar_base64 === "") avatar = null;
+        else {
+          const bytes = Buffer.from(o.avatar_base64, "base64");
+          const measured = measureMockEmojiArt(bytes);
+          if (!measured.contentType.startsWith("image/")) {
+            throw new Error("a custom agent's picture must be a PNG, JPEG, GIF or WebP image");
+          }
+          avatar = bytes;
+        }
+      }
+      const now = Date.now();
+      mockPersonas.set(name, {
+        name,
+        label: label === name ? "" : label,
+        backend,
+        model: model || null,
+        preprompt: typeof o.preprompt === "string" ? o.preprompt.trim() : existing?.preprompt ?? "",
+        avatar,
+        added_ms: existing?.added_ms ?? now,
+        updated_ms: now,
+      });
+      broadcast("agent_personas_changed", {});
+      return agentStatusView();
+    }
+
+    case "agent_persona_remove": {
+      const name = requireString(params, "name").trim().toLowerCase();
+      if (mockPersonas.delete(name)) broadcast("agent_personas_changed", {});
+      return agentStatusView();
+    }
+
     // ---- audio calling ------------------------------------------------------
     // Nothing is registered, nobody is rung, and no audio exists. The phases move on
     // timers so the page's own flow — prepare, negotiate, answer, mute, hang up — runs
@@ -8493,25 +8695,44 @@ function withoutQuotedBlocks(html: string): string {
   );
 }
 
-/** The backend a message asks for, or null — `agent_policy::split_prefix`, and the same
- *  rule: the address may sit ANYWHERE, as a word of its own, and something has to be left
- *  over to ask. */
-function mockAgentBackend(text: string): string | null {
-  let found: { backend: string; at: number } | null = null;
-  for (const backend of ["claude", "opencode"]) {
+/** Which agent a message asks for, or null — `agent_policy::split_address`, and the same
+ *  rules: the address may sit ANYWHERE, as a word of its own, something has to be left over
+ *  to ask, and the EARLIEST address wins.
+ *
+ *  A CUSTOM AGENT is one more address here and nothing else, which is the whole point of the
+ *  shape: `@bebou` resolves to the provider behind it plus the row that named it, so
+ *  everything downstream — the signature, the frames, the gate — takes one path. */
+function mockAgentAddress(text: string): { backend: string; persona: string | null } | null {
+  type Match = { backend: string; persona: string | null; address: string; at: number };
+  // Providers FIRST, so a tie at one offset keeps the provider — as in the backend, where it
+  // is a floor rather than a rule (a persona may not take a provider's name).
+  const addresses: { address: string; backend: string; persona: string | null }[] = [
+    { address: "claude", backend: "claude", persona: null },
+    { address: "opencode", backend: "opencode", persona: null },
+    ...[...mockPersonas.values()].map((persona) => ({
+      address: persona.name,
+      backend: persona.backend,
+      persona: persona.name,
+    })),
+  ];
+  const matches: Match[] = [];
+  for (const candidate of addresses) {
     // A word of its own on both sides: the text opens there or whitespace separates it,
     // and it ends the text or is followed by something that ends a word — so
     // "@claudette" is another word and "ping@claude.example" is another kind of address.
-    const at = new RegExp(`(^|\\s)@${backend}(?![\\p{L}\\p{N}_-])`, "iu").exec(text);
+    const at = new RegExp(`(^|\\s)@${candidate.address}(?![\\p{L}\\p{N}_-])`, "iu").exec(text);
     if (!at) continue;
-    const start = at.index + at[1]!.length;
-    if (!found || start < found.at) found = { backend, at: start };
+    matches.push({ ...candidate, at: at.index + at[1]!.length });
   }
+  const found = matches.reduce<Match | null>(
+    (earliest, match) => (earliest === null || match.at < earliest.at ? match : earliest),
+    null,
+  );
   if (!found) return null;
-  const rest = text.slice(found.at + found.backend.length + 1);
+  const rest = text.slice(found.at + found.address.length + 1);
   // A bare "@claude" asks nothing, and neither does one with only its own punctuation.
   const prompt = `${text.slice(0, found.at)} ${rest.replace(/^[:,]+/, "")}`.trim();
-  return prompt === "" ? null : found.backend;
+  return prompt === "" ? null : { backend: found.backend, persona: found.persona };
 }
 
 /** Answer a trigger the user wrote, if the conversation is opted in.
@@ -8521,18 +8742,19 @@ function mockAgentBackend(text: string): string | null {
  *  which matters: the rich composer puts the whole message in `content_html` and sends an
  *  empty `text`, so a mock that trusted that field would answer nothing at all. */
 function maybeRunMockAgent(convId: string, trigger: ChatMessage): void {
-  const backend = mockAgentBackend(plain(withoutQuotedBlocks(trigger.content)));
-  if (!backend) return;
+  const address = mockAgentAddress(plain(withoutQuotedBlocks(trigger.content)));
+  if (!address) return;
   // The consent gate, not a convenience: off is the default everywhere but the sandbox,
   // and a mock that answered regardless would make the switch untestable.
   if (mockAgentModes.get(convId) !== "reply") return;
-  void simulateMockAgentRun(convId, trigger, backend);
+  void simulateMockAgentRun(convId, trigger, address.backend, address.persona);
 }
 
 async function simulateMockAgentRun(
   convId: string,
   trigger: ChatMessage,
   backend: string,
+  persona: string | null = null,
 ): Promise<void> {
   const t = threadFor(convId);
   if (!t) return;
@@ -8546,8 +8768,11 @@ async function simulateMockAgentRun(
     sender_mri: trigger.sender_mri ?? "",
     preview: previewOf(trigger.content),
   });
+  // `bebou (claude)`, or `claude` — `agent_policy::Signature`, in one place so the
+  // placeholder, every edit and the final body cannot disagree.
+  const signer = persona ? `${persona} (${backend})` : backend;
   const body = (answer: string, pending: boolean) =>
-    quote + agentSignedHtml(backend, answer, { pending });
+    quote + agentSignedHtml(signer, answer, { pending });
 
   // 1. The placeholder, posted before the run starts — its id is what the edits address.
   const seq = nextSeq(t.messages);
@@ -8590,6 +8815,9 @@ async function simulateMockAgentRun(
       conversation: convId,
       message_id: reply.id,
       backend,
+      // So the LIVE bubble draws the custom agent's face from the first frame rather than
+      // swapping to it when the run ends (see web/src/lib/agent-run.ts).
+      persona: persona ?? "",
       phase: phase(),
       text: written,
       steps: steps.map((entry) => ({ ...entry })),
@@ -8611,7 +8839,7 @@ async function simulateMockAgentRun(
   // can break out of its remaining steps.
   const stoppedNow = (): boolean => mockAgentStopped.has(runId);
   const finalizeStopped = (): void => {
-    editAgentReply(convId, reply.id, quote + agentStoppedHtml(backend, written));
+    editAgentReply(convId, reply.id, quote + agentStoppedHtml(signer, written));
     frame({ phase: "done" });
   };
 
@@ -8695,12 +8923,12 @@ function burstsOf(text: string): string[] {
 
 /** The reply's body as `agent_policy::reply_html` / `thinking_html` build it: the answer
  *  as HTML, then the line that says a machine wrote it. */
-function agentSignedHtml(backend: string, answer: string, opts: { pending: boolean }): string {
+function agentSignedHtml(signer: string, answer: string, opts: { pending: boolean }): string {
   const body = agentAnswerHtml(answer);
-  if (!body) return `<p><em>${backend} is thinking…</em></p>`;
+  if (!body) return `<p><em>${signer} is thinking…</em></p>`;
   const footer = opts.pending
-    ? `<p><em>${backend} is writing…</em></p>`
-    : `<p><em>— ${backend}, via teams-lite</em></p>`;
+    ? `<p><em>${signer} is writing…</em></p>`
+    : `<p><em>— ${signer}, via teams-lite</em></p>`;
   return body + footer;
 }
 
@@ -8708,11 +8936,11 @@ function agentSignedHtml(backend: string, answer: string, opts: { pending: boole
  *  the answer so far, a "stopped by you" note, and the DONE signature LAST — which is what
  *  makes the reply read as a finished agent message (`agentAuthorship` matches the trailing
  *  `<p><em>…</em></p>`). An empty answer leaves the note standing alone. */
-function agentStoppedHtml(backend: string, answer: string): string {
+function agentStoppedHtml(signer: string, answer: string): string {
   return (
     agentAnswerHtml(answer) +
     `<p><em>— stopped by you</em></p>` +
-    `<p><em>— ${backend}, via teams-lite</em></p>`
+    `<p><em>— ${signer}, via teams-lite</em></p>`
   );
 }
 
@@ -9137,6 +9365,16 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         },
         { status: 200 },
       );
+    }
+    // Put the CUSTOM AGENTS back the way this file declares them — the two the seeded state
+    // holds, with `bebou`'s face and `natacha`'s model. A spec that adds, edits or removes
+    // one MUST reset it (`{kind: "agent_personas", reset: true}`): one mock process serves
+    // the whole run, and a third agent left behind changes what every later composer's "@"
+    // offers.
+    if (body.kind === "agent_personas") {
+      resetMockPersonas();
+      broadcast("agent_personas_changed", {});
+      return Response.json({ ok: true, personas: mockPersonasView() }, { status: 200 });
     }
     // Arm where this page stands with the write lock, so the banner that says "this window
     // can read, but not send" can be driven (see write-lock-banner.tsx). A spec MUST reset

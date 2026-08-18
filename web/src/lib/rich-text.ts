@@ -94,6 +94,11 @@ export type RichAttrs = {
   /** Agent tags only: the CLI the prefix summons (`claude`, `opencode`), which is the
    *  mark and the colour the chip wears. */
   backend?: string;
+  /** Agent tags only: the user's own CUSTOM AGENT the prefix summons, by address (`bebou`).
+   *  It decides the FACE and the NAME on the chip, while `backend` above still decides the
+   *  palette and the fallback artwork — a persona IS that provider wearing a name (see
+   *  lib/agent-persona.ts). Absent on a tag that addressed the provider itself. */
+  persona?: string;
   /** Table cells only: how many columns/rows the cell spans, when it spans more
    *  than one. Bounded (see {@link cellSpan}) so a hostile value can't ask the
    *  browser for a million columns. */

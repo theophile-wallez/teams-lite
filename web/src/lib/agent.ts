@@ -14,6 +14,8 @@
  *   switch that would do nothing.
  */
 
+import type { AgentPersona } from "./agent-persona";
+
 /**
  * One model the backend offers for a provider (`agent_models::Choice`).
  *
@@ -102,6 +104,10 @@ export type AgentConversationMode = {
 /** Everything `agent_status` reports. */
 export type AgentStatus = {
   backends: AgentBackend[];
+  /** The user's own CUSTOM AGENTS — see lib/agent-persona.ts. They ride in the status
+   *  because every surface that offers an agent already holds it. Absent on a backend too
+   *  old to publish any, which then behaves exactly as it did before the feature. */
+  personas?: AgentPersona[];
   /** The provider a surface offers when it offers ONE — see {@link agentDefaultProvider}.
    *  Absent on a backend too old to name one, which then reads as the first provider. */
   default_provider?: string;

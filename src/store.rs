@@ -125,6 +125,45 @@ CREATE TABLE IF NOT EXISTS custom_emoji (
     source       TEXT NOT NULL DEFAULT '',
     added_ms     INTEGER NOT NULL DEFAULT 0
 );
+-- The user's own CUSTOM AGENTS: `@bebou` and `@natacha`, each pointing at one of the
+-- AI providers `agent_policy::BACKENDS` holds (see `agent_persona`). A row is an ADDRESS
+-- plus a face, a label, a model and a preprompt; it is never a program, so the set of
+-- executables a Teams message can start is the same with this table full as with it
+-- empty.
+--
+-- LOCAL, and with no upstream at all — like `person_overrides` beside it and unlike a
+-- Teams setting: Microsoft holds no notion of one of these, so there is nothing to
+-- publish and nothing to reconcile. A reply names its persona in the line it signs
+-- itself with, which is how this app draws the right face on a message answered from a
+-- phone; the row itself never leaves the machine.
+--
+-- The avatar is BYTES for the reasons the two tables above give: a path breaks when the
+-- file moves, and a URL would make drawing an agent's face a request to a third party.
+-- The type and the weight are checked on the way in (`agent_persona::measure_avatar`),
+-- where a client's input arrives.
+CREATE TABLE IF NOT EXISTS agent_personas (
+    -- The address, without its `@`, lowercase: `bebou` is written `@bebou`. The primary
+    -- key IS the address, so a name can be taken exactly once and the store answers
+    -- "is this free?" with a lookup.
+    name                TEXT PRIMARY KEY,
+    -- What a reader sees, when it differs from the address: "Natacha" for `natacha`.
+    -- Empty means the address is the label.
+    label               TEXT NOT NULL DEFAULT '',
+    -- Which provider really runs (`agent_policy::BACKENDS`). A row naming one this build
+    -- does not hold is DROPPED by the read rather than falling back to a default: a
+    -- persona must never start a program the user did not name.
+    backend             TEXT NOT NULL DEFAULT '',
+    -- The model this persona runs, overriding the provider's own. Empty inherits.
+    model               TEXT NOT NULL DEFAULT '',
+    -- What leads every prompt this persona answers, and appears in no message body.
+    preprompt           TEXT NOT NULL DEFAULT '',
+    avatar_content_type TEXT NOT NULL DEFAULT '',
+    avatar_bytes        BLOB,
+    avatar_width        INTEGER NOT NULL DEFAULT 0,
+    avatar_height       INTEGER NOT NULL DEFAULT 0,
+    added_ms            INTEGER NOT NULL DEFAULT 0,
+    updated_ms          INTEGER NOT NULL DEFAULT 0
+);
 -- Team channels, kept SEPARATE from `conversations` so channel posts never mix
 -- into the chat list. A channel's messages still live in the shared `messages`
 -- table keyed by its thread id, so open/backfill/send/react reuse the same
@@ -358,6 +397,13 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     -- Which CLI is answering (`agent_policy::BACKENDS`), because the body a repair
     -- writes names it.
     backend         TEXT NOT NULL DEFAULT '',
+    -- The CUSTOM AGENT that was addressed, by name, or '' for a plain provider run. The
+    -- body a repair writes has to name what the thread has been watching for the last ten
+    -- minutes — `bebou (claude)`, not `claude` — and this is the only place that survives
+    -- the process. The NAME rather than a reference to the row, so a persona the user
+    -- renamed or deleted meanwhile still closes its own message
+    -- (`agent_policy::Signature::stored`).
+    persona         TEXT NOT NULL DEFAULT '',
     started_ms      INTEGER NOT NULL DEFAULT 0,
     heartbeat_ms    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (conversation_id, message_id)
@@ -498,7 +544,7 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// rather than a second v14 because both tables were built on branches that each called
 /// themselves 14: `open` runs the DDL pass only when the recorded version MOVES, so a
 /// store stamped 14 by either build would never grow the other one's table.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -1103,6 +1149,8 @@ pub struct AgentRun {
     /// The trigger's message id — the `run_id` an `agent_stream` frame carries.
     pub trigger_id: String,
     pub backend: String,
+    /// The custom agent answering, by name, or empty for a plain provider run.
+    pub persona: String,
     pub started_ms: i64,
     pub heartbeat_ms: i64,
 }
@@ -1600,6 +1648,12 @@ fn migrate(conn: &Connection) -> Result<()> {
             "ALTER TABLE {table} ADD COLUMN last_message_sender_mri TEXT NOT NULL DEFAULT ''"
         ))?;
     }
+
+    // agent_runs.persona: which custom agent a live run is answering as, so a run this
+    // process did not start still closes its message under the right name (see the DDL
+    // above). Legacy rows get '', which is exactly right — a run started before this
+    // column existed was a plain provider run.
+    add_column("ALTER TABLE agent_runs ADD COLUMN persona TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 
@@ -3738,13 +3792,15 @@ impl Store {
     pub fn begin_agent_run(&self, run: &AgentRun) -> Result<()> {
         self.exec(
             "INSERT OR REPLACE INTO agent_runs
-                 (conversation_id, message_id, trigger_id, backend, started_ms, heartbeat_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (conversation_id, message_id, trigger_id, backend, persona, started_ms,
+                  heartbeat_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 run.conversation_id,
                 run.message_id,
                 run.trigger_id,
                 run.backend,
+                run.persona,
                 run.started_ms,
                 run.heartbeat_ms,
             ],
@@ -3783,7 +3839,8 @@ impl Store {
     /// process abandoned, oldest first.
     pub fn abandoned_agent_runs(&self, quiet_before_ms: i64) -> Result<Vec<AgentRun>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT conversation_id, message_id, trigger_id, backend, started_ms, heartbeat_ms
+            "SELECT conversation_id, message_id, trigger_id, backend, persona, started_ms,
+                    heartbeat_ms
              FROM agent_runs WHERE heartbeat_ms < ?1 ORDER BY started_ms ASC",
         )?;
         let rows = stmt
@@ -3793,8 +3850,9 @@ impl Store {
                     message_id: row.get(1)?,
                     trigger_id: row.get(2)?,
                     backend: row.get(3)?,
-                    started_ms: row.get(4)?,
-                    heartbeat_ms: row.get(5)?,
+                    persona: row.get(4)?,
+                    started_ms: row.get(5)?,
+                    heartbeat_ms: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -4317,6 +4375,156 @@ impl Store {
         Ok(count > 0)
     }
 
+    // ---- custom agents (see `agent_persona`) --------------------------------
+
+    /// Every custom agent, by name — the list a trigger is matched against and the one
+    /// Settings draws.
+    ///
+    /// A ROW NAMING A PROVIDER THIS BUILD DOES NOT HOLD IS DROPPED, with a journal line.
+    /// That is the read half of the rule the module states: a persona points at an entry
+    /// of the static `agent_policy::BACKENDS` table, so a name that resolves to nothing
+    /// resolves to NOTHING — never to a default. Falling back would start a program the
+    /// user never named, which is the one thing this whole shape exists to prevent. It
+    /// cannot happen from this app's own writes (the RPC refuses an unknown provider); it
+    /// is what a store written by a NEWER build looks like to an older one, and this
+    /// machine runs two installs against one file.
+    ///
+    /// The avatar BYTES are deliberately not here. A list of ten personas is asked for on
+    /// every connect and on every trigger, and ten faces is megabytes; the shape travels
+    /// so a client knows whether to ask, and `persona_avatar` serves one when it does.
+    pub fn agent_personas(&self) -> Result<Vec<crate::agent_persona::Persona>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, label, backend, model, preprompt, avatar_content_type,
+                    avatar_width, avatar_height, added_ms, updated_ms
+             FROM agent_personas ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, u32>(6)?,
+                r.get::<_, u32>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (name, label, backend, model, preprompt, content_type, width, height, added, updated) =
+                row?;
+            let Some(backend) = crate::agent_policy::backend_named(&backend) else {
+                eprintln!(
+                    "[agent] custom agent @{name} names the provider `{backend}`, which this \
+                     build does not hold — ignoring it"
+                );
+                continue;
+            };
+            out.push(crate::agent_persona::Persona {
+                name,
+                label,
+                backend,
+                model: crate::agent_persona::normalize_model(Some(&model)),
+                preprompt,
+                avatar: (!content_type.is_empty()).then(|| crate::agent_persona::Avatar {
+                    content_type,
+                    width,
+                    height,
+                }),
+                added_ms: added,
+                updated_ms: updated,
+            });
+        }
+        Ok(out)
+    }
+
+    /// One custom agent's face: its content type and bytes, or `None` when it has none.
+    pub fn agent_persona_avatar(&self, name: &str) -> Result<Option<(String, Vec<u8>)>> {
+        let row: Option<(String, Option<Vec<u8>>)> = self
+            .conn
+            .query_row(
+                "SELECT avatar_content_type, avatar_bytes FROM agent_personas WHERE name = ?1",
+                params![name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((content_type, Some(bytes))) if !content_type.is_empty() && !bytes.is_empty() => {
+                Some((content_type, bytes))
+            }
+            _ => None,
+        })
+    }
+
+    /// Write one custom agent — creating it, or changing what the caller named.
+    ///
+    /// `avatar` is three-valued because the three answers differ: `None` LEAVES the face
+    /// alone (an edit of the preprompt must not drop the picture), `Some(None)` clears it,
+    /// and `Some(Some(..))` replaces it. A single `Option` would make every save of a
+    /// label a silent deletion of the face — which is the mistake `set_person_avatar`
+    /// avoids by being a method of its own, and this row has one field too many for that.
+    ///
+    /// `added_ms` is written once and kept: `ON CONFLICT` leaves it, so the list's order
+    /// and "since when" survive every edit.
+    pub fn set_agent_persona(
+        &self,
+        persona: &crate::agent_persona::Persona,
+        avatar: Option<Option<(&str, &[u8], u32, u32)>>,
+        now_ms: i64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            crate::agent_persona::is_valid_name(&persona.name),
+            "invalid custom agent name: {}",
+            persona.name
+        );
+        self.exec(
+            "INSERT INTO agent_personas
+                 (name, label, backend, model, preprompt, added_ms, updated_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(name) DO UPDATE SET
+                 label = ?2, backend = ?3, model = ?4, preprompt = ?5, updated_ms = ?6",
+            params![
+                persona.name,
+                persona.label,
+                persona.backend.name,
+                persona.model.clone().unwrap_or_default(),
+                persona.preprompt,
+                now_ms
+            ],
+        )?;
+        match avatar {
+            None => {}
+            Some(None) => {
+                self.exec(
+                    "UPDATE agent_personas
+                     SET avatar_content_type = '', avatar_bytes = NULL,
+                         avatar_width = 0, avatar_height = 0, updated_ms = ?2
+                     WHERE name = ?1",
+                    params![persona.name, now_ms],
+                )?;
+            }
+            Some(Some((content_type, bytes, width, height))) => {
+                self.exec(
+                    "UPDATE agent_personas
+                     SET avatar_content_type = ?2, avatar_bytes = ?3,
+                         avatar_width = ?4, avatar_height = ?5, updated_ms = ?6
+                     WHERE name = ?1",
+                    params![persona.name, content_type, bytes, width, height, now_ms],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Forget one custom agent. `false` when it was already gone.
+    pub fn remove_agent_persona(&self, name: &str) -> Result<bool> {
+        let count = self.exec("DELETE FROM agent_personas WHERE name = ?1", params![name])?;
+        Ok(count > 0)
+    }
+
     /// Everybody who has written in a conversation, most recent contributor first:
     /// their MRI and the display name their newest message carries (empty when we
     /// never captured one), resolved through the user's own nickname for them.
@@ -4721,7 +4929,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (15, 0x04fd_f3dd_54fb_c59d);
+        const PINNED: (i64, u64) = (16, 0xa4b5_ca61_c937_aa60);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -7692,6 +7900,7 @@ mod tests {
             message_id: message_id.into(),
             trigger_id: "1000".into(),
             backend: "claude".into(),
+            persona: String::new(),
             started_ms: 1_000,
             heartbeat_ms,
         }
@@ -7740,6 +7949,100 @@ mod tests {
         s.begin_agent_run(&a_run("2001", 9_000)).unwrap();
         assert!(!s.take_abandoned_agent_run("19:c@thread.v2", "2001", 5_000).unwrap());
         assert_eq!(s.abandoned_agent_runs(i64::MAX).unwrap().len(), 1);
+    }
+
+    fn a_persona(name: &str, backend: &str) -> crate::agent_persona::Persona {
+        crate::agent_persona::Persona {
+            name: name.into(),
+            label: String::new(),
+            backend: crate::agent_policy::backend_named(backend).expect("a backend"),
+            model: None,
+            preprompt: String::new(),
+            avatar: None,
+            added_ms: 0,
+            updated_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_custom_agent_round_trips_with_its_face() {
+        let s = Store::open_in_memory().unwrap();
+        let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47];
+        let mut bebou = a_persona("bebou", "claude");
+        bebou.label = "Bebou".into();
+        bebou.model = Some("haiku".into());
+        bebou.preprompt = "/bebou".into();
+        s.set_agent_persona(&bebou, Some(Some(("image/png", png, 64, 64))), 100).unwrap();
+
+        let all = s.agent_personas().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "bebou");
+        assert_eq!(all[0].label(), "Bebou");
+        assert_eq!(all[0].backend.name, "claude");
+        assert_eq!(all[0].model.as_deref(), Some("haiku"));
+        assert_eq!(all[0].preprompt, "/bebou");
+        assert_eq!(all[0].avatar.as_ref().map(|a| a.content_type.as_str()), Some("image/png"));
+        assert_eq!(
+            s.agent_persona_avatar("bebou").unwrap().unwrap(),
+            ("image/png".to_string(), png.to_vec())
+        );
+        assert!(s.remove_agent_persona("bebou").unwrap());
+        assert!(s.agent_personas().unwrap().is_empty());
+        assert!(!s.remove_agent_persona("bebou").unwrap(), "already gone");
+    }
+
+    /// The three-valued avatar, which is the whole reason `set_agent_persona` does not take
+    /// a plain `Option`: editing a preprompt must not silently delete the picture.
+    #[test]
+    fn saving_a_custom_agent_leaves_its_face_alone_unless_asked() {
+        let s = Store::open_in_memory().unwrap();
+        let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47];
+        let mut bebou = a_persona("bebou", "claude");
+        s.set_agent_persona(&bebou, Some(Some(("image/png", png, 64, 64))), 100).unwrap();
+
+        // An edit that says nothing about the face keeps it.
+        bebou.preprompt = "be nice".into();
+        s.set_agent_persona(&bebou, None, 200).unwrap();
+        assert!(s.agent_persona_avatar("bebou").unwrap().is_some());
+        assert_eq!(s.agent_personas().unwrap()[0].preprompt, "be nice");
+        // `added_ms` is written once, so the row keeps knowing when it was made.
+        assert_eq!(s.agent_personas().unwrap()[0].added_ms, 100);
+        assert_eq!(s.agent_personas().unwrap()[0].updated_ms, 200);
+
+        // Asked explicitly, it goes — and the row stays.
+        s.set_agent_persona(&bebou, Some(None), 300).unwrap();
+        assert!(s.agent_persona_avatar("bebou").unwrap().is_none());
+        assert_eq!(s.agent_personas().unwrap().len(), 1);
+        assert!(s.agent_personas().unwrap()[0].avatar.is_none());
+    }
+
+    /// A row naming a provider this build does not hold is DROPPED rather than defaulted.
+    /// It is what a store written by a NEWER build looks like to an older one — this
+    /// machine runs two installs against one file — and defaulting would start a program
+    /// the user never named.
+    #[test]
+    fn a_custom_agent_naming_an_unknown_provider_is_ignored() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_agent_persona(&a_persona("bebou", "claude"), None, 100).unwrap();
+        s.exec(
+            "INSERT INTO agent_personas (name, backend) VALUES ('gemma', 'gemini')",
+            params![],
+        )
+        .unwrap();
+        let all = s.agent_personas().unwrap();
+        assert_eq!(all.len(), 1, "only the one whose provider resolves");
+        assert_eq!(all[0].name, "bebou");
+    }
+
+    /// The store is the last floor under a name, after the RPC's own check: the primary key
+    /// is the ADDRESS a message is matched against, so a name that could not be typed as a
+    /// word must never become a row.
+    #[test]
+    fn the_store_refuses_a_name_that_could_not_be_an_address() {
+        let s = Store::open_in_memory().unwrap();
+        let mut bad = a_persona("bebou", "claude");
+        bad.name = "Bebou!".into();
+        assert!(s.set_agent_persona(&bad, None, 100).is_err());
     }
 
     #[test]

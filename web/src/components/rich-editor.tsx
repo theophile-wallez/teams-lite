@@ -472,7 +472,13 @@ export function RichEditor(props: {
     if (option.kind === "agent") {
       editor
         .chain()
-        .insertAgentTag({ backend: option.agent.backend, prefix: option.agent.prefix, from, to })
+        .insertAgentTag({
+          backend: option.agent.backend,
+          prefix: option.agent.prefix,
+          persona: option.agent.persona,
+          from,
+          to,
+        })
         .run();
       return;
     }

@@ -21,6 +21,74 @@ function message(over: Partial<ChatMessage> = {}): ChatMessage {
 // The four bodies are `agent_policy::thinking_html`, `reply_html` (streaming and
 // finished) and `failure_html`.
 
+describe("agentAuthorship — a custom agent", () => {
+  // The persona form is `bebou (claude)` (`agent_policy::Signature`). Reading it back is what
+  // makes a reply draw under its own name and face — including one answered from a phone
+  // while this app was closed, which is most of them.
+  it("reads which custom agent answered, and which CLI ran", () => {
+    const found = agentAuthorship(
+      message({
+        content: "<p>coucou ma Véro</p><p><em>— natacha (claude), via teams-lite</em></p>",
+      }),
+    );
+    expect(found).not.toBeNull();
+    expect(found!.persona).toBe("natacha");
+    expect(found!.backend).toBe("claude");
+    expect(found!.bodyHtml).toBe("<p>coucou ma Véro</p>");
+    expect(found!.pending).toBe(false);
+  });
+
+  it("reads the persona in all three states", () => {
+    const writing = agentAuthorship(
+      message({ content: "<p>coucou</p><p><em>natacha (claude) is writing…</em></p>" }),
+    );
+    expect(writing!.persona).toBe("natacha");
+    expect(writing!.pending).toBe(true);
+
+    const thinking = agentAuthorship(
+      message({ content: "<p><em>bebou (opencode) is thinking…</em></p>" }),
+    );
+    expect(thinking!.persona).toBe("bebou");
+    expect(thinking!.backend).toBe("opencode");
+    expect(thinking!.pending).toBe(true);
+
+    const failed = agentAuthorship(
+      message({ content: "<p><em>bebou (claude) could not answer: boom</em></p>" }),
+    );
+    expect(failed!.persona).toBe("bebou");
+    expect(failed!.failure).toBe("boom");
+    expect(failed!.pending).toBe(false);
+  });
+
+  it("leaves a plain provider reply with no persona", () => {
+    // Byte for byte the signature every reply carried before this feature: an older message
+    // must keep reading as one, and it must not be attributed to an agent nobody made.
+    const found = agentAuthorship(
+      message({ content: "<p>19420.</p><p><em>— claude, via teams-lite</em></p>" }),
+    );
+    expect(found!.persona).toBeNull();
+    expect(found!.backend).toBe("claude");
+  });
+
+  it("refuses a persona form whose CLI this app does not know", () => {
+    // The rule that makes "a message signed by a name we know" different from "a message
+    // ending in a dash and some words". The PERSONA name is whatever the machine that wrote
+    // the reply called its own agent, so it is never checked — the CLI is.
+    expect(
+      agentAuthorship(message({ content: "<p>hi</p><p><em>— bebou (gemini), via teams-lite</em></p>" })),
+    ).toBeNull();
+    expect(
+      agentAuthorship(message({ content: "<p>hi</p><p><em>— somebody's aunt, via teams-lite</em></p>" })),
+    ).toBeNull();
+  });
+
+  it("reads one through the whitespace Teams stores a body with", () => {
+    const stored =
+      "<p>coucou</p>\r\n<p>\r\n<em>— natacha (claude), via teams-lite</em>\r\n</p>\r\n";
+    expect(agentAuthorship(message({ content: stored }))!.persona).toBe("natacha");
+  });
+});
+
 describe("agentAuthorship", () => {
   it("reads a finished reply and hands back the answer without the signature", () => {
     const found = agentAuthorship(

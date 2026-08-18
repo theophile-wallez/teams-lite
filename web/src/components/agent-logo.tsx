@@ -1,6 +1,7 @@
 import { HugeiconsIcon } from "@hugeicons/react";
 import { SparklesIcon } from "@hugeicons/core-free-icons";
 import type { AgentModel } from "~/lib/agent";
+import { AgentMark } from "./agent-persona-mark";
 import { cn } from "~/lib/utils";
 
 /**
@@ -128,6 +129,9 @@ export function modelMark(backend: string, model: AgentModel): string {
  */
 export function AgentCoin(props: {
   backend: string;
+  /** The CUSTOM AGENT whose face goes here instead of the vendor's mark, by address — and
+   *  the vendor's mark when it has none (see components/agent-persona-mark.tsx). */
+  persona?: string | null;
   busy?: boolean;
   className?: string;
 }) {
@@ -135,10 +139,16 @@ export function AgentCoin(props: {
     <span
       data-testid="agent-coin"
       data-backend={props.backend}
+      data-persona={props.persona ?? undefined}
       data-busy={props.busy ? "true" : undefined}
       className={cn("grid shrink-0 place-items-center", props.busy && "agent-mark-busy", props.className)}
     >
-      <AgentLogo backend={props.backend} className="size-full" title={props.backend} />
+      <AgentMark
+        backend={props.backend}
+        persona={props.persona}
+        className="size-full"
+        title={props.persona ?? props.backend}
+      />
     </span>
   );
 }
