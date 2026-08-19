@@ -3186,11 +3186,39 @@ if (import.meta.main) {
       await page.locator('[data-testid="scheduled-delete"]').first().click();
       await page.locator('[data-testid="scheduled-delete-confirm"]').first().waitFor();
       await shot(`${out}-armed-light.png`);
+      await page.keyboard.press("Escape");
+
+      // A PHONE. Every surface of this feature is reached from a composer that is the whole
+      // width of the screen there, so each one is captured again at 390px: a menu that
+      // overflowed, a dialog wider than the viewport or a row whose controls fell off the
+      // right are all invisible at 1200px.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(300);
+      await shot(`${out}-mobile-banner-light.png`);
+      // The chevron is disabled on an empty box, so there are words to schedule again.
+      await typeInComposer(page, "Ship it in the morning");
+      await page.locator('[data-testid="composer-schedule"]').click();
+      await page.locator('[data-testid="composer-schedule-menu"]').waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-mobile-menu-light.png`);
+      await page.locator('[data-testid="composer-schedule-custom-open"]').click();
+      await page.locator('[data-testid="composer-schedule-custom-dialog"]').waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-mobile-custom-light.png`);
+      await page.locator('[data-testid="composer-schedule-custom-cancel"]').click();
+      await page.locator('[data-testid="composer-schedule-open-list"]').click();
+      await page.locator('[data-testid="scheduled-messages-dialog"]').waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-mobile-list-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-mobile-list-dark.png`);
+      await setTheme("light");
+      await page.setViewportSize({ width: 1200, height: 850 });
       console.log(
         `[preview] wrote ${out}-control-light.png, ${out}-menu-{light,dark}.png, ` +
           `${out}-custom-{light,dark}.png, ${out}-refused-light.png, ` +
-          `${out}-queued-{light,dark}.png, ${out}-list-{light,dark}.png and ` +
-          `${out}-armed-light.png`,
+          `${out}-queued-{light,dark}.png, ${out}-list-{light,dark}.png, ` +
+          `${out}-armed-light.png and ${out}-mobile-{banner,menu,custom,list}-*.png`,
       );
     });
     process.exit(0);

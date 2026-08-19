@@ -9011,14 +9011,16 @@ function scheduleSendEcho(
         : {}),
     };
     t.messages.push(msg);
-    t.recompute();
     t.setDraft(""); // the accepted send clears the persisted draft
     broadcast("message", nicknamed(msg));
     // A message the service is HOLDING is in no conversation yet, so it marks nothing read,
-    // moves no preview and wakes neither the agent nor a chess opponent: none of them has
-    // been said anything to. It is broadcast, because that is what the tenant does, and the
-    // page is what decides a held frame is not news.
+    // never becomes the row's PREVIEW, and wakes neither the agent nor a chess opponent:
+    // none of them has been said anything to. `recompute` is below this line for that
+    // reason — above it, the sidebar read "You: Ship it in the morning" for a message that
+    // had not been sent, which is the very thing this feature exists to stop. It is still
+    // broadcast, because that is what the tenant does, and the page decides it is not news.
     if (scheduledTime) return;
+    t.recompute();
     t.setRead(true); // it's ours
     broadcast(t.changedEvent, {});
     maybeRunMockAgent(convId, msg);

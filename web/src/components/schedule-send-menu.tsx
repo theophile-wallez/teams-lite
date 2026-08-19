@@ -93,7 +93,7 @@ export function ScheduleSendMenu(props: {
             data-testid="composer-schedule"
             data-cuelume-press=""
             disabled={!props.canSend}
-            className="grid h-8 w-6 shrink-0 cursor-pointer place-items-center rounded-r-full border-l border-primary-foreground/25 bg-primary text-primary-foreground transition-all hover:brightness-110 active:brightness-95 disabled:cursor-default disabled:border-border-subtle disabled:bg-element disabled:text-text-faint"
+            className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-r-full border-l border-primary-foreground/25 bg-primary text-primary-foreground transition-all hover:brightness-110 active:brightness-95 disabled:cursor-default disabled:border-border-subtle disabled:bg-element disabled:text-text-faint"
           >
             <HugeiconsIcon icon={ArrowDown01Icon} className="size-3.5" strokeWidth={2} />
           </button>
@@ -108,7 +108,7 @@ export function ScheduleSendMenu(props: {
               data-schedule-key={preset.key}
               data-schedule-at={preset.at}
               onClick={() => schedule(preset.at)}
-              className="block w-full truncate rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+              className="flex min-h-11 w-full items-center truncate rounded-md px-2 text-left text-sm transition-colors hover:bg-accent"
             >
               {presetRowLabel(preset, now)}
             </button>
@@ -122,7 +122,7 @@ export function ScheduleSendMenu(props: {
               setOpen(false);
               setCustomOpen(true);
             }}
-            className="block w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+            className="flex min-h-11 w-full items-center rounded-md px-2 text-left text-sm transition-colors hover:bg-accent"
           >
             Custom time
           </button>
@@ -153,7 +153,7 @@ export function ScheduleSendMenu(props: {
               setCustom(event.target.value);
               setError(null);
             }}
-            className="w-full rounded-md bg-element px-2 py-1.5 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="min-h-11 w-full rounded-md bg-element px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           {error && (
             <div

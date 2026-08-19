@@ -93,7 +93,11 @@ export function ScheduledMessagesDialog(props: { open: boolean; onOpenChange: (o
             Nothing is waiting to go out.
           </p>
         ) : (
-          <ul className="max-h-[60vh] space-y-2 overflow-y-auto">
+          <ul
+            // `p-1` is the room the cards' own shadow needs: an overflow scroller clips at
+            // its padding edge, so without it every row was drawn with its bottom cut off.
+            className="max-h-[60vh] space-y-2 overflow-y-auto p-1"
+          >
             {scheduled.map((m) => (
               <li
                 key={`${m.conversation_id}/${m.id}`}
@@ -122,9 +126,21 @@ export function ScheduledMessagesDialog(props: { open: boolean; onOpenChange: (o
                   </div>
                 </div>
 
-                <div className="mt-2 flex items-center justify-end gap-1">
+                {/* LABELLED, and the destructive one is pushed away from the others. Three
+                    unlabelled 28px glyphs four pixels apart put "send this to everybody now"
+                    next to "delete it" — on a phone that is a mis-tap that posts a message,
+                    and neither icon says which is which. */}
+                <div className="mt-2 flex items-center gap-2">
                   <RowAction
-                    label="Edit — cancels it and puts the words back in the composer"
+                    label="Send now"
+                    testId="scheduled-send-now"
+                    icon={SentIcon}
+                    disabled={busy !== null}
+                    onClick={() => void act(m.id, () => controller.sendScheduledMessageNow(m))}
+                  />
+                  <RowAction
+                    label="Edit"
+                    hint="Cancels it and puts the words back in the composer"
                     testId="scheduled-edit"
                     icon={PencilEdit02Icon}
                     disabled={busy !== null}
@@ -135,26 +151,19 @@ export function ScheduledMessagesDialog(props: { open: boolean; onOpenChange: (o
                       })
                     }
                   />
-                  <RowAction
-                    label="Send now"
-                    testId="scheduled-send-now"
-                    icon={SentIcon}
-                    disabled={busy !== null}
-                    onClick={() => void act(m.id, () => controller.sendScheduledMessageNow(m))}
-                  />
                   {armed === m.id ? (
                     <button
                       type="button"
                       data-testid="scheduled-delete-confirm"
                       disabled={busy !== null}
                       onClick={() => void act(m.id, () => controller.cancelScheduledMessage(m))}
-                      className="rounded-md bg-destructive px-2 py-1 text-xs font-medium text-destructive-foreground disabled:opacity-50"
+                      className="ml-auto inline-flex min-h-9 items-center rounded-md bg-destructive px-3 text-xs font-medium text-destructive-foreground disabled:opacity-50"
                     >
                       Delete for good
                     </button>
                   ) : (
                     <RowAction
-                      label="Delete this scheduled message"
+                      label="Delete"
                       testId="scheduled-delete"
                       icon={Delete02Icon}
                       destructive
@@ -172,10 +181,21 @@ export function ScheduledMessagesDialog(props: { open: boolean; onOpenChange: (o
   );
 }
 
-/** One icon control on a row. Always drawn rather than revealed on hover: this app is read
- *  from a phone, where there is no hover — the rule the chat row's "…" already follows. */
+/**
+ * One action on a row: its glyph AND its word.
+ *
+ * Always drawn rather than revealed on hover, because this app is read from a phone where
+ * there is no hover — the rule the chat row's "…" already follows. And LABELLED, because
+ * these three actions are "post this to everybody now", "take it back" and "delete it": a
+ * reader must not have to decode a 16px glyph to tell them apart. `destructive` is a
+ * DESTRUCTIVE row pushed to the far end (`ml-auto`), so the irreversible one is nowhere near
+ * the one that sends.
+ */
 function RowAction(props: {
   label: string;
+  /** What the action really costs, for the pointer that rests on it. The label alone is the
+   *  short form; this is where "Edit" says that it cancels the queued message. */
+  hint?: string;
   testId: string;
   icon: Parameters<typeof HugeiconsIcon>[0]["icon"];
   destructive?: boolean;
@@ -185,18 +205,18 @@ function RowAction(props: {
   return (
     <button
       type="button"
-      aria-label={props.label}
-      title={props.label}
+      title={props.hint ?? props.label}
       data-testid={props.testId}
       data-cuelume-press=""
       disabled={props.disabled}
       onClick={props.onClick}
       className={cn(
-        "grid size-7 place-items-center rounded-md text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50",
-        props.destructive && "hover:bg-destructive/10 hover:text-destructive",
+        "inline-flex min-h-9 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50",
+        props.destructive && "ml-auto hover:bg-destructive/10 hover:text-destructive",
       )}
     >
-      <HugeiconsIcon icon={props.icon} className="size-4" strokeWidth={1.6} />
+      <HugeiconsIcon icon={props.icon} className="size-4 shrink-0" strokeWidth={1.6} />
+      {props.label}
     </button>
   );
 }

@@ -283,6 +283,18 @@ Nine rules hold it, and each is pinned by a test:
   morning, Monday morning — a row already in the PAST is dropped rather than shifted, and one
   landing on the same moment as another is dropped too (on a Sunday, "tomorrow morning" IS
   Monday morning).
+- **A ROW'S ACTIONS CARRY THEIR WORDS, and the destructive one is pushed away from the other
+  two** (`RowAction`, `ml-auto`). They were three unlabelled 28px glyphs four pixels apart,
+  which put "post this to everybody now" beside "delete it for good" and asked the reader to
+  decode a 16px mark to tell them apart — on a phone that is a mis-tap that sends. They are
+  drawn at rest rather than on hover, for the reason the chat row's "…" splits that way: this
+  app is read from a phone, where there is no hover.
+- **Every target this feature adds clears the touch floor.** The chevron is the Send button's
+  own 32px square (it was 24px, which made it the narrowest control in the app, at the very
+  edge of the screen), and a menu row and the picker are 44px tall. The one place the reader
+  is not reaching for a control is the BANNER, whose "See all scheduled messages" FLOWS inside
+  its own sentence rather than sitting pinned at the right: pinned, a phone drew the count on
+  one line and the way into the list against the far edge of another.
 
 **"Custom time" is a ROW that opens a DIALOG, and that is a bug fix rather than a
 preference.** The native picker sat inline in the menu first and could not be used at all:
@@ -303,13 +315,18 @@ wheel, which is where this app is read.
 it ECHOES a scheduled send as a held message in the thread's own history — because that is
 what the tenant really does. A mock that withheld it would let a broken exclusion pass every
 test; instead it mirrors the backend's read (`delivered()`) and answers the list from the
-threads' own messages, so a cancel takes a row out of it with nothing to keep in step. Its
-`{kind:"scheduled", clear:true}` hook drops everything held, and **a spec MUST call it**: one
-mock process serves the whole run, and a queued message outlives the page — it would sit in
-every later spec's banner. `cd web && bun run preview -- --out /tmp/sched --schedule` captures
+threads' own messages, so a cancel takes a row out of it with nothing to keep in step. It also
+does what the tenant does about the SIDEBAR: a held message never becomes a conversation's
+preview (its `recompute()` runs below the echo's own early return), because a row reading
+"You: Ship it in the morning" for a message nobody has sent is exactly the claim the whole
+banner exists to correct. Its `{kind:"scheduled", clear:true}` hook drops everything held, and
+**a spec MUST call it**: one mock process serves the whole run, and a queued message outlives
+the page — it would sit in every later spec's banner.
+`cd web && bun run preview -- --out /tmp/sched --schedule` captures
 the pill, the menu in both themes, the custom-time dialog in both themes, a moment that has
-passed being refused, the queued banner in both themes, the list in both themes and an armed
-deletion;
+passed being refused, the queued banner in both themes, the list in both themes, an armed
+deletion — and the banner, the menu, the custom-time dialog and the list again at a PHONE's
+width, because every defect this surface shipped was one only 390px showed;
 `web/e2e/scheduled-send.spec.ts` pins every rule above and `web/src/lib/schedule-send.test.ts`
 the arithmetic.
 

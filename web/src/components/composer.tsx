@@ -384,18 +384,28 @@ export function Composer(props: {
         {scheduleBanner && (
           <div
             data-testid="composer-schedule-note"
-            className="mb-2 flex items-center gap-2 px-1 text-xs text-text-dim"
+            className="mb-2 flex items-start gap-2 px-1 text-xs text-text-dim"
           >
-            <HugeiconsIcon icon={Clock01Icon} className="size-3.5 shrink-0" strokeWidth={1.6} />
-            <span className="min-w-0 flex-1">{scheduleBanner}</span>
-            <button
-              type="button"
-              data-testid="composer-schedule-open-list"
-              onClick={() => setScheduledOpen(true)}
-              className="shrink-0 font-medium text-primary hover:underline"
-            >
-              See all scheduled messages
-            </button>
+            <HugeiconsIcon
+              icon={Clock01Icon}
+              className="mt-0.5 size-3.5 shrink-0"
+              strokeWidth={1.6}
+            />
+            {/* The sentence and the link are ONE flowing block, not a row with the link
+                pinned right: at a phone's width the sentence takes two lines, and a link
+                held against the far edge then floats beside a ragged paragraph. Inline, it
+                wraps with the words — which is also where the reference puts it. */}
+            <p className="min-w-0 flex-1">
+              {scheduleBanner}{" "}
+              <button
+                type="button"
+                data-testid="composer-schedule-open-list"
+                onClick={() => setScheduledOpen(true)}
+                className="font-medium text-primary hover:underline"
+              >
+                See all scheduled messages
+              </button>
+            </p>
           </div>
         )}
         <ScheduledMessagesDialog open={scheduledOpen} onOpenChange={setScheduledOpen} />
