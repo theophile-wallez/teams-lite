@@ -26,6 +26,7 @@ import {
   mergeRefreshedHistoryPage,
   mergeRefreshedMailPage,
   replyToPayload,
+  messageIsHeld,
   shouldNotify,
   trimHistoryPage,
   mergeCalendarWindow,
@@ -196,7 +197,6 @@ import {
   type Appearance,
   type ResolvedTheme,
 } from "./appearance";
-import { scheduledNote } from "./schedule-send";
 import { sendFailureMessage } from "./send-failure";
 import {
   DEFAULT_SOUNDS_ENABLED,
@@ -381,14 +381,18 @@ export type AppState = {
    *  `removeSentWords` follows for the words. It names the conversation and the game as well
    *  as the ply, so a move pending in one thread can never be drawn onto another one's board. */
   chessPending: { conversation: string; game: string; ply: number; san: string } | null;
-  /** Where the words went when the last send in the OPEN conversation was SCHEDULED, in
-   *  one sentence naming the moment (see {@link scheduledNote}), or null when nothing is
-   *  waiting.
+  /** Every message Teams is HOLDING for this account, soonest first — what "see all
+   *  scheduled messages" lists. Loaded on demand and after anything that changes it;
+   *  empty until then, because a list nobody has opened is a read nobody asked for. */
+  scheduledMessages: ChatMessage[];
+  /** Words handed BACK to a composer that is already open — today only from the scheduled
+   *  list, whose Edit cancels a queued message and returns it to be written again.
    *
-   *  It is the mirror of {@link sendError} and it is drawn in the same place, for the same
-   *  reason: the box is cleared and the message is NOT in the thread yet — Teams is
-   *  holding it — so without this line the words simply vanished. */
-  scheduleNote: string | null;
+   *  It needs a slice of its own because `draft` seeds the editor at MOUNT: the editor is
+   *  keyed per conversation, so setting the draft of the thread already on screen changes
+   *  nothing the reader can see. The token is what applies it exactly once, which is the
+   *  shape `agentAnswer` already uses for the same reason. */
+  composerRestore: { conversation: string; text: string; token: number } | null;
   replyingTo: PendingReply | null;
   /** The notifications panel's three activity streams (newest-first each), one
    *  per tab: Activity, Mentions, Following. */
@@ -834,7 +838,8 @@ function initialState(): AppState {
     sendError: null,
     chessError: null,
     chessPending: null,
-    scheduleNote: null,
+    scheduledMessages: [],
+    composerRestore: null,
     replyingTo: null,
     notifications: { activity: [], mentions: [], following: [] },
     notificationsUnread: 0,
@@ -1189,6 +1194,11 @@ export class TeamsController {
       this.set({ ready: true });
       // The activity feed is best-effort and must never block startup.
       void this.refreshNotifications();
+      // What Teams is holding for later. Read at startup rather than on demand, because
+      // the banner over a composer is DERIVED from it: without this, a thread with a
+      // message waiting said nothing about it until one more was queued in this page.
+      // It is a store read on the backend and costs no network request.
+      void this.loadScheduledMessages();
       // App settings (the GitLab host, and which integration tokens are stored)
       // are best-effort too — a failure just leaves the defaults, which enrich
       // nothing but public gitlab.com links.
@@ -1382,6 +1392,14 @@ export class TeamsController {
 
     on("message", (raw) => {
       const m = raw as ChatMessage;
+      // A message Teams is HOLDING arrives on the feed like any other — it is a real
+      // message, posted now and delivered later — so it never joins the thread, never
+      // chimes and never bumps a preview. What it does is refresh the scheduled list,
+      // which is where the reader was told to look for it.
+      if (messageIsHeld(m)) {
+        void this.loadScheduledMessages();
+        return;
+      }
       const cached = this.messageCache.get(m.conversation_id);
       // Read BEFORE the merge: a frame carrying a message this page already holds is a
       // reaction, an edit or a deletion on it rather than news (see `shouldNotify`), and
@@ -4424,9 +4442,7 @@ export class TeamsController {
       // reader just left must not be drawn onto the board of the one they opened.
       chessError: null,
       chessPending: null,
-      // And so does the note about a message that is waiting to go out.
-      scheduleNote: null,
-      messages: cached?.messages ?? [],
+        messages: cached?.messages ?? [],
       hasMoreOlder: cached?.has_more ?? false,
       loadingMessages: !cached,
       // Show any cached "seen by" positions instantly on re-open; the fetch below
@@ -4581,8 +4597,7 @@ export class TeamsController {
       sendError: null,
       chessError: null,
       chessPending: null,
-      scheduleNote: null,
-    });
+      });
   }
 
   async loadOlderMessages(): Promise<void> {
@@ -5816,6 +5831,110 @@ export class TeamsController {
    * broadcasts the result, which reconciles into the cache by id (see `wireEvents`) —
    * so the bubble becomes the deletion placeholder without anything optimistic here.
    */
+  // ---- scheduled messages (what Teams is holding for later) -----------------
+
+  /**
+   * Load the messages Teams is holding, into {@link AppState.scheduledMessages}.
+   *
+   * An ordinary read that costs no network request on the backend either, so it is called
+   * freely: when the list is opened, and after anything that changes what is queued.
+   */
+  async loadScheduledMessages(): Promise<void> {
+    try {
+      const { messages } = await this.backend.scheduledMessages();
+      this.set({ scheduledMessages: messages });
+    } catch (e) {
+      this.set({ status: `scheduled messages failed: ${errText(e)}` });
+    }
+  }
+
+  /**
+   * Cancel a scheduled message: Teams never delivers it.
+   *
+   * It is the ORDINARY `delete`, and that is measured rather than assumed — `DELETE` on a
+   * held message clears its `scheduledsendtime` and sets `deletetime`
+   * (`examples/scheduled_send_probe.rs`), so the one call both stops the delivery and takes
+   * the row out of the list. Nothing new is gated: `delete` is already an
+   * `OUTWARD_METHODS` entry, and the row asks twice before calling it exactly as a
+   * message's own Delete does.
+   *
+   * Cheaper than a re-read for the reader, but the list is re-read anyway: the store is
+   * the authority on what is still queued, and a row dropped locally on a call that failed
+   * would tell them a message is cancelled when it is not.
+   */
+  async cancelScheduledMessage(message: ChatMessage): Promise<boolean> {
+    try {
+      await this.backend.deleteMessage(message.conversation_id, message.id);
+    } catch (e) {
+      this.set({ status: `cancel failed: ${errText(e)}` });
+      playCue("error");
+      return false;
+    }
+    await this.loadScheduledMessages();
+    return true;
+  }
+
+  /**
+   * Send a scheduled message NOW: cancel the held one, post the same body immediately.
+   *
+   * Two calls rather than one, deliberately. The service DOES release a held message when
+   * it is edited — measured — but resting "send now" on that side effect would make it a
+   * silent no-op the day the tenant stops doing it, and an edit is not what the reader
+   * asked for. Cancel-then-send is two writes this app already makes, in the order that
+   * cannot double-post: if the send fails the message is simply cancelled, which the list
+   * then shows, rather than delivered twice.
+   */
+  async sendScheduledMessageNow(message: ChatMessage): Promise<boolean> {
+    if (!(await this.cancelScheduledMessage(message))) return false;
+    try {
+      await this.backend.send(
+        message.conversation_id,
+        copyableMessageText(message),
+        undefined,
+        // The body as Teams stored it, so formatting, mentions' own spans and inline
+        // pictures survive — the plain text above is only the fallback a `Text` frame needs.
+        message.content || undefined,
+      );
+    } catch (e) {
+      this.set({ status: `send failed: ${errText(e)}` });
+      if (this.get().openId === message.conversation_id) {
+        this.set({ sendError: sendFailureMessage(e) });
+      }
+      playCue("error");
+      return false;
+    }
+    await this.loadScheduledMessages();
+    return true;
+  }
+
+  /**
+   * Take a scheduled message back into the composer of its own conversation: cancel it, put
+   * its words in that thread's draft, and open the thread.
+   *
+   * This is the one row that covers both "edit the words" and "pick another time", and it
+   * is that shape because the service leaves no other: **an edit RELEASES a held message**
+   * (it is delivered at once) and a `properties` PUT of the moment is refused
+   * `400 InvalidMessagePropertyType` — both measured. So the honest offer is to un-queue it
+   * and hand it back, where the words and the moment are both the reader's again.
+   */
+  async editScheduledMessage(message: ChatMessage): Promise<boolean> {
+    const text = copyableMessageText(message);
+    if (!(await this.cancelScheduledMessage(message))) return false;
+    await this.openConversation(message.conversation_id);
+    // Both halves: the DRAFT so it survives a reload and a walk through other threads, and
+    // the restore so the editor already on screen really shows the words. Setting the draft
+    // alone changed nothing visible, because the editor seeds from it at mount.
+    this.setDraftText(text);
+    this.set({
+      composerRestore: {
+        conversation: message.conversation_id,
+        text,
+        token: (this.get().composerRestore?.token ?? 0) + 1,
+      },
+    });
+    return true;
+  }
+
   async deleteMessage(messageId: string): Promise<boolean> {
     const id = this.get().openId;
     if (!id) return false;
@@ -5892,7 +6011,7 @@ export class TeamsController {
       // this one, and a sentence about it hanging over another thread would name nothing.
       this.set({ status: `send failed: ${errText(e)}` });
       if (this.get().openId === id) {
-        this.set({ sendError: sendFailureMessage(e), scheduleNote: null });
+        this.set({ sendError: sendFailureMessage(e) });
       }
       playCue("error");
       return false;
@@ -5918,11 +6037,13 @@ export class TeamsController {
         scrollToBottomNonce: this.get().scrollToBottomNonce + 1,
         // A message that left answers the last one that did not.
         sendError: null,
-        // A scheduled one is the only send that leaves nothing in the thread, so it says
-        // so; an ordinary one takes that note back, because the message IS there now.
-        scheduleNote: scheduledAt ? scheduledNote(scheduledAt) : null,
       });
     }
+    // A SCHEDULED send leaves nothing in the thread, so what accounts for the words is the
+    // queue — read it back rather than announcing it here, so the banner says what is really
+    // waiting. Belt as well as braces: the live frame refreshes it too, and this covers a
+    // tenant that echoes a held message on no feed at all.
+    if (scheduledAt) void this.loadScheduledMessages();
     return true;
   }
 

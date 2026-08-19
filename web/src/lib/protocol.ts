@@ -354,6 +354,13 @@ export type ChatMessage = {
    *  non-empty (we had cached the message before it was deleted), the placeholder
    *  offers to reveal the original with an "invisible ink" unveil animation. */
   deleted?: boolean;
+  /** WHEN Teams is HOLDING this message for, in epoch ms — absent or 0 for one that was
+   *  sent at once, which is nearly all of them.
+   *
+   *  A scheduled send comes back in the ordinary history and on the live feed like any
+   *  other message (measured against the tenant), so this is what tells a page that a
+   *  frame is tomorrow's message rather than today's — see {@link messageIsHeld}. */
+  scheduled_time?: number;
 };
 
 export type ReplyTo = {
@@ -1570,6 +1577,23 @@ export function replyToPayload(message: ChatMessage, before: string, after: stri
 // ---- history merge logic ----------------------------------------------------
 
 export const HISTORY_PREFETCH_MESSAGES = 20;
+
+/**
+ * Whether Teams is still HOLDING this message — a scheduled send whose moment has not come.
+ *
+ * The one rule, in one place, because it decides three different things: such a message is
+ * not drawn in the thread, it is what the scheduled list is made of, and it must never
+ * chime. The backend's own read already excludes held rows from a history page
+ * (`Store::NOT_STILL_HELD`), so this is for the LIVE frame — which arrives like any other
+ * — and for a page that is holding rows across the moment they come due.
+ *
+ * It is a comparison against the clock rather than a flag because the service keeps the
+ * property on the message it has delivered: the moment passing is the whole event, and
+ * nothing has to be cleared for the message to become an ordinary one.
+ */
+export function messageIsHeld(m: ChatMessage, now: number = Date.now()): boolean {
+  return (m.scheduled_time ?? 0) > now;
+}
 
 export function mergeMessages(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
   const byId = new Map(current.map((message) => [message.id, message]));

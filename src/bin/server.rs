@@ -139,6 +139,11 @@ const DEFAULT_PORT: u16 = 19420;
 /// inspects real data on 19430. They share the SQLite store safely (WAL +
 /// busy_timeout, see `store::Store::open`).
 const READ_ONLY_PORT: u16 = 19430;
+
+/// How many scheduled messages the list answers with. Far above any real queue — Slack's
+/// own ceiling is 30 per conversation — and it bounds a read that is otherwise unbounded
+/// by anything the user does.
+const MAX_SCHEDULED_LISTED: i64 = 200;
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
 const UA: &str = teams_lite::USER_AGENT;
 /// Give the UI ample time to connect after the server becomes ready. Authentication
@@ -5553,6 +5558,25 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // and cached, which is the whole reason this method exists.
         "linear_workspace" => linear_workspace(ctx).await,
 
+        // Every message Teams is still HOLDING for this account, soonest first — the whole
+        // of "see all scheduled messages".
+        //
+        // An ORDINARY READ, ungated, and it makes no network request at all: a scheduled
+        // send comes back in the ordinary history, so the store already holds every one of
+        // them (the same rows the history leaves out until their moment passes). The page
+        // names each one's conversation from the list it already has, so nothing about a
+        // thread is resolved twice.
+        "scheduled_messages" => {
+            let me = ctx.identity().await?;
+            let store = ctx.store()?;
+            let held = store.scheduled_messages(MAX_SCHEDULED_LISTED)?;
+            let messages: Vec<Value> = held
+                .iter()
+                .map(|m| message_json(m, &me.name, &me.mri, Some(&store)))
+                .collect();
+            Ok(json!({ "messages": messages }))
+        }
+
         // The approval state of one merge request: who has approved it, how many
         // approvals it still wants, and whether the user's own is among them. A READ,
         // so it is ungated like `enrich_link` — and it is what lets the message's own
@@ -8459,7 +8483,13 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str, store: Option<&Sto
         "mentions_me": push_policy::mentions_user(&m.mentions, self_mri),
         "thread_root_id": m.thread_root_id,
         "thread_subject": m.thread_subject,
-        "deleted": m.deleted
+        "deleted": m.deleted,
+        // WHEN Teams is holding this one for, 0 for every message that was sent at once.
+        // It rides on every message because the LIVE path needs it: a scheduled send comes
+        // back on the feed like any other frame, and a page that merged it would draw
+        // tomorrow's message in today's thread — the very thing the store's own read
+        // excludes (see `Message::scheduled_time`).
+        "scheduled_time": m.scheduled_time
     })
 }
 
@@ -13715,6 +13745,7 @@ mod tests {
             thread_root_id: String::new(),
             thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         };
         let renamed = store
@@ -13936,6 +13967,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         }
     }

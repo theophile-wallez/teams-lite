@@ -123,23 +123,61 @@ export function scheduleRefusal(at: number, now: number = Date.now()): string | 
   return null;
 }
 
-/** What the composer says once a message is queued. It names the moment, because the
- *  message is NOT in the thread yet and the words have left the box — so this line is the
- *  only thing on screen that says where they went. */
-export function scheduledNote(at: number, now: Date = new Date()): string {
-  return `Scheduled for ${scheduleLabel(at, now)}. Teams sends it then, even with this app closed.`;
+/**
+ * What the banner above the composer says about what is queued for THIS conversation, or
+ * null when nothing is.
+ *
+ * It is DERIVED from the queue rather than set by the send that made one, and that is the
+ * whole of why it is right: a message is in no thread, so this line and the list it links to
+ * are the only things on screen accounting for the words — and a line set by an event went
+ * stale the moment the message was cancelled from the list, and was missing altogether when
+ * the app was simply reopened with something already waiting.
+ *
+ * `moments` are the scheduled times queued in the open conversation, in any order.
+ */
+export function scheduledBanner(moments: number[], now: Date = new Date()): string | null {
+  const next = moments.filter((at) => Number.isFinite(at)).sort((a, b) => a - b)[0];
+  if (next === undefined) return null;
+  if (moments.length === 1) return scheduledBannerLabel(next, now);
+  // The COUNT first, then the soonest: with several queued, "how many" is the fact the
+  // reader is missing, and the next moment is what tells them whether to hurry.
+  return `${moments.length} messages scheduled — the next ${scheduleLabel(next, now)}.`;
 }
 
 /**
- * The one thing this app cannot do about a scheduled message, said on the control BEFORE
- * it is pressed — the rule `RECORD_HINT` follows for a recording.
+ * What a scheduled send really costs, said on the control BEFORE it is pressed — the rule
+ * `RECORD_HINT` follows for a recording.
  *
- * Teams holds the message, and teams-lite has no surface that lists what is held: what is
- * measured is that the service accepts and holds it (`examples/scheduled_send_probe.rs`),
- * not what cancels it. So the reader is told where to go rather than left to find out.
+ * Teams holds the message and nobody in the conversation sees it until it goes out; it can
+ * be cancelled or taken back into the composer from the list until then, which is the half
+ * a reader needs before they trust a queue at all.
  */
 export const SCHEDULE_HINT =
-  "Teams holds the message until then. Change or cancel it in Teams itself.";
+  "Nobody sees it until then. Cancel or edit it from the scheduled list.";
+
+/**
+ * What ONE row of the schedule menu reads: the moment itself, capitalised — "Tomorrow at
+ * 09:00", "Monday at 09:00".
+ *
+ * One label rather than a name beside a time. The row used to carry both ("Tomorrow
+ * morning" and "tomorrow at 09:00 AM"), which is the same fact stated twice and wide enough
+ * to wrap the row onto two lines; Slack's own menu names the moment and stops.
+ */
+export function presetRowLabel(preset: SchedulePreset, now: Date = new Date()): string {
+  const when = scheduleLabel(preset.at, now);
+  return when.charAt(0).toUpperCase() + when.slice(1);
+}
+
+/** How a queued message's own row states when it goes — Slack's "Send tomorrow at 9:00". */
+export function scheduledRowLabel(at: number, now: Date = new Date()): string {
+  return `Send ${scheduleLabel(at, now)}`;
+}
+
+/** What the banner above the composer says once a message is queued: the same sentence the
+ *  note carried, which is the one thing on screen accounting for words that left the box. */
+export function scheduledBannerLabel(at: number, now: Date = new Date()): string {
+  return `Your message will be sent ${scheduleLabel(at, now)}.`;
+}
 
 /** The value a native `<input type="datetime-local">` wants: local time, minute
  *  precision, no timezone. Built by hand because `toISOString` is UTC, which would offer

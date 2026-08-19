@@ -3,6 +3,7 @@ import type { Editor } from "@tiptap/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Cancel01Icon,
+  Clock01Icon,
   ImageAdd01Icon,
   Loading02Icon,
   SentIcon,
@@ -20,9 +21,11 @@ import {
   type ComposerImage,
 } from "~/lib/composer-image";
 import { agentCandidatesFor, type OutboundMention } from "~/lib/mentions";
+import { scheduledBanner } from "~/lib/schedule-send";
 import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { ScheduleSendMenu } from "./schedule-send-menu";
+import { ScheduledMessagesDialog } from "./scheduled-messages-dialog";
 import { useAppState, useController } from "./controller-context";
 import type { CustomEmoji } from "~/lib/custom-emoji";
 import { unicodeShortcodes } from "~/lib/emoji-shortcodes";
@@ -95,7 +98,12 @@ export function Composer(props: {
   const sendError = useAppState((s) => s.sendError);
   // Where the words went when the last send here was SCHEDULED. The mirror of `sendError`,
   // in the same place: the box is empty and the message is not in the thread yet.
-  const scheduleNote = useAppState((s) => s.scheduleNote);
+  // What is QUEUED for this conversation. Derived rather than announced by the send that
+  // queued it: a line set by an event went stale as soon as the message was cancelled, and
+  // said nothing at all when the app was reopened with something already waiting.
+  const scheduledHere = useAppState((s) => s.scheduledMessages);
+  // Words handed back by the scheduled list's Edit, for the thread they belong to.
+  const composerRestore = useAppState((s) => s.composerRestore);
   const replyingTo = useAppState((s) => s.replyingTo);
   const openId = useAppState((s) => s.openId);
   // Who this thread can @mention. Loaded on the first "@" (see
@@ -128,6 +136,9 @@ export function Composer(props: {
   const [loadingImages, setLoadingImages] = useState(0);
   const imageLoading = loadingImages > 0;
   const [sending, setSending] = useState(false);
+  // Whether the list of what Teams is holding is open. Local: the banner's link is the only
+  // thing that opens it, and it closes itself when a row takes the reader elsewhere.
+  const [scheduledOpen, setScheduledOpen] = useState(false);
   // A ref as well as state: `send` must see the current values synchronously, so a
   // second Enter during a pending request cannot start a duplicate send.
   const sendingRef = useRef(false);
@@ -297,6 +308,9 @@ export function Composer(props: {
   };
 
   const canSend = !sending && !imageLoading && (images.length > 0 || !richEmpty);
+  const scheduleBanner = scheduledBanner(
+    scheduledHere.filter((m) => m.conversation_id === openId).map((m) => m.scheduled_time ?? 0),
+  );
 
   /** Send the composer's snapshot — now, or at `scheduledAt` if the reader picked a
    *  moment. One path for both, so a scheduled message carries the same pictures, the
@@ -363,6 +377,28 @@ export function Composer(props: {
             </button>
           </div>
         )}
+        {/* Where the words went when the last send here was queued for later — ABOVE the
+            box rather than inside it, because the message is in NO thread and this line
+            plus the list it links to are the only things on screen accounting for them.
+            Inside the box it read as part of the message being written. */}
+        {scheduleBanner && (
+          <div
+            data-testid="composer-schedule-note"
+            className="mb-2 flex items-center gap-2 px-1 text-xs text-text-dim"
+          >
+            <HugeiconsIcon icon={Clock01Icon} className="size-3.5 shrink-0" strokeWidth={1.6} />
+            <span className="min-w-0 flex-1">{scheduleBanner}</span>
+            <button
+              type="button"
+              data-testid="composer-schedule-open-list"
+              onClick={() => setScheduledOpen(true)}
+              className="shrink-0 font-medium text-primary hover:underline"
+            >
+              See all scheduled messages
+            </button>
+          </div>
+        )}
+        <ScheduledMessagesDialog open={scheduledOpen} onOpenChange={setScheduledOpen} />
         <div
           className="flex cursor-text flex-col gap-2 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
           onMouseDown={(event) => {
@@ -446,14 +482,6 @@ export function Composer(props: {
               {sendError}
             </div>
           )}
-          {/* Where the words went when the last send here was queued for later. It sits
-              where a failure does, because it answers the same question — the box is empty
-              and nothing has appeared in the thread. */}
-          {scheduleNote && (
-            <div data-testid="composer-schedule-note" className="text-xs text-text-dim">
-              {scheduleNote}
-            </div>
-          )}
 
           {/* The one input field: a bare-looking rich editor that hands a pasted image
               to `handlePaste` instead of inserting it as content. The placeholder under
@@ -482,6 +510,13 @@ export function Composer(props: {
               // where the tag would summon nothing.
               agentAnswer={
                 props.agentAnswer?.conversation === openId ? props.agentAnswer : null
+              }
+              // Words the scheduled list handed back. Never another thread's: a message
+              // cancelled in one conversation must not appear in the box of another.
+              restoreDraft={
+                composerRestore && composerRestore.conversation === openId
+                  ? { html: draftToHtml(composerRestore.text), token: composerRestore.token }
+                  : null
               }
               onMentionQuery={() => void controller.ensureMentionCandidates()}
               customEmojiPack={customEmojiPack}
@@ -546,11 +581,16 @@ export function Composer(props: {
               </button>
             </div>
 
-            <div className="flex items-center gap-1.5">
-              {/* "Send later" — the same send, with a moment in it (see
-                  schedule-send-menu.tsx). It sits beside Send because that is the choice
-                  it offers: now, or then. */}
-              <ScheduleSendMenu canSend={canSend} onSchedule={(at) => submit(at)} />
+            {/* ONE pill, split in two: Send, and the chevron that discloses "later".
+                They answer one question — now, or then — so two separate buttons would ask
+                the reader to tell them apart. Slack's own shape. */}
+            <div
+              data-testid="composer-send-group"
+              className={cn(
+                "flex shrink-0 items-center rounded-full transition-all",
+                canSend && "shadow-chip",
+              )}
+            >
               <button
                 type="button"
                 aria-label={sending ? "Sending message" : "Send message"}
@@ -559,9 +599,9 @@ export function Composer(props: {
                 disabled={!canSend}
                 onClick={() => submit()}
                 className={cn(
-                  "grid size-8 shrink-0 cursor-pointer place-items-center rounded-full transition-all disabled:cursor-default",
+                  "grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-l-full transition-all disabled:cursor-default",
                   canSend
-                    ? "bg-primary text-primary-foreground shadow-chip hover:brightness-110 active:brightness-95"
+                    ? "bg-primary text-primary-foreground hover:brightness-110 active:brightness-95"
                     : "bg-element text-text-faint",
                 )}
               >
@@ -575,6 +615,7 @@ export function Composer(props: {
                   <HugeiconsIcon icon={SentIcon} className="size-4" strokeWidth={1.8} />
                 )}
               </button>
+              <ScheduleSendMenu canSend={canSend} onSchedule={(at) => submit(at)} />
             </div>
           </div>
         </div>

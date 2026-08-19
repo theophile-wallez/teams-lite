@@ -166,95 +166,126 @@ screenshots carry the last one.
   the deep-link scroll in `notifications.spec.ts` time out, which is a fragility of the
   virtualized history worth its own look and NOT something a test should hide.
 
-## Sending a message LATER (the SERVICE holds it, and this app queues nothing)
+## Sending a message LATER (the SERVICE holds it, and this app can take it back)
 
 The composer can hand a message to Teams to deliver at a moment the user picked — Slack's
-"Schedule for later", which Teams itself also has. A control beside Send opens a short list
-of moments and a picker for any other one; the press posts the message ONCE, with the
-moment in it, and the service holds it until then.
-`web/src/lib/schedule-send.ts` holds every pure decision, `schedule-send-menu.tsx` draws the
-menu, and the backend's half is one optional field on the send that already existed
-(`teams_send::parse_scheduled_time`, written by `build_body`).
+"Schedule for later". The chevron ATTACHED to Send opens a short menu of moments; the press
+posts the message once, with the moment in it, and the service holds it until then. What is
+waiting is stated above the composer and listed in full behind that banner, where it can be
+sent now, taken back into the composer, or cancelled.
+`web/src/lib/schedule-send.ts` holds every pure decision,
+`web/src/components/schedule-send-menu.tsx` draws the menu,
+`scheduled-messages-dialog.tsx` the list, and the backend's half is one optional field on
+the send that already existed (`teams_send::parse_scheduled_time`) plus one column
+(`Message::scheduled_time`).
 
-**THE WHOLE FEATURE IS ONE FIELD, and that is the design rather than a shortcut.** Nothing
-here waits, nothing is queued on this machine, and the app can be closed, updated or
-restarted between the press and the delivery — because the message is already Teams', held
-by the same service that holds it for their own client. A hold-and-post scheduler in this
-backend was the obvious other shape and it is much worse: it would post at a moment nobody
-was present for, which is exactly the outward action § Sending messages forbids, and it
-would fail silently whenever the machine was asleep.
+**THE WHOLE SEND IS ONE FIELD, and every ACTION on it is an RPC this app already had.**
+Nothing waits here, nothing is queued on this machine, and the app can be closed, updated or
+restarted between the press and the delivery — the message is already Teams', held by the
+same service that holds it for their own client. A hold-and-post scheduler in this backend
+was the obvious other shape and it is much worse: it would post at a moment nobody was
+present for, which is exactly the outward action § Sending messages forbids, and it would
+fail silently whenever the machine was asleep. No new gate was needed either: the send is
+`send`, the cancel is `delete`, sending now is `delete` + `send`, and handing the words back
+is `delete` + `set_draft` — each already an `OUTWARD_METHODS` entry or a local write.
 
-**The field is MEASURED, and every near-miss spelling of it fails INVISIBLY.**
-`examples/scheduled_send_probe.rs` is the sanctioned way to try it live — pinned to the
-sandbox channel, and it cancels one of the two messages it posts:
+**EVERY FACT BELOW IS MEASURED**, by `examples/scheduled_send_probe.rs` — the sanctioned way
+to try it live, pinned to the sandbox channel, and it cancels or removes everything it posts:
 
     . bin/broker-env.sh && teams_lite_export_broker_bus && \
       cargo run --example scheduled_send_probe
 
-Measured 2026-08-17 over six candidate spellings and two encodings:
-`properties.scheduledsendtime` as a **quoted epoch-millisecond string** is what the service
-acts on (`teams_send::SCHEDULED_SEND_TIME`). Every top-level spelling —
-`scheduledsendtime`, `scheduledSendTime`, `deliverytime` — is IGNORED and the message posts
-**immediately**, which is the one outcome this feature must never have and the reason the
-name is a constant with the measurement written beside it. `properties.deliverytime` holds
-it too; one field is enough. The `/scheduledmessages` collection paths all answer 404 —
-there is no separate resource — and what is held is read back with `?view=scheduled` on the
-ordinary messages endpoint.
+Measured 2026-08-17 and again END TO END on 2026-08-18, on the real tenant:
 
-Seven rules hold it, and each is pinned by a test:
+- **`properties.scheduledsendtime`, a QUOTED epoch-millisecond string, is the field**
+  (`teams_send::SCHEDULED_SEND_TIME`). Every top-level spelling —
+  `scheduledsendtime`, `scheduledSendTime`, `deliverytime` — is IGNORED and the message posts
+  **immediately**, which is the one outcome this feature must never have. The
+  `/scheduledmessages` collection paths all answer 404; held messages read back with
+  `?view=scheduled`, which returns the thread's own messages with a hold on some of them.
+- **DELIVERY WORKS**: a message queued 75 s out arrived in the ordinary history at its moment,
+  and the property SURVIVES delivery — so "still waiting" is that moment being in the future
+  and never a flag something has to clear.
+- **A HELD MESSAGE COMES BACK IN THE ORDINARY HISTORY.** This is the fact that shaped the
+  whole surface: the read path stored it like any other message, so a message queued for
+  tomorrow morning sat in the thread as though it had been sent, and the app could not say
+  which one was waiting. `Message::scheduled_time` (schema v17) keeps the moment and
+  `Store::NOT_STILL_HELD` leaves such a row out of the history until it passes — a comparison
+  against the clock, so the message appears on its own with nothing to clear.
+- **`DELETE` CANCELS one**: its `scheduledsendtime` is gone and a `deletetime` is set, so the
+  one call both stops the delivery and takes the row out of the list.
+- **An EDIT RELEASES it** — accepted, and the hold is dropped, so the message is delivered at
+  once. That is why nothing here offers an in-place edit: a pencil that quietly sent
+  tomorrow's message today is the sharpest mistake this feature could make.
+- **A `properties` PUT of the moment is REFUSED**, `400 InvalidMessagePropertyType`. So there
+  is no reschedule to offer either.
 
-- **It needs no gate of its own.** `send` is already an `OUTWARD_METHODS` entry and the
-  moment rides in its params exactly as a picture and a mention do. The consent is the
-  user's press on a moment they picked — per-message, like every other send.
-- **`properties` is MERGED, never assigned** (`set_property`). Both halves this app writes
-  live there — who a mention names, and when the message goes — so an assignment silently
-  drops whichever was written first. That is not hypothetical: a scheduled send that also
-  @mentions somebody is the exact shape, and it fails in the two ways nothing reports (blue
-  text notifying nobody, or a message posted at once). `attach_mentions` used to assign.
-- **The moment is bounded at the TRUST BOUNDARY, and stated on both sides.** In the future,
-  and at most 120 days ahead — Slack's own ceiling (`teams_send::MAX_SCHEDULE_AHEAD_MS`,
-  mirrored by `scheduleRefusal` and by the picker's own `min`/`max`). The bound is what
-  catches a UNIT error: seconds where milliseconds were meant lands in 1970 and is refused
-  as past, and milliseconds multiplied again lands in the year 56 000 and is refused as too
-  far. A control that collects a moment the backend would refuse reads as a bug.
-- **A PRESS is the whole action.** Picking a moment sends, exactly as pressing Send does —
-  it is not "set a time, then press Send" — and the words leave the box the same way, so
-  the next Enter cannot post them a second time.
-- **The composer says WHERE the words went** (`scheduleNote`, drawn where `sendError` is).
-  This is the only send that leaves NOTHING in the thread: the box is empty and the history
-  is unchanged, so without that line the message simply vanished. It is the mirror of the
-  failure sentence, in the same place, for the same reason — and an ordinary send takes it
-  back, because that message IS there.
-- **The one thing this app cannot do is said BEFORE the press** (`SCHEDULE_HINT`, the rule
-  `RECORD_HINT` follows). teams-lite lists nothing that is held, so changing or cancelling a
-  scheduled message is done in Teams itself. What is measured is that the service accepts
-  and holds one; what is NOT yet measured is what cancels it, which is why no control here
-  claims to. Adding that list is a deliberate feature — the `?view=scheduled` read, and a
-  cancel proven against the tenant first — never a guess at the row shape.
+Nine rules hold it, and each is pinned by a test:
+
+- **The moment is bounded at the TRUST BOUNDARY, and stated on both sides.** In the future and
+  at most 120 days ahead — Slack's own ceiling (`teams_send::MAX_SCHEDULE_AHEAD_MS`, mirrored
+  by `scheduleRefusal` and by the picker's own `min`/`max`). The bound is what catches a UNIT
+  error: seconds where milliseconds were meant lands in 1970 and is refused as past,
+  milliseconds multiplied again lands in the year 56 000 and is refused as too far.
+- **`properties` is MERGED, never assigned** (`teams_send::set_property`). Both halves this
+  app writes live there — who a mention names, and when the message goes — so an assignment
+  silently drops whichever was written first, and both failures are invisible (blue text
+  notifying nobody, or a message posted at once).
+- **A PRESS is the whole action**, and the menu row names the moment ONCE. It used to carry a
+  name beside a time ("Tomorrow morning" and "tomorrow at 09:00"), which is one fact twice and
+  wide enough to wrap the row in two.
+- **The control is ONE PILL, split in two** — Send, and the chevron that discloses "later".
+  They answer one question, so two separate buttons would ask the reader to tell them apart;
+  `web/e2e/scheduled-send.spec.ts` measures the two boxes against each other.
+- **The BANNER above the composer is DERIVED from the queue, never announced by the send**
+  (`scheduledBanner`). That is the rule that makes it honest, and both other shapes were
+  wrong: a line set by the send went stale the moment the message was cancelled from the list,
+  and said nothing at all when the app was reopened with something already waiting. It is
+  above the box rather than inside it — inside, it read as part of the message being written —
+  it counts what is queued and names the SOONEST, and it carries the one way into the list.
+- **A held frame is not news, and the page is what says so** (`messageIsHeld`). The service
+  broadcasts it like any other message, so it never joins the thread, never chimes and never
+  bumps a preview — it refreshes the list instead. The backend's own read already excludes a
+  held row from a history page, so the page's rule covers the LIVE frame, which the backend
+  cannot exclude without hiding a message from itself.
+- **The list is ACROSS conversations and costs no network read** (`Store::scheduled_messages`,
+  answered by the open `scheduled_messages` RPC). A held message is in the ordinary history, so
+  the store already holds every one of them — the very rows the thread leaves out. The page
+  names each one's thread from the lists it already has, so nothing about a conversation is
+  resolved twice.
+- **Three actions, and the set is what the SERVICE allows.** Send now (`delete` + `send`, two
+  writes rather than resting on the edit's release — which would be a silent no-op the day the
+  tenant stopped doing it), Edit (cancel, then hand the words back to that thread's composer,
+  which is the one row covering both rewriting and re-timing), and Delete, which asks twice
+  like every other deletion here. The words are handed back through `composerRestore` and a
+  token, because the editor seeds its content at MOUNT — writing the draft of the thread
+  already on screen changed nothing the reader could see.
 - **The presets are honest rather than tidy** (`schedulePresets`): this evening, tomorrow
-  morning, Monday morning — and a row already in the PAST is dropped rather than shifted,
-  while a row landing on the same moment as another is dropped too (on a Sunday, "tomorrow
-  morning" IS Monday morning, and two rows doing one thing ask the reader to compare them to
-  learn nothing).
+  morning, Monday morning — a row already in the PAST is dropped rather than shifted, and one
+  landing on the same moment as another is dropped too (on a Sunday, "tomorrow morning" IS
+  Monday morning).
 
-The custom time is the **native** `<input type="datetime-local">`, bounded by `min` and
-`max`: a date-picker component would be a second calendar in an app that needs none, and the
-native one is a phone's own wheel, which is where this app is read.
+The custom time is the **native** `<input type="datetime-local">`: a date-picker component
+would be a second calendar in an app that needs none, and the native one is a phone's own
+wheel, which is where this app is read.
 
-`web/mock/server.ts` reproduces the whole flow with no tenant — it records the moment on the
-captured send, refuses the same moments the backend refuses (`parseScheduledTime`), and
-deliberately does NOT echo a scheduled message into the thread, because a mock that showed
-it at once would make the composer's own note read as a bug. `cd web && bun run preview --
---out /tmp/sched --schedule` captures the menu in both themes, a moment that has passed being
-refused, and the queued state in both themes; `web/e2e/scheduled-send.spec.ts` pins every
-rule above and `web/src/lib/schedule-send.test.ts` the arithmetic.
+`web/mock/server.ts` reproduces the whole flow with no tenant, and the important half is that
+it ECHOES a scheduled send as a held message in the thread's own history — because that is
+what the tenant really does. A mock that withheld it would let a broken exclusion pass every
+test; instead it mirrors the backend's read (`delivered()`) and answers the list from the
+threads' own messages, so a cancel takes a row out of it with nothing to keep in step. Its
+`{kind:"scheduled", clear:true}` hook drops everything held, and **a spec MUST call it**: one
+mock process serves the whole run, and a queued message outlives the page — it would sit in
+every later spec's banner. `cd web && bun run preview -- --out /tmp/sched --schedule` captures
+the pill, the menu in both themes, a moment that has passed being refused, the queued banner
+in both themes, the list in both themes and an armed deletion;
+`web/e2e/scheduled-send.spec.ts` pins every rule above and `web/src/lib/schedule-send.test.ts`
+the arithmetic.
 
-**What is UNVERIFIED against the tenant is the pairing and the cancel.** The field itself was
-measured live (above); the probe that walks the whole chain through this crate's own
-`send_message` — the id a held send answers with, whether a held message shows in the
-ordinary history, and whether `DELETE` cancels one — could not run on 2026-08-18, because the
-identity broker needed interactive re-authentication (`interaction_required`). Run it before
-building anything on those three.
+**What is verified against the tenant and what is not.** The whole chain is measured through
+this crate's own `send_message` (above) — the field, the delivery, the hold appearing in the
+history, and all three writes. What is UNTESTED is the pairing: one queue-and-cancel in the
+user's own app, over the socket, which is their own click.
 
 ## A picture somebody SENT is drawn WHOLE (the view is a display decision)
 
@@ -2403,7 +2434,10 @@ user. Two independent mechanisms enforce that split:
   For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
-  `bun run preview -- --out /tmp/ask --answer-with`. For the user's own CUSTOM AGENTS — the
+  `bun run preview -- --out /tmp/ask --answer-with`. For SENDING LATER — the send pill, the
+  menu of moments in both themes, a moment that has passed being refused, the banner a queued
+  message earns, the list of what is waiting in both themes and an armed deletion:
+  `bun run preview -- --out /tmp/sched --schedule`. For the user's own CUSTOM AGENTS — the
   Settings section, the form, the name a persona may not take, the "@" list that offers them
   beside the providers, the chip and one answering under its own face:
   `bun run preview -- --out /tmp/ca --custom-agents`. For a game of CHESS — the header's
@@ -4445,6 +4479,9 @@ user's. What changes is only what is asked.
   (`src/agent_persona.rs`, see § CUSTOM AGENTS) and the app's own update — the check, the download and the swap
   (`src/update.rs`, see § Updating the app from inside it) — plus the restart the user can
   ask for without a new build at all (`src/restart.rs`, see § Settings › This app).
+  A message the service is HOLDING for later carries the moment it is due
+  (`store::Message::scheduled_time`, schema v17) so the history can leave it out until then,
+  and `scheduled_messages` lists what is waiting — see § Sending a message LATER.
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - One front-end, talking to the backend only through that WebSocket. Local-first is
   enforced server-side; the front-end touches neither the network nor SQLite directly.

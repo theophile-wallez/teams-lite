@@ -116,8 +116,97 @@ async fn main() -> Result<()> {
         }
         let after = scheduled_view(&http, &session).await?;
         report_scheduled("after cancelling one", &after);
-        let still_there = after.iter().any(|m| message_id(m) == doomed.id);
-        println!("== the cancelled one is still held: {still_there}");
+        // A Teams deletion FLAGS the row rather than dropping it, so the id staying in the
+        // list proves nothing. What says the send is cancelled is that the row no longer
+        // carries a scheduled time — and that it carries a `deletetime` instead.
+        let row = after.iter().find(|m| message_id(m) == doomed.id);
+        println!(
+            "== the cancelled one: still scheduled={} deletetime={}",
+            row.is_some_and(|m| scheduled_time_of(m).is_some()),
+            row.is_some_and(|m| m.pointer("/properties/deletetime").is_some()),
+        );
+    }
+
+    // The three things the app has to offer on a message it is holding, measured on one
+    // more held message so nothing is built on a guess: rewrite the words, move the
+    // moment, and send it NOW. Each is a shape this app already speaks for an ordinary
+    // message; whether the service takes it on a HELD one is what nothing else can say.
+    let editable = teams_send::send_message(
+        &http,
+        &session,
+        "",
+        SANDBOX_THREAD,
+        "",
+        None,
+        Some("<p>scheduled send probe — this line is edited, moved and then released</p>"),
+        &[],
+        &[],
+        &[],
+        Some(cancel_at),
+    )
+    .await
+    .context("schedule the message the writes are tried on")?;
+    println!("\nscheduled for +{CANCEL_IN_SECONDS}s (the writes go on this one): id={:?}", editable.id);
+
+    if !editable.id.is_empty() {
+        // 1. EDIT — the ordinary edit PUT, on a message the service has not delivered.
+        match teams_send::edit_message(
+            &http,
+            &session,
+            SANDBOX_THREAD,
+            &editable.id,
+            "",
+            Some("<p>scheduled send probe — REWRITTEN while held</p>"),
+            &[],
+        )
+        .await
+        {
+            Ok(()) => println!("== EDIT on a held message: accepted"),
+            Err(e) => println!("!! EDIT on a held message: {e}"),
+        }
+        let held = one_scheduled(&http, &session, &editable.id).await;
+        println!(
+            "   after the edit: scheduled={:?} content={:?}",
+            held.as_ref().and_then(scheduled_time_of),
+            held.as_ref()
+                .and_then(|m| m.get("content").and_then(Value::as_str))
+                .map(|c| c.contains("REWRITTEN")),
+        );
+
+        // 2. RESCHEDULE — the `properties?name=<name>` PUT, the shape a reaction uses.
+        let moved_to = now_ms() + 2 * CANCEL_IN_SECONDS * 1000;
+        match put_scheduled_time(&http, &session, &editable.id, &moved_to.to_string()).await {
+            Ok(status) => println!("== RESCHEDULE (properties PUT): {status}"),
+            Err(e) => println!("!! RESCHEDULE (properties PUT): {e}"),
+        }
+        println!(
+            "   after the move: scheduled={:?} (asked for {moved_to})",
+            one_scheduled(&http, &session, &editable.id).await.as_ref().and_then(scheduled_time_of),
+        );
+
+        // 3. SEND NOW — the same PUT, clearing the property. If the service takes it the
+        //    message is released; if not, "send now" has to be a cancel plus a fresh send.
+        match put_scheduled_time(&http, &session, &editable.id, "").await {
+            Ok(status) => println!("== SEND NOW (clear the property): {status}"),
+            Err(e) => println!("!! SEND NOW (clear the property): {e}"),
+        }
+        let released = one_scheduled(&http, &session, &editable.id).await;
+        println!(
+            "   after the clear: scheduled={:?}",
+            released.as_ref().and_then(scheduled_time_of)
+        );
+        let page = teams_read::fetch_newest(&http, &session, SANDBOX_THREAD).await?;
+        println!(
+            "   in the ordinary history now: {}",
+            page.messages.iter().any(|m| m.id == editable.id)
+        );
+
+        // Whatever the three answered, this probe leaves nothing behind that would be
+        // delivered later: the message is removed either way.
+        match teams_send::delete_message(&http, &session, SANDBOX_THREAD, &editable.id).await {
+            Ok(()) => println!("== cleaned up the write-probe message"),
+            Err(e) => println!("!! could not clean up the write-probe message: {e}"),
+        }
     }
 
     // And the one we left alone: does the service really post it?
@@ -175,6 +264,59 @@ async fn scheduled_view(http: &reqwest::Client, session: &teams::Session) -> Res
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default())
+}
+
+/// The scheduled time a held message carries, if it still carries one.
+fn scheduled_time_of(message: &Value) -> Option<String> {
+    message
+        .pointer(&format!("/properties/{}", teams_send::SCHEDULED_SEND_TIME))
+        .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_i64().map(|n| n.to_string())))
+        .filter(|s| !s.is_empty())
+}
+
+/// One message out of the scheduled view, by id.
+async fn one_scheduled(
+    http: &reqwest::Client,
+    session: &teams::Session,
+    id: &str,
+) -> Option<Value> {
+    scheduled_view(http, session)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|m| message_id(m) == id)
+}
+
+/// PUT one message's `scheduledsendtime` property — the `properties?name=<name>` shape a
+/// reaction already uses (`teams_send::set_reaction`). An EMPTY value asks the service to
+/// release the message, which is what "send now" would rest on.
+async fn put_scheduled_time(
+    http: &reqwest::Client,
+    session: &teams::Session,
+    message_id: &str,
+    value: &str,
+) -> Result<String> {
+    let chat = session
+        .endpoint("chatService")
+        .context("no chatService endpoint")?
+        .trim_end_matches('/');
+    let name = teams_send::SCHEDULED_SEND_TIME;
+    let url = format!(
+        "{chat}/v1/users/ME/conversations/{}/messages/{}/properties?name={name}",
+        urlencoding::encode(SANDBOX_THREAD),
+        urlencoding::encode(message_id)
+    );
+    let resp = http
+        .put(&url)
+        .header("authentication", format!("skypetoken={}", session.skypetoken))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ name: value }).to_string())
+        .send()
+        .await
+        .context("properties PUT")?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    Ok(format!("{status} {}", body.chars().take(120).collect::<String>()))
 }
 
 /// Print the SHAPE of what is held — ids, the scheduled time and the property names —

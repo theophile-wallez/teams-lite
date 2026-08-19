@@ -1632,6 +1632,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             thread_root_id: String::new(),
             thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".to_string(),
         });
     }
@@ -1660,6 +1661,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             thread_root_id,
             thread_subject,
             deleted,
+            scheduled_time: scheduled_send_time(m),
             mentions: "[]".to_string(),
         });
     }
@@ -1686,6 +1688,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 thread_root_id: String::new(),
                 thread_subject: String::new(),
                 deleted: false,
+                scheduled_time: 0,
                 mentions: "[]".to_string(),
             });
         }
@@ -1719,6 +1722,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 thread_root_id,
                 thread_subject,
                 deleted: false,
+                scheduled_time: 0,
                 mentions: "[]".to_string(),
             });
         }
@@ -1752,6 +1756,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 thread_root_id,
                 thread_subject,
                 deleted,
+                scheduled_time: scheduled_send_time(m),
                 // Mention spans live in the body we just dropped, so nothing is
                 // addressable anymore.
                 mentions: "[]".to_string(),
@@ -1798,6 +1803,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         thread_root_id,
         thread_subject,
         deleted,
+        scheduled_time: scheduled_send_time(m),
         mentions: parse_mentions(m),
     })
 }
@@ -1841,16 +1847,50 @@ fn log_invisible_payload(
 /// needed. Best-effort: a surprising shape reads as "not deleted" rather than
 /// erroring, so it can never break message ingestion.
 fn is_deleted(m: &Value) -> bool {
-    let props = match m.get("properties") {
-        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
-        Some(v) => v.clone(),
-        _ => Value::Null,
-    };
+    let props = message_properties(m);
     match props.get("deletetime") {
         Some(Value::String(s)) => !s.is_empty() && s != "0",
         Some(Value::Number(n)) => n.as_i64().map(|v| v > 0).unwrap_or(false),
         _ => false,
     }
+}
+
+/// A message resource's `properties`, whichever of its two shapes it arrived in.
+///
+/// Teams sends it as a nested object OR as a JSON-encoded STRING (the same double
+/// encoding as `files` / `emotions` / `subject`), so every reader of it decodes a level
+/// deeper when needed — and there is one place that does, because a second copy would
+/// eventually read one shape and not the other.
+fn message_properties(m: &Value) -> Value {
+    match m.get("properties") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        _ => Value::Null,
+    }
+}
+
+/// WHEN Teams is holding this message for, or 0 when it is holding it for nothing.
+///
+/// `properties.scheduledsendtime` is what a scheduled send writes
+/// ([`crate::teams_send::SCHEDULED_SEND_TIME`]), and reading it back is not a nicety:
+/// **measured against the tenant, a held message comes back in the ORDINARY history**
+/// (`examples/scheduled_send_probe.rs`, 2026-08-18) — the read path stored it like any
+/// other message, so a message queued for tomorrow morning appeared in the thread as
+/// though it had been sent. The store keeps this number so the history can leave it out
+/// until the moment passes (`Store::SELECT_COLS`).
+///
+/// The value SURVIVES delivery — the delivered message still carries it — so this is a
+/// record of when it was due and never a claim that it is still waiting. What decides
+/// "still waiting" is that moment being in the future, which is the store's own rule and
+/// is why nothing here is cleared.
+fn scheduled_send_time(m: &Value) -> i64 {
+    let props = message_properties(m);
+    match props.get(crate::teams_send::SCHEDULED_SEND_TIME) {
+        Some(Value::String(s)) => s.parse::<i64>().unwrap_or(0),
+        Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
+        _ => 0,
+    }
+    .max(0)
 }
 
 /// Extract the channel-thread linkage from a message resource: the thread ROOT's
@@ -3184,6 +3224,7 @@ mod tests {
             thread_root_id: String::new(),
             thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         };
         assert_eq!(preview_for_message(&row("<p>hello</p>", "[]", "")), "hello");
@@ -4027,6 +4068,7 @@ mod tests {
                 message_type: String::new(), system_event: String::new(),
                 thread_root_id: String::new(), thread_subject: String::new(),
                 deleted: false,
+                scheduled_time: 0,
                 mentions: "[]".into(),
             })
             .collect();

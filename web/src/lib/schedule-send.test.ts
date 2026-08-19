@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_SCHEDULE_AHEAD_MS,
+  SCHEDULE_HINT,
   SCHEDULE_EVENING_HOUR,
   SCHEDULE_MORNING_HOUR,
   datetimeLocalValue,
   parseDatetimeLocal,
+  presetRowLabel,
   scheduleLabel,
   scheduleRefusal,
   schedulePresets,
-  scheduledNote,
+  scheduledBanner,
+  scheduledRowLabel,
 } from "./schedule-send";
 
 /** A Wednesday at 10:00 local time. */
@@ -109,10 +112,50 @@ describe("the native picker's value", () => {
   });
 });
 
-describe("scheduledNote", () => {
-  it("names the moment and says the app need not be open", () => {
-    const note = scheduledNote(new Date(2026, 7, 20, 9, 0).getTime(), wednesdayMorning);
+describe("what a queued message says about itself", () => {
+  it("the banner names the moment, because the message is in no thread", () => {
+    const note = scheduledBanner([new Date(2026, 7, 20, 9, 0).getTime()], wednesdayMorning);
     expect(note).toContain("tomorrow at");
-    expect(note.toLowerCase()).toContain("closed");
+    expect(note?.toLowerCase()).toContain("will be sent");
+  });
+
+  it("nothing queued is no banner at all", () => {
+    // It is DERIVED from the queue, which is what keeps it honest: a line set by the send
+    // that queued a message went stale the moment that message was cancelled.
+    expect(scheduledBanner([], wednesdayMorning)).toBeNull();
+  });
+
+  it("several queued count themselves and name the SOONEST", () => {
+    const monday = new Date(2026, 7, 24, 9, 0).getTime();
+    const tomorrow = new Date(2026, 7, 20, 9, 0).getTime();
+    // Given out of order on purpose: the caller hands over what is queued, not a sorted list.
+    const note = scheduledBanner([monday, tomorrow], wednesdayMorning);
+    expect(note).toContain("2 messages scheduled");
+    expect(note).toContain("tomorrow at");
+    expect(note).not.toContain("Monday");
+  });
+
+  it("a MENU row names the moment once, capitalised", () => {
+    // It used to carry a name AND a time — "Tomorrow morning" beside "tomorrow at 09:00" —
+    // which is one fact twice and wrapped the row onto two lines.
+    const [, tomorrow] = schedulePresets(wednesdayMorning);
+    const label = presetRowLabel(tomorrow!, wednesdayMorning);
+    expect(label).toMatch(/^Tomorrow at /);
+    expect(label.toLowerCase()).not.toContain("morning");
+  });
+
+  it("a row in the list says when it GOES, not when it was queued", () => {
+    // The row answers "what have I got waiting", so it reads as an instruction about the
+    // future rather than as a timestamp — which is what a message bubble already carries.
+    const row = scheduledRowLabel(new Date(2026, 7, 20, 9, 0).getTime(), wednesdayMorning);
+    expect(row).toMatch(/^Send tomorrow at /);
+  });
+
+  it("the hint promises the cancel this app really has", () => {
+    // It used to send the reader to Teams, because nothing here could cancel one. The
+    // measured DELETE changed that, and a hint that still pointed away would be this app
+    // hiding a feature it has.
+    expect(SCHEDULE_HINT.toLowerCase()).toContain("cancel");
+    expect(SCHEDULE_HINT.toLowerCase()).not.toContain("in teams itself");
   });
 });

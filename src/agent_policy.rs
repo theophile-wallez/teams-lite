@@ -1343,6 +1343,7 @@ mod tests {
             thread_root_id: String::new(),
             thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         }
     }

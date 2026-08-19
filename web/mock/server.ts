@@ -165,6 +165,11 @@ type ChatMessage = {
   thread_root_id?: string; // channel only: id of the thread's root post
   thread_subject?: string; // channel only: thread title, present on the root
   deleted?: boolean; // sender deleted it; content (if kept) is revealable
+  /** WHEN Teams is HOLDING this message for, in epoch ms — absent for one sent at once.
+   *  A scheduled send really does come back in the thread's own history carrying this, so
+   *  the mock echoes it that way: what keeps it out of the conversation is the page's rule
+   *  and the backend's read, and a mock that withheld it would let a broken one pass. */
+  scheduled_time?: number;
 };
 
 // A structured system/activity event (mirrors protocol.ts SystemEvent and the Rust
@@ -5839,6 +5844,23 @@ type Thread = {
   changedEvent: "conversations_changed" | "channels_changed";
 };
 
+/**
+ * A thread's messages MINUS the ones Teams is still holding — the mock's own half of
+ * `Store::NOT_STILL_HELD`.
+ *
+ * A scheduled send is a real message in the thread's own history, so without this the page
+ * would be handed tomorrow's message on every open and draw it as sent. Mirroring the
+ * backend's read matters more here than saving the filter: a mock that shows what the
+ * backend hides lets the bug pass every test.
+ *
+ * It compares against the CLOCK rather than removing anything, so the message appears on
+ * its own once its moment has gone by — exactly as the store does it.
+ */
+function delivered(messages: ChatMessage[]): ChatMessage[] {
+  const now = Date.now();
+  return messages.filter((m) => (m.scheduled_time ?? 0) <= now);
+}
+
 /** Resolve a thread id to its handle, checking chats first then channels. */
 function threadFor(id: string): Thread | null {
   const cs = store.get(id);
@@ -6852,7 +6874,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const id = requireString(params, "conversation");
       const t = threadFor(id);
       if (!t) return { messages: [], has_more: false };
-      return newestPage(t.messages);
+      return newestPage(delivered(t.messages));
     }
 
     case "backfill": {
@@ -6860,7 +6882,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const beforeSeq = requireNumber(params, "before_seq");
       const t = threadFor(id);
       if (!t) return { messages: [], has_more: false };
-      return pageBefore(t.messages, beforeSeq);
+      return pageBefore(delivered(t.messages), beforeSeq);
     }
 
     case "set_draft": {
@@ -6898,21 +6920,35 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         if (testSendDelayMs > 0) {
           return new Promise((resolve) => {
             setTimeout(() => {
-              if (scheduledTime === undefined) {
-                scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
-              }
+              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime);
               resolve({ sent: true });
             }, testSendDelayMs);
           });
         }
       }
-      // A SCHEDULED message never echoes into the thread: the real service is holding it,
-      // and a mock that showed it at once would make the note the composer draws — "it is
-      // not here yet, Teams sends it later" — read as a bug.
-      if (scheduledTime === undefined) {
-        scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions);
-      }
+      // A SCHEDULED message echoes too, carrying the moment it is held for — which is what
+      // the tenant really answers with (measured). What keeps it out of the conversation is
+      // the page's own rule and the backend's read, so echoing it is what makes those two
+      // testable at all.
+      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime);
       return { sent: true };
+    }
+
+    // Every message the service is HOLDING, soonest first — the mock's own half of
+    // `Store::scheduled_messages`. It is derived from the threads' own messages rather than
+    // kept in a list of its own, so a cancel (an ordinary delete) takes a row out of it with
+    // no second thing to keep in step.
+    case "scheduled_messages": {
+      const now = Date.now();
+      const everywhere: ChatMessage[] = [
+        ...[...store.values()].flatMap((c) => c.messages),
+        ...[...channelStore.values()].flatMap((c) => c.messages),
+      ];
+      const held = everywhere
+        .filter((m) => (m.scheduled_time ?? 0) > now && !m.deleted)
+        .sort((a, b) => (a.scheduled_time ?? 0) - (b.scheduled_time ?? 0))
+        .map((m) => nicknamed(m));
+      return { messages: held };
     }
 
     case "edit": {
@@ -8649,6 +8685,7 @@ function scheduleSendEcho(
   contentHtml?: string,
   images: SendImage[] = [],
   mentions?: OutboundMention[],
+  scheduledTime?: number,
 ): void {
   setTimeout(() => {
     const t = threadFor(convId);
@@ -8665,6 +8702,12 @@ function scheduleSendEcho(
       sender_mri: SELF_MRI,
       content: body + imageHtml,
       is_self: true,
+      // A SCHEDULED send comes back like this on the real tenant: a message in the thread's
+      // own history, carrying the moment the service is holding it for. The mock echoes it
+      // for that reason rather than withholding it — the page's own rule
+      // (`messageIsHeld`) and the backend's read are what keep it out of the conversation,
+      // and a mock that simply never sent it would let a broken rule pass every test.
+      ...(scheduledTime ? { scheduled_time: scheduledTime } : {}),
       // The body's mention spans carry only an index; this is what says whom each one
       // names, so a sent mention comes back rendered as a mention (like the real echo).
       ...(mentions && mentions.length > 0
@@ -8680,9 +8723,14 @@ function scheduleSendEcho(
     };
     t.messages.push(msg);
     t.recompute();
-    t.setRead(true); // it's ours
     t.setDraft(""); // the accepted send clears the persisted draft
     broadcast("message", nicknamed(msg));
+    // A message the service is HOLDING is in no conversation yet, so it marks nothing read,
+    // moves no preview and wakes neither the agent nor a chess opponent: none of them has
+    // been said anything to. It is broadcast, because that is what the tenant does, and the
+    // page is what decides a held frame is not news.
+    if (scheduledTime) return;
+    t.setRead(true); // it's ours
     broadcast(t.changedEvent, {});
     maybeRunMockAgent(convId, msg);
     maybeAnswerMockChess(convId, msg);
@@ -9801,6 +9849,25 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       personOverrides.clear();
       for (const mri of affected) broadcast("person_override_changed", { mri });
       return Response.json({ ok: true, cleared: affected.length }, { status: 200 });
+    }
+    // Everything the service is HOLDING, dropped. A spec MUST call this after queueing
+    // anything: one mock process serves the whole run, and a held message outlives the page
+    // — it would be in every later spec's banner and list. Cancelling through the UI would
+    // work too, but a spec should not have to drive four clicks to undo its own fixture.
+    if (body.kind === "scheduled" && body.clear === true) {
+      let cleared = 0;
+      for (const messages of [
+        ...[...store.values()].map((c) => c.messages),
+        ...[...channelStore.values()].map((c) => c.messages),
+      ]) {
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+          if ((messages[i]!.scheduled_time ?? 0) > Date.now()) {
+            messages.splice(i, 1);
+            cleared += 1;
+          }
+        }
+      }
+      return Response.json({ ok: true, cleared }, { status: 200 });
     }
     if (body.kind === "custom_emoji" && body.clear === true) {
       const cleared = customEmojiPack.size;

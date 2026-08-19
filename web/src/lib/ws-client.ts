@@ -43,6 +43,7 @@ import type {
   MailFolder,
   MailPage,
   MembersResult,
+  ChatMessage,
   MessagePage,
   NotificationFeeds,
   PersonOverride,
@@ -589,6 +590,12 @@ export class Backend {
    *  The backend flags the local row and re-broadcasts it, so the bubble becomes the
    *  "You deleted this message" placeholder through the `message` event. It refuses a
    *  message that is not ours before reaching the network. */
+  /** Every message Teams is still HOLDING for this account, soonest first — an ordinary
+   *  READ, and it makes no network request on the backend either: a scheduled send comes
+   *  back in the ordinary history, so the store already holds all of them. */
+  scheduledMessages(): Promise<{ messages: ChatMessage[] }> {
+    return this.request<{ messages: ChatMessage[] }>("scheduled_messages");
+  }
   deleteMessage(conversation: string, messageId: string): Promise<{ deleted: boolean }> {
     return this.writeRequest<{ deleted: boolean }>("delete", {
       conversation,

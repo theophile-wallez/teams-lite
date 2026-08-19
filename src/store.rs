@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS messages (
     thread_subject  TEXT NOT NULL DEFAULT '',
     deleted         INTEGER NOT NULL DEFAULT 0,
     mentions        TEXT NOT NULL DEFAULT '[]',
+    scheduled_time  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (conversation_id, id)
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -544,7 +545,7 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// rather than a second v14 because both tables were built on branches that each called
 /// themselves 14: `open` runs the DDL pass only when the recorded version MOVES, so a
 /// store stamped 14 by either build would never grow the other one's table.
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -667,6 +668,22 @@ pub struct Message {
     /// deletion that arrives for a message we never stored yields a row with
     /// `deleted: true` and empty `content` (nothing to reveal).
     pub deleted: bool,
+    /// WHEN Teams is holding this message for, in epoch ms — 0 for every message that was
+    /// sent at once, which is nearly all of them.
+    ///
+    /// A scheduled send is one POST with `properties.scheduledsendtime` on it and the
+    /// service holds the message until that moment (§ Sending a message LATER). Measured
+    /// against the tenant, **a held message comes back in the ordinary history** — so
+    /// without this column the read path stored it like any other message and a message
+    /// queued for tomorrow morning appeared in the thread as though it had been sent. It
+    /// is kept so the history can leave it out until the moment passes.
+    ///
+    /// It is a record of when the message was DUE and never a claim that it is still
+    /// waiting: the property survives delivery, so "still waiting" is this moment being in
+    /// the future — decided at READ time, which is what makes a delivered message appear
+    /// on its own with nothing to clear (see [`SELECT_COLS`] and
+    /// [`Store::scheduled_messages`]).
+    pub scheduled_time: i64,
     /// The @mentions the message body points at, as a JSON array string:
     /// `[{"itemid":0,"mri":"8:orgid:…","kind":"person","display_name":"James"}]`.
     /// A mention span in `content` carries only its `itemid`, so this is the ONLY
@@ -1309,6 +1326,7 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
             .get::<_, Option<String>>(14)?
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "[]".to_string()),
+        scheduled_time: row.get::<_, Option<i64>>(15)?.unwrap_or(0),
     })
 }
 
@@ -1319,10 +1337,23 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
 /// message that arrived nameless is still attributed. Both only work at READ time,
 /// since [`Store::insert_message`] freezes a message's `sender` at first insert and no
 /// sync ever refreshes it.
+/// The rule that keeps a message Teams is still HOLDING out of the thread.
+///
+/// A scheduled send comes back in the ordinary history the moment it is posted (measured
+/// — `examples/scheduled_send_probe.rs`), so without this the reader saw tomorrow's
+/// message sitting in the conversation as though it had been sent. It is a comparison
+/// against the clock rather than a flag, which is what makes the message appear on its own
+/// once the moment passes: nothing has to notice, and there is nothing to clear — the
+/// property survives delivery, so a flag would have had to be unset by something.
+///
+/// SQLite's own clock is used rather than a parameter threaded through every read: one
+/// expression, in one place, and no caller can forget it.
+const NOT_STILL_HELD: &str = "scheduled_time <= (CAST(strftime('%s','now') AS INTEGER) * 1000)";
+
 const SELECT_COLS: &str = concat!(
     "id, conversation_id, seq, compose_time, ",
     nicknamed!("messages.sender_mri", "sender"),
-    ", sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions"
+    ", sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions, scheduled_time"
 );
 
 fn row_to_mail(row: &Row) -> rusqlite::Result<MailMessageRow> {
@@ -1576,6 +1607,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     // carried a `deletetime`). Legacy rows default to 0 (not deleted); the flag
     // is set in place on the next sync/live update that carries the deletion.
     add_column("ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")?;
+    // scheduled_time: when Teams is HOLDING the message for (0 = sent at once, which is
+    // every legacy row). A held message arrives in the ordinary history, so this is what
+    // keeps it out of the thread until its moment passes — see `Message::scheduled_time`.
+    add_column("ALTER TABLE messages ADD COLUMN scheduled_time INTEGER NOT NULL DEFAULT 0")?;
     // mentions: who the body's @mention spans point at, as a JSON array string.
     // Legacy rows and messages without mentions carry the empty-array default;
     // `backfill_mentions` heals a legacy row on the next sync that carries them.
@@ -3159,8 +3194,8 @@ impl Store {
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let reactions = if m.reactions.is_empty() { "[]" } else { m.reactions.as_str() };
         let n = self.exec(
-            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions, scheduled_time)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(conversation_id, id) DO UPDATE SET
                  -- a frame that turns out to be a SYSTEM EVENT drops the body it was
                  -- stored with: the event says it better (and in the reader's own
@@ -3180,15 +3215,21 @@ impl Store {
                      WHEN messages.attachments IN ('', '[]') AND excluded.attachments NOT IN ('', '[]')
                      THEN excluded.attachments ELSE messages.attachments END,
                  system_event = CASE WHEN messages.system_event = '' THEN excluded.system_event ELSE messages.system_event END,
-                 deleted = MAX(messages.deleted, excluded.deleted)
+                 deleted = MAX(messages.deleted, excluded.deleted),
+                 -- A frame that comes back with NO hold is the message RELEASED (an edit
+                 -- does that, measured), so the incoming value wins outright here rather
+                 -- than the larger one: a stale hold would keep a delivered message out of
+                 -- the thread for ever.
+                 scheduled_time = excluded.scheduled_time
                  WHERE (excluded.content <> '' AND messages.content <> excluded.content)
                     OR (excluded.deleted = 1 AND messages.deleted = 0)
+                    OR (excluded.scheduled_time <> messages.scheduled_time)
                     OR (excluded.messagetype <> '' AND messages.messagetype = '')
                     OR (excluded.thread_root_id <> '' AND messages.thread_root_id = '')
                     OR (excluded.thread_subject <> '' AND messages.thread_subject = '')
                     OR (excluded.system_event <> '' AND messages.system_event = '')
                     OR (excluded.attachments NOT IN ('', '[]') AND messages.attachments IN ('', '[]'))",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.message_type, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject, m.deleted as i64, m.mentions],
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.message_type, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject, m.deleted as i64, m.mentions, m.scheduled_time],
         )?;
         Ok(n == 1)
     }
@@ -4626,7 +4667,8 @@ impl Store {
     /// The newest `limit` messages of a conversation, ordered oldest -> newest (for display).
     pub fn newest_messages(&self, conversation_id: &str, limit: i64) -> Result<Vec<Message>> {
         let sql = format!(
-            "SELECT {SELECT_COLS} FROM messages WHERE conversation_id = ?1 ORDER BY seq DESC LIMIT ?2"
+            "SELECT {SELECT_COLS} FROM messages
+             WHERE conversation_id = ?1 AND {NOT_STILL_HELD} ORDER BY seq DESC LIMIT ?2"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![conversation_id, limit], row_to_msg)?;
@@ -4635,13 +4677,37 @@ impl Store {
         Ok(v)
     }
 
+    /// Every message Teams is still HOLDING for this account, soonest first, with the
+    /// conversation each one is waiting in.
+    ///
+    /// This is the whole of "see all scheduled messages", and it costs no network read at
+    /// all: a scheduled send comes back in the ordinary history, so the store already holds
+    /// every one of them — the same rows [`NOT_STILL_HELD`] keeps out of the thread. It is
+    /// therefore across ALL conversations for free, which is what the reader is asking for
+    /// ("what have I got queued?") rather than a list per thread.
+    ///
+    /// A CANCELLED one is gone from it, because a Teams deletion flags the row and the
+    /// filter excludes a flagged one — measured: `DELETE` on a held message clears its
+    /// `scheduledsendtime` and sets `deletetime`, so both halves of the rule agree.
+    pub fn scheduled_messages(&self, limit: i64) -> Result<Vec<Message>> {
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM messages
+             WHERE NOT ({NOT_STILL_HELD}) AND deleted = 0
+             ORDER BY scheduled_time ASC LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![limit], row_to_msg)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The `limit` messages immediately older than `before_seq`, ordered oldest -> newest.
     /// Used when the UI scrolls up; if it returns fewer than `limit`, the caller should
     /// check `has_more_older` and fetch the next page from the network.
     pub fn messages_before(&self, conversation_id: &str, before_seq: i64, limit: i64) -> Result<Vec<Message>> {
         let sql = format!(
             "SELECT {SELECT_COLS} FROM messages
-             WHERE conversation_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3"
+             WHERE conversation_id = ?1 AND seq < ?2 AND {NOT_STILL_HELD}
+             ORDER BY seq DESC LIMIT ?3"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![conversation_id, before_seq, limit], row_to_msg)?;
@@ -4692,6 +4758,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         }
     }
@@ -4973,7 +5040,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (16, 0xa4b5_ca61_c937_aa60);
+        const PINNED: (i64, u64) = (17, 0x2d82_e7b1_90ee_36df);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -5310,6 +5377,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         };
 
@@ -5369,6 +5437,7 @@ mod tests {
             thread_root_id: String::new(),
             thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         };
 
@@ -5430,6 +5499,7 @@ mod tests {
             thread_root_id: String::new(),
             thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         };
         s.insert_message(&post(channel, "100")).unwrap(); // the root, already correct
@@ -5624,6 +5694,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         };
 
@@ -5677,6 +5748,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         };
 
@@ -6317,6 +6389,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         }).unwrap();
         s.insert_message(&Message {
@@ -6326,6 +6399,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         }).unwrap();
 
@@ -6349,6 +6423,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
@@ -6365,18 +6440,18 @@ mod tests {
         s.insert_message(&Message {
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: "8:orgid:me".into(), content: "salut".into(),
-            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0,        }).unwrap();
         s.insert_message(&Message {
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: "8:orgid:leonor".into(), content: "hello".into(),
-            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0,        }).unwrap();
 
         // A group: even though it has non-self senders, a group has no single face.
         s.upsert_conversation_full(&upd("grp", "Team chat", 400, ConversationKind::Group)).unwrap();
         s.insert_message(&Message {
             id: "g1".into(), conversation_id: "grp".into(), seq: 1, compose_time: 1,
             sender: "Grace HOPPER".into(), sender_mri: "8:orgid:grace".into(), content: "hi all".into(),
-            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(),        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0,        }).unwrap();
 
         let by_id = |id: &str| {
             s.conversations(me).unwrap().into_iter().find(|c| c.id == id).unwrap()
@@ -6391,6 +6466,71 @@ mod tests {
         m.sender = sender.into();
         m.sender_mri = mri.into();
         m
+    }
+
+    /// A message Teams is HOLDING is not in the thread, is in the scheduled list, and
+    /// walks from one to the other when its moment passes — with nothing cleared.
+    ///
+    /// Every part of this is measured behaviour rather than a design choice: a scheduled
+    /// send comes back in the ordinary history at once (so it had to be excluded), the
+    /// property survives delivery (so the rule is a comparison against the clock, not a
+    /// flag), and `DELETE` cancels one by flagging the row (so the list excludes a deleted
+    /// one) — `examples/scheduled_send_probe.rs`, 2026-08-18.
+    #[test]
+    fn a_message_teams_is_still_holding_is_listed_but_not_in_the_thread() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation_full(&upd("grp", "Team chat", 500, ConversationKind::Group)).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        s.insert_message(&msg("grp", 1)).unwrap();
+        let mut later = msg("grp", 2);
+        later.id = "tomorrow".into();
+        later.content = "the standup note".into();
+        later.scheduled_time = now + 60 * 60 * 1000;
+        s.insert_message(&later).unwrap();
+
+        // The thread holds only the message that was really sent.
+        let thread: Vec<String> =
+            s.newest_messages("grp", 50).unwrap().into_iter().map(|m| m.id).collect();
+        assert!(!thread.contains(&"tomorrow".to_string()), "a held message is in the thread");
+        // And paging older never turns it up either.
+        assert!(
+            s.messages_before("grp", 99, 50).unwrap().iter().all(|m| m.id != "tomorrow"),
+            "a held message is reachable by scrolling up"
+        );
+
+        // It IS in the list, with the moment it is waiting for and its conversation.
+        let held = s.scheduled_messages(50).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].id, "tomorrow");
+        assert_eq!(held[0].conversation_id, "grp");
+        assert_eq!(held[0].scheduled_time, now + 60 * 60 * 1000);
+        assert_eq!(held[0].content, "the standup note", "the list shows what will be sent");
+
+        // DELIVERY needs nothing cleared: the same row, its moment now past, is an
+        // ordinary message. That is why the rule is the clock rather than a flag — the
+        // service keeps the property on the delivered message.
+        later.scheduled_time = now - 1000;
+        s.insert_message(&later).unwrap();
+        assert!(
+            s.newest_messages("grp", 50).unwrap().iter().any(|m| m.id == "tomorrow"),
+            "a delivered message never appears in the thread"
+        );
+        assert!(s.scheduled_messages(50).unwrap().is_empty(), "a delivered message is still listed");
+
+        // A CANCELLED one leaves the list. Teams flags the row rather than dropping it, so
+        // a list that keyed on the hold alone would go on offering a message that is gone.
+        let mut cancelled = msg("grp", 3);
+        cancelled.id = "cancelled".into();
+        cancelled.scheduled_time = now + 60 * 60 * 1000;
+        s.insert_message(&cancelled).unwrap();
+        assert_eq!(s.scheduled_messages(50).unwrap().len(), 1);
+        cancelled.deleted = true;
+        s.insert_message(&cancelled).unwrap();
+        assert!(s.scheduled_messages(50).unwrap().is_empty(), "a cancelled send is still listed");
     }
 
     #[test]
@@ -6691,6 +6831,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         }).unwrap();
 
@@ -6720,6 +6861,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         }).unwrap();
         // a message without attachments keeps the empty-array default
@@ -6731,6 +6873,7 @@ mod tests {
             message_type: String::new(), system_event: String::new(),
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
+            scheduled_time: 0,
             mentions: "[]".into(),
         }).unwrap();
 

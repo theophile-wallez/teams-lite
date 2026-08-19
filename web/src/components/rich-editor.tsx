@@ -244,6 +244,11 @@ export function RichEditor(props: {
    *  menu: the tag it asks for is put at the front of the draft, with that row's own
    *  request behind it, once per token (see lib/agent-answer.ts). */
   agentAnswer?: AgentAnswer | null;
+  /** Words handed back to a composer that is already open (the scheduled list's Edit).
+   *  Applied exactly once per token, like {@link agentAnswer} and for its reason: the
+   *  editor seeds its content at MOUNT, so a draft written to a thread already on screen
+   *  is invisible until something remounts it. */
+  restoreDraft?: { html: string; token: number } | null;
   /** Called the moment an "@…" starts, so the candidates can be fetched on demand. */
   onMentionQuery?: () => void;
   /** The custom emoji pack this machine holds. */
@@ -563,6 +568,23 @@ export function RichEditor(props: {
     // `props.agentAnswer` is read through its own token.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, answerToken]);
+
+  // Words handed back from the scheduled list: replace what the box holds with them and
+  // put the caret in, so the reader can rewrite the message or pick another moment. It
+  // REPLACES rather than appends, because those words are the message they had queued —
+  // and the box is empty in the ordinary case, since the send that queued it took its own
+  // words back.
+  const restoreToken = props.restoreDraft?.token;
+  const appliedRestore = useRef<number | null>(null);
+  useEffect(() => {
+    const restore = props.restoreDraft;
+    if (!editor || !restore || appliedRestore.current === restore.token) return;
+    appliedRestore.current = restore.token;
+    editor.commands.setContent(restore.html);
+    focusEditor(editor);
+    // `props.restoreDraft` is read through its own token.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor, restoreToken]);
 
   // Expose submit so the composer's send button can trigger it from the outside.
   useEffect(() => {

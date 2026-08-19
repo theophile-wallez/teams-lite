@@ -568,6 +568,18 @@ export async function clearPersonOverrides(page: Page): Promise<void> {
   expect(res.ok()).toBeTruthy();
 }
 
+/** Drop every message the mock is HOLDING for later, through its gated test hook.
+ *
+ *  A spec that queues one MUST call this: a held message outlives the page — one mock
+ *  process serves the whole run — so it would sit in every later spec's banner and
+ *  scheduled list. */
+export async function clearScheduledMessages(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "scheduled", clear: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Arm what GitLab says about an approval, through the mock's gated test hook: a refusal
  *  sentence, a machine with no token at all (`unavailable`), or — with `clear` — a clean
  *  slate. A spec that arms one MUST clear it: one mock process serves the whole run, and a
