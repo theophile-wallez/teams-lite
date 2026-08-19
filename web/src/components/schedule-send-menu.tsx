@@ -11,6 +11,7 @@ import {
   schedulePresets,
 } from "~/lib/schedule-send";
 import { Button } from "./ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 
 /**
@@ -26,8 +27,15 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
  * it is not "set a time, then press Send" — and where the words went is then said by the
  * banner above the composer, because a scheduled message appears in no thread.
  *
- * The custom time is the NATIVE picker, bounded by `min`/`max` so the browser's own calendar
- * cannot offer a moment the backend would refuse; `scheduleRefusal` mirrors
+ * **"Custom time" is a ROW that opens a DIALOG, and that is not decoration.** The native
+ * picker used to sit inline in this menu, and it could not be used at all: pressing it opens
+ * the browser's OWN calendar, which is not in the document — so Radix read the press as an
+ * interaction outside the popover and dismissed the menu, taking the half-filled field with
+ * it. A dialog is dismissed by a press it can really see, and by Escape; the picker inside it
+ * survives. It is also the shape the reference has, where the row opens a small window.
+ *
+ * The picker is the NATIVE one either way, bounded by `min`/`max` so the browser's own
+ * calendar cannot offer a moment the backend would refuse; `scheduleRefusal` mirrors
  * `teams_send::parse_scheduled_time` for a value typed straight in.
  */
 export function ScheduleSendMenu(props: {
@@ -37,10 +45,22 @@ export function ScheduleSendMenu(props: {
   onSchedule: (at: number) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // The custom-time dialog is a sibling of the popover, never a child: rendered inside it, it
+  // would be unmounted the moment the menu closed to make room for it.
+  const [customOpen, setCustomOpen] = useState(false);
   const [custom, setCustom] = useState("");
   const [error, setError] = useState<string | null>(null);
   const now = new Date();
   const presets = schedulePresets(now);
+
+  /** An hour ahead, on the minute: legal, and nobody's real answer — so the reader edits it
+   *  rather than pressing past it. */
+  const seedCustom = () => {
+    const seed = new Date(Date.now() + 60 * 60 * 1000);
+    seed.setSeconds(0, 0);
+    setCustom(datetimeLocalValue(seed));
+    setError(null);
+  };
 
   const schedule = (at: number) => {
     const refusal = scheduleRefusal(at, Date.now());
@@ -51,61 +71,77 @@ export function ScheduleSendMenu(props: {
     setError(null);
     props.onSchedule(at);
     // Whether it left is reported at the composer — the banner above it, or the failure
-    // sentence beside the words — so the menu closes rather than holding a second copy.
+    // sentence beside the words — so both surfaces close rather than holding a second copy.
     setOpen(false);
+    setCustomOpen(false);
   };
 
   return (
-    <Popover
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (next) {
-          // An hour ahead, on the minute: legal, and nobody's real answer — so the reader
-          // edits it rather than pressing past it.
-          const seed = new Date(now.getTime() + 60 * 60 * 1000);
-          seed.setSeconds(0, 0);
-          setCustom(datetimeLocalValue(seed));
-          setError(null);
-        }
-      }}
-    >
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label="Send later"
-          title="Send later"
-          data-testid="composer-schedule"
-          data-cuelume-press=""
-          disabled={!props.canSend}
-          className="grid h-8 w-6 shrink-0 cursor-pointer place-items-center rounded-r-full border-l border-primary-foreground/25 bg-primary text-primary-foreground transition-all hover:brightness-110 active:brightness-95 disabled:cursor-default disabled:border-border-subtle disabled:bg-element disabled:text-text-faint"
-        >
-          <HugeiconsIcon icon={ArrowDown01Icon} className="size-3.5" strokeWidth={2} />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-72 p-2" data-testid="composer-schedule-menu">
-        <div className="px-2 pb-1 pt-1 text-xs font-semibold text-text-dim">Schedule message</div>
-        {presets.map((preset) => (
+    <>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (next) setError(null);
+        }}
+      >
+        <PopoverTrigger asChild>
           <button
-            key={preset.key}
             type="button"
-            data-testid="composer-schedule-preset"
-            data-schedule-key={preset.key}
-            data-schedule-at={preset.at}
-            onClick={() => schedule(preset.at)}
-            className="block w-full truncate rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+            aria-label="Send later"
+            title="Send later"
+            data-testid="composer-schedule"
+            data-cuelume-press=""
+            disabled={!props.canSend}
+            className="grid h-8 w-6 shrink-0 cursor-pointer place-items-center rounded-r-full border-l border-primary-foreground/25 bg-primary text-primary-foreground transition-all hover:brightness-110 active:brightness-95 disabled:cursor-default disabled:border-border-subtle disabled:bg-element disabled:text-text-faint"
           >
-            {presetRowLabel(preset, now)}
+            <HugeiconsIcon icon={ArrowDown01Icon} className="size-3.5" strokeWidth={2} />
           </button>
-        ))}
-        <div className="my-1.5 border-t border-border-subtle" />
-        <label
-          htmlFor="composer-schedule-custom"
-          className="block px-2 pb-1 text-sm text-foreground"
-        >
-          Custom time
-        </label>
-        <div className="flex items-center gap-2 px-2">
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-72 p-2" data-testid="composer-schedule-menu">
+          <div className="px-2 pb-1 pt-1 text-xs font-semibold text-text-dim">Schedule message</div>
+          {presets.map((preset) => (
+            <button
+              key={preset.key}
+              type="button"
+              data-testid="composer-schedule-preset"
+              data-schedule-key={preset.key}
+              data-schedule-at={preset.at}
+              onClick={() => schedule(preset.at)}
+              className="block w-full truncate rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+            >
+              {presetRowLabel(preset, now)}
+            </button>
+          ))}
+          <div className="my-1.5 border-t border-border-subtle" />
+          <button
+            type="button"
+            data-testid="composer-schedule-custom-open"
+            onClick={() => {
+              seedCustom();
+              setOpen(false);
+              setCustomOpen(true);
+            }}
+            className="block w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+          >
+            Custom time
+          </button>
+          <p className="px-2 pt-2 text-xs text-text-faint">{SCHEDULE_HINT}</p>
+        </PopoverContent>
+      </Popover>
+
+      {/* Any other moment. A DIALOG rather than a field in the menu above, because the
+        browser's own calendar is not in the document: a press on it read as a press outside
+        the popover, which dismissed the menu and the half-filled field with it. */}
+      <Dialog open={customOpen} onOpenChange={setCustomOpen}>
+        <DialogContent className="max-w-sm" data-testid="composer-schedule-custom-dialog">
+          <DialogHeader>
+            <DialogTitle>Send at a custom time</DialogTitle>
+            <DialogDescription>{SCHEDULE_HINT}</DialogDescription>
+          </DialogHeader>
+          <label htmlFor="composer-schedule-custom" className="text-sm text-text-dim">
+            Date and time
+          </label>
           <input
             id="composer-schedule-custom"
             data-testid="composer-schedule-custom"
@@ -117,27 +153,36 @@ export function ScheduleSendMenu(props: {
               setCustom(event.target.value);
               setError(null);
             }}
-            className="min-w-0 flex-1 rounded-md bg-element px-2 py-1 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="w-full rounded-md bg-element px-2 py-1.5 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
-          <Button
-            size="sm"
-            data-testid="composer-schedule-confirm"
-            onClick={() => schedule(parseDatetimeLocal(custom))}
-          >
-            Schedule
-          </Button>
-        </div>
-        {error && (
-          <div
-            role="alert"
-            data-testid="composer-schedule-error"
-            className="px-2 pt-2 text-xs text-destructive"
-          >
-            {error}
+          {error && (
+            <div
+              role="alert"
+              data-testid="composer-schedule-error"
+              className="text-xs text-destructive"
+            >
+              {error}
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="composer-schedule-custom-cancel"
+              onClick={() => setCustomOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              data-testid="composer-schedule-confirm"
+              onClick={() => schedule(parseDatetimeLocal(custom))}
+            >
+              Schedule
+            </Button>
           </div>
-        )}
-        <p className="px-2 pt-2 text-xs text-text-faint">{SCHEDULE_HINT}</p>
-      </PopoverContent>
-    </Popover>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

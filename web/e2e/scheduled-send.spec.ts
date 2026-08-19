@@ -15,6 +15,8 @@ const MENU = '[data-testid="composer-schedule-menu"]';
 const PRESET = '[data-testid="composer-schedule-preset"]';
 const CUSTOM = '[data-testid="composer-schedule-custom"]';
 const CONFIRM = '[data-testid="composer-schedule-confirm"]';
+const CUSTOM_OPEN = '[data-testid="composer-schedule-custom-open"]';
+const CUSTOM_DIALOG = '[data-testid="composer-schedule-custom-dialog"]';
 const BANNER = '[data-testid="composer-schedule-note"]';
 const OPEN_LIST = '[data-testid="composer-schedule-open-list"]';
 const ERROR = '[data-testid="composer-schedule-error"]';
@@ -179,13 +181,45 @@ test.describe("scheduling a send", () => {
     expect(Math.abs(later!.height - send!.height)).toBeLessThan(2);
   });
 
+  test("CUSTOM TIME opens a dialog, and USING the picker does not dismiss it", async ({
+    page,
+  }) => {
+    await openComposer(page);
+    await fillComposer(page, "custom moment");
+    await page.locator(TRIGGER).click();
+    // The row opens the dialog and closes the menu — the menu itself never holds the field.
+    await page.locator(CUSTOM_OPEN).click();
+    await expect(page.locator(CUSTOM_DIALOG)).toBeVisible();
+    await expect(page.locator(MENU)).toBeHidden();
+
+    // The bug this shape exists for: the browser's own calendar is not in the document, so
+    // a press on the picker used to read as a press OUTSIDE the popover and dismiss it,
+    // taking the half-filled field away. Pressing into the field, and on its calendar
+    // affordance at the right-hand edge, must both leave the dialog standing.
+    await page.locator(CUSTOM).click();
+    await expect(page.locator(CUSTOM_DIALOG)).toBeVisible();
+    const box = (await page.locator(CUSTOM).boundingBox())!;
+    await page.mouse.click(box.x + box.width - 10, box.y + box.height / 2);
+    await expect(page.locator(CUSTOM_DIALOG)).toBeVisible();
+    await expect(page.locator(CUSTOM)).toBeVisible();
+
+    // Cancel is the way out that always works. Escape belongs to the FIELD first — a native
+    // date input consumes it to dismiss its own calendar — so a dialog whose only exit was
+    // Escape would read as stuck while the picker had focus.
+    await page.locator('[data-testid="composer-schedule-custom-cancel"]').click();
+    await expect(page.locator(CUSTOM_DIALOG)).toBeHidden();
+    expect((await fetchCapturedSends(page)).length).toBe(0);
+  });
+
   test("a custom moment travels, and the composer is emptied like any send", async ({ page }) => {
     await openComposer(page);
     await fillComposer(page, "custom moment");
     await page.locator(TRIGGER).click();
+    await page.locator(CUSTOM_OPEN).click();
     await page.locator(CUSTOM).fill(localValue(90));
     const expected = new Date(localValue(90)).getTime();
     await page.locator(CONFIRM).click();
+    await expect(page.locator(CUSTOM_DIALOG)).toBeHidden();
 
     await expect.poll(async () => (await fetchCapturedSends(page)).length).toBeGreaterThan(0);
     const sends = await fetchCapturedSends(page);
@@ -198,10 +232,13 @@ test.describe("scheduling a send", () => {
     const before = (await fetchCapturedSends(page)).length;
     await fillComposer(page, "too late");
     await page.locator(TRIGGER).click();
+    await page.locator(CUSTOM_OPEN).click();
     await page.locator(CUSTOM).fill(localValue(-120));
     await page.locator(CONFIRM).click();
     await expect(page.locator(ERROR)).toContainText("passed");
-    await expect(page.locator(MENU)).toBeVisible();
+    // The refusal is stated where the moment was typed, and the dialog keeps it: nothing was
+    // sent, so the reader can correct the value rather than start again.
+    await expect(page.locator(CUSTOM_DIALOG)).toBeVisible();
     expect((await fetchCapturedSends(page)).length).toBe(before);
   });
 
@@ -209,6 +246,7 @@ test.describe("scheduling a send", () => {
     await openComposer(page);
     await fillComposer(page, "far future");
     await page.locator(TRIGGER).click();
+    await page.locator(CUSTOM_OPEN).click();
     const max = await page.locator(CUSTOM).getAttribute("max");
     const days = (new Date(max!).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
     expect(days).toBeGreaterThan(119);
@@ -237,6 +275,7 @@ test.describe("scheduling a send", () => {
     await fillComposer(page, "hint check");
     await page.locator(TRIGGER).click();
     await expect(page.locator(MENU)).toContainText("Schedule message");
+    await expect(page.locator(MENU)).toContainText("Custom time");
     // Nobody sees it until then, and it can be cancelled — the two facts a reader decides
     // with, on the control rather than after the press.
     await expect(page.locator(MENU)).toContainText("Nobody sees it");

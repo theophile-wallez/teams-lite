@@ -265,7 +265,18 @@ Nine rules hold it, and each is pinned by a test:
   landing on the same moment as another is dropped too (on a Sunday, "tomorrow morning" IS
   Monday morning).
 
-The custom time is the **native** `<input type="datetime-local">`: a date-picker component
+**"Custom time" is a ROW that opens a DIALOG, and that is a bug fix rather than a
+preference.** The native picker sat inline in the menu first and could not be used at all:
+pressing it opens the browser's OWN calendar, which is not in the document, so Radix read
+that press as an interaction OUTSIDE the popover and dismissed the menu — taking the
+half-filled field with it. The reader saw the menu vanish and nothing happen. A dialog is
+dismissed only by a press it can really see, so the picker inside one survives; it is also
+the shape the reference has. Two things follow: the dialog is a SIBLING of the popover (a
+child would be unmounted by the very close that makes room for it), and **Cancel is the way
+out that always works**, because a native date input consumes Escape for its own calendar —
+a dialog whose only exit was Escape would read as stuck while the field had focus.
+
+The picker itself is the **native** `<input type="datetime-local">`: a date-picker component
 would be a second calendar in an app that needs none, and the native one is a phone's own
 wheel, which is where this app is read.
 
@@ -277,8 +288,9 @@ threads' own messages, so a cancel takes a row out of it with nothing to keep in
 `{kind:"scheduled", clear:true}` hook drops everything held, and **a spec MUST call it**: one
 mock process serves the whole run, and a queued message outlives the page — it would sit in
 every later spec's banner. `cd web && bun run preview -- --out /tmp/sched --schedule` captures
-the pill, the menu in both themes, a moment that has passed being refused, the queued banner
-in both themes, the list in both themes and an armed deletion;
+the pill, the menu in both themes, the custom-time dialog in both themes, a moment that has
+passed being refused, the queued banner in both themes, the list in both themes and an armed
+deletion;
 `web/e2e/scheduled-send.spec.ts` pins every rule above and `web/src/lib/schedule-send.test.ts`
 the arithmetic.
 
@@ -2436,7 +2448,8 @@ user. Two independent mechanisms enforce that split:
   `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
   `bun run preview -- --out /tmp/ask --answer-with`. For SENDING LATER — the send pill, the
   menu of moments in both themes, a moment that has passed being refused, the banner a queued
-  message earns, the list of what is waiting in both themes and an armed deletion:
+  message earns, the custom-time dialog in both themes, the list of what is waiting in both
+  themes and an armed deletion:
   `bun run preview -- --out /tmp/sched --schedule`. For the user's own CUSTOM AGENTS — the
   Settings section, the form, the name a persona may not take, the "@" list that offers them
   beside the providers, the chip and one answering under its own face:

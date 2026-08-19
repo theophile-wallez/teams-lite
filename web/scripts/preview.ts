@@ -3060,6 +3060,15 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-menu-dark.png`);
       await setTheme("light");
+      // Any other moment: a row that opens a dialog, because the browser's own calendar is
+      // not in the document and pressing it used to dismiss the menu it sat in.
+      await page.locator('[data-testid="composer-schedule-custom-open"]').click();
+      await page.locator('[data-testid="composer-schedule-custom-dialog"]').waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-custom-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-custom-dark.png`);
+      await setTheme("light");
       // A moment that has passed, refused before the send rather than by one.
       const gone = new Date(Date.now() - 3 * 60 * 60 * 1000);
       const pad = (n: number) => String(n).padStart(2, "0");
@@ -3072,7 +3081,7 @@ if (import.meta.main) {
       await shot(`${out}-refused-light.png`);
       // Queued: the thread has nothing new, and the BANNER above the composer is what
       // accounts for the words — with the way into the list beside it.
-      await page.keyboard.press("Escape");
+      await page.locator('[data-testid="composer-schedule-custom-cancel"]').click();
       await page.locator('[data-testid="composer-schedule"]').click();
       await page.locator('[data-testid="composer-schedule-preset"]').first().click();
       await page.locator('[data-testid="composer-schedule-note"]').waitFor();
@@ -3093,8 +3102,9 @@ if (import.meta.main) {
       await shot(`${out}-armed-light.png`);
       console.log(
         `[preview] wrote ${out}-control-light.png, ${out}-menu-{light,dark}.png, ` +
-          `${out}-refused-light.png, ${out}-queued-{light,dark}.png, ` +
-          `${out}-list-{light,dark}.png and ${out}-armed-light.png`,
+          `${out}-custom-{light,dark}.png, ${out}-refused-light.png, ` +
+          `${out}-queued-{light,dark}.png, ${out}-list-{light,dark}.png and ` +
+          `${out}-armed-light.png`,
       );
     });
     process.exit(0);
