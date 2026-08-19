@@ -2491,9 +2491,9 @@ user. Two independent mechanisms enforce that split:
   beside the providers, the chip and one answering under its own face:
   `bun run preview -- --out /tmp/ca --custom-agents`. For a game of CHESS — the header's
   control, the challenge popover, the board in both themes, a game in progress with its score
-  sheet, the armed resignation and the board at a phone's width:
-  `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`: the pawn in the header is
-  20px). For a tracker REFERENCE drawn as a
+  sheet, the armed resignation, the board at a phone's width and the card a colleague's challenge
+  leaves for the reader to answer: `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`:
+  the pawn in the header is 20px). For a tracker REFERENCE drawn as a
   chip — in a chat message, in an agent's own answer and in a merge request's
   description: `bun run preview -- --out /tmp/ref --tracker-refs`. For the typing hint above the
   composer, one typist then three: `bun run preview -- --out /tmp/typ --typing`
@@ -4316,42 +4316,107 @@ new gate.
   where it sits — a later feature, never a quiet addition. It costs nothing: the sandbox thread
   `19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2` is a group CHAT, so the one place a send is
   pre-authorized is covered. Notes offers no game either — nobody to play.
+- **THE INVITATION HAS TWO SIDES, and the app shipped with only one of them.** A challenge is
+  answered from the board itself — **Accept — play black** / **Not now** — and the challenger's
+  own side of that wait is **Withdraw the challenge**. Every one of those is the same
+  `sendChessMessage` the moves ride (`join` / `decline` / `resign`, over the one `answer` in the
+  card), so no gate moved. It is written down because of how it was missed: the MOCK accepted
+  every challenge on its own, so `join` was only ever sent by the fixture — the challenged
+  player's card was a board with **nothing to press at all**, and eleven E2E tests passed over
+  it. A mock that plays only the easier half of a two-sided feature is a fixture that lies. Five
+  rules hold it, and each is pinned by a test:
+  - **WHOSE answer is owed decides the whole card** (`chessAwaitsOurAnswer` /
+    `chessAwaitsTheirAnswer` in `chess-thread.ts`). The status line reads from two sides —
+    "Waiting for somebody to accept." for the challenger, "<Ada> challenged you to a game — you
+    would play black." for the person challenged — because ONE sentence for both told the
+    challenged reader that somebody else was being waited on, which is the state they were in the
+    middle of answering.
+  - **A seat NOBODY holds is drawn as a SEAT, not as a person**, and it says whose it is: a dashed
+    empty circle rather than tinted initials (which is how this app draws a colleague with no
+    photo — `label="Nobody yet"` reduced to `NY`, ink naming nobody), labelled "You, if you
+    accept" for anybody who is not the challenger and "Waiting for somebody" for the challenger
+    themselves. A group chat is covered by the same rule, because there the seat really is the
+    first taker's.
+  - **A DECLINE and a WITHDRAWAL are two outcomes, and neither is a loss** (`ChessOutcome`'s
+    `declined { withdrawn }`). A `resign` on a game nobody accepted is read as the challenger
+    taking it back rather than as a resignation — a game that never started cannot be lost — and
+    a `decline` from the challenger themselves, or on a game already accepted, is refused by the
+    derivation. Both settle the game, which is what frees the conversation for the next challenge.
+  - **The HEADER says something is waiting rather than that it is the reader's move**
+    (`data-awaiting-answer` beside `data-your-turn`, and one dot for both — `chessWantsUs`). A
+    challenge to answer and a move to play are two different asks; the dot is the same, because
+    what it means is "this game wants something from you".
+  - **A spectator is offered none of it.** The controls follow the same derivation as a move, so a
+    third person in a group chat watching two colleagues play sees a board with no buttons.
 - **One game in flight per conversation.** A challenge is refused while a game is unfinished
   there; a finished one leaves its board where it is and lets the next challenge start.
-- **`chess.js` is a LAZY chunk** (1.4.0, BSD-2-Clause, zero dependencies). The pure halves — the
-  wire and the derivation — carry no dependency at all, which is what lets the pane decide a
-  board row exists and the header draw its turn dot without a rules engine on the path of every
-  chat. It is the rule `@pierre/diffs` holds for the diff renderer.
-- **The pieces are the Unicode chess glyphs, and hugeicons was tried FIRST.** That set does ship
-  a complete chess set, but a piece there is several OPEN paths (a pawn is its base, two curves
-  and a bare line), so `fill` cannot make a solid body — each subpath fills to its own implied
-  closure. Drawn instead as line art in two inks with a heavier halo behind, **both armies came
-  out looking identical at board size**: that was captured, looked at, and rejected. So the
-  pieces are `♚♛♜♝♞♟` — the SOLID glyphs for both sides — coloured near-white or near-black with
-  a 1px outline in the opposite ink, asked for in the TEXT presentation so no system draws a
-  colourful emoji instead. The hollow glyphs (`♔♕♖♗♘♙`) are deliberately unused: they are
-  outlines, so they vanish on a light square and bring the same problem back. § Project shape is
-  kept where it matters — no second icon PACKAGE is installed, `icon-library.test.ts` still
-  passes, and every glyph in the app's own chrome is still hugeicons'. Board art is not a row of
-  UI icons. The two inks are FIXED rather than themed, because "white piece" is a fact about
-  chess and a set that swapped sides with the app's appearance would be a board whose armies
-  change colour under the reader; the SQUARES follow the theme.
-- **The board is presentational and controlled**, and a square is a BUTTON only where a press
-  means something: a spectator's board and a settled game are a grid of squares. Moves are
-  played by tap-tap as well as by pointer, because this app is read from a phone.
+- **`chess.js` is in that same LAZY chunk** (1.4.0, BSD-2-Clause, zero dependencies), and it is
+  imported in exactly one file — the card. The pure halves — the wire and the derivation — carry
+  no dependency at all, which is what lets the pane decide a board row exists and the header draw
+  its turn dot without a rules engine, or a chessboard, on the path of every chat.
+- **THE BOARD IS `react-chessboard`, and two hand-rolled boards were tried first.** It is the
+  second surface in this app drawn by somebody else's renderer, after `@pierre/diffs` for a
+  patch, and the seam is where the care goes. What is theirs is everything a chessboard is
+  judged on and nothing this app has an opinion about: the piece art, picking a piece up and
+  dropping it, the animation between two positions, the coordinates down the edges. What stays
+  ours is the MEANING — which square is lit and why, whose turn it is, whether a press means
+  anything at all.
+  - **The pieces are why.** Hugeicons ships a complete chess set, so § Project shape was
+    satisfied on paper — but a piece there is several OPEN paths (a pawn is its base, two curves
+    and a bare line), so `fill` cannot make a solid body out of one: each subpath fills to its
+    own implied closure. Drawn as line art in two inks with a heavier halo behind, **both armies
+    came out looking identical at board size** — captured, looked at, rejected. The Unicode
+    glyphs (`♚♛♜♝♞♟` solid for both sides, outlined in the opposite ink) fixed that and still
+    looked like text in a grid. A board is a thing people have opinions about, and this one is
+    now drawn by a library whose whole job it is.
+  - **It is MIT with two `@dnd-kit` dependencies and React 19 as a peer**, and it lives inside
+    the board's own lazy chunk: measured on the built client, `chess-game-card-*.js` is 114 KB
+    of its own and the main app chunk holds ZERO references to it. So a reader who never opens
+    a game never downloads a chessboard — the rule `@pierre/diffs` holds for Shiki.
+  - **`icon-library.test.ts` still passes and is still the rule.** A board component that ships
+    its own piece art is not an icon library, exactly as `@pierre/diffs` shipping a highlighter
+    is not: no second icon PACKAGE is installed, and every glyph in the app's own chrome is
+    hugeicons'.
+  - **The library holds NO game state.** `position` is a FEN the card computes by replaying the
+    thread's own messages, so the board is still a reading of the history rather than a second
+    copy of the game — which is the property this whole feature rests on. A drop is answered
+    synchronously with "is that legal", and the move then travels as a message like every other.
+  - **`squareRenderer` is what makes the pair work.** It renders INSIDE their own `data-square`
+    element and replaces the styling hook they apply there, so this app draws its own selected
+    ring, legal-move dot, last-move tint and check wash — and carries the data attributes a spec
+    and a capture read. Their `squareStyles` option is deliberately unused: two places styling
+    one square is how the two would drift.
+  - **The SQUARES are the app's own theme tokens and the pieces are not.** `--chess-light` /
+    `--chess-dark` follow the appearance setting, because a board is a surface that has to sit
+    in a light or a dark page; "white piece" is a fact about chess. Their notation ink is a brown
+    that belongs to their default board, so each coordinate is drawn in the OTHER square's colour.
+  - **Arrows and auto-scroll are OFF.** A right-click that drew an arrow would take the
+    browser's own menu away, and a board that scrolled itself would move a virtualized history
+    under the reader.
+- **Both gestures end in ONE function** (`play` in the card): the tap-tap a phone uses, and a
+  piece dropped by the pointer. Neither can play a move the other would refuse, and dragging is
+  offered only to the player whose turn it is and only for their own pieces — so a spectator's
+  board and a settled game are a board nobody can move on.
 
 `web/mock/server.ts` plays the OPPONENT (`maybeAnswerMockChess`), because a game needs two
 machines and the suite has one: it accepts a challenge, opens as white when the challenger took
 black — without that a game the user asked to play as black would sit waiting for a first move
 nobody was going to make — and answers each move with a legal reply, replayed out of the thread's
-own messages rather than a position it keeps. Its `{kind:"chess"}` test hook aims that reply or
-silences it, and **a spec MUST reset it**: the reset also truncates the `Chess Club` fixture back
+own messages rather than a position it keeps. **It can also be the CHALLENGER**
+(`mockChessChallenge`, over the hook's `challenge`), which is the half that was missing and the
+only way the reader's own accept is ever exercised — the bug above is what earned it. The hook
+NAMES its conversation (`{kind:"chess", challenge:"w", conversation}`), because its default is the
+chess spec's own thread and a challenge posted anywhere but the open one is a test of nothing.
+`{kind:"chess"}` also aims the reply or silences it, and **a spec MUST reset it**: the reset also
+truncates the `Chess Club` fixture back
 to its seed, because one game left unfinished means the next test's header offers no challenge at
 all. That thread exists for the reason the ten-picture message taught this suite — a game posts
 several messages and the board absorbs them, so played in a shared fixture it would move the rows
 a later spec counts on. `cd web && bun run preview -- --out /tmp/chess --chess` captures the
 control, the popover, the board in both themes, a game in progress with its score sheet, the
-armed resignation and the board at a phone's width; `web/e2e/chess.spec.ts` pins every rule
+armed resignation, the board at a phone's width and — LAST, on the settled game above it, because
+`shot` crops the first match and a live challenge would stand in front of every board below it —
+the card a reader meets when somebody challenges THEM; `web/e2e/chess.spec.ts` pins every rule
 above. **What is unverified against the tenant is the pairing**: the wire rides `send`, which is
 measured, and everything else is pinned in unit tests and against the mock — so what is untested
 is one real challenge accepted by a colleague who also runs teams-lite, which is the user's own
@@ -4560,13 +4625,15 @@ user's. What changes is only what is asked.
     the same rule through its own seam rather than exempted: `@pierre/trees` draws the
     merge-request diff's file tree with hugeicons, serialized into the sprite it injects
     (`web/src/lib/tree-icons.ts`, see § The DIFF). The one thing in this app NOT drawn from it
-    is a chess PIECE, and only because that set cannot tell two armies apart at board size —
-    the reasoning, and what was tried first, is in § Chess in a conversation. No second icon
-    package is installed, so the test above still holds.
+    is a chess PIECE: the board is `react-chessboard` and the pieces are its own art, because
+    that hugeicons set cannot tell two armies apart at board size — the reasoning, and the two
+    hand-rolled boards tried first, are in § Chess in a conversation. No second icon package is
+    installed, so the test above still holds.
   - The game of CHESS is entirely the page's: `chess-wire.ts` reads the line a chess message
     signs itself with, `chess-thread.ts` derives every game from the thread's own messages, and
-    `chess.js` is reached only through the board's lazy chunk (see § Chess in a conversation).
-    There is no backend half at all — a move rides the `send` that is already gated.
+    `chess.js` plus `react-chessboard` are reached only through the board's lazy chunk (see
+    § Chess in a conversation). There is no backend half at all — a move rides the `send` that
+    is already gated.
   - There was a terminal UI (OpenTUI + Solid, in `ui/`) until 2026-08-03. It is gone,
     and the web app is the only client: do not re-add a second front-end, and read a
     comment that names one as history rather than as a place to keep in sync.

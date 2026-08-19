@@ -951,6 +951,26 @@ export async function setChessOpponent(
   expect(res.ok()).toBeTruthy();
 }
 
+/**
+ * Have the OPPONENT open a game, so the reader is the one challenged.
+ *
+ * This exists because its absence hid a shipped bug: the mock accepted every challenge itself,
+ * so the Accept path was never the reader's — and the app had no Accept button while every test
+ * passed. `color` is the colour the OPPONENT takes, so the reader plays the other one.
+ */
+export async function chessChallengeFromOpponent(
+  page: Page,
+  color: "w" | "b" = "w",
+): Promise<string> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "chess", challenge: color },
+  });
+  expect(res.ok()).toBeTruthy();
+  const body = (await res.json()) as { game: string | null };
+  expect(body.game).toBeTruthy();
+  return body.game as string;
+}
+
 /** Put the chess opponent back the way the mock declares it. */
 export async function resetChess(page: Page): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {

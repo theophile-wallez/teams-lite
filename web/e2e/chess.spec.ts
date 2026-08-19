@@ -1,6 +1,7 @@
 import {
   test,
   expect,
+  chessChallengeFromOpponent,
   chessSquareHasPiece,
   fetchCapturedSends,
   gotoApp,
@@ -61,6 +62,70 @@ test.describe("chess in a conversation", () => {
     );
   });
 
+  test("BEING CHALLENGED offers an answer, and accepting starts the game", async ({ page }) => {
+    // The other half of the feature, and the one the mock's own auto-accept used to hide: the
+    // reader is challenged, so their side of the card owes an ANSWER rather than a move.
+    await openChessThread(page);
+    await chessChallengeFromOpponent(page, "w");
+    await expect(page.locator(board)).toBeVisible();
+
+    // It says who asked and which side they would take, and offers both answers.
+    await expect(page.locator(status)).toContainText(/challenged you/i);
+    await expect(page.locator(status)).toContainText("black");
+    await expect(page.locator('[data-testid="chess-accept"]')).toBeVisible();
+    await expect(page.locator('[data-testid="chess-decline"]')).toBeVisible();
+    // The header says something is waiting for them, which is not the same as their move.
+    await expect(page.locator('[data-testid="chess-button"]')).toHaveAttribute(
+      "data-awaiting-answer",
+      "true",
+    );
+    await expect(page.locator('[data-testid="chess-button"]')).not.toHaveAttribute(
+      "data-your-turn",
+      "true",
+    );
+
+    // Accepting starts the game — and the opponent took white, so they open.
+    await page.locator('[data-testid="chess-accept"]').click();
+    await expect(page.locator('[data-testid="chess-accept"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="chess-moves"]')).toContainText("1.");
+    await expect(page.locator(status)).toContainText(/your move/i);
+    // Still one row: the challenge, the accept and the first move all folded into the board.
+    await expect(page.locator(board)).toHaveCount(1);
+  });
+
+  test("DECLINING a challenge frees the conversation for the next one", async ({ page }) => {
+    await openChessThread(page);
+    await chessChallengeFromOpponent(page, "w");
+    await page.locator('[data-testid="chess-decline"]').click();
+
+    await expect(page.locator(status)).toContainText(/declined/i);
+    // Nothing is waiting for the reader any more…
+    await expect(page.locator('[data-testid="chess-your-turn"]')).toHaveCount(0);
+    // …and the header offers a challenge again rather than pointing at a dead game.
+    await page.locator('[data-testid="chess-button"]').click();
+    await expect(page.locator('[data-testid="chess-challenge"]')).toBeVisible();
+    await page.keyboard.press("Escape");
+  });
+
+  test("WITHDRAWING our own unanswered challenge is not a loss", async ({ page }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    await page.locator('[data-testid="chess-button"]').click();
+    await page.locator('[data-testid="chess-color-w"]').click();
+    await page.locator('[data-testid="chess-challenge"]').click();
+    await expect(page.locator(board)).toBeVisible();
+    await expect(page.locator(status)).toContainText(/waiting for somebody to accept/i);
+
+    await page.locator('[data-testid="chess-withdraw"]').click();
+    await expect(page.locator(status)).toContainText(/withdrew the challenge/i);
+    // A game nobody played is not a game anybody lost.
+    await expect(page.locator(status)).not.toContainText(/resigned/i);
+    // And the next challenge may go out.
+    await page.locator('[data-testid="chess-button"]').click();
+    await expect(page.locator('[data-testid="chess-challenge"]')).toBeVisible();
+    await page.keyboard.press("Escape");
+  });
+
   test("the board is a reading of the messages: what leaves is the wire, not markup", async ({
     page,
   }) => {
@@ -88,8 +153,10 @@ test.describe("chess in a conversation", () => {
 
     // Pressing the piece lights every legal square it can reach — the tap-tap a phone needs.
     await page.locator('[data-square="e2"]').click();
-    await expect(page.locator('[data-square="e4"][data-target="true"]')).toBeVisible();
-    await expect(page.locator('[data-square="e3"][data-target="true"]')).toBeVisible();
+    // The highlight is this app's own overlay INSIDE the renderer's square (see
+    // components/chess-board.tsx), so it is a descendant rather than the square itself.
+    await expect(page.locator('[data-square="e4"] [data-target="true"]')).toBeVisible();
+    await expect(page.locator('[data-square="e3"] [data-target="true"]')).toBeVisible();
 
     await page.locator('[data-square="e4"]').click();
     // The piece has moved, the score sheet says so, and the opponent's reply lands after it.
@@ -107,7 +174,7 @@ test.describe("chess in a conversation", () => {
     await expect(page.locator(status)).toContainText("Your move");
     // A rook has nowhere to go from the opening position.
     await page.locator('[data-square="a1"]').click();
-    await expect(page.locator('[data-square="a3"]')).not.toHaveAttribute("data-target", "true");
+    await expect(page.locator('[data-square="a3"] [data-target="true"]')).toHaveCount(0);
     await page.locator('[data-square="a3"]').click();
     // Nothing was played and nothing was sent.
     await expect(page.locator('[data-testid="chess-moves"]')).toHaveCount(0);

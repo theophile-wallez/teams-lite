@@ -9051,6 +9051,36 @@ let mockChessReply: string | null = null;
 let mockChessSilent = false;
 
 /**
+ * Open a game AS THE OPPONENT, so the reader is the one challenged.
+ *
+ * This exists because its absence hid a shipped bug. The opponent accepted every challenge on
+ * its own, so the accept path was never the READER's — and the app had no Accept button at all
+ * while eleven tests passed. A mock that only ever plays the easier half of a two-sided feature
+ * is a fixture that lies.
+ */
+function mockChessChallenge(convId: string, color: "w" | "b"): string | null {
+  const t = threadFor(convId);
+  const other = t?.participants[0];
+  if (!t || !other) return null;
+  const game = mockChessGameId();
+  postMockChess(
+    convId,
+    other,
+    game,
+    `open ${color}`,
+    `♟ Chess — I'd like a game. I'm ${color === "w" ? "white" : "black"}.`,
+  );
+  return game;
+}
+
+/** Six lowercase hex characters, the shape the page's own `newChessGameId` mints. */
+function mockChessGameId(): string {
+  const bytes = new Uint8Array(3);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
  * Put the opponent back the way this file declares it, and the chess THREAD back to its seed.
  *
  * The thread matters as much as the aim: one game in flight per conversation is a real rule of
@@ -9109,6 +9139,20 @@ function maybeAnswerMockChess(convId: string, msg: ChatMessage): void {
           }
         }, MOCK_CHESS_DELAY_MS);
       }
+    }, MOCK_CHESS_DELAY_MS);
+    return;
+  }
+  // The reader ACCEPTED a challenge the mock opened. If the mock took white it has to open,
+  // exactly as it does when the reader challenges and picks black — otherwise a game the reader
+  // just accepted sits waiting for a first move nobody was going to make.
+  if (wire.rest === "join") {
+    const opened = t.messages
+      .map((m) => mockChessWire(m.content))
+      .find((w) => w?.game === wire.game && w.rest.startsWith("open "));
+    if (opened?.rest !== "open w") return;
+    setTimeout(() => {
+      const opening = new Chess().moves()[0];
+      if (opening) postMockChess(convId, other, wire.game, `1 ${opening}`, `♟ 1. ${opening}`);
     }, MOCK_CHESS_DELAY_MS);
     return;
   }
@@ -9979,8 +10023,18 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       }
       if (typeof body.reply === "string") mockChessReply = body.reply;
       if (typeof body.silent === "boolean") mockChessSilent = body.silent;
+      // Let the opponent OPEN a game, so the reader is the one challenged and the Accept path
+      // is theirs. Without it that path belongs to the mock and the app can ship with no
+      // Accept button at all — which is exactly what happened.
+      let challenged: string | null = null;
+      if (body.challenge === "w" || body.challenge === "b") {
+        challenged = mockChessChallenge(
+          typeof body.conversation === "string" ? body.conversation : MOCK_CHESS_THREAD,
+          body.challenge,
+        );
+      }
       return Response.json(
-        { ok: true, reply: mockChessReply, silent: mockChessSilent },
+        { ok: true, reply: mockChessReply, silent: mockChessSilent, game: challenged },
         { status: 200 },
       );
     }

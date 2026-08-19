@@ -124,10 +124,81 @@ describe("ChessGameCard", () => {
     expect(status(render({ outcome: { kind: "drawAgreed" } }))).toContain("Draw agreed");
   });
 
-  it("waits for an opponent while the challenge is open, and nobody may move", () => {
+  it("draws an EMPTY SEAT for a side nobody holds, and never a person's initials", () => {
+    // Tinted initials are how this app draws a colleague with no photo, so "Nobody yet" reduced
+    // to `NY` was ink naming nobody. The seat is drawn as a seat instead.
+    const html = render({ opponent: null });
+    expect(html).not.toContain("Nobody yet");
+    expect(html).toContain("border-dashed");
+  });
+
+  it("says whose the empty seat IS, from the reader's own side", () => {
+    // The challenger is waiting for anybody; the person challenged is looking at their own seat,
+    // and telling them somebody else is awaited is the mistake the status line already made.
+    expect(render({ opponent: null })).toContain("Waiting for somebody");
+    const challenged = render({
+      opponent: null,
+      ourColor: null,
+      challenger: { mri: "8:orgid:ada", name: "Ada Lovelace", isSelf: false },
+    });
+    expect(challenged).toContain("You, if you accept");
+    // And a challenge nobody took is nobody's seat any more.
+    const declined = render({
+      opponent: null,
+      ourColor: null,
+      challenger: { mri: "8:orgid:ada", name: "Ada Lovelace", isSelf: false },
+      outcome: { kind: "declined", withdrawn: false },
+    });
+    expect(declined).not.toContain("You, if you accept");
+  });
+
+  it("waits for an opponent while the challenge is open, and offers to take it back", () => {
     const html = render({ opponent: null });
     expect(status(html)).toMatch(/waiting for somebody to accept/i);
-    expect(html.match(/<button/g)).toBeNull();
+    // The challenger's own way out, which is what frees the conversation for another game.
+    expect(html).toContain('data-testid="chess-withdraw"');
+    // They are not offered an answer to their own challenge, and nobody may move yet.
+    expect(html).not.toContain('data-testid="chess-accept"');
+    expect(html).not.toContain('data-testid="chess-resign"');
+  });
+
+  it("OFFERS THE ANSWER to somebody who was challenged, and says who asked", () => {
+    // The bug this test exists for: the challenged player's side of a fresh challenge used to be
+    // a board with nothing to press at all, because the mock accepted on its own.
+    const html = render({
+      opponent: null,
+      ourColor: null,
+      challenger: { mri: "8:orgid:ada", name: "Ada Lovelace", isSelf: false },
+      challengerColor: "w",
+    });
+    expect(html).toContain('data-testid="chess-accept"');
+    expect(html).toContain('data-testid="chess-decline"');
+    // It says WHO asked and which side the reader would take — the two facts they answer with.
+    expect(status(html)).toContain("Ada Lovelace challenged you");
+    expect(status(html)).toContain("black");
+    // And never the challenger's own sentence, which reads as if they were the one waiting.
+    expect(status(html)).not.toMatch(/waiting for somebody to accept/i);
+    expect(html).not.toContain('data-testid="chess-withdraw"');
+  });
+
+  it("names the side the challenged reader would take, from the challenger's colour", () => {
+    const asWhite = render({
+      opponent: null,
+      ourColor: null,
+      challenger: { mri: "8:orgid:ada", name: "Ada", isSelf: false },
+      challengerColor: "b",
+    });
+    expect(status(asWhite)).toContain("white");
+  });
+
+  it("states a declined challenge and a withdrawn one apart, and neither as a loss", () => {
+    expect(status(render({ outcome: { kind: "declined", withdrawn: false } }))).toContain(
+      "Challenge declined",
+    );
+    const withdrawn = status(render({ outcome: { kind: "declined", withdrawn: true } }));
+    expect(withdrawn).toContain("withdrew the challenge");
+    // Nobody lost a game that never started.
+    expect(withdrawn).not.toMatch(/resigned|checkmate/i);
   });
 
   it("draws a spectator's board with no controls at all", () => {

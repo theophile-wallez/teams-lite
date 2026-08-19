@@ -26,7 +26,10 @@ export type ChessPlayer = { mri: string; name: string; isSelf: boolean };
 export type ChessOutcome =
   | { kind: "playing" }
   | { kind: "resigned"; by: ChessColor }
-  | { kind: "drawAgreed" };
+  | { kind: "drawAgreed" }
+  /** Nobody took the challenge up: it was declined, or the challenger withdrew it. Either way
+   *  the game never started, and the conversation is free for the next one. */
+  | { kind: "declined"; withdrawn: boolean };
 
 /** One game, as the thread states it. */
 export type ChessGame = {
@@ -78,6 +81,30 @@ export function activeChessGame(games: ChessGame[]): ChessGame | null {
 /** Whether the reader may move: they are a player, somebody accepted, and it is their turn. */
 export function chessTurnIsOurs(game: ChessGame): boolean {
   return !!game.ourColor && !!game.opponent && game.turn === game.ourColor;
+}
+
+/**
+ * Whether this game is waiting for the READER to answer a challenge — somebody else opened it
+ * and nobody has accepted yet.
+ *
+ * It is what the challenged player's whole experience rests on: their side of a fresh challenge
+ * is a board with no controls until they accept, so the card has to offer that and the header
+ * has to say something is waiting for them. The mock used to accept on its own, which is exactly
+ * how a UI with no Accept button passed every test.
+ */
+export function chessAwaitsOurAnswer(game: ChessGame): boolean {
+  return !chessGameIsSettled(game) && !game.opponent && !game.challenger.isSelf;
+}
+
+/** Whether the reader is the one who opened this game and is still waiting for an answer. */
+export function chessAwaitsTheirAnswer(game: ChessGame): boolean {
+  return !chessGameIsSettled(game) && !game.opponent && game.challenger.isSelf;
+}
+
+/** Whether this game wants something from the reader right now: their move, or their answer to
+ *  a challenge. One question, so the header asks it once. */
+export function chessWantsUs(game: ChessGame): boolean {
+  return chessTurnIsOurs(game) || chessAwaitsOurAnswer(game);
 }
 
 /** The games this message list holds, in the order they were opened. */
@@ -135,6 +162,15 @@ export function chessGamesInThread(messages: ChatMessage[]): ChessGame[] {
       continue;
     }
 
+    if (wire.body.kind === "decline") {
+      // A challenge nobody took up. It is only meaningful before somebody accepted, and only
+      // from somebody who is NOT the challenger — a challenger who changed their mind resigns
+      // their own open game instead, which is the withdrawal below.
+      if (game.opponent || who.mri === game.challenger.mri) continue;
+      game.outcome = { kind: "declined", withdrawn: false };
+      continue;
+    }
+
     const color = colorOf(game, who.mri);
     // Nobody outside the game may act on it. That is the derivation rather than a rule the
     // UI applies, which is what keeps a third person in a group chat out of it.
@@ -169,8 +205,12 @@ export function chessGamesInThread(messages: ChatMessage[]): ChessGame[] {
       continue;
     }
 
-    // A resignation.
-    game.outcome = { kind: "resigned", by: color };
+    // A resignation — or, before anybody accepted, the challenger WITHDRAWING their own offer.
+    // Resigning a game that never started is not a loss, and calling it one would put a defeat
+    // in the thread for a game nobody played.
+    game.outcome = game.opponent
+      ? { kind: "resigned", by: color }
+      : { kind: "declined", withdrawn: true };
     game.drawOfferedBy = null;
   }
 

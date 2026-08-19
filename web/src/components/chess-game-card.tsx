@@ -18,8 +18,11 @@
  */
 
 import { Chess, type Move, type Square } from "chess.js";
+import { useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState } from "react";
 import {
+  chessAwaitsOurAnswer,
+  chessAwaitsTheirAnswer,
   chessGameIsSettled,
   chessPlayerOf,
   chessTurnIsOurs,
@@ -29,8 +32,7 @@ import {
 import type { ChessColor } from "~/lib/chess-wire";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
-import { ChessBoard, emptyChessSquares, type ChessBoardSquare } from "./chess-board";
-import type { ChessPieceKind } from "./chess-pieces";
+import { ChessBoard } from "./chess-board";
 import { useOptionalAppState, useOptionalController } from "./controller-context";
 
 /** What the rules say about the move list the thread holds. */
@@ -69,6 +71,8 @@ export default function ChessGameCard(props: {
   const [selected, setSelected] = useState<string | null>(null);
   const [promotion, setPromotion] = useState<{ from: string; to: string } | null>(null);
   const [armedResign, setArmedResign] = useState(false);
+  // A position change is animated by the renderer; a reader who asked for no motion gets none.
+  const reduceMotion = useReducedMotion();
 
   const game = props.game;
 
@@ -100,21 +104,6 @@ export default function ChessGameCard(props: {
   const ourMove =
     !settled && chessTurnIsOurs(game) && moves.length === game.moves.length && !!controller;
 
-  const squares: ChessBoardSquare[] = useMemo(() => {
-    const board = chess.board();
-    const held = new Map<string, ChessBoardSquare>();
-    for (const rank of board) {
-      for (const cell of rank) {
-        if (!cell) continue;
-        held.set(cell.square, {
-          square: cell.square,
-          piece: { kind: cell.type as ChessPieceKind, color: cell.color },
-        });
-      }
-    }
-    return emptyChessSquares().map((s) => held.get(s.square) ?? s);
-  }, [chess]);
-
   /** Every legal move out of the selected square. */
   const fromSelected: Move[] = useMemo(() => {
     if (!ourMove || !selected) return [];
@@ -123,9 +112,28 @@ export default function ChessGameCard(props: {
 
   const targets = useMemo(() => [...new Set(fromSelected.map((m) => m.to))], [fromSelected]);
 
-  const check = chess.inCheck()
-    ? (squares.find((s) => s.piece?.kind === "k" && s.piece.color === chess.turn())?.square ?? null)
-    : null;
+  /** The king in check, which is the one square the renderer cannot work out for itself. */
+  const check = useMemo(() => {
+    if (!chess.inCheck()) return null;
+    for (const rank of chess.board()) {
+      for (const cell of rank) {
+        if (cell?.type === "k" && cell.color === chess.turn()) return cell.square;
+      }
+    }
+    return null;
+  }, [chess]);
+
+  /** Play from one square to another, asking the rules what that move IS. Both gestures end
+   *  here — the tap-tap a phone uses and a piece dropped by the pointer — so neither can play
+   *  a move the other would refuse. Answers whether the move was legal. */
+  function play(from: string, to: string): boolean {
+    const onto = chess.moves({ square: from as Square, verbose: true }).filter((m) => m.to === to);
+    if (onto.length === 0) return false;
+    // A promotion is the one move two squares cannot say on their own.
+    if (onto.some((m) => m.promotion)) setPromotion({ from, to });
+    else void send(onto[0]?.san ?? "");
+    return true;
+  }
 
   function press(square: string): void {
     if (!ourMove) return;
@@ -133,20 +141,20 @@ export default function ChessGameCard(props: {
       setSelected(null);
       return;
     }
-    if (selected) {
-      const onto = fromSelected.filter((m) => m.to === square);
-      if (onto.length > 0) {
-        setSelected(null);
-        // A promotion is the one move the two squares cannot say on their own.
-        if (onto.some((m) => m.promotion)) setPromotion({ from: selected, to: square });
-        else void send(onto[0]?.san ?? "");
-        return;
-      }
+    if (selected && play(selected, square)) {
+      setSelected(null);
+      return;
     }
     // Selecting one's own piece, and nothing else: a press on an empty square with nothing
     // selected means nothing.
-    const cell = squares.find((s) => s.square === square);
-    setSelected(cell?.piece && cell.piece.color === game.ourColor ? square : null);
+    const piece = chess.get(square as Square);
+    setSelected(piece && piece.color === game.ourColor ? square : null);
+  }
+
+  function drop(from: string, to: string): boolean {
+    if (!ourMove) return false;
+    setSelected(null);
+    return play(from, to);
   }
 
   async function send(san: string): Promise<void> {
@@ -173,6 +181,16 @@ export default function ChessGameCard(props: {
   }
 
   const canAct = !settled && !!game.ourColor && !!game.opponent && !!controller;
+  // A challenge waiting for an answer, and WHOSE answer it is. These two are the whole of the
+  // challenged player's experience: without them their side of a fresh challenge is a board with
+  // nothing to press, which is what the mock's own auto-accept hid.
+  const awaitingUs = !!controller && chessAwaitsOurAnswer(game);
+  const awaitingThem = !!controller && chessAwaitsTheirAnswer(game);
+
+  /** Answer a challenge, or take one back. */
+  function answer(body: { kind: "join" } | { kind: "decline" } | { kind: "resign" }): void {
+    void controller?.sendChessMessage(props.conversationId, { game: game.id, body });
+  }
 
   return (
     <article
@@ -185,13 +203,16 @@ export default function ChessGameCard(props: {
     >
       <ChessSide game={game} color={orientation === "w" ? "b" : "w"} />
       <ChessBoard
-        squares={squares}
+        id={`chess-${game.id}`}
+        fen={chess.fen()}
         orientation={orientation}
+        playable={ourMove ? game.ourColor : null}
         selected={selected}
         targets={targets}
         lastMove={lastMove}
         check={check}
-        {...(ourMove ? { onSquare: press } : {})}
+        animate={!reduceMotion}
+        {...(ourMove ? { onSquare: press, onDrop: drop } : {})}
       />
       <ChessSide game={game} color={orientation} />
 
@@ -231,6 +252,46 @@ export default function ChessGameCard(props: {
               {PROMOTION_LABEL[piece]}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* Somebody challenged the reader. This is the one state where the card asks for an answer
+          rather than a move, so it says WHO asked and offers both answers — a challenge nobody
+          can decline would sit in the conversation for ever, and one game is in flight at a
+          time, so it would block the next one too. */}
+      {awaitingUs && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            data-testid="chess-accept"
+            onClick={() => answer({ kind: "join" })}
+            className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground"
+          >
+            Accept — play {game.challengerColor === "w" ? "black" : "white"}
+          </button>
+          <button
+            type="button"
+            data-testid="chess-decline"
+            onClick={() => answer({ kind: "decline" })}
+            className="rounded-md border border-border-subtle px-2 py-0.5 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+          >
+            Not now
+          </button>
+        </div>
+      )}
+
+      {/* The challenger's own side of that wait: they can take the offer back, which is what
+          frees the conversation for another game. */}
+      {awaitingThem && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            data-testid="chess-withdraw"
+            onClick={() => answer({ kind: "resign" })}
+            className="rounded-md border border-border-subtle px-2 py-0.5 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+          >
+            Withdraw the challenge
+          </button>
         </div>
       )}
 
@@ -294,22 +355,51 @@ export default function ChessGameCard(props: {
 
 const PROMOTION_LABEL = { q: "Queen", r: "Rook", b: "Bishop", n: "Knight" } as const;
 
-/** One side of the board, named. Drawn above and below the board the way a board is read, and
- *  the face and the name are the app's own — so a colleague the user renamed is named here
- *  exactly as they are above their own bubbles. */
+/**
+ * One side of the board, named. Drawn above and below the board the way a board is read, and the
+ * face and the name are the app's own — so a colleague the user renamed is named here exactly as
+ * they are above their own bubbles.
+ *
+ * A seat NOBODY holds is drawn as an empty seat rather than as a person: no initials, because
+ * tinted initials are how this app draws a colleague it has no photo for and "Nobody yet" reduced
+ * to `NY` is ink that names nothing. And it says WHOSE it is from the reader's own position — the
+ * seat opposite a challenger is the reader's to take, so telling them somebody else is being
+ * waited for is the same mistake the status line made before it read from two sides.
+ */
 function ChessSide(props: { game: ChessGame; color: ChessColor }) {
   const player: ChessPlayer | null = chessPlayerOf(props.game, props.color);
-  const waiting = !player;
+  // Not the controller's question: whether a press would WORK is the card's, and whether the seat
+  // is the reader's is a fact about the game. A settled challenge is nobody's to take.
+  const oursToTake =
+    !player && !props.game.challenger.isSelf && !chessGameIsSettled(props.game);
   return (
     <header className="flex items-center gap-2 py-1.5">
-      <Avatar
-        seed={player?.mri || props.game.id}
-        label={player?.name || "Nobody yet"}
-        {...(player && !waiting ? { photo: { kind: "user" as const, id: player.mri } } : {})}
-        className="size-6"
-      />
-      <span className="truncate text-xs font-medium text-foreground">
-        {player ? (player.isSelf ? "You" : player.name) : "Waiting for somebody"}
+      {player ? (
+        <Avatar
+          seed={player.mri}
+          label={player.name}
+          photo={{ kind: "user", id: player.mri }}
+          className="size-6"
+        />
+      ) : (
+        <span
+          aria-hidden
+          className="size-6 shrink-0 rounded-full border border-dashed border-border-subtle"
+        />
+      )}
+      <span
+        className={cn(
+          "truncate text-xs font-medium",
+          player ? "text-foreground" : "text-text-dim",
+        )}
+      >
+        {player
+          ? player.isSelf
+            ? "You"
+            : player.name
+          : oursToTake
+            ? "You, if you accept"
+            : "Waiting for somebody"}
       </span>
       <span className="ml-auto shrink-0 text-[11px] text-text-faint">
         {props.color === "w" ? "White" : "Black"}
@@ -334,6 +424,11 @@ function statusOf(game: ChessGame, chess: Chess, brokeAt: number | null, ourMove
     return who?.isSelf ? "You resigned." : `${who?.name ?? "They"} resigned.`;
   }
   if (game.outcome.kind === "drawAgreed") return "Draw agreed.";
+  if (game.outcome.kind === "declined") {
+    return game.outcome.withdrawn
+      ? `${game.challenger.isSelf ? "You" : game.challenger.name} withdrew the challenge.`
+      : "Challenge declined.";
+  }
   if (chess.isCheckmate()) {
     const loser = chessPlayerOf(game, chess.turn());
     return loser?.isSelf ? "Checkmate — you lost." : `Checkmate — ${loser?.name ?? "they"} lost.`;
@@ -341,7 +436,14 @@ function statusOf(game: ChessGame, chess: Chess, brokeAt: number | null, ourMove
   if (chess.isStalemate()) return "Stalemate — a draw.";
   if (chess.isInsufficientMaterial()) return "A draw: neither side can mate.";
   if (chess.isDraw()) return "A draw.";
-  if (!game.opponent) return "Waiting for somebody to accept.";
+  // A challenge waiting for an answer reads from OPPOSITE sides, and one sentence for both was
+  // the bug: the challenged player was told somebody else was being waited on.
+  if (!game.opponent) {
+    if (game.challenger.isSelf) return "Waiting for somebody to accept.";
+    return `${game.challenger.name} challenged you to a game — you would play ${
+      game.challengerColor === "w" ? "black" : "white"
+    }.`;
+  }
   if (ourMove) return chess.inCheck() ? "Your move — you are in check." : "Your move.";
   const them = chessPlayerOf(game, chess.turn());
   return `Waiting for ${them?.isSelf ? "you" : (them?.name ?? "them")}.`;

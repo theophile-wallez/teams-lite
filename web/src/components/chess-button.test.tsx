@@ -54,15 +54,46 @@ describe("chessButtonState", () => {
   });
 
   it("points at the live game, and says when it is the reader's move", () => {
-    const live = game();
-    expect(chessButtonState([live])).toEqual({ kind: "open", game: live, ourTurn: true });
-    const theirs = game({ turn: "b" });
-    expect(chessButtonState([theirs])).toEqual({ kind: "open", game: theirs, ourTurn: false });
+    expect(chessButtonState([game()])).toMatchObject({ kind: "open", ourTurn: true, wantsUs: true });
+    expect(chessButtonState([game({ turn: "b" })])).toMatchObject({
+      kind: "open",
+      ourTurn: false,
+      wantsUs: false,
+    });
   });
 
   it("is never the reader's turn in a game they are only watching", () => {
-    const watched = game({ ourColor: null });
-    expect(chessButtonState([watched])).toEqual({ kind: "open", game: watched, ourTurn: false });
+    const watched = game({
+      ourColor: null,
+      challenger: { mri: "8:orgid:ada", name: "Ada", isSelf: false },
+    });
+    expect(chessButtonState([watched])).toMatchObject({
+      kind: "open",
+      ourTurn: false,
+      awaitingUs: false,
+      wantsUs: false,
+    });
+  });
+
+  it("says a CHALLENGE is waiting for the reader, which is not their move", () => {
+    // Somebody else opened it and nobody has accepted: the reader owes an answer, not a move.
+    const challenged = game({
+      opponent: null,
+      ourColor: null,
+      challenger: { mri: "8:orgid:ada", name: "Ada", isSelf: false },
+    });
+    expect(chessButtonState([challenged])).toMatchObject({
+      kind: "open",
+      ourTurn: false,
+      awaitingUs: true,
+      // One dot for one question: the game wants something from the reader either way.
+      wantsUs: true,
+    });
+  });
+
+  it("wants nothing from the reader while THEY are the one being waited on", () => {
+    const ours = game({ opponent: null });
+    expect(chessButtonState([ours])).toMatchObject({ awaitingUs: false, wantsUs: false });
   });
 
   it("points at the NEWEST live game when an older one is settled", () => {

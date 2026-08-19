@@ -1726,10 +1726,11 @@ if (import.meta.main) {
   // board row where the game started (see AGENTS.md § Chess in a conversation). The mock plays
   // the opponent, so the capture walks a real game: the header's control, the popover that
   // says what the press costs, the board once somebody accepted, a few moves with the score
-  // sheet under them, and the board at a phone's width.
+  // sheet under them, the board at a phone's width, and — last, because it needs a settled game
+  // above it — the card a reader meets when somebody challenges THEM.
   if (args.includes("--chess")) {
     await withPreview(async ({ page, shot, setTheme }) => {
-      await openConversation(page, "Agent Sandbox");
+      const conversation = await openConversation(page, "Agent Sandbox");
       const button = page.locator('[data-testid="chess-button"]');
       await button.waitFor();
       // The control up close: a 20px pawn in a row of 20px glyphs is where this is right or
@@ -1798,10 +1799,32 @@ if (import.meta.main) {
       await shot(`${out}-mobile-light.png`);
       await page.setViewportSize(VIEWPORT);
 
+      // BEING CHALLENGED, which is the half a reader meets first when a colleague opens the game:
+      // the card owes them an ANSWER rather than a move, so it names who asked, says which side
+      // they would take, and offers both answers — a state that had no control at all until the
+      // mock could be the challenger. Two things about how it is captured:
+      //   * the conversation is NAMED rather than left to the hook's own default, which is the
+      //     chess spec's own thread: a challenge posted anywhere but the open one captures nothing;
+      //   * it comes LAST, on the resigned game above it, because a finished game frees the
+      //     conversation for the next challenge — and `shot` crops the FIRST match, so a challenge
+      //     opened earlier would have stood in front of every board shot below it.
+      await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+        data: { kind: "chess", challenge: "w", conversation },
+      });
+      const answer = page.locator('[data-testid="chess-accept"]');
+      await answer.waitFor();
+      await page.waitForTimeout(300);
+      const challenged = '[data-testid="chess-game"] >> nth=-1';
+      await shot(`${out}-challenged-light.png`, challenged);
+      await setTheme("dark");
+      await shot(`${out}-challenged-dark.png`, challenged);
+      await setTheme("light");
+
       console.log(
         `[preview] wrote ${out}-button-{light,dark}.png, ${out}-challenge-{light,dark}.png, ` +
           `${out}-board-{light,dark}.png, ${out}-mid-game-light.png, ` +
-          `${out}-resign-armed-light.png and ${out}-mobile-light.png`,
+          `${out}-resign-armed-light.png, ${out}-mobile-light.png and ` +
+          `${out}-challenged-{light,dark}.png`,
       );
     });
     process.exit(0);

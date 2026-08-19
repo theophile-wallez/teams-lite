@@ -22,6 +22,7 @@ export type ChessColor = "w" | "b";
 export type ChessWireBody =
   | { kind: "open"; color: ChessColor }
   | { kind: "join" }
+  | { kind: "decline" }
   | { kind: "move"; ply: number; san: string }
   | { kind: "draw" }
   | { kind: "drawAccepted" }
@@ -80,6 +81,7 @@ function wireBody(rest: string): ChessWireBody | null {
   if (rest === "open w") return { kind: "open", color: "w" };
   if (rest === "open b") return { kind: "open", color: "b" };
   if (rest === "join") return { kind: "join" };
+  if (rest === "decline") return { kind: "decline" };
   if (rest === "draw") return { kind: "draw" };
   if (rest === "draw-ok") return { kind: "drawAccepted" };
   if (rest === "resign") return { kind: "resign" };
@@ -103,6 +105,8 @@ function wireKind(body: ChessWireBody): string {
       return `open ${body.color}`;
     case "join":
       return "join";
+    case "decline":
+      return "decline";
     case "move":
       return `${body.ply} ${body.san}`;
     case "draw":
@@ -125,6 +129,8 @@ export function chessMessageWords(body: ChessWireBody): string {
       return `♟ Chess — I'd like a game. I'm ${body.color === "w" ? "white" : "black"}.`;
     case "join":
       return "♟ Chess — accepted.";
+    case "decline":
+      return "♟ Chess — not right now, thanks.";
     case "move":
       // Numbered the way a score sheet reads: by the MOVE, with an ellipsis for black.
       return `♟ ${Math.ceil(body.ply / 2)}${body.ply % 2 === 1 ? "." : "…"} ${body.san}`;

@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   activeChessGame,
+  chessAwaitsOurAnswer,
+  chessAwaitsTheirAnswer,
   chessGameIsSettled,
   chessGamesInThread,
   chessPlayerOf,
   chessTurnIsOurs,
+  chessWantsUs,
 } from "./chess-thread";
 import { chessMessageHtml, type ChessWire } from "./chess-wire";
 import type { ChatMessage } from "./protocol";
@@ -256,6 +259,85 @@ describe("activeChessGame", () => {
 
   it("is null in a thread with no game at all", () => {
     expect(activeChessGame([])).toBeNull();
+  });
+});
+
+describe("a challenge waiting for an answer", () => {
+  it("awaits OUR answer when somebody else opened it and nobody accepted", () => {
+    const [theirs] = chessGamesInThread([
+      chess(ADA, { game: "aaa111", body: { kind: "open", color: "w" } }),
+    ]);
+    expect(theirs && chessAwaitsOurAnswer(theirs)).toBe(true);
+    expect(theirs && chessAwaitsTheirAnswer(theirs)).toBe(false);
+    // And the header asks one question: this game wants something from the reader.
+    expect(theirs && chessWantsUs(theirs)).toBe(true);
+  });
+
+  it("awaits THEIR answer when the reader opened it", () => {
+    const [ours] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+    ]);
+    expect(ours && chessAwaitsTheirAnswer(ours)).toBe(true);
+    expect(ours && chessAwaitsOurAnswer(ours)).toBe(false);
+    // Nothing is wanted from the reader: they are the one being waited on.
+    expect(ours && chessWantsUs(ours)).toBe(false);
+  });
+
+  it("awaits nobody once the game is accepted", () => {
+    const [game] = chessGamesInThread([
+      chess(ADA, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ME, { game: "aaa111", body: { kind: "join" } }),
+    ]);
+    expect(game?.ourColor).toBe("b");
+    expect(game && chessAwaitsOurAnswer(game)).toBe(false);
+    expect(game && chessAwaitsTheirAnswer(game)).toBe(false);
+    // It is white's move and we are black, so nothing is wanted yet.
+    expect(game && chessWantsUs(game)).toBe(false);
+  });
+
+  it("is DECLINED by anybody who is not the challenger, which frees the conversation", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "decline" } }),
+    ]);
+    expect(game?.outcome).toEqual({ kind: "declined", withdrawn: false });
+    expect(game && chessGameIsSettled(game)).toBe(true);
+    // Settled, so the next challenge may go out.
+    expect(activeChessGame([game!])).toBeNull();
+  });
+
+  it("cannot be declined by the CHALLENGER, and never once somebody accepted", () => {
+    const own = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ME, { game: "aaa111", body: { kind: "decline" } }),
+    ])[0];
+    expect(own?.outcome).toEqual({ kind: "playing" });
+
+    const started = chessGamesInThread([
+      chess(ME, { game: "bbb222", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "bbb222", body: { kind: "join" } }),
+      chess(ADA, { game: "bbb222", body: { kind: "decline" } }),
+    ])[0];
+    expect(started?.outcome).toEqual({ kind: "playing" });
+  });
+
+  it("is WITHDRAWN when the challenger resigns a game nobody accepted — never a loss", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ME, { game: "aaa111", body: { kind: "resign" } }),
+    ]);
+    // A game that never started cannot be lost, so this is not `resigned`.
+    expect(game?.outcome).toEqual({ kind: "declined", withdrawn: true });
+    expect(activeChessGame([game!])).toBeNull();
+  });
+
+  it("still resigns normally once the game is under way", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      chess(ME, { game: "aaa111", body: { kind: "resign" } }),
+    ]);
+    expect(game?.outcome).toEqual({ kind: "resigned", by: "w" });
   });
 });
 

@@ -16,7 +16,13 @@
 import { ChessPawnIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useState } from "react";
-import { activeChessGame, chessTurnIsOurs, type ChessGame } from "~/lib/chess-thread";
+import {
+  activeChessGame,
+  chessAwaitsOurAnswer,
+  chessTurnIsOurs,
+  chessWantsUs,
+  type ChessGame,
+} from "~/lib/chess-thread";
 import { newChessGameId, type ChessColor } from "~/lib/chess-wire";
 import { convLabel, isGroupChat, type Conversation } from "~/lib/protocol";
 import { useAppState, useController } from "./controller-context";
@@ -25,12 +31,28 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 /** What the control is for, right now. Pure, so it is unit-tested without a DOM. */
 export type ChessButtonState =
   | { kind: "challenge" }
-  | { kind: "open"; game: ChessGame; ourTurn: boolean };
+  | {
+      kind: "open";
+      game: ChessGame;
+      /** It is the reader's move. */
+      ourTurn: boolean;
+      /** Somebody challenged the reader and is waiting for an answer. */
+      awaitingUs: boolean;
+      /** Either of the two: the game wants something from the reader, which is what the dot
+       *  says. One dot for one question — a reader does not need to learn two marks. */
+      wantsUs: boolean;
+    };
 
 export function chessButtonState(games: ChessGame[]): ChessButtonState {
   const live = activeChessGame(games);
   if (!live) return { kind: "challenge" };
-  return { kind: "open", game: live, ourTurn: chessTurnIsOurs(live) };
+  return {
+    kind: "open",
+    game: live,
+    ourTurn: chessTurnIsOurs(live),
+    awaitingUs: chessAwaitsOurAnswer(live),
+    wantsUs: chessWantsUs(live),
+  };
 }
 
 /** What the press reaches. In a group the challenge is OPEN, and the label says so, because
@@ -76,17 +98,25 @@ export function ChessButton(props: { conversationId: string; games: ChessGame[] 
         data-conversation-id={props.conversationId}
         data-chess-game={state.game.id}
         data-your-turn={state.ourTurn ? "true" : undefined}
-        aria-label={state.ourTurn ? "Your move — go to the chess board" : "Go to the chess board"}
-        title={state.ourTurn ? "Your move" : "Chess"}
+        data-awaiting-answer={state.awaitingUs ? "true" : undefined}
+        aria-label={
+          state.awaitingUs
+            ? `${state.game.challenger.name} challenged you to chess — go to the board`
+            : state.ourTurn
+              ? "Your move — go to the chess board"
+              : "Go to the chess board"
+        }
+        title={state.awaitingUs ? "You have been challenged" : state.ourTurn ? "Your move" : "Chess"}
         onClick={() =>
           controller.requestScrollToMessage(props.conversationId, state.game.challengeMessageId)
         }
         className="relative grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
       >
         <HugeiconsIcon icon={ChessPawnIcon} className="size-5" strokeWidth={1.6} />
-        {/* It is the reader's move. The board may be a screen away, and this is the one place
-            the header can say so. */}
-        {state.ourTurn && (
+        {/* The game wants something from the reader — their move, or their answer to a
+            challenge. The board may be a screen away, and this is the one place the header can
+            say so. */}
+        {state.wantsUs && (
           <span
             data-testid="chess-your-turn"
             aria-hidden
