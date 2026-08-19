@@ -1062,12 +1062,43 @@ Diagnose it freely:
   intune-container status
   intune-container doctor
   bin/teams-lite-broker-check.sh        # is the login keyring locked?
+  bin/teams-lite-broker-bus-check.sh    # is a backend on a stale broker bus?
 
 A restart IS the remedy when that keyring re-locked, but it is not yours to run: the
 app has a Repair sign-in button, and teams-lite-broker-repair.service does it at most
 three times an hour. Ask the user to press the button, or to run:
 
   intune-container stop && intune-container start"
+fi
+
+# --- 3b-ii. the broker-BUS repair restarts the BACKENDS, not the container ------
+# A different fault with a different remedy, and it needs its own rule because the
+# container is healthy in this one: a backend that started before the container was ready
+# froze a bus with no broker on it, and the fix is to restart that backend. `--repair`
+# therefore starts teams-lite-backend-restart.service, which try-restarts BOTH
+# send-capable backends — the same "not yours to start" line every other backend rule
+# draws (§ 3a), and the same reason: a restart drops the socket under whoever is reading
+# the app, invalidates every page's write token, and kills a live `@claude` run.
+#
+# Without the flag the script only looks, and looking is exactly how an agent should
+# answer "why is this front empty when the other one is fine" — so the flag is what
+# decides, as it does for the keyring check above.
+asks_for_a_bus_repair="${at_command_start}[A-Za-z0-9_./~\${}-]*teams-lite-broker-bus-check\.sh[^;&|]*--repair"
+if ! searching_text &&
+  printf '%s' "$command_line" | grep -qE "$asks_for_a_bus_repair"; then
+  block "That flag restarts the send-capable backends. It asks systemd for
+teams-lite-backend-restart.service, which try-restarts teams-lite-backend.service and
+teams-lite-app.service — so the socket drops under whoever is reading the app, every open
+page's write token dies with the process, and a live @claude run is cut off mid-answer.
+
+Read the state freely — that is the whole point of the script:
+
+  bin/teams-lite-broker-bus-check.sh    # 0 = fine, 1 = a backend is stale, 2 = cannot tell
+
+The repair is not yours to run. teams-lite-broker-health.timer does it every 15 minutes,
+and the user can do it now with:
+
+  systemctl --user restart teams-lite-app.service"
 fi
 
 # --- 3c. the `teams` command is the whole live stack in one word ----------------

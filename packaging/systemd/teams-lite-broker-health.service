@@ -1,7 +1,8 @@
 [Unit]
 # Installed by bin/teams-lite-service.sh, which substitutes every @token@ below.
-Description=Check the Intune broker keyring, and repair it if it re-locked
+Description=Check the Intune broker keyring and each backend's bus, and repair either
 Documentation=file://@REPO@/bin/teams-lite-broker-check.sh
+Documentation=file://@REPO@/bin/teams-lite-broker-bus-check.sh
 # Started by the timer, never by the target: PartOf= keeps `systemctl --user restart
 # teams-lite.target` from reaching in here.
 PartOf=teams-lite.target
@@ -21,8 +22,25 @@ Type=oneshot
 # so the rate limit stays in one place and counts every trigger together.
 ExecStart=@SERVICE_DIR@/teams-lite-broker-check.sh --repair
 
-# The script exits 1 when the keyring was locked, which is information rather than a
-# failure of this unit. Only 2 (could not tell) and a crash are worth marking failed.
+# THE SECOND CHECK, for the second way this machine loses its sign-in with nothing to
+# show for it: a backend still dialling a broker bus that is not the broker's. The bus
+# path embeds the container's leader PID and is frozen at exec, so a backend that started
+# BEFORE the container was ready holds the HOST bus — which carries no broker — for as
+# long as it lives, while staying `active (running)` and answering every read. That is a
+# permanent, silent outage on one front and nothing else on the machine notices it:
+# teams-lite-broker-bus.path only fires on a WRITE to rootless.json, and on a boot that
+# write happens before anything is watching for it.
+#
+# It is ordered AFTER the keyring, which is the older and commoner fault: a keyring's
+# exit 2 ("cannot tell") therefore skips this one, which is the right direction — a host
+# where the keyring cannot be read is one where this answer would be no better.
+# The two are independent otherwise, since this one resolves the bus itself rather than
+# trusting any backend's copy.
+ExecStart=@SERVICE_DIR@/teams-lite-broker-bus-check.sh --repair
+
+# Either script exits 1 when it FOUND its fault and asked for the repair, which is
+# information rather than a failure of this unit. Only 2 (could not tell) and a crash are
+# worth marking failed.
 SuccessExitStatus=1
 
 StandardOutput=journal

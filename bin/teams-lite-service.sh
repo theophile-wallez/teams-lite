@@ -207,6 +207,7 @@ stage_artifacts() {
 
   install -m 0755 "$BIN_DIR/teams-lite-backend.sh" "$SERVICE_DIR/teams-lite-backend.sh"
   install -m 0755 "$BIN_DIR/teams-lite-broker-check.sh" "$SERVICE_DIR/teams-lite-broker-check.sh"
+  install -m 0755 "$BIN_DIR/teams-lite-broker-bus-check.sh" "$SERVICE_DIR/teams-lite-broker-bus-check.sh"
   install -m 0644 "$BIN_DIR/broker-env.sh" "$SERVICE_DIR/broker-env.sh"
 
   # The web runtime file set is owned by web/scripts/stage-bundle.ts, so this script

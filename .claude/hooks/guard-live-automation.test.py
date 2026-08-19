@@ -854,6 +854,11 @@ def cases(tmp: Path):
         # The check script is a read of the keyring — until `--repair`, which starts
         # the repair unit and therefore restarts the container.
         ("BLOCK", PROJECT, "bin/teams-lite-broker-check.sh --repair"),
+        # Its sibling asks about a stale broker BUS, and its `--repair` restarts the two
+        # send-capable BACKENDS rather than the container — the socket drops under
+        # whoever is reading the app, and a live @claude run dies with the process.
+        ("BLOCK", PROJECT, "bin/teams-lite-broker-bus-check.sh --repair"),
+        ("BLOCK", PROJECT, "$HOME/.local/share/teams-lite/service/teams-lite-broker-bus-check.sh --repair"),
         # --- must allow ------------------------------------------------------
         # Reading the live backend is deliberately fine, through either address.
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
@@ -1035,8 +1040,12 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "intune-container status"),
         ("ALLOW", PROJECT, "intune-container doctor"),
         ("ALLOW", PROJECT, "bin/teams-lite-broker-check.sh"),
+        # And so is asking whether a backend is on a stale bus — that read IS the whole
+        # answer to "why is this front empty when the other one is fine".
+        ("ALLOW", PROJECT, "bin/teams-lite-broker-bus-check.sh"),
         # Prose that names a repair runs nothing: a commit message, a doc line.
         ("ALLOW", PROJECT, "git commit -m 'feat: run broker-check.sh --repair from the timer'"),
+        ("ALLOW", PROJECT, "git commit -m 'fix: broker-bus-check.sh --repair runs from the timer'"),
         ("ALLOW", PROJECT, "git commit -m 'docs: intune-container stop && start unlocks it'"),
         # A production web server that names a read-only backend is fine.
         ("ALLOW", WEB, "TEAMS_LITE_WS_URL=ws://127.0.0.1:19430 bun run start"),

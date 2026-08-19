@@ -36,7 +36,13 @@ fi
 # An empty result means "no other bus needed" — either the broker is already on our
 # own session bus (classic Intune), or nothing was found at all. Only the second case
 # is a failure.
-broker_bus="$(teams_lite_broker_bus)"
+#
+# It WAITS for one, because this unit is ordered after a Type=oneshot container unit
+# that goes "active (exited)" long before the broker's name is on the container's bus.
+# Without the wait a boot resolved nothing, exited 69, and handed the retry to
+# `Restart=always` — whose backoff walks to 300 s, so losing the first race could cost
+# five minutes of a silent app for a container that was up two seconds later.
+broker_bus="$(teams_lite_wait_for_broker_bus)"
 
 # Fail the START when no broker is reachable, rather than run a backend that dies on
 # its first token call: the journal then names the cause, and `Restart=always` with

@@ -60,6 +60,15 @@ TEAMS_LITE_BROKER_DBUS_NAME='com.microsoft.identity.broker1'
 # The leader is the container's PID 1 as seen from the host.
 TEAMS_LITE_CONTAINER_STATE="${TEAMS_LITE_CONTAINER_STATE:-$HOME/.local/share/intune-container/rootless.json}"
 
+# How long a start WAITS for that bus before it gives up (see
+# teams_lite_wait_for_broker_bus). The container's own unit is a Type=oneshot that
+# stays "active (exited)", so After= on it returns while the container is still coming
+# up — and the broker's name appears on the bus only once the container's dbus-daemon
+# has read its service files, which is later still. So every caller here can start
+# BEFORE there is any bus to find, and the address is frozen at exec. It is bounded
+# because a host with no container at all must not hang a unit's start for ever.
+TEAMS_LITE_BROKER_WAIT_SECONDS="${TEAMS_LITE_BROKER_WAIT_SECONDS:-30}"
+
 # Fallback process probes, most specific first. The broker itself when it happens to
 # be resident, then the device broker — a different service, but one that runs in
 # the SAME container, so its /proc/<pid>/root reaches the same bus.
@@ -147,6 +156,57 @@ teams_lite_broker_bus() {
   done
 
   return 0
+}
+
+# Print the address of a bus that carries the broker, WAITING up to
+# TEAMS_LITE_BROKER_WAIT_SECONDS for one to appear. Never exports, and prints nothing
+# when the broker is already on the bus we sit on — exactly as teams_lite_broker_bus
+# does, so "no change needed" and "nothing found" are still told apart by
+# teams_lite_broker_on_session_bus.
+#
+# WHY A WAIT AND NOT A RETRY. Every caller freezes the answer into a process
+# environment at exec, so a start that loses the race to the container keeps the HOST
+# bus — which carries no broker — for as long as that process lives. The staged backend
+# turned that into a retry by failing its own start; the released build's wrapper
+# launched anyway, and its backend does not exit on a failed token call (a broken
+# sign-in is deliberately not fatal), so it stayed up and permanently unauthenticated
+# with nothing on the machine able to notice. Waiting here is what makes the FIRST
+# start the right one; teams-lite-broker-bus-check.sh is what catches the rest.
+#
+# It waits only while a container is KNOWN, which is what keeps the wait off a host that
+# has no containerized Intune at all: rootless.json is written by `intune-container` and
+# a stale one from the previous boot still proves the machine has a container coming up.
+# With no such file there is nothing to wait FOR, so a classic-Intune host and a machine
+# where the broker is simply absent both answer at once instead of hanging 30 s.
+teams_lite_wait_for_broker_bus() {
+  local waited=0 address
+  while :; do
+    address="$(teams_lite_broker_bus)"
+    if [ -n "$address" ] || teams_lite_broker_on_session_bus; then
+      printf '%s' "$address"
+      return 0
+    fi
+    [ -e "$TEAMS_LITE_CONTAINER_STATE" ] || return 0
+    [ "$waited" -lt "$TEAMS_LITE_BROKER_WAIT_SECONDS" ] || return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# Print the bus address a RUNNING process froze at exec, or nothing. This is the other
+# half of the question above: teams_lite_broker_bus says where the broker is NOW, and
+# this says where a given backend is still dialling. They disagree exactly when that
+# backend is stale.
+#
+# An absent variable prints nothing, which is not the same as an empty one: a process
+# that inherited no address uses the host default, and the caller decides what that
+# means rather than this function guessing.
+teams_lite_frozen_bus_of_pid() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  [ -r "/proc/$pid/environ" ] || return 1
+  tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null |
+    sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1
 }
 
 # Export DBUS_SESSION_BUS_ADDRESS when the broker lives on another bus.

@@ -5119,6 +5119,48 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   it at each start and `teams-lite-broker-bus.path` restarts the backend when
   `rootless.json` changes. Without that the backend stays up, unauthenticated, and
   silent.
+- **A backend can also freeze the WRONG bus at BOOT, and that one is permanent.** The
+  address is resolved once and frozen at exec, so a backend that started before the
+  container was ready holds the HOST session bus — which carries no broker at all — for
+  as long as it lives. It never exits over it either: a broken sign-in is deliberately
+  not fatal (see § A broken sign-in costs the LIVE feed), so the process stays
+  `active (running)`, answers every read out of the store, and signs in to nothing.
+  It happened to `teams-lite-app.service` on this host: four start attempts lost the
+  race, the survivor froze `/run/user/1000/bus`, and the app on 19442 could not reach
+  Teams while the staged pair on 19420 worked perfectly. Nothing noticed, because every
+  existing self-heal watches the CONTAINER and the container was healthy — the `.path`
+  unit fires on a WRITE to `rootless.json` and on a boot that write lands before
+  anything is watching, `PartOf=` never fires because the container unit is a
+  `Type=oneshot` that stays "active (exited)", and the keyring check answers about the
+  keyring. Two halves fix it, and neither replaces the other:
+  - **The wrappers WAIT, so the first start is the right one.**
+    `teams_lite_wait_for_broker_bus` (`bin/broker-env.sh`) polls the existing detection
+    for `TEAMS_LITE_BROKER_WAIT_SECONDS` (30), and the wrapper install.sh writes carries
+    its own copy of that loop because it is self-contained by design. It waits only while
+    a container is KNOWN — `rootless.json` exists, a stale one from the last boot
+    included — so a classic-Intune host and a machine with no Intune launch at once
+    rather than hanging. For the staged backend this also replaces a start that exited 69
+    and handed the retry to `Restart=always`, whose backoff walks to 300 s: losing the
+    first race cost minutes of silence for a container that was up two seconds later.
+  - **The health timer compares the two answers, and restarts what disagrees.**
+    `bin/teams-lite-broker-bus-check.sh` reads where the broker IS
+    (`teams_lite_broker_bus`) against where each running backend is still dialling
+    (`teams_lite_frozen_bus_of_pid`, over `/proc/<pid>/environ`) and asks
+    `teams-lite-backend-restart.service` for the repair — the same unit the `.path` uses,
+    so a restart is spelled once. It tests the CAUSE rather than a symptom, exactly as
+    the keyring check does, because a failed token call is equally what a locked keyring,
+    a stopping container and a slow reply look like and each has a different repair. It
+    never touches the container: the container is healthy in this failure. And it
+    **never repairs on ignorance** — no resolvable container bus, an unreadable
+    `/proc` entry or a stopped unit all answer "cannot tell" (exit 2) and restart
+    nothing, since a restart with the container down would only fail the backend's own
+    start and take the history offline while it walked up the backoff.
+  Both halves are pinned by
+  `update::tests::a_backend_that_froze_the_wrong_broker_bus_is_found_and_restarted`,
+  which scans the units and both wrappers — every one of those files is on the other side
+  of a process boundary, so a change there is invisible to every other test. **The bare
+  check is yours; `--repair` is not**: it restarts two send-capable backends, so the
+  automation hook blocks that flag for the reason it blocks every other backend start.
 - **The keyring re-locks, and that is repaired automatically.** The container's login
   keyring locks itself every ~18 hours; the broker then answers every token call with
   `NoReply`, and the app shows nothing. `bin/teams-lite-broker-check.sh` reads the
@@ -5130,6 +5172,10 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   so the hook blocks `intune-container stop|start|restart` and
   `teams-lite-broker-check.sh --repair`. `intune-container status|doctor` and the bare
   check stay open, because diagnosing is the normal way to answer "why is it empty".
+  That timer runs the BUS check beside this one (see the bullet above), ordered after it:
+  the keyring is the older and commoner fault, and its own "cannot tell" then skips the
+  second — the right direction, since a host where the keyring cannot be read is one
+  where the bus answer would be no better.
 - **Tailscale, never Funnel.** `tailscale serve` is tailnet-only, behind Tailscale's
   own authenticated HTTPS. `tailscale funnel` would publish the user's Teams account
   to the internet, send included.

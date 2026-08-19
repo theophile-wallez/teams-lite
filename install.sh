@@ -75,7 +75,13 @@ install -m 0755 "$tmp" "$BIN_DIR/teams-bin"
 #          /proc/<container-pid>/root/run/user/0/bus, so we just point
 #          DBUS_SESSION_BUS_ADDRESS at it and connect directly.
 #      Detection is automatic; if no broker is found we still launch and let the
-#      binary surface its own error.
+#      binary surface its own error — but only after WAITING for one, because this
+#      wrapper is also what teams-lite-app.service execs, and there the address it
+#      resolves is frozen for the life of a service that never exits on its own.
+#      Losing that race left a backend permanently signed in to nothing, on a front
+#      the user reads, with the app `active (running)` the whole time. The wait is
+#      bounded and happens only while a container is KNOWN (rootless.json exists),
+#      so a machine with classic Intune or none at all still launches at once.
 #
 #      This is a self-contained COPY of bin/broker-env.sh, because an installed
 #      binary has no repo to source it from. bin/broker-env.sh is the source of
@@ -89,6 +95,7 @@ set -euo pipefail
 TEAMS_BIN="$BIN_DIR/teams-bin"
 BROKER_DBUS_NAME='com.microsoft.identity.broker1'
 CONTAINER_STATE="\${TEAMS_LITE_CONTAINER_STATE:-\$HOME/.local/share/intune-container/rootless.json}"
+BROKER_WAIT_SECONDS="\${TEAMS_LITE_BROKER_WAIT_SECONDS:-30}"
 
 launch() {
   cd "$BIN_DIR" || exit 1
@@ -102,26 +109,39 @@ broker_on_bus() {
     awk '{print \$1}' | grep -qx "\$BROKER_DBUS_NAME"
 }
 
-# Topology 1 — classic Intune: broker name already on our host session bus.
-if command -v busctl >/dev/null 2>&1 &&
-   busctl --user --list --no-legend 2>/dev/null | awk '{print \$1}' | grep -qx "\$BROKER_DBUS_NAME"; then
-  launch "\$@"
-fi
-
-# Topology 2 — containerized Intune: the container's own bus, reached through
-# /proc. The container leader first (it lives as long as the container), then any
-# process that runs inside it.
-for pid in \
-  "\$(grep -o '"leader"[[:space:]]*:[[:space:]]*[0-9]\\+' "\$CONTAINER_STATE" 2>/dev/null | grep -o '[0-9]\\+\$' || true)" \
-  \$(pgrep -f 'identity-broker/bin/microsoft-identity' 2>/dev/null || true) \
-  \$(pgrep -f 'intune/bin/intune-daemon' 2>/dev/null || true); do
-  [ -n "\$pid" ] || continue
-  bus="/proc/\$pid/root/run/user/0/bus"
-  [ -S "\$bus" ] || continue
-  if broker_on_bus "unix:path=\$bus"; then
-    export DBUS_SESSION_BUS_ADDRESS="unix:path=\$bus"
+# Both topologies, retried until the container is up. The launch function execs, so
+# the first bus that carries the broker ends this loop for good.
+waited=0
+while :; do
+  # Topology 1 — classic Intune: broker name already on our host session bus.
+  if command -v busctl >/dev/null 2>&1 &&
+     busctl --user --list --no-legend 2>/dev/null | awk '{print \$1}' | grep -qx "\$BROKER_DBUS_NAME"; then
     launch "\$@"
   fi
+
+  # Topology 2 — containerized Intune: the container's own bus, reached through
+  # /proc. The container leader first (it lives as long as the container), then any
+  # process that runs inside it.
+  for pid in \\
+    "\$(grep -o '"leader"[[:space:]]*:[[:space:]]*[0-9]\\+' "\$CONTAINER_STATE" 2>/dev/null | grep -o '[0-9]\\+\$' || true)" \\
+    \$(pgrep -f 'identity-broker/bin/microsoft-identity' 2>/dev/null || true) \\
+    \$(pgrep -f 'intune/bin/intune-daemon' 2>/dev/null || true); do
+    [ -n "\$pid" ] || continue
+    bus="/proc/\$pid/root/run/user/0/bus"
+    [ -S "\$bus" ] || continue
+    if broker_on_bus "unix:path=\$bus"; then
+      export DBUS_SESSION_BUS_ADDRESS="unix:path=\$bus"
+      launch "\$@"
+    fi
+  done
+
+  # Wait only while a container is KNOWN to exist. With no rootless.json there is
+  # nothing to wait for, so a classic-Intune host and a machine with no Intune at
+  # all launch at once rather than hanging.
+  [ -e "\$CONTAINER_STATE" ] || break
+  [ "\$waited" -lt "\$BROKER_WAIT_SECONDS" ] || break
+  sleep 1
+  waited=\$((waited + 1))
 done
 
 echo "teams-lite: identity broker not found on this session bus and no Intune" \\

@@ -1226,6 +1226,111 @@ mod tests {
         );
     }
 
+    /// A backend that froze the WRONG broker bus is found, and restarted.
+    ///
+    /// The broker's bus is `/proc/<container-leader>/root/run/user/0/bus` and a process
+    /// environment is frozen at exec, so a backend that STARTED BEFORE the container was
+    /// ready holds the host session bus — which carries no broker — for as long as it
+    /// lives. It never exits over it either: a broken sign-in is deliberately not fatal,
+    /// so the process stays `active (running)`, answers every read out of the store, and
+    /// signs in to nothing. It happened to teams-lite-app.service on the author's machine,
+    /// and the app on that front could not reach Teams at all while the staged pair beside
+    /// it worked perfectly.
+    ///
+    /// Neither existing self-heal covered it: `teams-lite-broker-bus.path` fires on a WRITE
+    /// to rootless.json, and on a boot that write lands before anything is watching for it;
+    /// `PartOf=intune-container.service` never fires because that unit is a Type=oneshot
+    /// which stays "active (exited)" and restarts itself without changing state; and the
+    /// keyring check answers about the CONTAINER, which in this failure is perfectly
+    /// healthy. So the fix is two-sided, and each side is pinned below — the wrappers WAIT
+    /// so the first start is the right one, and the health timer compares each running
+    /// backend's frozen address with the broker's own so the rest are caught.
+    ///
+    /// Every one of these files is on the other side of a process boundary — nothing in the
+    /// crate runs them — so a change there is invisible to every other test, and the
+    /// failure it reintroduces is silent by construction.
+    #[test]
+    fn a_backend_that_froze_the_wrong_broker_bus_is_found_and_restarted() {
+        let health = include_str!("../packaging/systemd/teams-lite-broker-health.service");
+        let bus_check = include_str!("../bin/teams-lite-broker-bus-check.sh");
+        let installer = include_str!("../bin/teams-lite-service.sh");
+        let wrapper = include_str!("../bin/teams-lite-backend.sh");
+        let env = include_str!("../bin/broker-env.sh");
+        let released = include_str!("../install.sh");
+
+        // THE TIMER IS THE ONLY TRIGGER THAT WORKS WITH NO CLIENT CONNECTED, which is
+        // exactly when this outage goes unnoticed — so the check has to run from it, and
+        // with --repair, or it is a diagnosis nobody reads.
+        assert!(
+            health.contains("teams-lite-broker-bus-check.sh --repair"),
+            "the health timer must check each backend's broker bus, and repair it"
+        );
+        // Both scripts exit 1 to mean "found my fault and asked for the repair", which is
+        // information rather than a failure of the unit.
+        assert!(
+            health.contains("SuccessExitStatus=1"),
+            "a check that found its fault must not mark the health unit failed"
+        );
+        // A unit whose program is absent is one systemd starts with 203/EXEC.
+        assert!(
+            installer.contains("teams-lite-broker-bus-check.sh\" \"$SERVICE_DIR/teams-lite-broker-bus-check.sh"),
+            "the installer must stage the bus check beside the unit that runs it"
+        );
+
+        // THE REPAIR IS THE BACKEND'S, NEVER THE CONTAINER'S. The container is healthy in
+        // this failure, and restarting it would take the user's sign-in down for a minute
+        // to fix something that is not wrong with it.
+        assert!(
+            bus_check.contains("teams-lite-backend-restart.service"),
+            "the bus check must repair through the unit that already restarts both backends"
+        );
+        // The VERBS, not the word: the script names `intune-container status` in the
+        // sentence it prints when it cannot tell, which is a read and the normal way to
+        // answer "is the container even up".
+        for verb in ["stop", "start", "restart"] {
+            assert!(
+                !bus_check.contains(&format!("intune-container {verb}")),
+                "a stale bus is the backend's fault, not the container's — never {verb} it here"
+            );
+        }
+        // A repair must never fire on ignorance: with no container bus resolvable, a
+        // restart would only make the backend fail its own start and take the history
+        // offline while it walked up the backoff.
+        assert!(
+            bus_check.contains("cannot tell") && bus_check.contains("exit 2"),
+            "an unknown state must be stated and skipped, never repaired"
+        );
+
+        // THE WAIT IS WHAT MAKES THE FIRST START THE RIGHT ONE, on both install shapes.
+        assert!(
+            wrapper.contains("teams_lite_wait_for_broker_bus"),
+            "the staged wrapper must wait for the container rather than exit and retry: \
+             Restart= walks to 300 s, so losing the first race costs minutes of silence"
+        );
+        assert!(
+            env.contains("teams_lite_wait_for_broker_bus")
+                && env.contains("TEAMS_LITE_BROKER_WAIT_SECONDS"),
+            "the wait belongs in the one place the detection already lives"
+        );
+        // Matched on the unescaped tokens: that wrapper is written through an unquoted
+        // heredoc, so every `$` in it is spelled `\$` in this file.
+        assert!(
+            released.contains("BROKER_WAIT_SECONDS")
+                && released.contains("waited=0")
+                && released.contains("sleep 1"),
+            "the wrapper install.sh writes is what teams-lite-app.service execs, so it \
+             must wait too — it is a self-contained copy and cannot source broker-env.sh"
+        );
+        // BOUNDED, and only while a container is KNOWN. A host with classic Intune or with
+        // none at all must launch at once rather than hanging for the whole window.
+        for (name, text) in [("broker-env.sh", env), ("install.sh", released)] {
+            assert!(
+                text.contains("CONTAINER_STATE") || text.contains("TEAMS_LITE_CONTAINER_STATE"),
+                "{name} must gate the wait on a container it can see"
+            );
+        }
+    }
+
     /// What CI publishes, and the four things about it this module depends on.
     ///
     /// The workflow is on the other side of a process boundary — nothing in the crate runs
