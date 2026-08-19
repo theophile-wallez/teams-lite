@@ -83,6 +83,9 @@ pub struct RetryPolicy {
     pub base_delay: Duration,
     /// Upper bound for the exponential back-off.
     pub max_delay: Duration,
+    /// Whether a [`ErrorClass::Transient`] failure may be retried. False for an
+    /// operation that CREATES something (see [`RetryPolicy::auth_only`]).
+    pub retry_transient: bool,
 }
 
 impl Default for RetryPolicy {
@@ -91,6 +94,7 @@ impl Default for RetryPolicy {
             max_attempts: 3,
             base_delay: Duration::from_millis(300),
             max_delay: Duration::from_secs(5),
+            retry_transient: true,
         }
     }
 }
@@ -100,6 +104,25 @@ impl RetryPolicy {
     /// where retrying is undesirable but the classification hook is still wanted.
     pub fn once() -> Self {
         Self { max_attempts: 1, ..Self::default() }
+    }
+
+    /// Retry a rejected CREDENTIAL and nothing else.
+    ///
+    /// A transient failure — a timeout, a reset connection, a 502 from the edge — says
+    /// the ANSWER was lost, never that the request was. For a POST that CREATES a
+    /// message that is the whole difference: Teams may have accepted it and only the
+    /// reply went missing, so a second attempt posts it a second time, under the user's
+    /// name, in front of everybody in the thread. There is no idempotency key on that
+    /// endpoint, so nothing downstream can undo the duplicate — and § Sending messages
+    /// already says a send that failed is REPORTED at the composer with the words still
+    /// in the box, which is the retry the user makes deliberately.
+    ///
+    /// A 401 is the opposite: the request was REFUSED before anything was created, so
+    /// refreshing the credential and going again posts nothing twice. That one is kept,
+    /// because the broker's tokens expire hourly and a send refused for an expired token
+    /// would otherwise fail in front of the user every hour.
+    pub fn auth_only() -> Self {
+        Self { max_attempts: 2, retry_transient: false, ..Self::default() }
     }
 }
 
@@ -158,7 +181,7 @@ where
                         last_err = Some(e);
                     }
                     ErrorClass::Transient => {
-                        if is_last {
+                        if is_last || !policy.retry_transient {
                             return Err(e);
                         }
                         last_err = Some(e);
@@ -255,6 +278,7 @@ mod tests {
             max_attempts: 3,
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(2),
+            ..RetryPolicy::default()
         };
         let out: anyhow::Result<u32> = with_retry(policy, no_auth(), || {
             let c = c.clone();
@@ -276,6 +300,7 @@ mod tests {
             max_attempts: 2,
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(2),
+            ..RetryPolicy::default()
         };
         let out: anyhow::Result<u32> = with_retry(policy, no_auth(), || {
             let c = c.clone();
@@ -347,5 +372,59 @@ mod tests {
         assert!(out.is_err());
         assert_eq!(refreshes.load(Ordering::SeqCst), 1, "refresh must not repeat");
         assert_eq!(calls.load(Ordering::SeqCst), 2, "one attempt, one refreshed retry");
+    }
+
+    // The policy a `send` runs under. A lost ANSWER is not a lost REQUEST, so the one
+    // operation in this app that creates a message must be attempted exactly once per
+    // transient failure — a second POST is a second message in the thread, and nothing
+    // takes it back.
+    #[tokio::test]
+    async fn auth_only_never_repeats_a_transient_failure() {
+        for signal in ["-> 503 Service Unavailable", "operation timed out", "-> 429 Too Many Requests"] {
+            let calls = Arc::new(AtomicU32::new(0));
+            let c = calls.clone();
+            let out: anyhow::Result<u32> = with_retry(RetryPolicy::auth_only(), no_auth(), || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err(err(signal))
+                }
+            })
+            .await;
+            assert!(out.is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{signal} must be attempted once");
+        }
+    }
+
+    // The other half: a 401 created nothing, so it is still refreshed and retried —
+    // without it every send would fail in front of the user each time a broker token
+    // expired.
+    #[tokio::test]
+    async fn auth_only_still_refreshes_a_rejected_credential() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let refreshes = Arc::new(AtomicU32::new(0));
+        let c = calls.clone();
+        let r = refreshes.clone();
+        let out: anyhow::Result<u32> = with_retry(
+            RetryPolicy::auth_only(),
+            Some(|| {
+                let r = r.clone();
+                async move {
+                    r.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            }),
+            || {
+                let c = c.clone();
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 { Err(err("-> 401 Unauthorized")) } else { Ok(7u32) }
+                }
+            },
+        )
+        .await;
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

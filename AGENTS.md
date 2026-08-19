@@ -88,6 +88,25 @@
   both wrong and both happened: clearing the whole box erases words nobody sent, and
   clearing nothing leaves the message that just left sitting there, so the next Enter posts
   it twice.
+- **ONE ENTER IS ONE MESSAGE, and the two halves of that live on opposite sides of the
+  socket.** A reader who presses Enter and sees nothing happen presses it again — the send is
+  still travelling, so the words are still in the box — and every duplicate that ever reached
+  a colleague came out of that moment. Each half is pinned by a test:
+  - **The PAGE refuses a send while one is out.** `sendingRef` in
+    `web/src/components/composer.tsx` is set in `send`'s own synchronous prefix, so a press
+    that lands in the same millisecond cannot pass it, and the rich editor's `sentRef` covers
+    the same window in the field (`web/e2e/messaging.spec.ts` hammers Enter against a held
+    send and counts the RPCs, not the bubbles — a page that posted twice and drew one row
+    would pass an assertion about the thread alone).
+  - **The BACKEND never retries a POST that CREATES a message.** `send` runs under
+    `retry::RetryPolicy::auth_only()`, never the default one: a timeout, a reset connection
+    and a 502 all mean the ANSWER was lost and say nothing about whether Teams accepted the
+    message, and there is no idempotency key on that endpoint — so the default policy's three
+    attempts were three messages in the thread from one press, with the reader hammering
+    Enter through the back-off because nothing had happened yet. A **401** is the opposite and
+    is still refreshed and retried: the request was refused before anything was created, and
+    the broker's tokens expire hourly. Every other write here is a PUT or a DELETE and keeps
+    the default policy, because repeating one of those changes nothing.
 - **A reply puts the caret in the box, in the same task as the click that asked.** Every
   path that drafts on a message asks for it (`doReply`, and the two "… with <agent>" rows),
   and `focusEditor` focuses the field itself before it places the caret: TipTap finishes

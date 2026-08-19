@@ -2640,6 +2640,18 @@ impl Ctx {
         F: Fn(Session, String) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
+        self.retry_on_auth_with(retry::RetryPolicy::default(), op).await
+    }
+
+    /// [`Ctx::retry_on_auth`] with the policy named by the caller.
+    ///
+    /// It exists for the one operation here that CREATES something: a `send` retried
+    /// after a lost answer posts the message twice (see [`retry::RetryPolicy::auth_only`]).
+    async fn retry_on_auth_with<T, F, Fut>(&self, policy: retry::RetryPolicy, op: F) -> Result<T>
+    where
+        F: Fn(Session, String) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
         let attempt = || async {
             let session = self.session().await?;
             let csa = self.csa().await?;
@@ -2649,7 +2661,7 @@ impl Ctx {
             eprintln!("[auth] 401 — refreshing credentials before retry");
             self.force_refresh_auth().await.map(|_| ())
         };
-        retry::with_retry(retry::RetryPolicy::default(), Some(on_auth), attempt).await
+        retry::with_retry(policy, Some(on_auth), attempt).await
     }
 }
 
@@ -4305,8 +4317,14 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
             let send_conv = conv.clone();
+            // A POST that creates a message is the one call here that must NOT be
+            // retried on a lost answer: Teams has no idempotency key for it, so a
+            // second attempt posts the message a second time — which is the duplicate
+            // a reader watching a slow send hammer Enter really got. A refused
+            // credential is still refreshed and retried, because that one created
+            // nothing (see `retry::RetryPolicy::auth_only`).
             let sent = ctx
-                .retry_on_auth(move |session, _csa| {
+                .retry_on_auth_with(retry::RetryPolicy::auth_only(), move |session, _csa| {
                     let http = http.clone();
                     let tokens = tokens.clone();
                     let conv = send_conv.clone();
@@ -14871,6 +14889,38 @@ mod lifecycle_tests {
                  clears the marker on every device the user owns."
             );
         }
+    }
+
+    // A `send` POSTs a message and Teams gives it no idempotency key, so a retry after a
+    // lost answer is a SECOND message in the thread — under the user's name, in front of
+    // everybody in it, and nothing takes it back. It reached a real reader as one Enter
+    // producing several copies. There is no line this could be enforced by, so the arm is
+    // scanned: it must name the policy that retries a refused CREDENTIAL and nothing else.
+    #[test]
+    fn a_send_is_never_retried_after_an_answer_it_lost() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code
+            .split("\"send\" =>")
+            .nth(1)
+            .expect("the send handler")
+            .split("\"edit\" =>")
+            .next()
+            .expect("the handler ends at the next arm");
+        assert!(handler.contains("teams_send::send_message"), "scanned the wrong text");
+        assert!(
+            handler.contains("retry::RetryPolicy::auth_only()"),
+            "the send handler must run under `RetryPolicy::auth_only()`. The default policy \
+             retries a timeout, a reset connection and a 5xx — every one of which means the \
+             ANSWER was lost, never that Teams refused the message, so the retry posts it again."
+        );
+        // The default policy reaches the same code path through the sibling that names no
+        // policy at all, so the bare call is what must not come back here.
+        assert!(
+            !handler.contains(".retry_on_auth("),
+            "the send handler names `retry_on_auth(`, which is the DEFAULT policy — the one \
+             that retries a transient failure. Use `retry_on_auth_with(RetryPolicy::auth_only())`."
+        );
     }
 
     // Every GitLab payload the page is handed must say who its people are in Teams, or the

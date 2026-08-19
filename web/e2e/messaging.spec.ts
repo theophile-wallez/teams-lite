@@ -110,6 +110,34 @@ test.describe("messaging", () => {
     await clearComposer(page);
   });
 
+  // Enter hammered is one message. A send takes as long as the network takes and the key
+  // repeats meanwhile, so every press after the first lands on a box that still holds the
+  // words — and each one of those posted the message again, under the user's name, in front
+  // of everybody in the thread. It is the sharpest shape of the rule above: the composer
+  // refuses a send while one is out, and the refusal must hold for a press that arrives in
+  // the same millisecond as the answer to the one before it.
+  test("posts one message when Enter is hammered", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    await setSendControl(page, { clear: true, delay_ms: 400 });
+
+    const words = `hammered-${Date.now()}`;
+    await fillComposer(page, words);
+    const field = composerField(page);
+    for (let i = 0; i < 8; i += 1) await field.press("Enter");
+
+    await expect(page.locator('[data-testid="message"]', { hasText: words })).toHaveCount(1);
+    await expect(field).toHaveText("");
+    // The bubble is one because the SEND was one: a page that posted twice and drew one
+    // row would pass an assertion about the thread alone.
+    const sends = (await fetchCapturedSends(page)).filter((s) =>
+      `${s.text}${s.content_html ?? ""}`.includes(words),
+    );
+    expect(sends).toHaveLength(1);
+    await setSendControl(page, { clear: true });
+    await clearComposer(page);
+  });
+
   // The other half of the same rule: a draft REWRITTEN while the message travelled is the
   // reader's, whole. The sent range no longer describes anything that left, so nothing is
   // taken out of it — the words on screen are the ones they mean to send next.
