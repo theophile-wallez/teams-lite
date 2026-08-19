@@ -307,4 +307,22 @@ test.describe("messaging", () => {
     await openConversationAt(page, 1);
     await expect(page.locator('[data-testid="composer-send-error"]')).toHaveCount(0);
   });
+
+  /**
+   * The other half of the coarse-pointer rule in `web/e2e/mobile.spec.ts`: a MOUSE keeps
+   * text selection, because that is how words are copied out of a message there. The two
+   * assertions are one decision — dropping the `(pointer: coarse)` query in app.css would
+   * take selection away from every desktop reader, and only this one says so.
+   */
+  test("a message stays selectable under a mouse", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+
+    const select = await page
+      .locator('[data-testid="message"]')
+      .first()
+      .evaluate((element) => getComputedStyle(element).userSelect);
+
+    expect(select).not.toBe("none");
+  });
 });

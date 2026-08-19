@@ -286,6 +286,25 @@ html[data-virtual-keyboard-open] .composer-shell {
   margin-bottom: 0;
 }
 
+/* A message bubble a long touch means something on (components/use-message-gestures.ts:
+   a still touch opens the actions menu). The BROWSER answers that same hold with a
+   gesture of its own — Android selects the word under the finger and raises its
+   magnifier, iOS raises the selection callout — so the reader who held a bubble to
+   react got a selection and a floating menu instead of the one they were holding for,
+   with the reaction row underneath it. Both are suppressed on a COARSE pointer, where
+   the hold is the app's; a mouse keeps selection, which is how text is copied there.
+
+   It costs the phone nothing: the menu the hold opens carries Copy, over the same
+   `copyableMessageText` a selection would have given. The class is applied only while
+   the gestures are live, so a bubble being EDITED keeps selection inside its field. */
+@media (pointer: coarse) {
+  .message-hold-target {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+}
+
 /* The chat-image lightbox (components/image-lightbox.tsx). The <dialog> is opened
    with showModal(), so the picture is drawn in the browser's top layer — never
    clipped by, nor drawn under, the message scroller, which is what every in-flow

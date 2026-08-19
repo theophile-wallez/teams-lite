@@ -40,7 +40,13 @@ export const DialogContent = React.forwardRef<
     >
       {children}
       {showClose && (
-        <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-60 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <DialogPrimitive.Close
+          // 44px of touch target around 16px of ink, the way the slider's thumb does it
+          // (components/ui/slider.tsx): a bare 16px glyph is some 2.5mm under a thumb, so
+          // on a phone this was a close a reader could not hit — the pseudo-element grows
+          // the target without moving the ink or the layout.
+          className="absolute right-4 top-4 rounded-sm opacity-60 ring-offset-background transition-opacity after:absolute after:-inset-3.5 after:content-[''] hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <HugeiconsIcon icon={Cancel01Icon} className="size-4" />
           <span className="sr-only">Close</span>
         </DialogPrimitive.Close>

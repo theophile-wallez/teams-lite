@@ -580,8 +580,13 @@ function MessageBubbleImpl(props: {
     null,
   );
   const emojiTheme = useAppState((s) => s.resolvedTheme);
+  // Whether a still touch on this bubble means something. It also decides whether the
+  // browser's own long-press gestures are given up on a coarse pointer (see
+  // `.message-hold-target` in styles/app.css) — a bubble being EDITED keeps them, because
+  // its field is where the reader selects text.
+  const gesturesLive = !inert && !props.editing;
   const messageGestures = useMessageGestures({
-    enabled: !inert && !props.editing,
+    enabled: gesturesLive,
     mine,
     onLongPress: () => setMenuOpen(true),
     onReply: () => props.onReply(props.message),
@@ -883,6 +888,9 @@ function MessageBubbleImpl(props: {
           // state and pipeline badges were cut off at the edge. With the floor gone
           // the bubble shrinks to the row and the card's own lines shrink with it.
           "relative min-w-0 text-sm leading-relaxed",
+          // On a phone the hold is this app's, so the browser's word selection and its
+          // callout are given up here — Copy is in the menu the hold opens.
+          gesturesLive && "message-hold-target",
           // Media- and link-only messages drop the standard bubble chrome; the
           // link card / atelier mat / recording card (below) becomes the surface.
           // A link card gets a tighter max width; the mat is capped at the usual

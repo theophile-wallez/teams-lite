@@ -2,12 +2,15 @@ import { devices, type Locator, type Page } from "@playwright/test";
 import {
   test,
   expect,
+  clearScheduledMessages,
   composerField,
   emitUpdate,
+  fillComposer,
   gotoApp,
   openConversationAt,
   openConversationNamed,
   resetCall,
+  setSendControl,
 } from "./helpers";
 
 // The mobile, single-pane layout. Emulate an Android Chrome phone (narrow
@@ -278,5 +281,68 @@ test.describe("mobile single-pane layout", () => {
     expect(mini.y + mini.height).toBeLessThanOrEqual(viewport.height - 8);
 
     await resetCall(page);
+  });
+
+  /**
+   * The hold that opens the actions menu is the app's, so the BROWSER's own long-press
+   * gestures are given up here: Android selects the word under the finger and raises its
+   * magnifier, iOS raises the selection callout — and the reader who held a bubble to react
+   * got that instead of the reaction row. Copying is not lost: it is a row in the menu the
+   * hold opens. Asserted on the computed style, because a synthetic pointer event never
+   * starts a real browser selection and so can never see this. `-webkit-touch-callout` rides
+   * beside it in app.css and is deliberately not asserted: desktop Chromium does not
+   * implement the property, so it computes to "" here whatever the stylesheet says — iOS is
+   * the only place it means anything.
+   */
+  test("a message gives up the browser's own long-press gestures", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+
+    const select = await page
+      .locator('[data-testid="message"]')
+      .first()
+      .evaluate((element) => getComputedStyle(element).userSelect);
+
+    expect(select).toBe("none");
+  });
+
+  /**
+   * A dialog's close is 16px of ink, which under a thumb is a control the reader cannot hit —
+   * it was reported on the scheduled-messages list, and the fix is the shared `DialogContent`,
+   * so every dialog in the app carries it. The target is a pseudo-element, which no bounding
+   * box reports, so what is measured is the thing the reader does: a tap short of the ink,
+   * INSIDE the dialog, still closes it. Inside on both axes on purpose — a point outside the
+   * dialog would be dismissed by the overlay and prove nothing.
+   */
+  test("a dialog's close carries a thumb-sized target", async ({ page }) => {
+    await clearScheduledMessages(page);
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    await setSendControl(page, { clear: true });
+    await fillComposer(page, "the standup note");
+    await page.locator('[data-testid="composer-schedule"]').click();
+    await page.locator('[data-testid="composer-schedule-preset"]').first().click();
+    await page.locator('[data-testid="composer-schedule-open-list"]').click();
+
+    const dialog = page.locator('[data-testid="scheduled-messages-dialog"]');
+    await expect(dialog).toBeVisible();
+    const close = dialog.getByRole("button", { name: "Close" });
+    const ink = (await close.boundingBox())!;
+    // A pointer 10px down-left of the ink: well outside the 16px glyph, and inside the 14px
+    // the target reaches rather than exactly on its edge — a boundary pixel is decided by the
+    // dialog's own fractional width, so 14 here passed or failed by luck of rounding.
+    const x = ink.x - 10;
+    const y = ink.y + ink.height + 10;
+    const hit = await page.evaluate(
+      (at) => document.elementFromPoint(at.x, at.y)?.closest("button")?.textContent ?? "",
+      { x, y },
+    );
+    expect(hit).toBe("Close");
+
+    await page.touchscreen.tap(x, y);
+    await expect(dialog).toBeHidden();
+
+    await setSendControl(page, { clear: true });
+    await clearScheduledMessages(page);
   });
 });
