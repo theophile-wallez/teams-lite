@@ -64,6 +64,19 @@ Type=exec
 # Restart=always brings the unit back up — on the new binary, because the wrapper execs
 # whatever is at that path now.
 WorkingDirectory=@APP_BIN_DIR@
+
+# WAIT FOR THE BROKER'S BUS BEFORE THE LAUNCHER RESOLVES IT. The wrapper named below does
+# its own detection and freezes the answer at exec — and it is the copy install.sh WROTE,
+# which the in-app update never replaces, so a machine installed before that wrapper
+# learned to wait keeps one that launches anyway. Measured here: the container restarted,
+# PartOf= propagated to this unit, the wrapper lost the race and the backend froze
+# /run/user/1000/bus — no broker on it — while staying `active (running)` and answering
+# every read. This unit IS rewritten by every `teams-lite-service.sh update`, so it is the
+# half that can still be corrected without a 130 MB re-install.
+#
+# It also bounds the failure: a non-zero exit here aborts the start and Restart=always
+# comes back, where before the wrong address was frozen for the life of the process.
+ExecStartPre=@SERVICE_DIR@/teams-lite-broker-wait.sh
 ExecStart=@APP_BIN@ --no-open --host 127.0.0.1 --port @APP_WEB_PORT@
 
 # The backend this launcher spawns, on a port of its own. Stated here rather than left to

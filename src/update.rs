@@ -1321,6 +1321,45 @@ mod tests {
             "the wrapper install.sh writes is what teams-lite-app.service execs, so it \
              must wait too — it is a self-contained copy and cannot source broker-env.sh"
         );
+
+        // AND THE UNIT WAITS TOO, because that wrapper is the one install.sh already WROTE
+        // and the in-app update replaces the binary beside it, never the wrapper. So a
+        // machine installed before the wait keeps a wrapper that launches anyway until
+        // somebody re-runs install.sh — measured here: the container restarted, PartOf=
+        // propagated to the app unit, and its backend froze /run/user/1000/bus again with
+        // the fix already on master. The unit IS rewritten by every `update`, so it is the
+        // half this repo can still correct with no 130 MB download.
+        let app = include_str!("../packaging/systemd/teams-lite-app.service");
+        assert!(
+            app.contains("ExecStartPre=@SERVICE_DIR@/teams-lite-broker-wait.sh"),
+            "the app unit must not let its launcher resolve the bus before there is one"
+        );
+        let wait_script = include_str!("../bin/teams-lite-broker-wait.sh");
+        // 69 is EX_UNAVAILABLE, and it is what turns a permanent wrong address into a
+        // bounded retry through the unit's own Restart=always.
+        assert!(
+            wait_script.contains("exit 69"),
+            "a container whose bus never appeared must abort the start, not freeze a dead \
+             address for the life of the process"
+        );
+        // …and only where a container is KNOWN. Failing on a host that has none would keep
+        // the app unit down for ever over something that is not a fault.
+        assert!(
+            wait_script.contains("TEAMS_LITE_CONTAINER_STATE"),
+            "no Intune container on this host is not a reason to refuse to start"
+        );
+        for staged in ["teams-lite-broker-bus-check.sh", "teams-lite-broker-wait.sh"] {
+            assert!(
+                installer.contains(&format!("{staged}\" \"$SERVICE_DIR/{staged}")),
+                "the installer must stage {staged} beside the unit that names it"
+            );
+        }
+        // A unit whose ExecStartPre is absent is one systemd starts with 203/EXEC, and
+        // `units` can run before anything was ever staged.
+        assert!(
+            installer.contains(r#"[ ! -x "$SERVICE_DIR/teams-lite-broker-wait.sh" ]"#),
+            "the app unit must be skipped when its ExecStartPre is not staged yet"
+        );
         // BOUNDED, and only while a container is KNOWN. A host with classic Intune or with
         // none at all must launch at once rather than hanging for the whole window.
         for (name, text) in [("broker-env.sh", env), ("install.sh", released)] {

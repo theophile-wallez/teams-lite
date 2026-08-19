@@ -208,6 +208,7 @@ stage_artifacts() {
   install -m 0755 "$BIN_DIR/teams-lite-backend.sh" "$SERVICE_DIR/teams-lite-backend.sh"
   install -m 0755 "$BIN_DIR/teams-lite-broker-check.sh" "$SERVICE_DIR/teams-lite-broker-check.sh"
   install -m 0755 "$BIN_DIR/teams-lite-broker-bus-check.sh" "$SERVICE_DIR/teams-lite-broker-bus-check.sh"
+  install -m 0755 "$BIN_DIR/teams-lite-broker-wait.sh" "$SERVICE_DIR/teams-lite-broker-wait.sh"
   install -m 0644 "$BIN_DIR/broker-env.sh" "$SERVICE_DIR/broker-env.sh"
 
   # The web runtime file set is owned by web/scripts/stage-bundle.ts, so this script
@@ -245,6 +246,14 @@ install_units() {
     if [ "$unit" = teams-lite-app.service ] && [ ! -x "$APP_BIN" ]; then
       rm -f "$UNIT_DIR/$unit"
       info "$unit: skipped — no released build at $APP_BIN"
+      continue
+    fi
+    # Its ExecStartPre is staged by stage_artifacts, and `units` can be run on its own
+    # before anything was ever staged — so the same rule covers it: no unit for a program
+    # that is absent, rather than one systemd starts with 203/EXEC.
+    if [ "$unit" = teams-lite-app.service ] && [ ! -x "$SERVICE_DIR/teams-lite-broker-wait.sh" ]; then
+      rm -f "$UNIT_DIR/$unit"
+      info "$unit: skipped — nothing staged yet; run 'update' first"
       continue
     fi
     units+=("$unit")
