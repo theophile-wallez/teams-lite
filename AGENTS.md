@@ -255,7 +255,12 @@ Nine rules hold it, and each is pinned by a test:
   wide enough to wrap the row in two.
 - **The control is ONE PILL, split in two** — Send, and the chevron that discloses "later".
   They answer one question, so two separate buttons would ask the reader to tell them apart;
-  `web/e2e/scheduled-send.spec.ts` measures the two boxes against each other.
+  `web/e2e/scheduled-send.spec.ts` measures the two boxes against each other — their WIDTHS
+  included, so a chevron narrowed back below Send's own square fails rather than shipping.
+  **And the rule between them is INSET rather than an edge**, which is the other half of making
+  one pill aimable: a full-height border cut the pill in two and left the two glyphs a hairline
+  apart, so a press meant for Send opened the menu. Slack's own shape is a short rule standing
+  in whitespace, and it costs neither half its size — the gap is drawn, not taken from a target.
 - **The BANNER above the composer is DERIVED from the queue, never announced by the send**
   (`scheduledBanner`). That is the rule that makes it honest, and both other shapes were
   wrong: a line set by the send went stale the moment the message was cancelled from the list,

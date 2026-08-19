@@ -179,6 +179,10 @@ test.describe("scheduling a send", () => {
     expect(later!.x).toBeGreaterThan(send!.x);
     expect(Math.abs(later!.x - (send!.x + send!.width))).toBeLessThan(2);
     expect(Math.abs(later!.height - send!.height)).toBeLessThan(2);
+    // And the halves are the SAME width, which is what keeps the two glyphs far enough apart
+    // to aim at: the chevron was 24px against Send's 32px, so its glyph sat 12px from the
+    // hairline and a press meant for Send landed on the menu.
+    expect(Math.abs(later!.width - send!.width)).toBeLessThan(2);
   });
 
   test("CUSTOM TIME opens a dialog, and USING the picker does not dismiss it", async ({

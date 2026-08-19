@@ -86,6 +86,11 @@ export function ScheduleSendMenu(props: {
         }}
       >
         <PopoverTrigger asChild>
+          {/* The two halves are the SAME width, and the rule between them is INSET rather than
+            an edge: a 24px chevron whose border ran the full height of a 32px Send put the two
+            glyphs 28px apart with nothing but a hairline between them, so a press aimed at one
+            landed on the other. Slack's own shape — equal halves, a short rule standing in
+            whitespace — and the target grows with the gap rather than instead of it. */}
           <button
             type="button"
             aria-label="Send later"
@@ -93,7 +98,7 @@ export function ScheduleSendMenu(props: {
             data-testid="composer-schedule"
             data-cuelume-press=""
             disabled={!props.canSend}
-            className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-r-full border-l border-primary-foreground/25 bg-primary text-primary-foreground transition-all hover:brightness-110 active:brightness-95 disabled:cursor-default disabled:border-border-subtle disabled:bg-element disabled:text-text-faint"
+            className="relative grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-r-full bg-primary text-primary-foreground transition-all before:absolute before:left-0 before:h-4 before:w-px before:bg-primary-foreground/25 hover:brightness-110 active:brightness-95 disabled:cursor-default disabled:bg-element disabled:text-text-faint disabled:before:bg-border-subtle"
           >
             <HugeiconsIcon icon={ArrowDown01Icon} className="size-3.5" strokeWidth={2} />
           </button>
