@@ -2486,7 +2486,9 @@ user. Two independent mechanisms enforce that split:
   `bun run preview -- --out /tmp/log --job-log`, or `openJobLog` from the same file.
   For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
-  `toggleChatSection` from the same file. For "Answer with <agent>" on a message:
+  `toggleChatSection` from the same file. For a message's actions as a PHONE draws them —
+  opened by a real HOLD, at the touch floor, in both themes, and the bubble left with no "…"
+  once the menu closes: `bun run preview -- --out /tmp/ma --message-actions`. For "Answer with <agent>" on a message:
   `bun run preview -- --out /tmp/ask --answer-with`. For SENDING LATER — the send pill, the
   menu of moments in both themes, a moment that has passed being refused, the banner a queued
   message earns, the custom-time dialog in both themes, the list of what is waiting in both
@@ -2774,6 +2776,64 @@ these fields after something they are not.
 over the Teams-sourced value from then on, and nothing writes any of them back:
 publishing a setting to the user's account is an outward action and would need its own
 consent gate and its own `OUTWARD_METHODS` entry, exactly like a send.
+
+## A HOLD is how a phone reaches a menu (and the browser's own echo of it)
+
+Three surfaces are opened by a still touch rather than by a hover: a message's actions
+(`useMessageGestures`), a chat row's Teams settings and what an update brings
+(`useLongPress`). The hold itself is 500 ms of not moving, and everything below is about the
+half-second AFTER it — which is where this feature failed twice, on a real iPhone, while every
+test passed. `web/src/lib/press-echo.ts` holds the shared half; `web/e2e/mobile.spec.ts` pins
+each rule, and `cd web && bun run preview -- --out /tmp/ma --message-actions` is the capture
+(a phone, with a finger — `withPreview`'s `phone` option, which is a coarse POINTER and not
+only a narrow viewport).
+
+**THE MENU OPENS WHILE THE FINGER IS STILL DOWN, so the browser's own echo of that touch
+arrives afterwards — and every Radix layer reads it as somebody dismissing.** Two events, and
+each cost a bug:
+
+- **`pointerdown` with `pointerType: "mouse"`**, which WebKit sends at the point the finger
+  was: outside the menu, so `usePointerDownOutside` dismissed it in the same frame the reader
+  let go. **Chromium's compatibility sequence carries no pointerdown at all**, which is why
+  nothing here could see it: the engine the app is READ on is the one engine this suite cannot
+  drive, so the spec sends that event itself (`holdWithEcho`).
+- **`mousedown`, whose DEFAULT moves focus** to the element under the finger — so the row
+  behind the menu took it and Radix dismissed on focus-outside, half a second later, with no
+  pointer event involved. Swallowing the event is not enough for that one; the default has to
+  be prevented.
+
+So while a hold owns the moment — the finger down, plus `PRESS_ECHO_GRACE_MS` after it lifts —
+both are stopped at one document capture listener, for every hold in the app rather than at
+each surface a hold can open. A REAL new touch is never swallowed: that is how a reader
+dismisses what is open. Three more rules:
+
+- **The window runs from the RELEASE, never from the hold.** A reader who holds for three
+  seconds gets the echo when they lift, long after a window measured from the 500 ms mark had
+  expired.
+- **A CLICK is swallowed only where the bubble really holds it.** A React portal's events
+  travel up the COMPONENT tree, so every tap inside the menu the hold had just opened passed
+  through the bubble's own suppression and was eaten — the reader held a message, the reaction
+  row appeared, and their tap on it did nothing. **That was the whole of the reported bug**, and
+  a DOM containment test is the whole of the fix (`event.currentTarget.contains(event.target)`).
+- **A menu a HOLD opened gives focus back to nothing.** Radix restores focus to its trigger on
+  close, and the "…" is `focus-visible:grid` at every pointer — so a phone was left with a
+  permanent ellipsis beside every message its reader had ever held, which is what the bug
+  report's screenshot showed. `openedByHold` prevents that one restore; a keyboard close still
+  gets its focus back.
+
+**AND EVERY TARGET IN THOSE MENUS IS 44 px UNDER A THUMB**, which is the floor a dialog's
+close, a slider's thumb and the schedule menu's rows already hold. Measured on a phone before
+this: a menu row was 32 px tall — "Copy" and "Delete for everyone" 32 px apart in one column —
+and the quick reactions were nine 28 px circles side by side. The row height rides the shared
+`DropdownMenuItem`, for the reason the dialog close rides `DialogContent`: one rule, every menu
+in the app. The reaction row is drawn at the floor on a coarse pointer and the menu widens to
+hold six of them; the full picker becomes a labelled **More reactions** row there, because a
+seventh circle would either shrink them all back under the floor or wrap onto a line of its
+own — and a word is easier to hit than a 16 px glyph either way. **That swap is RENDERED by
+pointer, not hidden by CSS** (`useCoarsePointer` in `web/src/lib/platform.ts`): a row taken out
+with `display: none` is still in the menu's own collection, so a keyboard would walk onto a
+stop nobody can see. It reads `false` until it has asked, because the extra row belongs to a
+phone and a pointer's menu is the one that must not gain a dead stop.
 
 ## The chat list mirrors Teams too, and the "…" menu is LOCAL
 

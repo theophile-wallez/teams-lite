@@ -128,7 +128,16 @@ export type PreviewOptions = {
   /** Pixels captured per CSS pixel. Raise it to review a small detail (an icon, a
    *  chip) without changing the layout the app renders at. */
   deviceScaleFactor?: number;
+  /** A PHONE with a finger: a narrow viewport AND a coarse pointer. Several captures set the
+   *  viewport themselves, which is enough for what a narrow screen LAYS OUT — but not for what
+   *  a touch device is offered at all, since the affordances a hold replaces are behind
+   *  `@media (pointer: coarse)`. A mode reviewing one of those needs this. */
+  phone?: boolean;
 };
+
+/** What `phone` emulates: Playwright's own Pixel 7, minus its Chrome-on-Android user agent —
+ *  the app reads the pointer and the width, and nothing about it reads a UA string. */
+const PHONE = { viewport: { width: 412, height: 839 }, hasTouch: true, isMobile: true } as const;
 
 /**
  * Boot a mock-backed preview of the web app, run `body` against it, then tear
@@ -153,6 +162,7 @@ export async function withPreview<T>(
     const page = await browser.newPage({
       viewport: VIEWPORT,
       deviceScaleFactor: options.deviceScaleFactor,
+      ...(options.phone ? PHONE : {}),
     });
     await page.goto(WEB_ORIGIN, { waitUntil: "domcontentloaded" });
     await page.waitForSelector('[data-testid="conversation-row"]', {
@@ -1689,6 +1699,56 @@ if (import.meta.main) {
   // "Answer with <agent>": the same tag reached from a message's own ⋯ menu. Two things
   // to look at — the row (the vendor's mark beside the words, in a menu whose other rows
   // wear our own glyphs) and the draft it writes (a reply, tag first, request seeded).
+  // The message actions as a PHONE draws them: opened by a hold rather than by the "…", and
+  // measured at the touch floor. This surface had no capture and shipped the same bug twice —
+  // a hold whose menu the browser's own echo took away, and rows a thumb could not hit.
+  if (args.includes("--message-actions")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openFirstConversation(page);
+        const bubble = page.locator('[data-testid="message"]').last();
+        await bubble.scrollIntoViewIfNeeded();
+
+        // A REAL hold, through the browser's own input pipeline: the app gives up the
+        // browser's long-press gestures on a coarse pointer, and a synthetic event would
+        // exercise none of that.
+        const box = (await bubble.boundingBox())!;
+        const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send("Input.dispatchTouchEvent", {
+          type: "touchStart",
+          touchPoints: [{ x: point.x, y: point.y }],
+        });
+        await page.waitForTimeout(700);
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        await cdp.detach();
+
+        const menu = page.locator('[data-testid="action-reply"]');
+        await menu.waitFor({ state: "visible" });
+        await page.waitForTimeout(400);
+        await shot(`${out}-held-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-held-dark.png`);
+
+        // And what the bubble keeps once the menu closes: nothing. The "…" belongs to a
+        // pointer, and it used to be left behind holding the focus the menu restored to it.
+        // Dismissed the way a reader does — a tap away from the menu, not Escape, which on this
+        // app leaves the whole conversation.
+        await setTheme("light");
+        await page.touchscreen.tap(24, 140);
+        await menu.waitFor({ state: "hidden" });
+        await page.waitForTimeout(400);
+        await shot(`${out}-closed-light.png`);
+        console.log(
+          `[preview] wrote ${out}-held-{light,dark}.png and ${out}-closed-light.png`,
+        );
+      },
+      // A phone, with a finger: the whole point of this capture is the coarse-pointer shape.
+      { phone: true, deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
   if (args.includes("--answer-with")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       await openConversation(page, "Agent Sandbox");

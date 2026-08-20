@@ -81,6 +81,7 @@ import { LinearLinkCard } from "./linear-link-card";
 import { PersonHoverCard } from "./person-card";
 import { TrackerProjectProvider, useTrackerVocabulary } from "./tracker-refs-context";
 import { Emoji } from "./emoji";
+import { useCoarsePointer } from "~/lib/platform";
 import { useAppState, useController } from "./controller-context";
 import { useMessageGestures } from "./use-message-gestures";
 import { bodyIsOnlyEmoji, extractableCustomEmoji } from "~/lib/custom-emoji";
@@ -585,10 +586,16 @@ function MessageBubbleImpl(props: {
   // `.message-hold-target` in styles/app.css) — a bubble being EDITED keeps them, because
   // its field is where the reader selects text.
   const gesturesLive = !inert && !props.editing;
+  // Whether the open menu was opened by a HOLD, which decides where focus goes when it
+  // closes (see `onCloseAutoFocus` below).
+  const openedByHold = useRef(false);
   const messageGestures = useMessageGestures({
     enabled: gesturesLive,
     mine,
-    onLongPress: () => setMenuOpen(true),
+    onLongPress: () => {
+      openedByHold.current = true;
+      setMenuOpen(true);
+    },
     onReply: () => props.onReply(props.message),
   });
 
@@ -1102,6 +1109,18 @@ function MessageBubbleImpl(props: {
                   // moment it opened — and emoji-mart's search field is where
                   // focus belongs anyway. Reply and "Answer with …" hand off the same
                   // way, to the composer they just wrote into.
+                  //
+                  // A menu a HOLD opened has nowhere to give focus back to: a finger never
+                  // focused the ⋯, and putting focus there leaves it `:focus-visible` — which
+                  // is `grid` at every pointer, so a phone was left with a permanent ellipsis
+                  // beside every message its reader had ever held. That is the second half of
+                  // the reported bug: the dots stayed on screen and the menu did not.
+                  if (openedByHold.current) {
+                    openedByHold.current = false;
+                    handingOffFocus.current = false;
+                    event.preventDefault();
+                    return;
+                  }
                   if (!handingOffFocus.current) return;
                   handingOffFocus.current = false;
                   event.preventDefault();
@@ -1212,6 +1231,7 @@ function MessageActionsMenu(props: {
   onAddEmoji: (src: string, code: string) => void;
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const coarsePointer = useCoarsePointer();
   // A closed menu is disarmed: the next open starts at "Delete", never at the
   // confirmation. Reset on close rather than on open so the row does not visibly
   // change back while the menu is still fading out.
@@ -1244,6 +1264,10 @@ function MessageActionsMenu(props: {
       <DropdownMenuContent
         align={props.mine ? "start" : "end"}
         onCloseAutoFocus={props.onCloseAutoFocus}
+        // Wide enough under a THUMB for the six quick reactions at the touch floor: a menu
+        // sized for a pointer holds them only by drawing each one 28px across, which is what
+        // a phone got.
+        className="[@media(pointer:coarse)]:min-w-[19rem]"
       >
         <ReactionPicker
           data-testid="menu-reaction-picker"
@@ -1253,6 +1277,15 @@ function MessageActionsMenu(props: {
           customEmoji={props.customEmoji}
           className="justify-between px-1 pb-1"
         />
+        {/* The full picker, as a row, where there is no room for a seventh circle. RENDERED
+            by pointer rather than hidden by CSS: a `display: none` row is still in the menu's
+            own collection, so a keyboard would walk onto a stop nobody can see. */}
+        {coarsePointer && (
+          <DropdownMenuItem data-testid="action-more-reactions" onSelect={props.onMore}>
+            <HugeiconsIcon icon={SmilePlusIcon} className="size-4" strokeWidth={1.6} />
+            More reactions
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
         {props.mine && (
           <DropdownMenuItem data-testid="action-edit" onSelect={props.onEdit}>
@@ -1666,6 +1699,13 @@ function DeletedContent(props: { mine: boolean; revealable: boolean; children: R
   );
 }
 
+/** One reaction in the quick row: 28px of ink at a pointer, and the app's own 44px touch
+ *  floor under a thumb — measured on a phone, the row was nine 28px circles side by side. */
+const REACTION_TARGET =
+  "grid size-7 place-items-center rounded-full leading-none transition-transform [@media(pointer:coarse)]:size-11";
+/** The art inside it, which grows with the target rather than floating in the middle of one. */
+const REACTION_ART = "size-[18px] [@media(pointer:coarse)]:size-6";
+
 /**
  * A row of emoji buttons for adding a reaction, in Teams' canonical order,
  * followed by the affordance that opens the full emoji picker. It is the reaction
@@ -1687,6 +1727,7 @@ function ReactionPicker(props: {
   // `alias_of` is EMPTY on a row that holds art, never null.
   const customReactions = (props.customEmoji ?? []).filter((e) => !e.alias_of).slice(0, 6);
   const hasCustom = customReactions.length > 0;
+  const coarsePointer = useCoarsePointer();
 
   return (
     <div data-testid={props["data-testid"]} className={cn("flex flex-col", props.className)}>
@@ -1715,9 +1756,9 @@ function ReactionPicker(props: {
               aria-label={`React with ${emoji.name}`}
               data-testid={`reaction-option-custom-${emoji.name}`}
               onClick={() => props.onPick({ emoji: emoji.name })}
-              className="grid size-7 place-items-center rounded-full leading-none transition-transform hover:bg-accent"
+              className={cn(REACTION_TARGET, "hover:bg-accent")}
             >
-              <PackEmoji name={emoji.name} />
+              <PackEmoji name={emoji.name} className={REACTION_ART} />
             </button>
           ))}
         </div>
@@ -1735,25 +1776,30 @@ function ReactionPicker(props: {
               data-testid={`reaction-option-${key}`}
               onClick={() => props.onPick({ key })}
               className={cn(
-                "grid size-7 place-items-center rounded-full leading-none transition-transform",
+                REACTION_TARGET,
                 active ? "bg-primary/20 ring-1 ring-inset ring-primary/50" : "hover:bg-accent",
               )}
             >
-              <Emoji emoji={emoji} className="size-[18px]" />
+              <Emoji emoji={emoji} className={REACTION_ART} />
             </button>
           );
         })}
         {/* The six above are the shortcuts; the other ~1500 reactions Teams accepts
-            are one click away in the full picker. */}
-        <button
-          type="button"
-          aria-label="More reactions"
-          data-testid="reaction-more"
-          onClick={props.onMore}
-          className="grid size-7 place-items-center rounded-full text-text-dim transition-transform hover:bg-accent hover:text-foreground"
-        >
-          <HugeiconsIcon icon={SmilePlusIcon} className="size-[18px]" strokeWidth={1.6} />
-        </button>
+            are one click away in the full picker. Under a THUMB it is a labelled row of the
+            menu instead (see {@link MessageActionsMenu}): six 44px circles fill the row, and a
+            seventh would either shrink them all back under the touch floor or wrap alone onto
+            a second line — while a word is easier to hit than a 16px glyph either way. */}
+        {!coarsePointer && (
+          <button
+            type="button"
+            aria-label="More reactions"
+            data-testid="reaction-more"
+            onClick={props.onMore}
+            className={cn(REACTION_TARGET, "text-text-dim hover:bg-accent hover:text-foreground")}
+          >
+            <HugeiconsIcon icon={SmilePlusIcon} className={REACTION_ART} strokeWidth={1.6} />
+          </button>
+        )}
       </div>
     </div>
   );

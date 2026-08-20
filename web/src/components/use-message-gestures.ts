@@ -1,5 +1,6 @@
 import { animate, useMotionValue, useReducedMotion, useTransform } from "motion/react";
 import { useEffect, useRef, type MouseEventHandler, type PointerEventHandler } from "react";
+import { PRESS_ECHO_GRACE_MS, usePressEcho } from "~/lib/press-echo";
 
 /** Time a touch must stay still before it opens the message actions menu. */
 const LONG_PRESS_MS = 500;
@@ -37,6 +38,9 @@ export function useMessageGestures(options: MessageGesturesOptions) {
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suppressClickUntil = useRef(0);
   const settleAnimation = useRef<ReturnType<typeof animate> | null>(null);
+  // The browser's own echo of the hold, which would otherwise dismiss the menu the hold
+  // opens the instant the finger lifts (see lib/press-echo.ts).
+  const echo = usePressEcho();
   const onLongPress = useRef(options.onLongPress);
   const onReply = useRef(options.onReply);
   onLongPress.current = options.onLongPress;
@@ -86,7 +90,8 @@ export function useMessageGestures(options: MessageGesturesOptions) {
       const gesture = active.current;
       if (!gesture || gesture.pointerId !== event.pointerId || gesture.axis !== "pending") return;
       gesture.longPressFired = true;
-      suppressClickUntil.current = Date.now() + 700;
+      suppressClickUntil.current = Date.now() + PRESS_ECHO_GRACE_MS;
+      echo.claim();
       onLongPress.current();
     }, LONG_PRESS_MS);
   };
@@ -123,9 +128,16 @@ export function useMessageGestures(options: MessageGesturesOptions) {
     finishPointer(event.currentTarget, event.pointerId);
     active.current = null;
 
-    if (gesture.longPressFired) return;
+    if (gesture.longPressFired) {
+      // Re-armed from the RELEASE rather than from the hold: a reader who held for three
+      // seconds gets the browser's echo — its compatibility click, and the pointerdown
+      // WebKit sends with it — now, long after a window measured from the hold expired.
+      suppressClickUntil.current = Date.now() + PRESS_ECHO_GRACE_MS;
+      echo.release();
+      return;
+    }
     if (gesture.axis === "horizontal") {
-      suppressClickUntil.current = Date.now() + 700;
+      suppressClickUntil.current = Date.now() + PRESS_ECHO_GRACE_MS;
       const inwardDistance = options.mine ? -x.get() : x.get();
       settle();
       if (inwardDistance >= REPLY_THRESHOLD_PX) onReply.current();
@@ -140,11 +152,22 @@ export function useMessageGestures(options: MessageGesturesOptions) {
     clearLongPress();
     finishPointer(event.currentTarget, event.pointerId);
     active.current = null;
+    if (gesture.longPressFired) {
+      suppressClickUntil.current = Date.now() + PRESS_ECHO_GRACE_MS;
+      echo.release();
+    }
     settle();
   };
 
   const onClickCapture: MouseEventHandler<HTMLElement> = (event) => {
     if (Date.now() > suppressClickUntil.current) return;
+    // What the hold must not activate is what was UNDER the finger. The menu it opened is
+    // rendered in a PORTAL, and a portal's events travel up the COMPONENT tree rather than
+    // the DOM one — so every tap inside that menu arrived here too and was swallowed for the
+    // window's whole length: the reader held a bubble, the reaction row appeared, and their
+    // tap on it did nothing. That is the reported bug, and this containment test is the whole
+    // of it — a click the bubble does not really hold is not the hold's to cancel.
+    if (!event.currentTarget.contains(event.target as Node)) return;
     suppressClickUntil.current = 0;
     event.preventDefault();
     event.stopPropagation();

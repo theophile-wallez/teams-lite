@@ -7,6 +7,9 @@ import { cn } from "~/lib/utils";
 export const DropdownMenu = DropdownMenuPrimitive.Root;
 export const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 
+/** What a row of a menu measures under a thumb. See {@link DropdownMenuItem}. */
+const COARSE_ROW = "[@media(pointer:coarse)]:min-h-11";
+
 /**
  * A menu that opens anchored to its trigger (not a centered modal), portaled to
  * the body so it escapes overflow/stacking contexts. Styling mirrors the app's
@@ -45,6 +48,12 @@ export const DropdownMenuItem = React.forwardRef<
     ref={ref}
     className={cn(
       "flex cursor-pointer select-none items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm text-foreground outline-none transition-colors",
+      // 44px under a thumb, which is the floor this app already holds a dialog's close, a
+      // slider's thumb and the schedule menu's own rows to. A row is 32px tall at a pointer,
+      // and this app is read from a phone — where "Copy" and "Delete for everyone" sat 32px
+      // apart in the same column. It rides the shared primitive for the reason the dialog
+      // close does: one rule, and every menu in the app carries it.
+      COARSE_ROW,
       "focus:bg-accent focus:text-foreground data-[highlighted]:bg-accent data-[highlighted]:text-foreground",
       "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       destructive &&
@@ -73,6 +82,7 @@ export const DropdownMenuCheckboxItem = React.forwardRef<
     onSelect={onSelect ?? ((event) => event.preventDefault())}
     className={cn(
       "flex cursor-pointer select-none items-center gap-2.5 rounded-lg py-1.5 pl-2 pr-2.5 text-sm text-foreground outline-none transition-colors",
+      COARSE_ROW,
       "focus:bg-accent focus:text-foreground data-[highlighted]:bg-accent data-[highlighted]:text-foreground",
       "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className,

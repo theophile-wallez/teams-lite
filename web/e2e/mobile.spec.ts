@@ -1,4 +1,5 @@
 import { devices, type Locator, type Page } from "@playwright/test";
+import { PRESS_ECHO_GRACE_MS } from "../src/lib/press-echo";
 import {
   test,
   expect,
@@ -56,6 +57,56 @@ async function touchGesture(
   }
   const end = moves.at(-1) ?? { x: 0, y: 0 };
   await dispatch("pointerup", start.x + end.x, start.y + end.y);
+}
+
+/**
+ * A REAL touch, driven through the browser's own input pipeline, followed by the ECHO every
+ * browser sends once the finger lifts: its compatibility mouse sequence. WebKit's carries a
+ * **`pointerdown` of its own** (`pointerType: "mouse"`, at the point the finger was), and that
+ * is what dismissed the menu a hold had just opened on a real iPhone — every Radix layer reads
+ * it as "a pointer went down outside me" (see src/lib/press-echo.ts).
+ *
+ * Chromium's own sequence carries `mousedown`/`click` and no pointerdown, so neither
+ * `touchGesture`'s synthetic events NOR a real Chromium touch can see this failure: the engine
+ * the app is read on is the one engine this suite cannot drive. The echo is therefore sent
+ * here, as the engine sends it — which is what makes the hold's own regression test honest.
+ */
+async function holdWithEcho(page: Page, target: Locator, holdMs = 650): Promise<void> {
+  const box = await target.boundingBox();
+  expect(box).not.toBeNull();
+  const x = box!.x + box!.width / 2;
+  const y = box!.y + box!.height / 2;
+
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+  await page.waitForTimeout(holdMs);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await cdp.detach();
+
+  await page.evaluate(
+    ({ x: px, y: py }) => {
+      // Where WebKit aims it: the point the finger was. With a modal menu open the body is
+      // `pointer-events: none`, so that lands on the document element, exactly as it did on
+      // the phone this was reported from.
+      const target = document.elementFromPoint(px, py) ?? document.documentElement;
+      target.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          pointerId: 2,
+          pointerType: "mouse",
+          isPrimary: true,
+          button: 0,
+          bubbles: true,
+          cancelable: true,
+          clientX: px,
+          clientY: py,
+        }),
+      );
+    },
+    { x, y },
+  );
+  // Long enough for a dismissal to land: the echo dismissed the menu through React state, so
+  // an assertion in the same breath as the dispatch could pass over the very bug this drives.
+  await page.waitForTimeout(150);
 }
 
 test.describe("mobile single-pane layout", () => {
@@ -142,6 +193,100 @@ test.describe("mobile single-pane layout", () => {
     await expect(page.locator('[data-testid="action-copy"]')).toBeVisible();
   });
 
+  /**
+   * The same hold, driven with a REAL touch and followed by the browser's own echo of it —
+   * which is where this feature really failed. On a phone the reader held a colleague's
+   * message, the menu appeared and vanished as they let go, and the "…" was left behind
+   * holding the focus the menu had restored to it: a permanent ellipsis beside a message with
+   * no menu, which is precisely what the bug report's screenshot showed. Both halves are
+   * pinned here, and the whole point of the reaction is done with a finger — the reader's
+   * actual ask was "react to somebody else's message from my phone".
+   */
+  test("a held message keeps its menu through the browser's echo, and reacts", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+
+    // The newest message, which is where a reader's thumb is: the one under the composer.
+    const message = page.locator('[data-testid="message"]').last();
+    await message.scrollIntoViewIfNeeded();
+
+    await holdWithEcho(page, message);
+
+    // The menu survived the release. Before the fix it was gone within the frame.
+    await expect(page.locator('[data-testid="action-reply"]')).toBeVisible();
+    await expect(page.locator('[data-testid="action-copy"]')).toBeVisible();
+
+    // A reaction, with a finger, from the row the hold opened.
+    const reaction = page.locator('[data-testid="menu-reaction-picker"] button').first();
+    const box = (await reaction.boundingBox())!;
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+
+    const chip = message.locator('[data-testid^="reaction-chip-"]').first();
+    await expect(chip).toBeVisible();
+
+    // Take it back, so the thread is left as the other specs found it — and because a chip
+    // that cannot be toggled off with a finger is half a feature. A beat first: a press on the
+    // BUBBLE is deliberately swallowed for a moment after a hold, so that the hold cannot also
+    // activate what was under the finger (see `useMessageGestures`). A reader taking a
+    // reaction back is well past that; a test tapping in the same frame is not.
+    await page.waitForTimeout(PRESS_ECHO_GRACE_MS + 100);
+    const chipBox = (await chip.boundingBox())!;
+    await page.touchscreen.tap(chipBox.x + chipBox.width / 2, chipBox.y + chipBox.height / 2);
+    await expect(chip).not.toBeVisible();
+
+    // Nothing is left standing beside the message: the ⋯ belongs to a pointer.
+    await expect(message.locator('[data-testid="message-actions"]')).not.toBeVisible();
+  });
+
+  /**
+   * And every target in that menu is one a thumb can hit. Measured on this layout, a row was
+   * 32px tall and a reaction 28px across — nine of them side by side, with "Copy" and "Delete
+   * for everyone" 32px apart in the same column. 44px is the floor this app already holds a
+   * dialog's close, a slider's thumb and the schedule menu's rows to, so the reaction row is
+   * drawn at it under a thumb and the full picker becomes a labelled row: a seventh circle
+   * would either shrink them all back or wrap onto a line of its own.
+   */
+  test("a held message's menu is drawn at the touch floor", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    const message = page.locator('[data-testid="message"]').last();
+    await message.scrollIntoViewIfNeeded();
+    await holdWithEcho(page, message);
+    await expect(page.locator('[data-testid="action-reply"]')).toBeVisible();
+
+    const menu = page.locator('[role="menu"]').filter({ has: page.getByTestId("action-reply") });
+    const targets = await menu.evaluate((node) => {
+      const boxes = (selector: string) =>
+        Array.from(node.querySelectorAll(selector))
+          // What a phone never draws is not a target: the glyph that stands in for the full
+          // picker at a pointer is `display: none` here, and its row carries it instead.
+          .filter((el) => (el as HTMLElement).offsetParent !== null)
+          .map((el) => {
+            const box = el.getBoundingClientRect();
+            return { name: el.getAttribute("data-testid") ?? "", w: box.width, h: box.height };
+          });
+      return {
+        rows: boxes('[role="menuitem"]'),
+        reactions: boxes('[data-testid="menu-reaction-picker"] button'),
+        width: node.getBoundingClientRect().width,
+      };
+    });
+
+    expect(targets.rows.length).toBeGreaterThan(2);
+    expect(targets.reactions.length).toBeGreaterThan(5);
+    for (const target of [...targets.rows, ...targets.reactions]) {
+      expect(target.h, `${target.name} is ${target.h}px tall`).toBeGreaterThanOrEqual(44);
+    }
+    for (const reaction of targets.reactions) {
+      expect(reaction.w, `${reaction.name} is ${reaction.w}px wide`).toBeGreaterThanOrEqual(44);
+    }
+    // The row fits: a menu narrow enough to wrap it would draw each circle under the floor.
+    expect(targets.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    await expect(page.getByTestId("action-more-reactions")).toBeVisible();
+  });
+
   test("a long press on a chat row opens its Teams settings menu", async ({ page }) => {
     await gotoApp(page);
 
@@ -149,7 +294,8 @@ test.describe("mobile single-pane layout", () => {
     const row = page.locator('[data-testid="conversation-row"]').first();
     await expect(page.locator('[data-testid="chat-menu"]').first()).not.toBeVisible();
 
-    await touchGesture(page, row, [], 550);
+    // With the echo, because this hold is the same hook and had the same failure.
+    await holdWithEcho(page, row);
 
     await expect(page.locator('[data-testid="chat-menu-pin"]')).toBeVisible();
     await expect(page.locator('[data-testid="chat-menu-mute"]')).toBeVisible();
@@ -170,7 +316,7 @@ test.describe("mobile single-pane layout", () => {
     await expect(button).toBeVisible();
     const panel = page.getByTestId("update-changes");
 
-    await touchGesture(page, button, [], 550);
+    await holdWithEcho(page, button);
     await expect(panel).toBeVisible();
     await expect(panel).toContainText("never let a sender's own words name a file on disk");
     // The hold opened the panel and nothing else: 130 MB did not start downloading.

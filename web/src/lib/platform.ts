@@ -81,3 +81,25 @@ export function useModifierLabel(): ModifierLabel {
   }, []);
   return label;
 }
+
+/**
+ * Whether this reader is pointing with a FINGER, resolved on the client only.
+ *
+ * Most coarse-pointer choices in this app are made in CSS, which is the right place for
+ * them — a target's size, an affordance a hover reveals. This is for the one thing CSS
+ * cannot do: leave a control out of the DOM entirely. A row hidden with `display: none` is
+ * still in a menu's own collection, so a keyboard would walk onto a row nobody can see, and
+ * `false` until mount is the safe default — the extra row belongs to a phone, and a pointer's
+ * menu is the one that must not gain a dead stop.
+ */
+export function useCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia("(pointer: coarse)");
+    setCoarse(query.matches);
+    const onChange = (event: MediaQueryListEvent) => setCoarse(event.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+  return coarse;
+}
