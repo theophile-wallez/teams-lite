@@ -1,13 +1,20 @@
 import {
   test,
   expect,
+  clearComposer,
   composerField,
+  clearScheduledMessages,
+  fetchCapturedSends,
+  fillComposer,
   gotoApp,
   openChannelsTab,
+  openConversationAt,
   fetchTestChannels,
   realErrors,
   sendFromComposer,
+  setSendControl,
 } from "./helpers";
+import type { Page } from "@playwright/test";
 
 // Channels are a Microsoft Teams-style, first-class surface: a separate sidebar
 // tab holding a team → channel tree, cleanly split from the Chats list. These
@@ -360,5 +367,219 @@ test.describe("channels", () => {
       .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
       .toBeGreaterThan(0);
     expect(realErrors(consoleErrors)).toEqual([]);
+  });
+});
+
+// A channel post has a TITLE and a chat message does not — Teams' own split, and the whole
+// differentiation this surface used to be missing: the composer was the same box in both,
+// and an inbound title was drawn as 13px metadata above the words. See lib/post-subject.ts
+// for the rule and `teams_send::SUBJECT` for what the title is on the wire.
+test.describe("a channel post's title", () => {
+  const subjectField = '[data-testid="composer-subject"]';
+
+  /** Open a channel that is not the app-card one, so the post drawn is an ordinary one. */
+  async function openChannel(page: Page): Promise<void> {
+    await gotoApp(page);
+    await openChannelsTab(page);
+    await page.locator('[data-testid="channel-row"]').first().click();
+    await expect
+      .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+  }
+
+  test("is offered on a channel post, and never in a chat", async ({ page }) => {
+    await openChannel(page);
+    await expect(page.locator(subjectField)).toBeVisible();
+    // The backend's own ceiling, so the field refuses the 251st character rather than
+    // collecting a title the send is refused for.
+    await expect(page.locator(subjectField)).toHaveAttribute("maxlength", "250");
+    // And it is aimed at with a thumb: the touch floor every other target here clears.
+    const box = await page.locator(subjectField).boundingBox();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+
+    // A chat message has no title anywhere in Teams, and the backend refuses one.
+    await page.locator('[data-testid="tab-chats"]').click();
+    await openConversationAt(page, 0);
+    await expect(page.locator('[data-testid="composer-shell"]')).toBeVisible();
+    await expect(page.locator(subjectField)).toHaveCount(0);
+  });
+
+  test("is not offered on a REPLY, never travels on one, and survives the cancel", async ({
+    page,
+  }) => {
+    await openChannel(page);
+    await setSendControl(page, { clear: true });
+    await page.locator(subjectField).fill("Ship the US envs");
+
+    // A reply belongs to a thread that is already named by its first post, so there is no
+    // title to write — and the backend refuses one on a reply.
+    const message = page.locator('[data-testid="message"]').first();
+    await message.hover();
+    await message.locator('[data-testid="message-actions"]').click();
+    await page.locator('[data-testid="action-reply"]').click();
+    await expect(page.locator('[data-testid="reply-banner"]')).toBeVisible();
+    await expect(page.locator(subjectField)).toHaveCount(0);
+
+    // And what the hidden field holds does not travel with the reply: the backend REFUSES a
+    // titled reply, so a regression here is a reply that cannot be sent at all.
+    const body = `reply-${Date.now()}`;
+    await sendFromComposer(page, body);
+    await expect
+      .poll(async () =>
+        (await fetchCapturedSends(page)).some((s) => s.content_html?.includes(body)),
+      )
+      .toBe(true);
+    const sent = (await fetchCapturedSends(page))
+      .filter((send) => send.content_html?.includes(body))
+      .pop();
+    expect(sent?.reply_to).toBeTruthy();
+    expect(sent?.subject).toBeUndefined();
+
+    // The field was hidden, not emptied: the reader had not finished with it, and the send
+    // that ended the reply brings it back with the words still in it.
+    await expect(page.locator(subjectField)).toHaveValue("Ship the US envs");
+  });
+
+  test("a press on the title puts the caret in the title", async ({ page }) => {
+    // The box focuses the message field on any click that is not a control — so a press on
+    // the title used to fall through to it, which made the field unusable by pointer.
+    await openChannel(page);
+    await page.locator(subjectField).click();
+    await page.keyboard.type("Typed into the title");
+    await expect(page.locator(subjectField)).toHaveValue("Typed into the title");
+    await expect(composerField(page)).toHaveText("");
+
+    // Enter belongs to the message: in the title it moves to the words rather than posting
+    // a titled nothing.
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("and this is the body");
+    await expect(page.locator(subjectField)).toHaveValue("Typed into the title");
+    await expect(composerField(page)).toContainText("and this is the body");
+
+    // And Escape in the title does the same rather than reaching the shell, whose Escape
+    // LEAVES the conversation — which would take the title with it, since the words are a
+    // persisted draft and the title is not.
+    await page.locator(subjectField).click();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(subjectField)).toBeVisible();
+    await expect(page.locator(subjectField)).toHaveValue("Typed into the title");
+  });
+
+  test("travels as a property of the message and is drawn as a heading", async ({ page }) => {
+    await openChannel(page);
+    const title = `Release ${Date.now()}`;
+    const body = `body-${Date.now()}`;
+    // An empty box — an earlier test's draft in this channel survives, and Send is enabled
+    // by the WORDS, which is the thing being asserted next.
+    await clearComposer(page);
+    await page.locator(subjectField).fill(title);
+    // A title alone is not a post: Send stays disabled until there are words.
+    await expect(page.locator('[data-testid="composer-send"]')).toBeDisabled();
+    await sendFromComposer(page, body);
+
+    // The send carried the title as its own field. That is the crux: the title is
+    // `properties.subject` on the message, never words inside its body — so a colleague's
+    // own client draws a titled post rather than a bold first line.
+    const sentBody = (sends: Awaited<ReturnType<typeof fetchCapturedSends>>) =>
+      sends.filter((send) => send.content_html?.includes(body)).pop();
+    await expect
+      .poll(async () => sentBody(await fetchCapturedSends(page))?.subject, { timeout: 10_000 })
+      .toBe(title);
+    const sent = sentBody(await fetchCapturedSends(page));
+    expect(sent?.content_html ?? "").not.toContain(title);
+
+    // And the echo is drawn as a titled post: the heading above the words, in the size a
+    // heading has. Measured rather than trusted from the class list, because "it reads as a
+    // title" is the whole feature — at the 13px it used to be it read as metadata.
+    const group = page.locator('[data-testid="thread-group"]').filter({ hasText: body });
+    const heading = group.locator('[data-testid="thread-subject"]');
+    await expect(heading).toHaveText(title);
+    const headingSize = await heading.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+    const bubble = group.locator("[data-message-id]").first();
+    const bodySize = await bubble.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+    expect(headingSize).toBeGreaterThan(bodySize);
+    expect(headingSize).toBeGreaterThanOrEqual(16);
+    // The title is not in the post's own words either — the differentiation is real, not
+    // the same sentence twice.
+    await expect(bubble).not.toContainText(title);
+
+    // The title that left is taken back with the words, so the next post does not inherit it.
+    await expect(page.locator(subjectField)).toHaveValue("");
+  });
+
+  test("a title being rewritten while the send travels is left alone", async ({ page }) => {
+    // The rule the words follow (`removeSentWords`): a send takes back exactly what left,
+    // and only while the field still holds it. Hold the send and rewrite the title meanwhile.
+    await openChannel(page);
+    await setSendControl(page, { delay_ms: 700, clear: true });
+    const body = `held-${Date.now()}`;
+    await page.locator(subjectField).fill("First thoughts");
+    await fillComposer(page, body);
+    await composerField(page).press("Enter");
+    await page.locator(subjectField).fill("Second thoughts");
+    // The title that LEFT was the first one, so the rewrite survives the send that finishes
+    // after it — an unconditional clear would erase words nobody sent.
+    await expect
+      .poll(async () => (await fetchCapturedSends(page)).some((s) => s.subject === "First thoughts"))
+      .toBe(true);
+    await expect(page.locator(subjectField)).toHaveValue("Second thoughts");
+    await setSendControl(page, { clear: true });
+  });
+
+  test("survives the scheduled queue, in both actions", async ({ page }) => {
+    // A message Teams is HOLDING is re-sent by "Send now" and handed back by "Edit"
+    // (§ Sending a message LATER), so both have to carry the title the service stored —
+    // otherwise the reader re-posts their own announcement with the heading removed.
+    await openChannel(page);
+    await setSendControl(page, { clear: true });
+    const title = `Queued release ${Date.now()}`;
+    const body = `queued-${Date.now()}`;
+    await page.locator(subjectField).fill(title);
+    await fillComposer(page, body);
+    await page.locator('[data-testid="composer-schedule"]').click();
+    await page.locator('[data-testid="composer-schedule-preset"]').first().click();
+    await expect(page.locator('[data-testid="composer-schedule-note"]')).toBeVisible();
+
+    // SEND NOW: the same title goes out with the words.
+    await page.locator('[data-testid="composer-schedule-open-list"]').click();
+    const row = page
+      .locator('[data-testid="scheduled-message-row"]')
+      .filter({ hasText: body });
+    await row.locator('[data-testid="scheduled-send-now"]').click();
+    await expect
+      .poll(async () =>
+        (await fetchCapturedSends(page)).some((s) => s.subject === title && !s.scheduled_time),
+      )
+      .toBe(true);
+    await page.keyboard.press("Escape");
+
+    // EDIT: the title comes back to the field with the words, ready to be re-timed.
+    const second = `queued-again-${Date.now()}`;
+    await page.locator(subjectField).fill(title);
+    await fillComposer(page, second);
+    await page.locator('[data-testid="composer-schedule"]').click();
+    await page.locator('[data-testid="composer-schedule-preset"]').first().click();
+    await page.locator('[data-testid="composer-schedule-open-list"]').click();
+    await page
+      .locator('[data-testid="scheduled-message-row"]')
+      .filter({ hasText: second })
+      .locator('[data-testid="scheduled-edit"]')
+      .click();
+    await expect(page.locator('[data-testid="scheduled-messages-dialog"]')).toBeHidden();
+    await expect(composerField(page)).toHaveText(second);
+    await expect(page.locator(subjectField)).toHaveValue(title);
+
+    // One mock process serves the whole run: a queued message left behind sits in every
+    // later spec's banner.
+    await clearScheduledMessages(page);
+  });
+
+  test("belongs to the conversation it was written in", async ({ page }) => {
+    await openChannel(page);
+    await page.locator(subjectField).fill("Only for this channel");
+    // Walking away drops it, exactly as a pasted picture is dropped: a title belongs to the
+    // post being written, and must not follow the reader into somebody else's channel.
+    await page.locator('[data-testid="channel-row"]').nth(1).click();
+    await expect(page.locator(subjectField)).toHaveValue("");
   });
 });

@@ -272,6 +272,10 @@ type CapturedSend = {
    *  send. What a spec asserts on to prove the moment the reader picked really left the
    *  composer, since a held message appears in no thread. */
   scheduled_time?: number;
+  /** The post's TITLE — absent on an untitled post, which is every chat message and every
+   *  reply. What a spec asserts on to prove the title really left the composer as a
+   *  property of the message rather than as words inside its body. */
+  subject?: string;
 };
 
 /** One @mention as the composer sends it (mirrors the Rust `teams_send::Mention`). */
@@ -5806,6 +5810,34 @@ function parseScheduledTime(value: unknown): number | undefined {
   return value;
 }
 
+/** How long a post's TITLE may get — `teams_send::MAX_SUBJECT_CHARS`, mirrored here for
+ *  the reason every other bound in this file is: a mock that accepts what the backend
+ *  refuses hides the bug instead of failing a test. */
+const MOCK_MAX_SUBJECT_CHARS = 250;
+
+/** The optional `subject` a send may carry: a channel post's TITLE. Refused exactly as
+ *  `teams_send::parse_subject` refuses it — a reply carries none (the thread is already
+ *  named by its first post), it is bounded, and it is one line. */
+function parseSendSubject(input: Record<string, unknown>): string | undefined {
+  const value = input.subject;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error("subject must be a string");
+  const subject = value.trim();
+  if (subject.length === 0) return undefined;
+  if (input.reply_to !== undefined && input.reply_to !== null) {
+    throw new Error("a reply carries no title — the thread's title is its first post's");
+  }
+  if ([...subject].length > MOCK_MAX_SUBJECT_CHARS) {
+    throw new Error(`a title is at most ${MOCK_MAX_SUBJECT_CHARS} characters`);
+  }
+  // Every character a browser breaks a line on, which is what the backend refuses:
+  // Cc (both ranges) plus U+2028/U+2029, which `char::is_control` does NOT cover.
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(subject)) {
+    throw new Error("a title is one line");
+  }
+  return subject;
+}
+
 /** Build the AMS inline-image HTML Teams returns after a successful upload. */
 function sentImageContent(image: SendImage): string {
   nextSentImage += 1;
@@ -7085,6 +7117,8 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // `teams_send::parse_scheduled_time` refuses it: a mock that accepts what the
       // backend would not hides the bug instead of failing a test.
       const scheduledTime = parseScheduledTime(input.scheduled_time);
+      // A channel post's TITLE, refused exactly as the backend refuses it.
+      const subject = parseSendSubject(input);
       if (TEST_HOOKS) {
         capturedSends.push({
           conversation: id,
@@ -7094,12 +7128,13 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           ...(images.length > 0 ? { images } : {}),
           ...(mentions.length > 0 ? { mentions } : {}),
           ...(scheduledTime !== undefined ? { scheduled_time: scheduledTime } : {}),
+          ...(subject !== undefined ? { subject } : {}),
         });
         if (testSendError) throw new Error(testSendError);
         if (testSendDelayMs > 0) {
           return new Promise((resolve) => {
             setTimeout(() => {
-              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime);
+              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject);
               resolve({ sent: true });
             }, testSendDelayMs);
           });
@@ -7109,7 +7144,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // the tenant really answers with (measured). What keeps it out of the conversation is
       // the page's own rule and the backend's read, so echoing it is what makes those two
       // testable at all.
-      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime);
+      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject);
       return { sent: true };
     }
 
@@ -8975,6 +9010,7 @@ function scheduleSendEcho(
   images: SendImage[] = [],
   mentions?: OutboundMention[],
   scheduledTime?: number,
+  subject?: string,
 ): void {
   setTimeout(() => {
     const t = threadFor(convId);
@@ -8997,6 +9033,12 @@ function scheduleSendEcho(
       // (`messageIsHeld`) and the backend's read are what keep it out of the conversation,
       // and a mock that simply never sent it would let a broken rule pass every test.
       ...(scheduledTime ? { scheduled_time: scheduledTime } : {}),
+      // A titled post comes back as the ROOT of its own thread carrying that title, which
+      // is what the tenant really answers with: the subject is a property of the message
+      // (measured — `examples/channel_subject_probe.rs`), and the read path decodes it into
+      // `thread_subject` on every inbound message. Echoing it is what makes the whole
+      // rendering half testable — the heading a thread is drawn with is this field.
+      ...(subject ? { thread_root_id: `${convId}#${seq}`, thread_subject: subject } : {}),
       // The body's mention spans carry only an index; this is what says whom each one
       // names, so a sent mention comes back rendered as a mention (like the real echo).
       ...(mentions && mentions.length > 0

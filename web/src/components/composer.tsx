@@ -21,6 +21,11 @@ import {
   type ComposerImage,
 } from "~/lib/composer-image";
 import { agentCandidatesFor, type OutboundMention } from "~/lib/mentions";
+import {
+  POST_SUBJECT_MAX_CHARS,
+  outboundSubject,
+  postSubjectOffered,
+} from "~/lib/post-subject";
 import { scheduledBanner } from "~/lib/schedule-send";
 import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
@@ -106,6 +111,18 @@ export function Composer(props: {
   const composerRestore = useAppState((s) => s.composerRestore);
   const replyingTo = useAppState((s) => s.replyingTo);
   const openId = useAppState((s) => s.openId);
+  // Whether the open thread is a CHANNEL, which is what decides that a post has a TITLE at
+  // all: a chat message has none in Teams, and a reply belongs to a thread already named by
+  // its first post (see lib/post-subject.ts).
+  const channels = useAppState((s) => s.channels);
+  const subjectOffered = postSubjectOffered({
+    isChannel: channels.some((channel) => channel.id === openId),
+    replying: replyingTo !== null,
+  });
+  // The title being written. Local to the composer, like the pending pictures and for the
+  // same reason: a title belongs to the post it is being written for, so it is dropped when
+  // the reader walks to another conversation rather than following them into one.
+  const [subject, setSubject] = useState("");
   // Who this thread can @mention. Loaded on the first "@" (see
   // `ensureMentionCandidates`), so a conversation nobody mentions in costs nothing.
   const mentionCandidates = useAppState((s) => s.mentionCandidates);
@@ -187,9 +204,19 @@ export function Composer(props: {
     imagesRef.current = [];
     setImages([]);
     setImageError(null);
+    setSubject("");
     sendingRef.current = false;
     setSending(false);
   }, [openId]);
+
+  // A message handed back by the scheduled list brings its TITLE with it, so a titled
+  // announcement taken out of the queue is not re-posted with its heading missing. It runs on
+  // each restore the store publishes, and never for another thread's — exactly as the words
+  // do not travel between conversations either.
+  useEffect(() => {
+    if (!composerRestore || composerRestore.conversation !== openId) return;
+    setSubject(composerRestore.subject ?? "");
+  }, [composerRestore, openId]);
 
   /** Show or hide the format buttons. The field itself is untouched, so the caret,
    *  the selection and the text stay exactly as they were. */
@@ -286,6 +313,10 @@ export function Composer(props: {
     const submitted = imagesRef.current;
     if (!clean && !richHtml && submitted.length === 0) return false;
 
+    // The TITLE only where a post has one, so a line typed before the reader pressed Reply
+    // is not smuggled onto the reply — the backend refuses one there (`parse_subject`).
+    const submittedSubject = subjectOffered ? outboundSubject(subject) : undefined;
+
     const version = ++sendVersion.current;
     sendingRef.current = true;
     setSending(true);
@@ -295,6 +326,7 @@ export function Composer(props: {
       submitted.map(sendImage),
       mentions,
       scheduledAt ?? undefined,
+      submittedSubject,
     );
     if (sendVersion.current !== version) return sent;
     sendingRef.current = false;
@@ -303,6 +335,12 @@ export function Composer(props: {
       const gone = new Set(submitted.map((image) => image.id));
       imagesRef.current = imagesRef.current.filter((image) => !gone.has(image.id));
       setImages(imagesRef.current);
+      // The title that left goes with the words, and only while the field still holds
+      // exactly it: a reader who rewrote the title while the send was travelling keeps
+      // what they are writing. The rule `removeSentWords` follows for the body.
+      if (submittedSubject) {
+        setSubject((now) => (now.trim() === submittedSubject ? "" : now));
+      }
     }
     return sent;
   };
@@ -413,10 +451,12 @@ export function Composer(props: {
           className="flex cursor-text flex-col gap-2 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
           onMouseDown={(event) => {
             // Clicking anywhere in the box focuses the field, except the action
-            // buttons (send / format bar / image) and the field itself, which handle
-            // their own clicks.
+            // buttons (send / format bar / image), the field itself, and the TITLE —
+            // each of which handles its own clicks. A press on the title that fell
+            // through here would put the caret in the body instead, which makes the
+            // title field unusable by pointer.
             const element = event.target as HTMLElement;
-            if (element.closest("button") || element.closest("[contenteditable]")) return;
+            if (element.closest("button, input, [contenteditable]")) return;
             event.preventDefault();
             focusField();
           }}
@@ -435,6 +475,41 @@ export function Composer(props: {
             >
               <Suspense fallback={null}>{editor && <FormatToolbar editor={editor} />}</Suspense>
             </div>
+          )}
+
+          {/* The TITLE, on a channel post only — Teams' own "Add a subject", and the line
+              its announcements draw above the body. It is a separate FIELD rather than a
+              first line of the message because that is what it is on the wire: a property,
+              not words in the body (see lib/post-subject.ts), so a client that typed it
+              into the message would show a colleague a bold sentence instead of a titled
+              post. It sits at the top of the box, above the words it titles, set in the
+              weight it is drawn in and ruled off from them — which is the differentiation
+              the whole feature is about. Native `maxLength` is the ceiling, so the field
+              refuses the 251st character instead of the send refusing the title. */}
+          {subjectOffered && (
+            <input
+              type="text"
+              value={subject}
+              onChange={(event) => setSubject(event.target.value)}
+              // Enter belongs to the message, so in the title it moves to the words rather
+              // than posting a titled nothing — and Escape does the same instead of reaching
+              // the shell, whose Escape LEAVES the conversation (`goToList`) and would drop
+              // the title with it: the words are a persisted draft and this line is not.
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== "Escape") return;
+                event.preventDefault();
+                event.stopPropagation();
+                focusField();
+              }}
+              maxLength={POST_SUBJECT_MAX_CHARS}
+              placeholder="Add a subject"
+              aria-label="Post title"
+              data-testid="composer-subject"
+              // 16px so iOS does not zoom the page on focus (the rule
+              // COMPOSER_FIELD_CLASS states), and 44px tall so it clears the touch floor
+              // every other target in this app clears — this box is aimed at with a thumb.
+              className="min-h-11 w-full border-b border-border-subtle bg-transparent px-1 text-base font-semibold text-foreground outline-none placeholder:font-normal placeholder:text-text-faint"
+            />
           )}
 
           {/* The pending pictures, above the field like Teams: a thumbnail each, with its

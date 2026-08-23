@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
         &[],
         // Posted now: this probe deletes what it posts.
         None,
+        None, // no title: a probe posts no channel post
     )
     .await
     .context("post the message to delete")?;

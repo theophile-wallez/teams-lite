@@ -410,7 +410,14 @@ export type AppState = {
    *  keyed per conversation, so setting the draft of the thread already on screen changes
    *  nothing the reader can see. The token is what applies it exactly once, which is the
    *  shape `agentAnswer` already uses for the same reason. */
-  composerRestore: { conversation: string; text: string; token: number } | null;
+  composerRestore: {
+    conversation: string;
+    text: string;
+    /** The TITLE that message had, where it had one — a channel post handed back from the
+     *  scheduled list. Absent for every untitled one. */
+    subject?: string;
+    token: number;
+  } | null;
   replyingTo: PendingReply | null;
   /** The notifications panel's three activity streams (newest-first each), one
    *  per tab: Activity, Mentions, Following. */
@@ -6002,6 +6009,13 @@ export class TeamsController {
         // The body as Teams stored it, so formatting, mentions' own spans and inline
         // pictures survive — the plain text above is only the fallback a `Text` frame needs.
         message.content || undefined,
+        [],
+        undefined,
+        undefined,
+        // And its TITLE, because this is a re-send: the held message carries the subject
+        // Teams stored, and posting the words without it would deliver an announcement
+        // stripped of the line above them.
+        message.thread_subject || undefined,
       );
     } catch (e) {
       this.set({ status: `send failed: ${errText(e)}` });
@@ -6037,6 +6051,10 @@ export class TeamsController {
       composerRestore: {
         conversation: message.conversation_id,
         text,
+        // A titled post hands its TITLE back too, or the reader re-posts an announcement
+        // with the heading silently removed. It is not in the draft: a draft is words, and
+        // the title is a property of the message (see lib/post-subject.ts).
+        subject: message.thread_subject || undefined,
         token: (this.get().composerRestore?.token ?? 0) + 1,
       },
     });
@@ -6096,6 +6114,10 @@ export class TeamsController {
     images: SendImage[] = [],
     mentions?: OutboundMention[],
     scheduledAt?: number,
+    /** The post's TITLE, where the composer offered one — a channel post, never a chat
+     *  message and never a reply (see lib/post-subject.ts). It rides in the send that
+     *  posts the words it titles, exactly as the pictures and the mentions do. */
+    subject?: string,
   ): Promise<boolean> {
     const id = this.get().openId;
     if (!id) return false;
@@ -6110,7 +6132,16 @@ export class TeamsController {
       : undefined;
 
     try {
-      await this.backend.send(id, clean, replyTo, richHtml, images, mentions, scheduledAt);
+      await this.backend.send(
+        id,
+        clean,
+        replyTo,
+        richHtml,
+        images,
+        mentions,
+        scheduledAt,
+        subject,
+      );
     } catch (e) {
       // Both surfaces, and each has its reader. The status line keeps the RAW failure,
       // which is what a developer reads off a screenshot; the composer gets one sentence

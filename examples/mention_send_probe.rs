@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
         &[],
         &mentions,
         None,
+        None, // no title: a probe posts no channel post
     )
     .await
     .context("send the mention")?;

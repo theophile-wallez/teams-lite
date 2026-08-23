@@ -1128,7 +1128,20 @@ function ThreadGroup(props: {
       data-testid="thread-group"
       className="mb-3 rounded-2xl border border-border-subtle/60 bg-element/20 px-3 py-2.5"
     >
-      {subject && <h3 className="pb-1 text-[13px] font-semibold text-foreground">{subject}</h3>}
+      {/* The post's TITLE. It is drawn AS a title — the size and weight Teams gives an
+          announcement's headline — because that differentiation is the whole point of the
+          field: a channel post has a title and a chat message does not, and at the 13px
+          semibold this used to be it read as metadata above the words rather than as the
+          heading of what follows. `break-words` because a title is one line of anything: a
+          branch name, a URL, a bracketed list of tickets. */}
+      {subject && (
+        <h3
+          data-testid="thread-subject"
+          className="pb-1.5 text-[17px] font-semibold leading-snug text-foreground break-words"
+        >
+          {subject}
+        </h3>
+      )}
       {renderMsg(lead, undefined, undefined, { onPanel: true })}
       {replies.length > 0 && (
         <>

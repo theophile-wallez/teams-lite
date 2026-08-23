@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
         &[],
         &[],
         None,
+        None, // no title: a probe posts no channel post
     )
     .await
     .context("post the placeholder")?;
@@ -133,6 +134,7 @@ async fn main() -> Result<()> {
             let html = agent_policy::reply_html(&signer, &current.text, false);
             teams_send::edit_message(
                 &http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html), &[],
+                None, // a probe's message is untitled
             )
             .await?;
             posted = current.text;
@@ -149,7 +151,7 @@ async fn main() -> Result<()> {
         Ok(outcome) => agent_policy::reply_html(&signer, &outcome.text, true),
         Err(e) => agent_policy::failure_html(&signer, &e.to_string()),
     };
-    teams_send::edit_message(&http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html), &[])
+    teams_send::edit_message(&http, &session, SANDBOX_THREAD, &sent.id, "", Some(&html), &[], None)
         .await
         .context("post the final answer")?;
 

@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
         // A probe mentions nobody: a mention notifies the person it names.
         &[],
         Some(deliver_at),
+        None, // no title: a probe posts no channel post
     )
     .await
     .context("schedule the message that should be delivered")?;
@@ -99,6 +100,7 @@ async fn main() -> Result<()> {
         &[],
         &[],
         Some(cancel_at),
+        None, // no title: a probe posts no channel post
     )
     .await
     .context("schedule the message that should be cancelled")?;
@@ -143,6 +145,7 @@ async fn main() -> Result<()> {
         &[],
         &[],
         Some(cancel_at),
+        None, // no title: a probe posts no channel post
     )
     .await
     .context("schedule the message the writes are tried on")?;
@@ -158,6 +161,7 @@ async fn main() -> Result<()> {
             "",
             Some("<p>scheduled send probe — REWRITTEN while held</p>"),
             &[],
+            None, // a probe's message is untitled
         )
         .await
         {

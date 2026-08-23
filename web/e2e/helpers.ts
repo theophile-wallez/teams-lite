@@ -158,6 +158,10 @@ export type CapturedSend = {
    *  reader scheduled it — a held message appears in no thread, so this is the only proof
    *  the moment they picked really left the composer. */
   scheduled_time?: number;
+  /** The post's TITLE. Present only on a titled channel post, and its being a field of
+   *  its own here is the point: the title is a property of the message, never words in
+   *  its body. */
+  subject?: string;
 };
 
 /** Configure the mock's next sends. Always reset the control after a failure test,

@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         &[],
         &[],
         None,
+        None, // no title: a probe posts no channel post
     )
     .await
     .context("post the message")?;

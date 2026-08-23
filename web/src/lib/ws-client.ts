@@ -550,12 +550,17 @@ export class Backend {
     images: SendImage[] = [],
     mentions?: OutboundMention[],
     scheduledTime?: number,
+    subject?: string,
   ): Promise<{ sent: boolean }> {
     return this.writeRequest<{ sent: boolean }>("send", {
       conversation,
       text,
       reply_to: replyTo,
       content_html: contentHtml,
+      // The post's TITLE, where a channel post has one — `properties.subject` on the
+      // message, never words in its body (see lib/post-subject.ts). Absent means untitled,
+      // which is every message this app sent before the field existed.
+      subject: subject || undefined,
       // When Teams is to DELIVER it, in epoch milliseconds — absent means now. The
       // service holds the message until then, so this is one ordinary send with one more
       // field in it rather than a queue on this machine.

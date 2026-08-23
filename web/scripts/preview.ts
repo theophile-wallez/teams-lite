@@ -3137,10 +3137,36 @@ if (import.meta.main) {
       await page.locator('[data-testid="channel-row"]').first().click();
       await page.waitForSelector('[data-testid="message"], [data-testid="system-event"]');
       await shot(`${out}-dark.png`);
+      // A channel post has a TITLE and a chat message does not: the composer's own field,
+      // empty and then filled, and the post it becomes — the heading drawn as a heading.
+      await shot(`${out}-subject-empty-dark.png`, '[data-testid="composer-shell"]');
+      await setTheme("light");
+      await page.locator('[data-testid="composer-subject"]').fill("Ship the US envs on Friday");
+      await typeInComposer(page, "The state diff is behind a feature flag now.");
+      await shot(`${out}-subject-light.png`, '[data-testid="composer-shell"]');
+      await page.keyboard.press("Enter");
+      await page.waitForSelector('[data-testid="thread-subject"]');
+      const titled = page
+        .locator('[data-testid="thread-group"]')
+        .filter({ hasText: "The state diff is behind a feature flag now." })
+        .first();
+      await titled.screenshot({ path: `${out}-titled-post-light.png`, animations: "disabled" });
+      await setTheme("dark");
+      await titled.screenshot({ path: `${out}-titled-post-dark.png`, animations: "disabled" });
+      // The composer grows a row on a channel, and this app is read from a PHONE — where the
+      // box is the whole width and every field in it competes with the keyboard.
+      await setTheme("light");
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.locator('[data-testid="composer-subject"]').fill("Ship the US envs on Friday");
+      await typeInComposer(page, "One more line, written on a phone.");
+      await shot(`${out}-subject-phone-light.png`);
+      await page.setViewportSize(VIEWPORT);
       console.log(
         `[preview] wrote ${out}-tree-light.png, ${out}-open-light.png, ` +
           `${out}-collapsed-light.png, ${out}-placement-light.png, ${out}-card-light.png, ` +
-          `${out}-card-dark.png, ${out}-card-actions-dark.png and ${out}-dark.png`,
+          `${out}-card-dark.png, ${out}-card-actions-dark.png, ${out}-dark.png, ` +
+          `${out}-subject-{empty-dark,light,phone-light}.png and ` +
+          `${out}-titled-post-{light,dark}.png`,
       );
     });
     process.exit(0);

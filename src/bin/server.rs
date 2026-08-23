@@ -4303,6 +4303,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // one POST is the whole feature — the service holds the message and posts it
             // at that moment, so nothing on this machine has to be running then.
             let scheduled_ms = teams_send::parse_scheduled_time(params)?;
+            // The post's TITLE, where a channel post has one. It rides in this method's
+            // params for the reason the pictures and the moment do — `send` is already the
+            // OUTWARD_METHODS entry, and the title is part of the message it posts, not a
+            // second action. A reply is refused one here (see `parse_subject`).
+            let subject = teams_send::parse_subject(params)?;
 
             // Custom emoji: read the pack's art for each code in the outbound body, so
             // the `:shipit:` codes become Teams' own inline emoji markup with the bytes
@@ -4334,6 +4339,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let images = images.clone();
                     let emoji_art = emoji_art.clone();
                     let mentions = mentions.clone();
+                    let subject = subject.clone();
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
                         let (rewritten_html, emoji_ids) = if !emoji_art.is_empty() {
@@ -4365,6 +4371,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &emoji_ids,
                             &mentions,
                             scheduled_ms,
+                            subject.as_deref(),
                         )
                         .await
                     }
@@ -4394,6 +4401,19 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let escaped = teams_send::escape_html(text.trim());
             let emoji_art = custom_emoji_art_in(&ctx, &escaped);
 
+            // The TITLE the post already has, carried through the edit. Measured against
+            // the tenant (2026-08-23, `examples/channel_subject_probe.rs`): an edit ASSIGNS
+            // `properties`, so one that did not restate the subject deleted the line above
+            // the body — for everybody in the thread, on a rewrite of one word. It comes
+            // from THIS machine's own store rather than from the client, so an edit can
+            // never retitle a post either.
+            let subject = ctx
+                .store()
+                .ok()
+                .and_then(|store| store.get_message(&conv, &message_id).ok().flatten())
+                .map(|m| m.thread_subject)
+                .filter(|s| !s.is_empty());
+
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
             let edit_conv = conv.clone();
@@ -4407,6 +4427,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let message_id = edit_id.clone();
                     let text = edit_text.clone();
                     let emoji_art = emoji_art.clone();
+                    let subject = subject.clone();
                     let escaped = teams_send::escape_html(text.trim());
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
@@ -4434,6 +4455,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &text,
                             Some(&rewritten_html),
                             &[],
+                            subject.as_deref(),
                         )
                         .await?;
                         Ok::<_, anyhow::Error>(rewritten_html)
@@ -10624,6 +10646,9 @@ async fn agent_send(
                 // Never scheduled: the answer is posted now and EDITED as it is written,
                 // and a message Teams is holding has no body to edit.
                 None,
+                // And no title: an answer is a REPLY, which has none — the thread it
+                // answers in is already named by its first post.
+                None,
             )
             .await
         }
@@ -10659,6 +10684,10 @@ async fn agent_edit(
                 "",
                 Some(&body.html),
                 &body.mentions,
+                // An agent's reply has no title: it is posted as a REPLY, and a reply is
+                // never titled (see `teams_send::parse_subject`). So there is nothing for
+                // this edit — one of many, once a second as the answer streams — to carry.
+                None,
             )
             .await
         }
@@ -14479,6 +14508,31 @@ mod tests {
         let mut broken = message(3);
         broken.mentions = "{not json".into();
         assert_eq!(message_json(&broken, "Alice", "8:me", None)["mentions"], json!([]));
+    }
+
+    /// An EDIT must carry the post's TITLE, and read it from THIS machine's store.
+    ///
+    /// Measured against the tenant (2026-08-23, `examples/channel_subject_probe.rs`): the
+    /// service ASSIGNS `properties` on an edit, so an edit that restates nothing deletes the
+    /// title — the line above the body gone for everybody in the thread, on a rewrite of one
+    /// word, with nothing anywhere saying so. It comes from the store rather than from the
+    /// client because an edit must not be able to RETITLE a post either.
+    #[test]
+    fn editing_a_titled_post_carries_its_title_from_the_store() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code.split("\"edit\" => {").nth(1).expect("the edit handler");
+        let handler = handler.split("\"react\" => {").next().expect("it ends at the next arm");
+        assert!(
+            handler.contains("get_message") && handler.contains("thread_subject"),
+            "the edit handler must read the message's own stored title, or a rewrite \
+             deletes the title of every titled post."
+        );
+        assert!(
+            handler.contains("subject.as_deref()"),
+            "the title has to reach `edit_message`; read from the store and dropped on the \
+             floor is the same silent loss."
+        );
     }
 
     #[test]

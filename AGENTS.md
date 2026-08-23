@@ -185,6 +185,102 @@ screenshots carry the last one.
   the deep-link scroll in `notifications.spec.ts` time out, which is a fragility of the
   virtualized history worth its own look and NOT something a test should hide.
 
+## A channel post has a TITLE (its own field in the composer, a heading above the body)
+
+A post in a CHANNEL carries a title — the line an announcement draws above its words — and a
+chat message does not. That is Teams' own split, and until this both halves of it were
+missing here: the composer was the same box in an announcement channel as in a 1:1, so a post
+could not be titled at all, and an INBOUND title was drawn at 13px above the thread, which
+reads as metadata rather than as the heading of what follows.
+`web/src/lib/post-subject.ts` holds the pure decisions, `teams_send::SUBJECT` and
+`parse_subject` the wire and the trust boundary, the field is `composer-subject` in
+`web/src/components/composer.tsx`, and the heading is `thread-subject` in
+`message-pane.tsx`.
+
+**THE TITLE IS A PROPERTY OF THE MESSAGE, NEVER WORDS IN ITS BODY.**
+`properties.subject` — exactly where the read path has always found one (`parse_thread` in
+src/teams_read.rs, over `Message::thread_subject`, which is what a channel thread has been
+named after since channels existed here). A composer that wrote the title as a first line of
+the body would show a colleague a bold sentence instead of a titled post, and the thread
+would have no name at all: nothing in the body is ever read as one.
+
+**EVERY FACT BELOW IS MEASURED**, by `examples/channel_subject_probe.rs` — the sanctioned way
+to try it live, pinned to the sandbox chat, and it removes both messages it posts:
+
+    . bin/broker-env.sh && teams_lite_export_broker_bus && \
+      cargo run --example channel_subject_probe
+
+Measured 2026-08-23 on the real tenant, plus one count off this machine's own store:
+
+- **`properties.subject` on a SEND is the title**, accepted byte for byte and read back as
+  one. A wrong spelling would not fail — the message would simply post untitled, which is the
+  one outcome this feature exists to prevent.
+- **AN EDIT DELETES IT.** The service ASSIGNS `properties` rather than merging it, so the
+  edit that restated nothing came back with no title: a rewrite of one word silently removing
+  the line above the body, for everybody in the thread. The same edit carrying the title KEPT
+  it. That is not a new hazard either — every edit this app made before today would have
+  stripped the title off a post the user had titled in real Teams.
+- **A title is a LINE, not a paragraph**: over the 80 titled posts this store holds they run
+  from 11 to 108 characters (mean 46), and the subject appears in the message body in 2 of
+  them — a coincidence of wording, not markup.
+
+Twelve rules hold it, and each is pinned by a test:
+
+- **The EDIT carries the title, and it comes from the STORE.** The `edit` handler reads the
+  message's own row (`Store::get_message`) and `build_edit_body` restates it, so an edit made
+  from any surface keeps it — and a client cannot RETITLE a post, because it never supplies
+  the value. `editing_a_titled_post_carries_its_title_from_the_store` scans the handler for
+  both halves, since reading it from the store and dropping it on the floor is the same
+  silent loss.
+- **It needs no gate of its own.** `send` is already an `OUTWARD_METHODS` entry and the title
+  rides in its params, exactly as a picture and a mention do — the title is part of the
+  message being posted, not a second action.
+- **A REPLY carries none, on both sides.** A thread has one title and it belongs to its first
+  post, so `parse_subject` refuses a `subject` beside a `reply_to` and the field is not drawn
+  while a reply is being written. Hidden, not emptied: a title typed before the reader pressed
+  Reply is still there when they cancel it, and it is not smuggled onto the reply meanwhile.
+- **A CHAT never offers one**, because Teams has no such field there and the send would carry
+  a property nothing draws.
+- **It is bounded and one LINE at the trust boundary** (`MAX_SUBJECT_CHARS`, 250 — a sanity
+  bound well clear of every real title, catching a whole message pasted into the field), and
+  `POST_SUBJECT_MAX_CHARS` states the same number as the field's native `maxLength`, so the
+  251st character is refused as it is typed rather than by a send.
+- **A title alone is not a post.** Send stays disabled until there are words: a titled empty
+  message is a heading over nothing.
+- **The field is where the reader's press LANDS, and it clears the touch floor.** The
+  composer focuses the message field on any click in its box that is not a control, so the
+  title had to be excluded — without that it is unusable by pointer, which is how the box
+  behaves on a phone too. It is 44px tall and set at 16px, the two rules every other target
+  and every other field here holds (a thumb, and no iOS zoom on focus), and Enter inside the
+  title moves to the words rather than posting.
+- **A title belongs to the conversation it was written in.** Walking away drops it, exactly as
+  a pasted picture is dropped — a title must not follow the reader into somebody else's
+  channel.
+- **A send takes back exactly the title that left**, and only while the field still holds it:
+  the rule `removeSentWords` follows for the words, so a title the reader REWROTE while the
+  request travelled is left alone.
+- **The heading is drawn AS a heading** — the size and weight Teams gives an announcement's
+  headline, and `web/e2e/channels.spec.ts` MEASURES it against the post's own body text
+  rather than trusting a class list, because "it reads as a title" is the whole feature.
+- **A titled post SURVIVES THE QUEUE.** Both actions on a message Teams is HOLDING are a
+  re-send (§ Sending a message LATER), so both carry the title the service already stored:
+  "Send now" posts it with the words, and "Edit" hands it back into the field — through
+  `composerRestore`, since a draft is words and the title is not one of them. Without either,
+  a reader taking their own announcement out of the queue would re-post it with the heading
+  silently removed.
+- **The mock mirrors every refusal and ECHOES a titled post** as the root of its own thread
+  carrying that title (`parseSendSubject`, and `scheduleSendEcho`), which is what the tenant
+  really answers with — a mock that withheld it would let a broken heading pass every test.
+
+`cd web && bun run preview -- --out /tmp/chan --channels` captures the field empty and filled,
+the post it becomes in both themes, and the composer at a PHONE's width, where the box gains a
+row; `web/e2e/channels.spec.ts` pins every rule the page owns and
+`web/src/lib/post-subject.test.ts` the pure ones. **What is UNVERIFIED against the tenant is a
+titled post in a real CHANNEL**: there is no sandbox channel, so what the probe measures is
+the service accepting the property on the messages endpoint — one endpoint for a chat and a
+channel alike — and one titled post in an announcement channel stays the user's own click, in
+their own app.
+
 ## Sending a message LATER (the SERVICE holds it, and this app can take it back)
 
 The composer can hand a message to Teams to deliver at a moment the user picked — Slack's
@@ -2458,7 +2554,9 @@ user. Two independent mechanisms enforce that split:
   from it. For the mail surface: `bun run preview -- --out /tmp/mail --mail`, or
   `openMailTab` / `openFirstMail` / `openMailAt` from the same file. For the calendar:
   `bun run preview -- --out /tmp/cal --calendar`, or `openCalendarTab` /
-  `openCalendarView` / `openFirstEvent`. For the team → channel tree:
+  `openCalendarView` / `openFirstEvent`. For the team → channel tree — and a channel post's own TITLE:
+  the composer's field empty and filled, the titled post in both themes and that composer at a
+  phone's width:
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
   `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
   and current, the list, the page, its header's own approval and merge in both themes, its own
@@ -4669,6 +4767,9 @@ user's. What changes is only what is asked.
   A message the service is HOLDING for later carries the moment it is due
   (`store::Message::scheduled_time`, schema v17) so the history can leave it out until then,
   and `scheduled_messages` lists what is waiting — see § Sending a message LATER.
+  A CHANNEL post also carries a TITLE, in the send that posts it and in the edit that
+  rewrites it (`teams_send::SUBJECT`, over the `Message::thread_subject` the read path has
+  always decoded) — see § A channel post has a TITLE.
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - One front-end, talking to the backend only through that WebSocket. Local-first is
   enforced server-side; the front-end touches neither the network nor SQLite directly.
