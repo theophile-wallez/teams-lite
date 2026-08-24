@@ -56,6 +56,12 @@
 //     a later moment could be bound out too. It is not bound today: `teams_read` parses no
 //     clientmessageid off an inbound message, so the reader has nothing to compare against — a
 //     stated gap rather than an unknown one.
+//   - THE WHOLE CHAIN CLOSES. A real message sealed by `seal::seal`, posted through
+//     `teams_send`, read back through `teams_read` and opened by `seal::open` came out WORD FOR
+//     WORD: `<p>the merger closes on <b>Friday</b></p>`, 41 characters of words in a 142-character
+//     body. With no passphrase at all the same message answers `UnknownKey([cb, b4, a8, 55])` —
+//     which is the locked row, naming which passphrase is missing. Every measurement above is about
+//     the carrier; this one is the feature.
 //   - A CUSTOM `properties.tlsealed` IS KEPT, byte for byte — and its budget is a SEPARATE and
 //     much smaller 28 672 bytes ("Message properties size exceeded"). It is the prettier
 //     carrier (a stock Teams client would draw the notice alone, with no base64 under it) and
@@ -70,7 +76,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 
-use teams_lite::{teams, teams_read, teams_send};
+use teams_lite::{seal, teams, teams_read, teams_send};
 
 /// The sandbox chat (AGENTS.md § Sending messages). The only pre-authorized target, and the
 /// only conversation this file may ever name.
@@ -189,7 +195,39 @@ async fn main() -> Result<()> {
         );
     }
 
-    // 6. The CEILING, in the service's own words, and which half of the message it counts.
+    // 6. THE WHOLE CHAIN, through the code that really ships. Everything above measures the
+    //    CARRIER with a stand-in pattern; this seals a real message with `seal::seal`, posts it
+    //    through `teams_send`, reads it back through `teams_read`, and opens it with `seal::open`.
+    //    If this says WORDS, then a sealed chat works end to end against the real tenant.
+    println!("\n=== 6. a real seal, posted and opened again ===");
+    {
+        let words = "<p>the merger closes on <b>Friday</b></p>";
+        let key = seal::derive("probe passphrase", SANDBOX_THREAD)?;
+        let body = seal::seal(&key, SANDBOX_THREAD, &session.self_mri, words)?;
+        println!("  sealed {} chars of words into a {} char body", words.len(), body.len());
+        let id = post(&http, &session, &body).await?;
+        posted.push(id.clone());
+
+        let page = teams_read::fetch_newest(&http, &session, SANDBOX_THREAD).await?;
+        let stored = page
+            .messages
+            .iter()
+            .find(|m| m.id == id)
+            .context("the message did not come back")?;
+        // The sender the reader really sees, which is what the envelope binds.
+        match seal::open(&[key], SANDBOX_THREAD, &stored.sender_mri, &stored.content) {
+            seal::Opened::Words(back) if back == words => {
+                println!("  OPENED, word for word: {back:?}")
+            }
+            seal::Opened::Words(back) => println!("  opened but CHANGED: {back:?}"),
+            other => println!("  FAILED: {other:?} — the chain does not close"),
+        }
+        // And what a reader with NO passphrase sees: a locked row, naming which key it needs.
+        let without = seal::open(&[], SANDBOX_THREAD, &stored.sender_mri, &stored.content);
+        println!("  with no passphrase at all: {without:?}");
+    }
+
+    // 7. The CEILING, in the service's own words, and which half of the message it counts.
     //    An AEAD has no partial credit and base64 is 4 bytes out for 3 in, so the largest
     //    message this app may seal is a number the feature has to know — and whether the
     //    envelope is cheaper in a property than in the body decides which carrier ships.

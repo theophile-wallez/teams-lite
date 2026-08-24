@@ -452,10 +452,19 @@ carrying all four message states at once and a `{kind:"seal"}` hook a spec MUST 
 run preview -- --out /tmp/seal --seal` captures the menu row, the dialog in both themes, a generated
 passphrase, the four states, the composer's hint, the mismatch warning, the armed forget and the
 dialog at a phone's width; `web/e2e/seal.spec.ts` pins every rule the page owns and
-`web/src/lib/seal.test.ts` the pure ones. **What is UNVERIFIED against the tenant is the pairing**:
-the carrier, the ceiling, the edit and the sender's mri are all measured through this crate's own
-functions (above), and what nobody has done is seal a message in one install and open it in a
-colleague's — which needs a second machine running this app, and is the user's own click.
+`web/src/lib/seal.test.ts` the pure ones.
+
+**THE WHOLE CHAIN IS VERIFIED AGAINST THE TENANT, through the code that ships.** The probe's last
+measurement seals a real message with `seal::seal`, posts it through `teams_send`, reads it back
+through `teams_read` and opens it with `seal::open`: it came out word for word, and the same message
+read with no passphrase answers `UnknownKey`, which is the locked row naming which passphrase is
+missing. What is still UNVERIFIED is the PAIRING BETWEEN TWO MACHINES: nobody has sealed a message in
+one install and opened it in a colleague's, because that needs a second machine running this app. Two
+things rest on that and are inferred rather than measured — that a colleague's `sender_mri` is spelled
+for their reader exactly as their own session spells it (proven for one's OWN message, and the failure
+would be visible rather than silent: their message reads as damaged and its token stays on disk), and
+that two people typing one passphrase land on one key (pinned in Rust, and the same code on both
+sides).
 
 ## Sending a message LATER (the SERVICE holds it, and this app can take it back)
 
