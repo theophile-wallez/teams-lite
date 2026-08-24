@@ -292,9 +292,15 @@ export function SealDialog(props: {
             // the two rules every other field in this app holds.
             className="h-11 text-base"
           />
+          {/* The field's own hint, and it says something the panel above has not.
+              "Every passphrase is kept" is already stated up there, beside the keys it is
+              about — saying it twice, two centimetres apart, is one fact twice, which is what
+              the schedule menu's own rows were fixed for. What is worth saying HERE is what
+              adding one DOES, because that is the question somebody with a field in front of
+              them is asking. */}
           <p data-testid="seal-field-hint" className="text-[11px] text-text-faint">
             {holdsKey
-              ? "Every passphrase above is kept, so nothing already here stops opening."
+              ? "Adding one opens the messages it was used for. It also becomes the one new messages are encrypted with."
               : "A passphrase this app makes is five short groups you can read out. Type your own if you would rather."}
           </p>
 
