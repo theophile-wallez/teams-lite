@@ -1005,9 +1005,9 @@ Five rules hold it together. Each one is load-bearing, and each is pinned by a t
   channel is the single built-in exception, because § Sending messages pre-authorizes
   it. Anything else needs `agent_set_mode`, a write-token-gated `MACHINE_METHODS`
   entry — which is the consent gate for this whole feature, and the reason it is not a
-  standing licence to post. The user turns one thread on from that thread's own header
-  (`web/src/components/agent-menu.tsx`, over `web/src/lib/agent.ts`), never from a
-  global list of ids: the consent belongs where they can see who reads the thread. The
+  standing licence to post. The user turns one thread on from that thread's own MENU
+  (`web/src/components/conversation-menu.tsx`, over `web/src/lib/agent.ts` and
+  `agent-menu.tsx`'s own rules), never from a global list of ids: the consent belongs where they can see who reads the thread. The
   switch stays off and disabled until `agent_status` answers, because `off` is what the
   backend defaults to and a hopeful switch would misstate where a machine posts.
 - **The tool allowlist is read-only until the user widens it.** `Read`, `Glob`, `Grep`
@@ -3187,6 +3187,52 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
     957 chats — so "the members are only me" finds hundreds of ordinary colleagues' chats.
     It cost one wrong diagnosis: the id is the signal.
 
+## ONE MENU in a conversation's header (everything the thread offers, behind one trigger)
+
+A conversation's header holds ONE control at its right, and it opens a menu with everything the
+thread offers in it: the CALL — or the JOIN, where the thread was minted for a meeting — a game of
+CHESS, whether the local agent answers here, and whether the chat is ENCRYPTED.
+`web/src/components/conversation-menu.tsx` is the whole of it, and it replaced three separate
+controls standing side by side.
+
+**THE THING THE READER AIMS AT USED TO MOVE BETWEEN CONVERSATIONS.** Each of those three drew
+itself only where it would work, which is the right rule for a control and the wrong shape for a
+row of them: a 1:1 had a call, a meeting chat had a Join in that slot instead, Notes had neither so
+the agent switch slid left into the space, and a channel had only the agent. So the second control
+from the right was a different action in every thread — on a phone a mis-tap, on a desktop a
+hesitation. One trigger, in one place, in every conversation, is steadier.
+
+**The cost is honest and worth saying: a call is now two presses.** That is the trade — a target
+that never moves, paid for with one extra press on the commonest action here. What is bought back is
+that every OTHER action costs two presses as well rather than being hidden behind a glyph the reader
+had to recognise first, and that a menu row has room for WORDS: a refusal used to live in a tooltip,
+which on a coarse pointer is a sentence that does not exist.
+
+Five rules hold it, and each is pinned by a test:
+
+- **No gate moved with the controls.** Each row is drawn under exactly the condition its button was
+  drawn under, carries the same `aria-label`, and states the same reason where it cannot act. The
+  arguments for each live where they always did — `call-button.tsx`, `chess-button.tsx` and
+  `agent-menu.tsx` — and this file draws them rather than re-deciding them.
+- **The old testids are KEPT on the rows** (`call-button`, `meeting-join-here`, `chess-button`,
+  `chess-challenge`, `agent-mode-toggle`, `agent-hint`, `agent-unrestricted-toggle`). A spec that
+  drove a control now opens the menu and finds the same row, so what every existing assertion MEANS
+  survived the move.
+- **Two things stay OUTSIDE the closed menu, because a signal inside one says nothing.** The chess
+  attention DOT, whose whole job is to say the game wants something from the reader while the board
+  is a screen away, moves onto the trigger; and the agent's own "on" becomes the trigger's accent,
+  because "a machine may post under my name in this thread" is the sharpest state this header ever
+  stated and a consent that can only be read by opening a menu is one the reader stops checking. The
+  two do not compete: the accent is a standing state and the dot is a thing waiting to be done.
+- **A MEETING's Join still states its own address** (`data-join-url`, or `data-meeting-thread`), for
+  the reason § Automation safety gives: an outward action a driver cannot prove is one it must not
+  take. `web/scripts/join-live.ts --from-chat` therefore OPENS the menu and then re-reads that
+  address from the row in the moment before the click — the proof is unchanged, and opening a menu
+  reaches nobody. Only the OPENING is retried, so no attempt can carry a stale proof forward.
+- **Every row clears the 44px touch floor**, which it gets from the shared `DropdownMenuItem` — the
+  same rule and the same one place a message's own actions already hold (§ A HOLD is how a phone
+  reaches a menu).
+
 ## Audio calls (a call RINGS a person — the sharpest outward action here)
 
 The app takes and places one-to-one **audio** calls, by doing what the real Teams WEB
@@ -3261,16 +3307,16 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   - a **MEETING chat** — a thread Teams minted FOR a meeting — JOINS instead, addressed by
     that thread (see § Joining a meeting). It offers no ring: joining and ringing everybody
     invited answer the same question, and only one of them is what the thread is for.
-  - **All three wear ONE control, in one box** (`MeetingJoinButton shape="icon"`, the call
-    button's own 36px square and its own handset). A header is a row of controls the user
-    aims at, so a chat that changed their size or shape would move the target between two
-    conversations — and the labelled blue pill the calendar keeps would read as a fourth kind
-    of thing here. The handset is not a claim that the click rings anybody: it says "start
-    talking to the people in this conversation, here", which is what both actions do. WHICH
-    action it is lives in the tooltip, in the label a screen reader gets, and in the row's own
-    "Meeting chat" subtitle — and `web/e2e/calling.spec.ts` measures the two boxes against
-    each other rather than trusting the class list. A glyph that tried to say "join" was
-    measured and rejected: `MeetingRoomIcon` reads as a bare panel at 20px.
+  - **All three are ONE ROW of the conversation's own menu** (§ ONE MENU in the header). They
+    answer one question — start talking to the people in this conversation, here — so they were
+    one control in one box before the menu existed, for the reason that argument still gives:
+    a header is a row of controls the user aims at, and a chat that changed their size or shape
+    would move the target between two conversations. The menu takes that further rather than
+    away: the TRIGGER is the one target now, in every conversation, and the row has room for
+    WORDS where the icon had a tooltip — which on a coarse pointer is a sentence that does not
+    exist. WHICH action it is is in the row's own label, in what a screen reader is handed, and
+    in the row's "Meeting chat" subtitle. A glyph that tried to say "join" was measured and
+    rejected on the way here: `MeetingRoomIcon` reads as a bare panel at 20px.
   - **`MAX_GROUP_CALL_PEOPLE` (20) is the ceiling**, and it is a product rule rather than a
     protocol one: every name in that list is a device buzzing in somebody's pocket, and a
     mis-click on a 60-person thread cannot be taken back. Above it the user still has real
@@ -3842,9 +3888,9 @@ folded window, the drag and the picture in both themes.
 ## Joining a meeting (the calendar stays read-only)
 
 A calendar event with a Teams link offers **Join here** beside the way out to real
-Teams (`web/src/components/meeting-join-button.tsx`) — and the HEADER of the meeting's own
-chat offers the same join, as the icon control every other chat's header carries (see
-§ Audio calls for why one shape). A meeting is usually noticed in the chat list, which is
+Teams (`web/src/components/meeting-join-button.tsx`) — and the MENU of the meeting's own
+chat offers the same join, as one row of the one control every conversation's header carries
+(see § ONE MENU in a conversation's header). A meeting is usually noticed in the chat list, which is
 why both surfaces exist. It joins with a microphone and nothing else, so a meeting whose
 point is a shared screen is still one to open in Teams.
 
@@ -4603,7 +4649,8 @@ Rust and against the mock, so what is untested is one real `@bebou` run in the u
 ## Chess in a conversation (a game IS the thread)
 
 The user can play chess against anybody in a conversation who also runs teams-lite, from a
-shortcut in that conversation's own header. Every challenge, acceptance, move, draw offer and
+row of that conversation's own MENU (§ ONE MENU in a conversation's header). Every challenge,
+acceptance, move, draw offer and
 resignation is an ordinary Teams message; the board is one row in the history, derived from
 those messages. `web/src/lib/chess-wire.ts` is the line a chess message signs itself with,
 `chess-thread.ts` the games a thread holds, `web/src/components/chess-game-card.tsx` the board
