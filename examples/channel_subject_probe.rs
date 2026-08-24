@@ -117,6 +117,8 @@ async fn post_titled(
         &[],
         None,
         Some(TITLE),
+        // A probe seals nothing: it posts to the sandbox chat in the clear.
+        None,
     )
     .await
     .context("send a titled message")?;
@@ -140,9 +142,13 @@ async fn edit(
         Some("<p>channel subject probe — the body was rewritten by an edit</p>"),
         &[],
         subject,
+        None, // a probe posts in the clear
     )
     .await
     .context("edit a titled message")
+    // The edit answers with the body it posted; this probe seals nothing, so there is
+    // nothing to compare and the body is dropped.
+    .map(|_posted| ())
 }
 
 /// The title the service really stored for one message, read back through the app's own

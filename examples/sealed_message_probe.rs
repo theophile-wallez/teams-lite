@@ -126,7 +126,9 @@ async fn main() -> Result<()> {
     let id = post(&http, &session, &sealed_body(&first)).await?;
     posted.push(id.clone());
     let second = envelope_of(1024);
-    teams_send::edit_message(&http, &session, SANDBOX_THREAD, &id, "", Some(&sealed_body(&second)), &[], None)
+    teams_send::edit_message(
+        &http, &session, SANDBOX_THREAD, &id, "", Some(&sealed_body(&second)), &[], None, None,
+    )
         .await
         .context("edit a sealed message")?;
     let raw = read_raw(&http, &session, &id).await?;
@@ -284,6 +286,8 @@ async fn post(http: &reqwest::Client, session: &teams::Session, body: &str) -> R
         // A probe mentions nobody: a mention notifies the person it names.
         &[],
         None,
+        None,
+        // A probe seals nothing: it posts to the sandbox chat in the clear.
         None,
     )
     .await

@@ -48,6 +48,8 @@ async fn main() -> Result<()> {
         // Posted now: this probe deletes what it posts.
         None,
         None, // no title: a probe posts no channel post
+        // A probe seals nothing: it posts to the sandbox chat in the clear.
+        None,
     )
     .await
     .context("post the message to delete")?;

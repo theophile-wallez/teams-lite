@@ -191,6 +191,10 @@ pub const MAX_SEALED_PLAINTEXT: usize = 64 * 1024;
 pub const SERVICE_MESSAGE_LIMIT: usize = 102_400;
 
 /// How much room the rest of a POST is allowed, on top of the sealed body.
+///
+/// Read only by [`the_ceilings_close`], which is the whole point of it: the number is an
+/// assertion about the arithmetic rather than a value any code branches on.
+#[cfg(test)]
 const POST_OVERHEAD_BUDGET: usize = 12 * 1024;
 
 /// A decompressed body is never allowed past this. The ciphertext is AUTHENTICATED, so only

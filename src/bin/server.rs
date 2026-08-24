@@ -4319,6 +4319,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 None => (None, Vec::new()),
             };
 
+            // The key this conversation SEALS with, or None where it is not sealed (§ A sealed
+            // chat). It is read here, once, rather than inside the retry closure: an auth
+            // retry must re-seal with the SAME key, and a passphrase the user changed between
+            // the two attempts would otherwise post a message under a key nobody else holds.
+            //
+            // FAIL-CLOSED: a store this backend cannot read refuses the send rather than
+            // posting in the clear to a chat whose reader believes it is sealed.
+            let seal_key = ctx
+                .store()
+                .context("this chat may be sealed and the store cannot be read")?
+                .current_seal_key(&conv)
+                .context("read this chat's seal key")?;
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
             let send_conv = conv.clone();
@@ -4340,6 +4352,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let emoji_art = emoji_art.clone();
                     let mentions = mentions.clone();
                     let subject = subject.clone();
+                    let seal_key = seal_key.clone();
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
                         let (rewritten_html, emoji_ids) = if !emoji_art.is_empty() {
@@ -4372,6 +4385,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &mentions,
                             scheduled_ms,
                             subject.as_deref(),
+                            seal_key.as_ref(),
                         )
                         .await
                     }
@@ -4414,6 +4428,16 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(|m| m.thread_subject)
                 .filter(|s| !s.is_empty());
 
+            // The key this conversation seals with. An edit is a whole new body, so it has to
+            // be sealed exactly as the send was — and FAIL-CLOSED for the send's own reason: a
+            // rewrite that quietly went out in the clear would publish, to everybody, the words
+            // of a message the reader had sealed.
+            let seal_key = ctx
+                .store()
+                .context("this chat may be sealed and the store cannot be read")?
+                .current_seal_key(&conv)
+                .context("read this chat's seal key")?;
+
             let http = ctx.http.clone();
             let tokens = ctx.tokens.clone();
             let edit_conv = conv.clone();
@@ -4428,6 +4452,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let text = edit_text.clone();
                     let emoji_art = emoji_art.clone();
                     let subject = subject.clone();
+                    let seal_key = seal_key.clone();
                     let escaped = teams_send::escape_html(text.trim());
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
@@ -4447,7 +4472,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         // A plain edit of the user's OWN message carries no mention: the
                         // RPC takes text, and a mention needs a span the text has no way to
                         // hold. The composer's mentions travel on the send.
-                        teams_send::edit_message(
+                        // What it ANSWERS with is what it really posted — the sealed
+                        // envelope in a sealed chat — and that is what the local row gets.
+                        let posted = teams_send::edit_message(
                             &http,
                             &session,
                             &conv,
@@ -4456,9 +4483,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             Some(&rewritten_html),
                             &[],
                             subject.as_deref(),
+                            seal_key.as_ref(),
                         )
                         .await?;
-                        Ok::<_, anyhow::Error>(rewritten_html)
+                        Ok::<_, anyhow::Error>(posted)
                     }
                 })
                 .await?;
@@ -4467,9 +4495,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 let session = ctx.session().await?;
                 (session.self_name.to_string(), session.self_mri.to_string())
             };
-            // Update the local row with the SAME body we sent (the rewritten html with
-            // emoji markup), so the row and the network agree — exactly what the comment
-            // above promised.
+            // Update the local row with the SAME body we sent — the rewritten html with the
+            // emoji markup, and in a SEALED chat the envelope rather than the words. That is
+            // what `edit_message` answers with, for exactly this reason: storing the plaintext
+            // would leave this machine the only one in the thread that reads the message as
+            // never having been sealed, so the padlock would go and `msg_reader` would have
+            // nothing to open.
             if let Ok(store) = ctx.store() {
                 if let Some(updated) = store.update_message_content(&conv, &message_id, &final_html)? {
                     ctx.emit("message", message_json(&updated, &self_name, &self_mri, Some(&store)));
@@ -10618,12 +10649,21 @@ async fn agent_send(
     let tokens = ctx.tokens.clone();
     let conversation = command.conversation_id.clone();
     let html = html.to_string();
+    // The agent's answer is sealed like every other message in a sealed chat — the user asked
+    // for exactly that split: the agent READS the thread in the clear (its prompt carries the
+    // conversation to the model provider), and what it POSTS is sealed. Read once, outside the
+    // retry, so an auth retry re-seals under the same key.
+    let seal_key = ctx
+        .store()
+        .context("this chat may be sealed and the store cannot be read")?
+        .current_seal_key(&conversation)?;
     ctx.retry_on_auth(move |session, _csa| {
         let http = http.clone();
         let tokens = tokens.clone();
         let conversation = conversation.clone();
         let html = html.clone();
         let reply_to = reply_to.clone();
+        let seal_key = seal_key.clone();
         async move {
             let ic3 = tokens.get(IC3_SCOPE).await?;
             teams_send::send_message(
@@ -10649,6 +10689,7 @@ async fn agent_send(
                 // And no title: an answer is a REPLY, which has none — the thread it
                 // answers in is already named by its first post.
                 None,
+                seal_key.as_ref(),
             )
             .await
         }
@@ -10670,11 +10711,19 @@ async fn agent_edit(
     let conversation = conversation_id.to_string();
     let message_id = message_id.to_string();
     let body = body.clone();
+    // Every streaming frame of the answer is a re-seal, with a fresh nonce each time. Read the
+    // key once here rather than per frame: the derivation is already paid (the store holds the
+    // derived key), and a passphrase changed mid-answer must not split one message across two.
+    let seal_key = ctx
+        .store()
+        .context("this chat may be sealed and the store cannot be read")?
+        .current_seal_key(conversation_id)?;
     ctx.retry_on_auth(move |session, _csa| {
         let http = http.clone();
         let conversation = conversation.clone();
         let message_id = message_id.clone();
         let body = body.clone();
+        let seal_key = seal_key.clone();
         async move {
             teams_send::edit_message(
                 &http,
@@ -10688,8 +10737,12 @@ async fn agent_edit(
                 // never titled (see `teams_send::parse_subject`). So there is nothing for
                 // this edit — one of many, once a second as the answer streams — to carry.
                 None,
+                seal_key.as_ref(),
             )
             .await
+            // The edit answers with the body it posted; an agent's own edit has no local row to
+            // reconcile, so it is dropped here rather than threaded through the caller.
+            .map(|_posted| ())
         }
     })
     .await

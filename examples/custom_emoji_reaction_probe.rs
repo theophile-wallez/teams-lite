@@ -69,6 +69,8 @@ async fn main() -> Result<()> {
         &[],
         None,
         None, // no title: a probe posts no channel post
+        // A probe seals nothing: it posts to the sandbox chat in the clear.
+        None,
     )
     .await
     .context("post the message")?;

@@ -64,6 +64,8 @@ async fn main() -> Result<()> {
         &[],
         Some(deliver_at),
         None, // no title: a probe posts no channel post
+        // A probe seals nothing: it posts to the sandbox chat in the clear.
+        None,
     )
     .await
     .context("schedule the message that should be delivered")?;
@@ -101,6 +103,8 @@ async fn main() -> Result<()> {
         &[],
         Some(cancel_at),
         None, // no title: a probe posts no channel post
+        // A probe seals nothing: it posts to the sandbox chat in the clear.
+        None,
     )
     .await
     .context("schedule the message that should be cancelled")?;
@@ -146,6 +150,8 @@ async fn main() -> Result<()> {
         &[],
         Some(cancel_at),
         None, // no title: a probe posts no channel post
+        // A probe seals nothing: it posts to the sandbox chat in the clear.
+        None,
     )
     .await
     .context("schedule the message the writes are tried on")?;
@@ -162,10 +168,11 @@ async fn main() -> Result<()> {
             Some("<p>scheduled send probe — REWRITTEN while held</p>"),
             &[],
             None, // a probe's message is untitled
+            None, // and unsealed: a probe posts in the clear
         )
         .await
         {
-            Ok(()) => println!("== EDIT on a held message: accepted"),
+            Ok(_posted) => println!("== EDIT on a held message: accepted"),
             Err(e) => println!("!! EDIT on a held message: {e}"),
         }
         let held = one_scheduled(&http, &session, &editable.id).await;
