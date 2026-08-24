@@ -1329,6 +1329,7 @@ mod tests {
 
     fn message(content: &str) -> Message {
         Message {
+            seal: Default::default(),
             id: "1785773946196".into(),
             conversation_id: SANDBOX_THREAD.into(),
             seq: 1,

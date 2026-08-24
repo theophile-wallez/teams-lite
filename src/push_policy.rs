@@ -202,6 +202,7 @@ mod tests {
 
     fn chat_message() -> Message {
         Message {
+            seal: Default::default(),
             id: "m1".into(),
             conversation_id: "19:chat@thread.v2".into(),
             seq: 1,

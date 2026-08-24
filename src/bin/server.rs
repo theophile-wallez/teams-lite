@@ -14052,6 +14052,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         store.set_person_name("8:orgid:rob", Some("Bob"), 1_000).unwrap();
         let message = Message {
+            seal: Default::default(),
             id: "m1".into(),
             conversation_id: "19:dm@unq.gbl.spaces".into(),
             seq: 1,
@@ -14395,6 +14396,7 @@ mod tests {
 
     fn message(seq: i64) -> Message {
         Message {
+            seal: Default::default(),
             id: format!("m{seq}"),
             conversation_id: "c1".into(),
             seq,

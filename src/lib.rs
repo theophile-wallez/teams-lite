@@ -43,6 +43,7 @@ pub mod push;
 pub mod push_policy;
 pub mod restart;
 pub mod retry;
+pub mod seal;
 pub mod sender_icon;
 pub mod signin;
 pub mod teams;

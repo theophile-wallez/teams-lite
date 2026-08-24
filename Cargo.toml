@@ -39,6 +39,13 @@ sha2 = "0.10"
 # `sha2` above already brings in, so it adds no tree of its own.
 sha1 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
+# Argon2id, for exactly one caller: the key that seals a chat's messages
+# (`seal::derive`). It is the one place in this crate that turns a HUMAN PASSPHRASE into a
+# key, and the ciphertext it protects is held for ever by the adversary it protects it from
+# (the tenant), so the KDF has to be memory-hard — `sha2` and `hkdf` above are neither, and
+# using either here would leave a weak passphrase open to an offline attack at GPU speed.
+# RustCrypto, like `aes-gcm`, `hkdf` and `p256`: pure Rust, no system openssl, one small tree.
+argon2 = "0.5"
 # Local wall-clock time, for exactly one caller: the hours "Always available" keeps
 # (`teams_presence::local_minute_of_day`). Everything else here is epoch ms or ISO-8601
 # UTC and needs no calendar — but "green from 08:00 to 19:00" is the user's OWN morning,

@@ -1628,6 +1628,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             content: String::new(),
             attachments: "[]".to_string(),
             reactions: String::new(),
+            seal: crate::store::MessageSeal::None,
             system_event: event.to_string(),
             thread_root_id: String::new(),
             thread_subject: String::new(),
@@ -1657,6 +1658,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             content: String::new(),
             attachments: "[]".to_string(),
             reactions: parse_emotions(m),
+            seal: crate::store::MessageSeal::None,
             system_event: event.to_string(),
             thread_root_id,
             thread_subject,
@@ -1684,7 +1686,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 content: String::new(),
                 attachments: "[]".to_string(),
                 reactions: String::new(),
-                system_event: event.to_string(),
+                seal: crate::store::MessageSeal::None,
+            system_event: event.to_string(),
                 thread_root_id: String::new(),
                 thread_subject: String::new(),
                 deleted: false,
@@ -1718,7 +1721,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 content: String::new(),
                 attachments: Value::Array(vec![attachment]).to_string(),
                 reactions: parse_emotions(m),
-                system_event: String::new(),
+                seal: crate::store::MessageSeal::None,
+            system_event: String::new(),
                 thread_root_id,
                 thread_subject,
                 deleted: false,
@@ -1752,7 +1756,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 content: String::new(),
                 attachments: Value::Array(vec![attachment]).to_string(),
                 reactions: parse_emotions(m),
-                system_event: String::new(),
+                seal: crate::store::MessageSeal::None,
+            system_event: String::new(),
                 thread_root_id,
                 thread_subject,
                 deleted,
@@ -1796,6 +1801,9 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         sender,
         sender_mri,
         message_type: messagetype.to_string(),
+        // A frame is not a store read, so this is the structural answer: sealed and not yet
+        // opened, or an ordinary message (see `MessageSeal::of_frame`).
+        seal: crate::store::MessageSeal::of_frame(&content),
         content,
         attachments,
         reactions: parse_emotions(m),
@@ -2495,6 +2503,16 @@ pub(crate) fn attachment_value_label(attachment: &Value) -> String {
 pub fn preview_for_message(m: &crate::store::Message) -> String {
     if !m.system_event.is_empty() {
         return system_event_label(&m.system_event);
+    }
+    // A SEALED body previews as NOTHING, and that one line is what keeps a base64 token out of
+    // the sidebar and out of a notification. The stored preview is written from the FRAME (see
+    // `parse_last_message`), where the body is still a ciphertext, so previewing it would put
+    // the token on the chat row for good — and the gap is then filled by
+    // `Store::derived_preview`, which reads through `msg_reader` and so previews the WORDS on
+    // every sidebar read. That is also what makes a passphrase added today fix every preview
+    // with nothing to migrate.
+    if crate::seal::is_sealed(&m.content) {
+        return String::new();
     }
     let text = preview_from_html(&m.content);
     if !text.is_empty() {
@@ -3220,6 +3238,7 @@ mod tests {
             content: content.into(),
             attachments: attachments.into(),
             reactions: "[]".into(),
+            seal: crate::store::MessageSeal::None,
             system_event: system_event.into(),
             thread_root_id: String::new(),
             thread_subject: String::new(),
@@ -4055,6 +4074,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, &seq)| Message {
+                seal: Default::default(),
                 id: format!("id{seq}"),
                 conversation_id: "c1".into(),
                 seq,

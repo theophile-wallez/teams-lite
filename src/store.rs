@@ -441,6 +441,39 @@ CREATE TABLE IF NOT EXISTS gitlab_reads (
     payload    TEXT NOT NULL,
     fetched_ms INTEGER NOT NULL DEFAULT 0
 );
+-- The passphrases that open a SEALED chat, one row per key (see `crate::seal`).
+--
+-- A conversation is sealed IFF it holds a CURRENT key: one state rather than two, because
+-- "sealed with no key" is a chat nothing can be sent to and "a key but not sealed" is a
+-- chat whose reader cannot tell what the next Enter publishes. Turning sealing off clears
+-- `is_current` and KEEPS the row, so every message already in the thread stays readable —
+-- a key removed while its messages remain is the one action here nothing takes back.
+--
+-- SEVERAL keys per conversation is the normal state, not an edge case: a passphrase gets
+-- rotated, or a colleague changes it, and the older messages still have to open. A read
+-- tries the keys whose id matches the envelope (see `seal::open`).
+--
+-- The PASSPHRASE is kept beside the derived key, deliberately. It is what a colleague who
+-- joins the conversation next month has to be given, and a passphrase this app cannot show
+-- again is one the user has to rotate the whole chat to share. It is no wider a secret than
+-- the key beside it — either one opens every message — and the dialog that reveals it says
+-- so, which is why the generated default is what it offers first.
+CREATE TABLE IF NOT EXISTS seal_keys (
+    conversation_id TEXT NOT NULL,
+    -- `seal::KeyId` as 8 hex characters: which envelopes this key opens.
+    key_id          TEXT NOT NULL,
+    -- The derived AES-256 key as 64 hex characters. Kept so a read never runs Argon2id —
+    -- the derivation is paid once, when the passphrase is added.
+    key_hex         TEXT NOT NULL,
+    -- The words the user typed or the app generated. Never sent to a client except by the
+    -- reveal the user pressed (see the `seal_reveal` RPC), and never logged.
+    passphrase      TEXT NOT NULL DEFAULT '',
+    -- 1 on the one key new messages are sealed with. 0 on an older key that is still
+    -- allowed to OPEN what it sealed.
+    is_current      INTEGER NOT NULL DEFAULT 0,
+    added_ms        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (conversation_id, key_id)
+);
 "#;
 
 /// Indexes, applied AFTER [`migrate`] because several of them cover columns that a
@@ -545,7 +578,15 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// rather than a second v14 because both tables were built on branches that each called
 /// themselves 14: `open` runs the DDL pass only when the recorded version MOVES, so a
 /// store stamped 14 by either build would never grow the other one's table.
-const SCHEMA_VERSION: i64 = 17;
+/// v18 adds `seal_keys`, the passphrases that open a SEALED chat (see [`crate::seal`] and
+/// [`Store::seal_keyring`]). A whole new table rather than columns, and additive: an older
+/// binary never names it — which is also exactly what it costs, and it is worth stating,
+/// because two send-capable backends share this store. A backend from before this commit
+/// reads a sealed message as the token it is and POSTS a reply in the CLEAR to a chat the
+/// other one is sealing. The store cannot prevent that (the older process reads a table it
+/// has never heard of), and it heals on the next re-stage — the same shape § Running the
+/// released build beside the staged one already records for the presence hours.
+const SCHEMA_VERSION: i64 = 18;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -691,6 +732,37 @@ pub struct Message {
     /// lets the UI show a person card for a mention. Defaults to `"[]"` for
     /// messages without mentions and for legacy rows.
     pub mentions: String,
+    /// How this row's body reached the reader: an ordinary message, one this machine OPENED,
+    /// or one it could not (see [`MessageSeal`] and [`crate::seal`]).
+    ///
+    /// It is resolved on the way OUT of the store, by [`msg_reader`], and is never a stored
+    /// column: the row on disk holds the ciphertext the frame really carried — which is what
+    /// makes a passphrase added tomorrow open every message already received — and this field
+    /// is what that ciphertext turned out to be on this read, with this machine's keys.
+    pub seal: MessageSeal,
+}
+
+/// One conversation this machine holds a seal key for — what Settings lists.
+///
+/// It carries no passphrase and no key material: a page is told WHICH chats are sealed and with
+/// which key id, never with what (the rule `get_settings` holds for a token).
+#[derive(Debug, Clone)]
+pub struct SealedConversation {
+    pub conversation_id: String,
+    /// Whether NEW messages here are sealed, i.e. whether one of these keys is current.
+    pub sealing: bool,
+    /// The key new messages are sealed with, or empty when sealing is off.
+    pub current_key_id: String,
+    /// Every key this machine holds for the conversation, oldest first.
+    pub keys: Vec<SealKeyRecord>,
+}
+
+/// One passphrase this machine holds for a conversation, without the passphrase.
+#[derive(Debug, Clone)]
+pub struct SealKeyRecord {
+    pub key_id: String,
+    pub is_current: bool,
+    pub added_ms: i64,
 }
 
 /// The nature of a conversation. Modeled as an enum (not a bool) because there
@@ -1300,6 +1372,133 @@ const OTHER_PARTY_MRI: &str = "SELECT messages.sender_mri FROM messages
        AND messages.sender <> '' AND messages.sender <> ?1
      ORDER BY messages.seq DESC LIMIT 1";
 
+/// Every seal key this machine holds, by conversation — read ONCE per query and then applied
+/// to each row (see [`msg_reader`]).
+///
+/// It is loaded whole rather than per conversation because the table holds one row per
+/// passphrase the user has ever entered, and two of the reads that return bodies span every
+/// conversation at once (the scheduled queue, and the newest rows a preview is built from). A
+/// keyring is cheap; a second policy for "which conversation is this row from" is not.
+#[derive(Default, Clone)]
+pub struct SealKeyring {
+    by_conversation: std::collections::HashMap<String, Vec<crate::seal::SealKey>>,
+}
+
+impl SealKeyring {
+    /// The keys that may open a message in one conversation. Empty for every unsealed chat,
+    /// which is almost all of them.
+    pub fn keys(&self, conversation_id: &str) -> &[crate::seal::SealKey] {
+        self.by_conversation.get(conversation_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Whether this machine holds a key for that conversation at all.
+    pub fn holds(&self, conversation_id: &str) -> bool {
+        !self.keys(conversation_id).is_empty()
+    }
+}
+
+/// Turn one stored row into words: [`row_to_msg`], then the SEAL.
+///
+/// **This is the only way a message body may leave the store**, and that is the same rule
+/// [`SELECT_COLS`] holds for a person's name: the resolution lives in the READ, so a surface
+/// cannot forget it. A message page, the single row re-read after an edit, the row a push is
+/// built from and the scheduled queue all go through here, and
+/// [`every_read_of_a_body_goes_through_the_seal`] scans this file to keep it that way.
+///
+/// A body that is not an envelope is untouched and costs one rejected prefix test, so this can
+/// be applied to every row without first asking whether its conversation is sealed — the
+/// envelope answers for itself (see [`crate::seal::open`]).
+///
+/// A body that is sealed and CANNOT be opened comes back EMPTY, never as the token: the page
+/// draws a locked row from [`Message::seal`], and handing it base64 would put a wall of it in
+/// the history, in the sidebar's preview, and in a notification. The token stays on disk, so
+/// the passphrase added tomorrow still opens the message.
+fn msg_reader(keyring: &SealKeyring) -> impl Fn(&Row) -> rusqlite::Result<Message> + '_ {
+    move |row| {
+        let mut msg = row_to_msg(row)?;
+        let opened = crate::seal::open(keyring.keys(&msg.conversation_id), &msg.conversation_id, &msg.content);
+        msg.seal = match opened {
+            crate::seal::Opened::NotSealed => MessageSeal::None,
+            crate::seal::Opened::Words(words) => {
+                msg.content = words;
+                MessageSeal::Opened
+            }
+            crate::seal::Opened::UnknownKey(id) => {
+                msg.content = String::new();
+                MessageSeal::Locked { key_id: crate::seal::hex_of(&id) }
+            }
+            crate::seal::Opened::NewerVersion(_) => {
+                msg.content = String::new();
+                MessageSeal::NewerVersion
+            }
+            crate::seal::Opened::Damaged => {
+                msg.content = String::new();
+                MessageSeal::Damaged
+            }
+        };
+        Ok(msg)
+    }
+}
+
+/// How a message's body reached the reader.
+///
+/// Four outcomes rather than a boolean, because each one is a different sentence and a
+/// different next move: nothing to do, done, "you have not added this passphrase", "this build
+/// is too old", "these bytes are damaged".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum MessageSeal {
+    /// An ordinary message. Every message in an unsealed chat, and every message sent in a
+    /// sealed one before it was sealed.
+    #[default]
+    None,
+    /// It was sealed, and this machine opened it. `content` holds the words.
+    Opened,
+    /// Sealed under a passphrase this machine does not hold. `key_id` says WHICH, so the app
+    /// can tell one missing passphrase from another rather than saying "cannot read this".
+    Locked { key_id: String },
+    /// Sealed by a newer build of this app.
+    NewerVersion,
+    /// Recognisably sealed, and the bytes fail their own authentication tag.
+    Damaged,
+}
+
+impl MessageSeal {
+    /// The word the wire carries, or `None` for an ordinary message. `Opened` is deliberately
+    /// a word too: a page that drew a padlock beside a message the reader CAN read is how they
+    /// learn the chat is sealed at all.
+    pub fn wire(&self) -> Option<&'static str> {
+        match self {
+            MessageSeal::None => None,
+            MessageSeal::Opened => Some("opened"),
+            MessageSeal::Locked { .. } => Some("locked"),
+            MessageSeal::NewerVersion => Some("newer"),
+            MessageSeal::Damaged => Some("damaged"),
+        }
+    }
+
+    /// The seal state of a body straight off a FRAME, with no key in hand: either an
+    /// ordinary message, or one that is sealed and not yet opened.
+    ///
+    /// This is what the INGEST path sees, and it is why the two decisions taken on a live
+    /// frame — does this message summon the agent, and does it become a notification — open
+    /// the body EXPLICITLY rather than reading `content`. A frame is not a store read, so
+    /// [`msg_reader`] has not run on it.
+    pub fn of_frame(body: &str) -> MessageSeal {
+        match crate::seal::key_id_of(body) {
+            Some(id) => MessageSeal::Locked { key_id: crate::seal::hex_of(&id) },
+            None => MessageSeal::None,
+        }
+    }
+
+    /// Which passphrase is missing, for the one state that names one.
+    pub fn key_id(&self) -> Option<&str> {
+        match self {
+            MessageSeal::Locked { key_id } => Some(key_id.as_str()),
+            _ => None,
+        }
+    }
+}
+
 fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
     Ok(Message {
         id: row.get(0)?,
@@ -1327,6 +1526,8 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "[]".to_string()),
         scheduled_time: row.get::<_, Option<i64>>(15)?.unwrap_or(0),
+        // Resolved by `msg_reader`, which is the only way a body leaves this store.
+        seal: MessageSeal::None,
     })
 }
 
@@ -3255,7 +3456,7 @@ impl Store {
             "SELECT {SELECT_COLS} FROM messages WHERE conversation_id = ?1 AND id = ?2"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let msg = stmt.query_row(params![conversation_id, id], row_to_msg)?;
+        let msg = stmt.query_row(params![conversation_id, id], msg_reader(&self.seal_keyring()?))?;
         Ok(Some(msg))
     }
 
@@ -3293,7 +3494,7 @@ impl Store {
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let msg = stmt
-            .query_row(params![conversation_id, id], row_to_msg)
+            .query_row(params![conversation_id, id], msg_reader(&self.seal_keyring()?))
             .optional()?;
         Ok(msg)
     }
@@ -4299,6 +4500,202 @@ impl Store {
         Ok(())
     }
 
+    // ---- A SEALED chat: the passphrases that open one (see `crate::seal`) ----
+
+    /// Every seal key this machine holds, by conversation.
+    ///
+    /// Read once per query by [`msg_reader`], which is the only way a body leaves this store.
+    /// One row per passphrase ever entered, so this is a handful of rows on any real machine
+    /// and empty on almost all of them — a store with no sealed chat pays one scan of an empty
+    /// table per read.
+    ///
+    /// A row whose hex does not parse is SKIPPED rather than fatal: it can only be a store
+    /// somebody edited by hand, and refusing to answer would take the whole history offline
+    /// over one bad row.
+    pub fn seal_keyring(&self) -> Result<SealKeyring> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT conversation_id, key_id, key_hex FROM seal_keys ORDER BY added_ms ASC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        let mut keyring = SealKeyring::default();
+        for row in rows {
+            let (conversation_id, key_id, key_hex) = row?;
+            let Ok(id) = crate::seal::key_id_from_hex(&key_id) else { continue };
+            let Ok(bytes) = crate::seal::key_bytes_from_hex(&key_hex) else { continue };
+            keyring
+                .by_conversation
+                .entry(conversation_id)
+                .or_default()
+                .push(crate::seal::SealKey::from_stored(id, bytes));
+        }
+        Ok(keyring)
+    }
+
+    /// The key NEW messages in this conversation are sealed with, or `None` when the
+    /// conversation is not sealed.
+    ///
+    /// A conversation is sealed IFF it holds a current key — one state rather than two, so a
+    /// reader can never be shown "sealed" over a chat nothing can be sent to, and the send path
+    /// asks exactly one question (see the `seal_keys` table).
+    pub fn current_seal_key(&self, conversation_id: &str) -> Result<Option<crate::seal::SealKey>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key_id, key_hex FROM seal_keys
+             WHERE conversation_id = ?1 AND is_current = 1 ORDER BY added_ms DESC LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row(params![conversation_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()?;
+        let Some((key_id, key_hex)) = row else { return Ok(None) };
+        Ok(Some(crate::seal::SealKey::from_stored(
+            crate::seal::key_id_from_hex(&key_id)?,
+            crate::seal::key_bytes_from_hex(&key_hex)?,
+        )))
+    }
+
+    /// Add a passphrase to a conversation and make it the one new messages are sealed with.
+    ///
+    /// Additive: every key already there is KEPT and simply stops being current, so the
+    /// messages it sealed still open. That is what makes a rotation — and a colleague changing
+    /// the passphrase — cost nothing that is already in the thread.
+    pub fn add_seal_key(
+        &self,
+        conversation_id: &str,
+        key: &crate::seal::SealKey,
+        passphrase: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.exec(
+            "UPDATE seal_keys SET is_current = 0 WHERE conversation_id = ?1",
+            params![conversation_id],
+        )?;
+        self.exec(
+            "INSERT INTO seal_keys (conversation_id, key_id, key_hex, passphrase, is_current, added_ms)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)
+             ON CONFLICT(conversation_id, key_id) DO UPDATE SET
+                 key_hex = excluded.key_hex,
+                 passphrase = excluded.passphrase,
+                 is_current = 1",
+            params![
+                conversation_id,
+                key.id_hex(),
+                crate::seal::hex_of(&key.secret_for_store()),
+                passphrase,
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Stop sealing NEW messages in a conversation, and keep every key it holds.
+    ///
+    /// The keys are deliberately kept: a chat that stops being sealed is still full of sealed
+    /// messages, and dropping the passphrase would make every one of them permanently
+    /// unreadable — which is the one action in this feature that nothing takes back. Forgetting
+    /// a key is a separate, explicit act (see [`Store::forget_seal_key`]).
+    pub fn stop_sealing(&self, conversation_id: &str) -> Result<bool> {
+        let changed = self.exec(
+            "UPDATE seal_keys SET is_current = 0 WHERE conversation_id = ?1 AND is_current = 1",
+            params![conversation_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Forget one key. Every message it sealed becomes unreadable on this machine, for good.
+    pub fn forget_seal_key(&self, conversation_id: &str, key_id: &str) -> Result<bool> {
+        let changed = self.exec(
+            "DELETE FROM seal_keys WHERE conversation_id = ?1 AND key_id = ?2",
+            params![conversation_id, key_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Every conversation this machine holds a key for: which keys, which one is current, and
+    /// when each was added. What Settings lists, and what the page reads to know which chats
+    /// are sealed.
+    ///
+    /// The PASSPHRASE is not in it. It leaves this store only through the reveal the user
+    /// pressed (see [`Store::seal_passphrase`]) — the rule `get_settings` holds for a token.
+    pub fn sealed_conversations(&self) -> Result<Vec<SealedConversation>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT conversation_id, key_id, is_current, added_ms FROM seal_keys
+             ORDER BY conversation_id ASC, added_ms ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? != 0,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out: Vec<SealedConversation> = Vec::new();
+        for row in rows {
+            let (conversation_id, key_id, is_current, added_ms) = row?;
+            let entry = match out.iter_mut().find(|e| e.conversation_id == conversation_id) {
+                Some(entry) => entry,
+                None => {
+                    out.push(SealedConversation {
+                        conversation_id: conversation_id.clone(),
+                        sealing: false,
+                        current_key_id: String::new(),
+                        keys: Vec::new(),
+                    });
+                    out.last_mut().expect("just pushed")
+                }
+            };
+            if is_current {
+                entry.sealing = true;
+                entry.current_key_id = key_id.clone();
+            }
+            entry.keys.push(SealKeyRecord { key_id, is_current, added_ms });
+        }
+        Ok(out)
+    }
+
+    /// The passphrase behind one key, for the reveal the user pressed and for nothing else.
+    pub fn seal_passphrase(&self, conversation_id: &str, key_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT passphrase FROM seal_keys WHERE conversation_id = ?1 AND key_id = ?2",
+        )?;
+        Ok(stmt
+            .query_row(params![conversation_id, key_id], |row| row.get::<_, String>(0))
+            .optional()?
+            .filter(|p| !p.is_empty()))
+    }
+
+    /// Which keys the sealed messages ALREADY in a conversation were sealed with, newest first,
+    /// over the newest `limit` rows.
+    ///
+    /// **This is what stops the sharpest failure this feature has**: two people each set a
+    /// DIFFERENT passphrase, every message each posts is unreadable to the other, and without
+    /// this nobody is told — both see a thread of locked rows and each believes the other's app
+    /// is broken. Reading the key ids off the messages the thread already holds is what lets
+    /// the app say "the messages here were sealed with a passphrase you have not added" BEFORE
+    /// the user starts posting into a chat nobody can read.
+    ///
+    /// It reads the stored bodies directly rather than going through [`msg_reader`], because the
+    /// question is about the ENVELOPE and holds whether or not any key opens it.
+    pub fn seal_key_ids_in_use(&self, conversation_id: &str, limit: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT content FROM messages WHERE conversation_id = ?1 ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![conversation_id, limit], |row| row.get::<_, String>(0))?;
+        let mut seen: Vec<String> = Vec::new();
+        for row in rows {
+            if let Some(id) = crate::seal::key_id_of(&row?) {
+                let hex = crate::seal::hex_of(&id);
+                if !seen.contains(&hex) {
+                    seen.push(hex);
+                }
+            }
+        }
+        Ok(seen)
+    }
+
     /// Every custom emoji in the pack, ordered by name ascending, bytes excluded.
     pub fn custom_emoji(&self) -> Result<Vec<crate::custom_emoji::CustomEmoji>> {
         let mut stmt = self.conn.prepare_cached(
@@ -4670,8 +5067,9 @@ impl Store {
             "SELECT {SELECT_COLS} FROM messages
              WHERE conversation_id = ?1 AND {NOT_STILL_HELD} ORDER BY seq DESC LIMIT ?2"
         );
+        let keyring = self.seal_keyring()?;
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![conversation_id, limit], row_to_msg)?;
+        let rows = stmt.query_map(params![conversation_id, limit], msg_reader(&keyring))?;
         let mut v: Vec<Message> = rows.collect::<rusqlite::Result<_>>()?;
         v.reverse(); // oldest -> newest
         Ok(v)
@@ -4695,8 +5093,9 @@ impl Store {
              WHERE NOT ({NOT_STILL_HELD}) AND deleted = 0
              ORDER BY scheduled_time ASC LIMIT ?1"
         );
+        let keyring = self.seal_keyring()?;
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![limit], row_to_msg)?;
+        let rows = stmt.query_map(params![limit], msg_reader(&keyring))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -4709,8 +5108,9 @@ impl Store {
              WHERE conversation_id = ?1 AND seq < ?2 AND {NOT_STILL_HELD}
              ORDER BY seq DESC LIMIT ?3"
         );
+        let keyring = self.seal_keyring()?;
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![conversation_id, before_seq, limit], row_to_msg)?;
+        let rows = stmt.query_map(params![conversation_id, before_seq, limit], msg_reader(&keyring))?;
         let mut v: Vec<Message> = rows.collect::<rusqlite::Result<_>>()?;
         v.reverse();
         Ok(v)
@@ -4746,6 +5146,7 @@ mod tests {
 
     fn msg(conv: &str, seq: i64) -> Message {
         Message {
+            seal: Default::default(),
             id: format!("m{seq}"),
             conversation_id: conv.to_string(),
             seq,
@@ -5024,6 +5425,43 @@ mod tests {
         hash
     }
 
+    /// EVERY read of a message body goes through the seal, and this is what keeps it that way.
+    ///
+    /// [`msg_reader`] is the one place a stored ciphertext becomes words — the rule
+    /// [`SELECT_COLS`] holds for a person's name, for the same reason: a resolution the CALLER
+    /// has to remember is one a caller will forget, and the read that forgot this one would
+    /// hand a page, a notification or an agent a base64 token in place of somebody's words.
+    ///
+    /// So [`row_to_msg`] may be named only by `msg_reader` itself. A new read that reaches for
+    /// it directly fails here rather than shipping.
+    #[test]
+    fn every_read_of_a_body_goes_through_the_seal() {
+        // The module's own code, without the tests — which name it in order to scan for it.
+        let whole = include_str!("store.rs");
+        let source = &whole[..whole.find("\n#[cfg(test)]").expect("a test module")];
+        let mentions: Vec<&str> = source
+            .lines()
+            .filter(|line| line.contains("row_to_msg"))
+            // Its own definition, and the doc comments that name it.
+            .filter(|line| !line.trim_start().starts_with("///"))
+            .filter(|line| !line.contains("fn row_to_msg"))
+            .filter(|line| !line.contains("// "))
+            .collect();
+        assert_eq!(
+            mentions,
+            vec!["        let mut msg = row_to_msg(row)?;"],
+            "a message body must leave this store only through `msg_reader`, which is what \
+             unseals it — a read that names `row_to_msg` directly would hand its caller a \
+             ciphertext"
+        );
+        // And the reads themselves: every statement over SELECT_COLS is mapped by msg_reader.
+        let readers = source.matches("msg_reader(&").count();
+        assert!(
+            readers >= 5,
+            "only {readers} reads map through `msg_reader`; a new one over SELECT_COLS must too"
+        );
+    }
+
     /// The column set this file creates, pinned to [`SCHEMA_VERSION`].
     ///
     /// THE BUG THIS EXISTS FOR, twice over: a column was added to `SCHEMA`/[`migrate`]
@@ -5040,7 +5478,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (17, 0x2d82_e7b1_90ee_36df);
+        const PINNED: (i64, u64) = (18, 0x24b0_4377_b5a8_06cd);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -5365,6 +5803,7 @@ mod tests {
         s.upsert_conversation("c1", "Chat", 100).unwrap();
 
         let frame = |id: &str, content: &str| Message {
+            seal: Default::default(),
             id: id.into(),
             conversation_id: "c1".into(),
             seq: 1,
@@ -5423,6 +5862,7 @@ mod tests {
         s.upsert_conversation("c1", "Chat", 100).unwrap();
 
         let row = |id: &str, sender: &str| Message {
+            seal: Default::default(),
             id: id.into(),
             conversation_id: "c1".into(),
             seq: 1,
@@ -5485,6 +5925,7 @@ mod tests {
         // Two posts under the phantom id: one already filed under the channel too
         // (the collision), one only here.
         let post = |conv: &str, id: &str| Message {
+            seal: Default::default(),
             id: id.into(),
             conversation_id: conv.into(),
             seq: id.parse().unwrap(),
@@ -5682,6 +6123,7 @@ mod tests {
         s.upsert_conversation("c1", "Chat", 100).unwrap();
 
         let frame = |id: &str, content: &str| Message {
+            seal: Default::default(),
             id: id.into(),
             conversation_id: "c1".into(),
             seq: 1,
@@ -5736,6 +6178,7 @@ mod tests {
         s.upsert_conversation("c1", "Chat", 100).unwrap();
 
         let frame = |id: &str, content: &str| Message {
+            seal: Default::default(),
             id: id.into(),
             conversation_id: "c1".into(),
             seq: 1,
@@ -6383,6 +6826,7 @@ mod tests {
         // messages from me and from the other person
         let me = "Théophile WALLEZ";
         s.insert_message(&Message {
+            seal: Default::default(),
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: String::new(), content: "salut".into(), attachments: "[]".into(),
             reactions: "[]".into(),
@@ -6393,6 +6837,7 @@ mod tests {
             mentions: "[]".into(),
         }).unwrap();
         s.insert_message(&Message {
+            seal: Default::default(),
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: String::new(), content: "hello".into(), attachments: "[]".into(),
             reactions: "[]".into(),
@@ -6417,6 +6862,7 @@ mod tests {
         let me = "Moi";
         // only my own message present -> cannot derive the other name yet
         s.insert_message(&Message {
+            seal: Default::default(),
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: String::new(), content: "coucou".into(), attachments: "[]".into(),
             reactions: "[]".into(),
@@ -6438,10 +6884,12 @@ mod tests {
         // A 1:1: avatar_mri resolves to the other party's most-recent sender_mri.
         s.upsert_conversation_full(&upd("dm", "", 500, ConversationKind::OneOnOne)).unwrap();
         s.insert_message(&Message {
+            seal: Default::default(),
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: "8:orgid:me".into(), content: "salut".into(),
             attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0,        }).unwrap();
         s.insert_message(&Message {
+            seal: Default::default(),
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: "8:orgid:leonor".into(), content: "hello".into(),
             attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0,        }).unwrap();
@@ -6449,6 +6897,7 @@ mod tests {
         // A group: even though it has non-self senders, a group has no single face.
         s.upsert_conversation_full(&upd("grp", "Team chat", 400, ConversationKind::Group)).unwrap();
         s.insert_message(&Message {
+            seal: Default::default(),
             id: "g1".into(), conversation_id: "grp".into(), seq: 1, compose_time: 1,
             sender: "Grace HOPPER".into(), sender_mri: "8:orgid:grace".into(), content: "hi all".into(),
             attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0,        }).unwrap();
@@ -6825,6 +7274,7 @@ mod tests {
         s.upsert_conversation("c1", "Chat", 100).unwrap();
         // legacy row: no MRI captured
         s.insert_message(&Message {
+            seal: Default::default(),
             id: "m1".into(), conversation_id: "c1".into(), seq: 1, compose_time: 1,
             sender: "Me".into(), sender_mri: String::new(), content: "hi".into(), attachments: "[]".into(),
             reactions: "[]".into(),
@@ -6854,6 +7304,7 @@ mod tests {
         s.upsert_conversation("c1", "Chat", 100).unwrap();
         // a message carrying a file attachment
         s.insert_message(&Message {
+            seal: Default::default(),
             id: "m1".into(), conversation_id: "c1".into(), seq: 1, compose_time: 1,
             sender: "Me".into(), sender_mri: String::new(), content: "see file".into(),
             attachments: r#"[{"name":"report.pdf","content_type":"application/pdf","url":"https://x.skype.com/o/1","kind":"file"}]"#.into(),
@@ -6866,6 +7317,7 @@ mod tests {
         }).unwrap();
         // a message without attachments keeps the empty-array default
         s.insert_message(&Message {
+            seal: Default::default(),
             id: "m2".into(), conversation_id: "c1".into(), seq: 2, compose_time: 2,
             sender: "Me".into(), sender_mri: String::new(), content: "hi".into(),
             attachments: "[]".into(),
