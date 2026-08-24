@@ -385,9 +385,17 @@ Fourteen rules hold it, and each is pinned by a test:
   than 1 because lanes cost an attacker nothing and buy the defender wall clock back.
 - **A locked message's `content` is EMPTY on the wire, never the token.** The store keeps the
   ciphertext on disk, so a passphrase added tomorrow still opens it — and no page, sidebar preview or
-  notification is ever handed base64. A sealed body previews as NOTHING for the same reason
-  (`preview_for_message`), and `Store::derived_preview` then fills the gap from a read that has been
-  through `msg_reader`, so the words appear on every sidebar read with nothing to migrate.
+  notification is ever handed base64.
+- **THE SIDEBAR SHOWS THE WORDS, and that takes TWO halves that only work together.** It is the
+  shortest path the envelope has to a reader's eye, and it is not the history: the CSA snapshot
+  carries Teams' OWN copy of a chat's newest message, so for a sealed chat that body is the
+  envelope — and the row's second line was 374 characters of base64. `parse_last_message` therefore
+  stores NOTHING for a sealed body (and `preview_for_message` does the same for the local path),
+  because a non-empty stored preview is exactly what stops `Store::derived_preview` from running —
+  and that is the read which goes through `msg_reader` and so through the seal. Empty means the
+  sidebar falls through to it and draws the message in the clear, on every read, with nothing to
+  migrate when a passphrase arrives. `the_sidebar_previews_a_sealed_chat_with_its_words` drives
+  both halves at once, because either alone leaves the token on the row.
 - **FOUR outcomes, not a boolean** (`MessageSeal`): an ordinary message, one this machine OPENED, one
   sealed under a passphrase it does not hold, one from a newer build, and one whose bytes fail their
   own authentication. Each is a different sentence and a different next move, and collapsing them

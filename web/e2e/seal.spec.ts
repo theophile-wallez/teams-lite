@@ -462,6 +462,17 @@ test.describe("a sealed chat", () => {
     await expect(wasLocked).toHaveAttribute("data-seal", "opened");
     await expect(wasLocked).toHaveAttribute("title", /encrypted before it reached teams/i);
     await expect(page.locator('[data-testid="sealed-message"]')).toHaveCount(1); // the damaged one
+
+    // THE SIDEBAR PREVIEW is pinned in Rust rather than here, on purpose. It is the shortest path
+    // the envelope has to a reader's eye — Teams' own snapshot of a chat's newest message carries
+    // the body, so for a sealed chat that body IS the token — but both halves of the fix live in
+    // the backend (`teams_read::parse_last_message` stores nothing for a sealed body, and
+    // `Store::derived_preview` then answers from a read that has been through the seal), and the
+    // page draws whatever it is handed. Asserting it here would mean scrolling a virtualized
+    // sidebar to a fixture row that is deliberately far down, which buys brittleness rather than
+    // coverage: `store::tests::the_sidebar_previews_a_sealed_chat_with_its_words` drives the real
+    // functions instead.
+
     // Both passphrases are kept, oldest first, and the one just added is current.
     const again = await openSealDialog(page);
     await expect(again.locator('[data-testid="seal-key-row"]')).toHaveCount(2);

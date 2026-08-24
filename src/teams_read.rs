@@ -260,6 +260,21 @@ struct LastMessage {
 /// The preview mirrors the message-history display gate so a system frame
 /// (typing/presence, a member/topic change) never leaks its raw machine XML into
 /// the sidebar; a call event gets a short human label instead of being blanked.
+/// The preview a CSA sync would store for one last-message body — the real
+/// [`parse_last_message`] over a minimal container, for a test in another module.
+///
+/// It exists so `store::tests::the_sidebar_previews_a_sealed_chat_with_its_words` can drive the
+/// function that really runs rather than a second copy of its rule: the whole point of that test
+/// is that these two halves — nothing stored here, and the store's own derived read — only work
+/// together.
+#[doc(hidden)]
+pub fn preview_of_last_message_for_test(content: &str) -> String {
+    parse_last_message(&serde_json::json!({
+        "lastMessage": { "id": "1", "content": content, "messageType": "RichText/Html" }
+    }))
+    .preview
+}
+
 fn parse_last_message(container: &Value) -> LastMessage {
     let has_message = container.pointer("/lastMessage/id").and_then(|x| x.as_str()).is_some();
     let time = container
@@ -269,7 +284,20 @@ fn parse_last_message(container: &Value) -> LastMessage {
         .unwrap_or(0);
     let content = container.pointer("/lastMessage/content").and_then(|x| x.as_str()).unwrap_or("");
     let message_type = container.pointer("/lastMessage/messageType").and_then(|x| x.as_str()).unwrap_or("");
-    let preview = if let Some(event) = parse_call_event(message_type, content) {
+    let preview = if crate::seal::is_sealed(content) {
+        // A SEALED newest message previews as NOTHING here, and that empty string is what makes
+        // the sidebar show the WORDS.
+        //
+        // This is the one place the ciphertext would otherwise reach a reader's eye. The CSA
+        // snapshot carries Teams' own copy of the last message's body, so for a sealed chat that
+        // body is the envelope — and `preview_from_html` below would hand the sidebar 374
+        // characters of base64 as the chat's second line. Worse, it is not merely ugly: a
+        // non-empty stored preview is what stops `Store::derived_preview` from running, and that
+        // is the read which goes through `msg_reader` and therefore through the seal. Empty here
+        // means the sidebar falls through to it and draws the message in the clear, on every
+        // read, with nothing to migrate when a passphrase arrives.
+        String::new()
+    } else if let Some(event) = parse_call_event(message_type, content) {
         call_event_label(&event).to_string()
     } else if let Some(recording) = parse_call_recording(message_type, content) {
         // A meeting recording previews as a clean event-style label (like a call),

@@ -5548,6 +5548,63 @@ mod tests {
         }
     }
 
+    /// THE SIDEBAR SHOWS THE WORDS, not the ciphertext.
+    ///
+    /// It is the one place the envelope would otherwise reach a reader's eye, and by the shortest
+    /// path: the CSA snapshot carries Teams' OWN copy of the last message's body, so a sync of a
+    /// sealed chat hands this store 374 characters of base64 as the row's second line. Two halves
+    /// stop it, and only together — `teams_read::parse_last_message` stores NOTHING for a sealed
+    /// body, and that empty string is what lets [`Store::derived_preview`] answer instead, from a
+    /// read that has been through `msg_reader`.
+    #[test]
+    fn the_sidebar_previews_a_sealed_chat_with_its_words() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
+        let sender = "8:orgid:ada";
+        let words = "<p>the merger closes on Friday</p>";
+        let key = crate::seal::derive("hunter two", conversation).unwrap();
+        let sealed = crate::seal::seal(&key, conversation, sender, words).unwrap();
+
+        // What a CSA sync really writes: Teams' own preview of the newest message, which for a
+        // sealed chat is the envelope. `parse_last_message` reduces it to nothing.
+        let preview = crate::teams_read::preview_of_last_message_for_test(&sealed);
+        assert_eq!(preview, "", "a sealed body must not become the stored preview");
+
+        store
+            .upsert_conversation_full(&ConversationUpdate {
+                id: conversation,
+                display_name: "Design crew",
+                last_message_time: 1_700_000_000_000,
+                kind: ConversationKind::Group,
+                last_message_preview: &preview,
+                last_message_sender: "Ada Lovelace",
+                last_message_sender_mri: sender,
+                last_message_from_me: false,
+                is_read: true,
+                is_muted: false,
+                is_pinned: false,
+                is_hidden: false,
+                thread_type: "",
+                picture_url: "",
+            })
+            .unwrap();
+        let mut row = message_for_test(conversation, sender, &sealed);
+        row.compose_time = 1_700_000_000_000;
+        store.insert_message(&row).unwrap();
+
+        // With no passphrase there is nothing to show, and the row must not show base64.
+        let before = store.conversations("Me").unwrap();
+        let mine = before.iter().find(|c| c.id == conversation).expect("the conversation");
+        assert_eq!(mine.last_message_preview, "");
+
+        // With the passphrase, the sidebar reads the WORDS — from the same stored ciphertext,
+        // with nothing migrated.
+        store.add_seal_key(conversation, &key, "hunter two", 1_700_000_000_000).unwrap();
+        let after = store.conversations("Me").unwrap();
+        let mine = after.iter().find(|c| c.id == conversation).expect("the conversation");
+        assert_eq!(mine.last_message_preview, "the merger closes on Friday");
+    }
+
     /// EVERY read of a message body goes through the seal, and this is what keeps it that way.
     ///
     /// [`msg_reader`] is the one place a stored ciphertext becomes words — the rule
