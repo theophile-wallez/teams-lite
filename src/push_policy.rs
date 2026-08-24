@@ -64,12 +64,27 @@ impl<'a> Placement<'a> {
 ///
 /// `from_me` comes from the caller because it already resolved it (identity matching
 /// needs both the display name and the MRI — see `is_self` in `src/bin/server.rs`).
+///
+/// `sealed_words` is the user's own setting for a SEALED chat: false — the default — means the
+/// notification says a message arrived and NOT what it says. The backend holds the key, so it
+/// could publish the words either way, and the payload is encrypted to the device (RFC 8291) so
+/// no push service reads them; what the setting decides is whether the words of a chat the user
+/// deliberately sealed appear on a locked screen. A sealed chat still notifies: silence would
+/// leave them wondering, which is worse than a preview that says nothing.
+/// What a notification says about a sealed message when the user has not asked for the words.
+///
+/// Deliberately neutral: it says a message arrived and nothing else. A phrase naming this app or
+/// the fact that the chat is encrypted would put on a locked screen exactly what the sealed body
+/// itself is careful not to carry.
+const SEALED_BODY: &str = "New message";
+
 pub fn notification_for(
     message: &Message,
     placement: &Placement<'_>,
     self_mri: &str,
     from_me: bool,
     now_ms: i64,
+    sealed_words: bool,
 ) -> Option<Notification> {
     if from_me {
         return None;
@@ -91,7 +106,22 @@ pub fn notification_for(
         return None;
     }
 
-    let body = truncate(&teams_read::preview_for_message(message), MAX_BODY_CHARS);
+    // A SEALED message notifies, and what it SAYS is the user's own setting. `preview_for_message`
+    // answers nothing for a sealed body by design (it is what keeps a base64 token out of the
+    // sidebar), so a sealed chat would otherwise fall through the empty-body gate below and stay
+    // silent — a message the reader never hears about at all.
+    let sealed = message.seal != crate::store::MessageSeal::None;
+    let words = truncate(&teams_read::preview_for_message(message), MAX_BODY_CHARS);
+    // Two ways a sealed message says nothing about its words, and they must land on the same
+    // sentence: the user has not asked for them, or this machine cannot READ them — a message
+    // sealed under a passphrase nobody here holds has no words to publish. Falling through to the
+    // empty-body gate below would make that second one SILENT, and the reader would never hear
+    // about a message at all.
+    let body = if sealed && (!sealed_words || words.is_empty()) {
+        SEALED_BODY.to_string()
+    } else {
+        words
+    };
     if body.is_empty() {
         return None; // nothing to say; a blank notification is worse than none
     }
@@ -233,7 +263,7 @@ mod tests {
 
     #[test]
     fn a_chat_message_notifies_with_the_senders_name_and_the_body() {
-        let notification = notification_for(&chat_message(), &chat(), SELF_MRI, false, NOW).unwrap();
+        let notification = notification_for(&chat_message(), &chat(), SELF_MRI, false, NOW, false).unwrap();
         assert_eq!(notification.title, "Ada Lovelace");
         assert_eq!(notification.body, "Ready for the demo?");
         assert_eq!(notification.tag, "19:chat@thread.v2");
@@ -244,13 +274,13 @@ mod tests {
     fn a_group_chat_says_where_the_message_came_from() {
         let placement = Placement::Chat { title: "Release train" };
         let notification =
-            notification_for(&chat_message(), &placement, SELF_MRI, false, NOW).unwrap();
+            notification_for(&chat_message(), &placement, SELF_MRI, false, NOW, false).unwrap();
         assert_eq!(notification.title, "Ada Lovelace · Release train");
     }
 
     #[test]
     fn our_own_message_never_notifies() {
-        assert!(notification_for(&chat_message(), &chat(), SELF_MRI, true, NOW).is_none());
+        assert!(notification_for(&chat_message(), &chat(), SELF_MRI, true, NOW, false).is_none());
     }
 
     #[test]
@@ -258,36 +288,36 @@ mod tests {
         let mut message = chat_message();
         message.system_event = r#"{"kind":"call","event":"ended"}"#.into();
         message.content = String::new();
-        assert!(notification_for(&message, &chat(), SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&message, &chat(), SELF_MRI, false, NOW, false).is_none());
     }
 
     #[test]
     fn a_deleted_message_never_notifies() {
         let mut message = chat_message();
         message.deleted = true;
-        assert!(notification_for(&message, &chat(), SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&message, &chat(), SELF_MRI, false, NOW, false).is_none());
     }
 
     #[test]
     fn an_activity_stream_frame_never_notifies() {
         let mut message = chat_message();
         message.conversation_id = teams_activity::MENTIONS_THREAD.into();
-        assert!(notification_for(&message, &chat(), SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&message, &chat(), SELF_MRI, false, NOW, false).is_none());
     }
 
     #[test]
     fn a_replayed_message_never_notifies() {
         let mut old = chat_message();
         old.compose_time = NOW - MAX_AGE_MS - 1;
-        assert!(notification_for(&old, &chat(), SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&old, &chat(), SELF_MRI, false, NOW, false).is_none());
 
         let mut skewed = chat_message();
         skewed.compose_time = NOW + MAX_AGE_MS + 1;
-        assert!(notification_for(&skewed, &chat(), SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&skewed, &chat(), SELF_MRI, false, NOW, false).is_none());
 
         let mut undated = chat_message();
         undated.compose_time = 0;
-        assert!(notification_for(&undated, &chat(), SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&undated, &chat(), SELF_MRI, false, NOW, false).is_none());
     }
 
     #[test]
@@ -296,11 +326,11 @@ mod tests {
         let mut message = chat_message();
         message.conversation_id = "19:abc@thread.tacv2".into();
 
-        assert!(notification_for(&message, &channel, SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&message, &channel, SELF_MRI, false, NOW, false).is_none());
 
         message.mentions =
             format!(r#"[{{"itemid":0,"mri":"{SELF_MRI}","kind":"person","display_name":"Ada"}}]"#);
-        let notification = notification_for(&message, &channel, SELF_MRI, false, NOW).unwrap();
+        let notification = notification_for(&message, &channel, SELF_MRI, false, NOW, false).unwrap();
         assert_eq!(notification.title, "Ada Lovelace · Engine · General");
     }
 
@@ -309,7 +339,7 @@ mod tests {
         let channel = channel();
         let mut message = chat_message();
         message.mentions = format!(r#"[{{"itemid":0,"mri":"{OTHER_MRI}","kind":"person"}}]"#);
-        assert!(notification_for(&message, &channel, SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&message, &channel, SELF_MRI, false, NOW, false).is_none());
     }
 
     /// A channel post, with the thread fields a real `@thread.tacv2` message carries.
@@ -328,7 +358,7 @@ mod tests {
         let mut message = channel_post("m1", "m1");
         message.mentions =
             format!(r#"[{{"itemid":0,"mri":"{SELF_MRI}","kind":"person","display_name":"Ada"}}]"#);
-        assert!(notification_for(&message, &muted, SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&message, &muted, SELF_MRI, false, NOW, false).is_none());
     }
 
     #[test]
@@ -338,20 +368,20 @@ mod tests {
 
         // The post that opens a thread names itself as the thread's root.
         let post = channel_post("m1", "m1");
-        assert!(notification_for(&post, &all_posts, SELF_MRI, false, NOW).is_some());
+        assert!(notification_for(&post, &all_posts, SELF_MRI, false, NOW, false).is_some());
 
         // A reply names the opening post instead.
         let reply = channel_post("m2", "m1");
-        assert!(notification_for(&reply, &all_posts, SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&reply, &all_posts, SELF_MRI, false, NOW, false).is_none());
 
         // …unless it mentions us: a summons passes at every level but muted.
         let mut mentioning_reply = channel_post("m3", "m1");
         mentioning_reply.mentions = format!(r#"[{{"itemid":0,"mri":"{SELF_MRI}"}}]"#);
-        assert!(notification_for(&mentioning_reply, &all_posts, SELF_MRI, false, NOW).is_some());
+        assert!(notification_for(&mentioning_reply, &all_posts, SELF_MRI, false, NOW, false).is_some());
 
         // A frame with no thread field at all reads as a post, never as a reply.
         let rootless = channel_post("m4", "");
-        assert!(notification_for(&rootless, &all_posts, SELF_MRI, false, NOW).is_some());
+        assert!(notification_for(&rootless, &all_posts, SELF_MRI, false, NOW, false).is_some());
     }
 
     #[test]
@@ -360,9 +390,9 @@ mod tests {
             title: "Engine · General",
             alerts: ChannelAlerts::AllNewPostsAndReplies,
         };
-        assert!(notification_for(&channel_post("m1", "m1"), &with_replies, SELF_MRI, false, NOW)
+        assert!(notification_for(&channel_post("m1", "m1"), &with_replies, SELF_MRI, false, NOW, false)
             .is_some());
-        assert!(notification_for(&channel_post("m2", "m1"), &with_replies, SELF_MRI, false, NOW)
+        assert!(notification_for(&channel_post("m2", "m1"), &with_replies, SELF_MRI, false, NOW, false)
             .is_some());
     }
 
@@ -374,16 +404,16 @@ mod tests {
             title: "Engine · General",
             alerts: ChannelAlerts::AllNewPostsAndReplies,
         };
-        assert!(notification_for(&channel_post("m1", "m1"), &widest, SELF_MRI, true, NOW).is_none());
+        assert!(notification_for(&channel_post("m1", "m1"), &widest, SELF_MRI, true, NOW, false).is_none());
 
         let mut system = channel_post("m2", "m2");
         system.system_event = r#"{"kind":"call","event":"ended"}"#.into();
         system.content = String::new();
-        assert!(notification_for(&system, &widest, SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&system, &widest, SELF_MRI, false, NOW, false).is_none());
 
         let mut replayed = channel_post("m3", "m3");
         replayed.compose_time = NOW - MAX_AGE_MS - 1;
-        assert!(notification_for(&replayed, &widest, SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&replayed, &widest, SELF_MRI, false, NOW, false).is_none());
     }
 
     #[test]
@@ -401,15 +431,59 @@ mod tests {
         let mut message = chat_message();
         message.content = "<p> </p>".into();
         message.message_type = "RichText/Html".into();
-        assert!(notification_for(&message, &chat(), SELF_MRI, false, NOW).is_none());
+        assert!(notification_for(&message, &chat(), SELF_MRI, false, NOW, false).is_none());
     }
 
     #[test]
     fn a_long_body_is_truncated_for_the_lock_screen() {
         let mut message = chat_message();
         message.content = format!("<p>{}</p>", "word ".repeat(200));
-        let notification = notification_for(&message, &chat(), SELF_MRI, false, NOW).unwrap();
+        let notification = notification_for(&message, &chat(), SELF_MRI, false, NOW, false).unwrap();
         assert!(notification.body.chars().count() <= MAX_BODY_CHARS + 1, "{}", notification.body);
         assert!(notification.body.ends_with('…'));
     }
+    /// A SEALED message NOTIFIES, and by default it says nothing about the words.
+    ///
+    /// Both halves matter. Silence would leave the reader to find the message by opening the app,
+    /// which is what a notification exists to save them — and the words on a locked screen are the
+    /// one place a sealed conversation would appear in the clear without them asking.
+    #[test]
+    fn a_sealed_message_notifies_without_publishing_the_words() {
+        let mut message = chat_message();
+        message.content = "<p>the merger closes on Friday</p>".to_string();
+        message.seal = crate::store::MessageSeal::Opened;
+
+        let quiet = notification_for(&message, &chat(), SELF_MRI, false, NOW, false)
+            .expect("a sealed message still notifies");
+        assert_eq!(quiet.body, SEALED_BODY);
+        assert!(!quiet.body.contains("merger"), "the words must stay off the lock screen");
+        // It still says WHERE, because that is the half the reader acts on.
+        assert!(!quiet.title.is_empty());
+
+        // And with the setting on, the words are what it carries.
+        let loud = notification_for(&message, &chat(), SELF_MRI, false, NOW, true)
+            .expect("a sealed message still notifies");
+        assert!(loud.body.contains("merger"), "the setting asks for the words: {}", loud.body);
+    }
+
+    /// A message this machine could NOT open notifies the same way, and never with the token.
+    ///
+    /// `preview_for_message` answers nothing for a sealed body — which is what keeps base64 out of
+    /// the sidebar — so without the sealed branch this message would fall through the empty-body
+    /// gate and stay silent, and the reader would never hear about it at all.
+    #[test]
+    fn a_message_this_machine_cannot_open_still_notifies() {
+        let mut message = chat_message();
+        // What the store really holds for a locked row: an empty body, and the seal state.
+        message.content = String::new();
+        message.seal = crate::store::MessageSeal::Locked { key_id: "0a1b2c3d".to_string() };
+        let notification = notification_for(&message, &chat(), SELF_MRI, false, NOW, false)
+            .expect("a locked message still notifies");
+        assert_eq!(notification.body, SEALED_BODY);
+        // Even with the setting ON: there are no words on this machine to publish.
+        let asked = notification_for(&message, &chat(), SELF_MRI, false, NOW, true)
+            .expect("a locked message still notifies");
+        assert_eq!(asked.body, SEALED_BODY);
+    }
+
 }

@@ -220,6 +220,19 @@ const SETTING_SENDER_ICONS: &str = "sender_icons";
 /// What the switch buys is the user's own answer to "may the people in my threads put
 /// pictures in my pack at all".
 const SETTING_EMOJI_AUTO_IMPORT: &str = "emoji_auto_import";
+/// Whether a notification about a message in a SEALED chat carries the WORDS.
+///
+/// **Off by default**, which is the opposite default from the two settings above, and
+/// deliberately: the user sealed that conversation, and a preview on a locked screen is the one
+/// place its words would appear without them asking. The backend holds the key, so it could
+/// publish them either way, and the payload is encrypted to the device (RFC 8291) — so what the
+/// switch decides is a lock screen and a notification the phone keeps, not who can read the
+/// message in transit.
+///
+/// A sealed chat still NOTIFIES with it off: it says a message arrived and nothing about what it
+/// says (see [`teams_lite::push_policy`]). Silence would be worse — the reader would find out by
+/// opening the app, which is what a notification exists to save them.
+const SETTING_SEALED_PUSH_WORDS: &str = "sealed_push_words";
 /// The id of the presence endpoint this store's backends register, generated on first
 /// use and then kept. Stable ON PURPOSE, twice over: re-registering the same id is the
 /// same endpoint refreshed rather than a second one, so neither the heartbeat nor the
@@ -430,6 +443,21 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// meanwhile. Nothing that merely found this socket gets to do that to the app the user is
 /// reading — and `update_check`, which only ASKS GitHub whether a newer build exists,
 /// deliberately stays open beside it: it changes nothing on this machine.
+/// `seal_set`, `seal_off` and `seal_forget` decide whether a conversation's messages are
+/// ENCRYPTED before they reach Teams, and under which passphrase (see [`teams_lite::seal`]).
+/// They write only to the store, and they are gated for the reason `custom_emoji_add` is —
+/// what they decide is what the next send publishes — but the consequence is sharper in both
+/// directions. A client that could turn sealing OFF would make the next message go out in the
+/// clear to a chat whose reader believes it is sealed; one that could turn it ON, or change the
+/// passphrase, would make every message the user then posts unreadable to the colleagues they
+/// are writing to. `seal_forget` is sharper still: it drops a key, and every message that key
+/// sealed becomes unreadable on this machine for good.
+/// `seal_reveal` is here because its ANSWER is the passphrase itself. That is the one thing in
+/// this file a client is handed rather than told about, and it exists because a colleague who
+/// joins the conversation next month has to be given something — so it is the user's own press,
+/// never a field of a status payload. `seal_status` stays OPEN beside it: it answers WHICH
+/// conversations are sealed and under which key id, and never with the key or the words.
+///
 /// `signin_start` / `signin_frame` / `signin_input` / `signin_cancel` serve the identity
 /// broker's own sign-in window to the browser the app is read in (see [`teams_lite::signin`]
 /// and SIGN-IN.md). They post nothing to Teams, so they are not outward — but each one is a
@@ -437,7 +465,7 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// authenticates as the user, `signin_frame` answers with a picture of a sign-in page, and
 /// `signin_input` presses keys into it. `signin_frame` is gated as hard as the rest for that
 /// reason: a read whose answer is the pixels of somebody's password field is not a read.
-const MACHINE_METHODS: [&str; 26] = [
+const MACHINE_METHODS: [&str; 30] = [
     "repair_broker",
     "signin_start",
     "signin_frame",
@@ -464,7 +492,48 @@ const MACHINE_METHODS: [&str; 26] = [
     "custom_emoji_add",
     "custom_emoji_remove",
     "custom_emoji_import",
+    "seal_set",
+    "seal_off",
+    "seal_forget",
+    "seal_reveal",
 ];
+
+/// How many of a conversation's newest messages `seal_set` reads to answer "does this passphrase
+/// open what is already here".
+///
+/// A handful is enough to name the key in use and it is one indexed read: the question is "which
+/// passphrase is this thread being sealed with right now", not "every key it has ever seen".
+const SEAL_SCAN_DEPTH: i64 = 50;
+
+/// What a page is told about the sealed chats on this machine: which conversations, which key
+/// ids, and which one is current — and never a key or a passphrase.
+///
+/// It is the shape `get_settings` holds for a token: the page needs to know whether a chat is
+/// sealed in order to draw a padlock and a composer hint, and it never needs the secret to do it.
+fn seal_status_value(ctx: &Ctx) -> Result<Value> {
+    let store = ctx.store()?;
+    let conversations: Vec<Value> = store
+        .sealed_conversations()?
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "conversation": entry.conversation_id,
+                "sealing": entry.sealing,
+                "current_key_id": entry.current_key_id,
+                "keys": entry
+                    .keys
+                    .iter()
+                    .map(|k| json!({
+                        "key_id": k.key_id,
+                        "is_current": k.is_current,
+                        "added_ms": k.added_ms,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(json!({ "conversations": conversations }))
+}
 
 /// What a {@link MACHINE_METHODS} entry actually does to the machine, for its
 /// refusal text. Per method, not per class: "restarts the Intune container" would be
@@ -504,6 +573,20 @@ fn machine_effect(method: &str) -> &'static str {
              configuration — every tool it holds"
         }
         "agent_stop" => "stops a local agent this machine is running mid-answer",
+        "seal_set" => {
+            "decides that this machine encrypts every message it posts to a conversation, and \
+             under which passphrase — so a wrong one makes every message unreadable to the \
+             colleagues it is written to"
+        }
+        "seal_off" => {
+            "stops this machine encrypting a conversation, so the next message goes out in the \
+             clear to a chat whose reader believes it is sealed"
+        }
+        "seal_forget" => {
+            "drops a passphrase this machine holds, and every message it opened becomes \
+             unreadable here for good"
+        }
+        "seal_reveal" => "answers with a passphrase this machine holds",
         "agent_persona_save" | "agent_persona_remove" => {
             "changes the custom agents this machine answers to, and what instruction leads \
              their prompts"
@@ -4192,6 +4275,122 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             Ok(json!({ "removed": removed }))
         }
 
+        // ---- A SEALED chat (see `teams_lite::seal` and AGENTS.md § A sealed chat) ----
+
+        // Which conversations this machine holds a passphrase for, and which of them it is
+        // SEALING. OPEN, like `get_settings`: it answers which chats are sealed and under which
+        // key id, and never with a key or a passphrase — the one question a page must be able to
+        // ask before it draws a padlock or a composer hint.
+        "seal_status" => Ok(seal_status_value(&ctx)?),
+
+        // Set — or generate — the passphrase a conversation is sealed with, and start sealing.
+        //
+        // Additive: every key already held is kept and stops being current, so the messages it
+        // sealed still open. That is what makes a rotation, and a colleague changing the
+        // passphrase, cost nothing that is already in the thread.
+        //
+        // It ANSWERS with whether that passphrase opens the sealed messages the thread already
+        // holds. That is the sharpest failure this feature has: two people each set a DIFFERENT
+        // passphrase, every message each posts is unreadable to the other, and without this
+        // nobody is told — both see locked rows and each believes the other's app is broken.
+        "seal_set" => {
+            let conversation = param_str(params, "conversation")?;
+            // A CHANNEL is not sealable in v1, for the reason a channel holds no game of chess:
+            // its history is drawn as threads, and a sealed post there would have to answer a
+            // different question about where the padlock sits. Refused here rather than left to
+            // behave oddly.
+            anyhow::ensure!(
+                !teams_read::is_channel_thread_id(&conversation),
+                "a channel cannot be sealed yet — this is for a chat"
+            );
+            // Absent means GENERATE one, which is what the dialog offers first: a passphrase the
+            // app made carries its own entropy and does not lean on the KDF for safety.
+            let generated = params.get("passphrase").is_none();
+            let passphrase = match params.get("passphrase") {
+                Some(value) => {
+                    let raw = value.as_str().context("passphrase must be a string")?;
+                    teams_lite::seal::check_passphrase(raw)?
+                }
+                None => teams_lite::seal::generate_passphrase(),
+            };
+            let key = teams_lite::seal::derive(&passphrase, &conversation).context("derive the key")?;
+            let store = ctx.store()?;
+            // WHICH keys the messages already in the thread were sealed with, read before the
+            // write so the answer describes what the reader is walking into.
+            let in_use = store.seal_key_ids_in_use(&conversation, SEAL_SCAN_DEPTH)?;
+            let opens_existing = in_use.is_empty() || in_use.contains(&key.id_hex());
+            store.add_seal_key(&conversation, &key, &passphrase, now_ms())?;
+            // The journal records the key id and never the passphrase, for the reason no other
+            // secret in this file is ever logged.
+            eprintln!(
+                "[seal] {conversation} now seals under {} ({} keys already used here)",
+                key.id_hex(),
+                in_use.len()
+            );
+            ctx.emit("seal_changed", json!({ "conversation": conversation }));
+            let mut answer = seal_status_value(&ctx)?;
+            answer["conversation"] = json!(conversation);
+            answer["key_id"] = json!(key.id_hex());
+            answer["opens_existing"] = json!(opens_existing);
+            answer["key_ids_in_use"] = json!(in_use);
+            // The passphrase travels back ONLY when this machine invented it, so the dialog can
+            // show the user what to give their colleagues. One the user typed is one they already
+            // have.
+            if generated {
+                answer["passphrase"] = json!(passphrase);
+            }
+            Ok(answer)
+        }
+
+        // Stop sealing NEW messages, and KEEP every key. A chat that stops being sealed is still
+        // full of sealed messages, and dropping the passphrase would make every one of them
+        // unreadable — which is the one act here nothing takes back (that is `seal_forget`).
+        "seal_off" => {
+            let conversation = param_str(params, "conversation")?;
+            let store = ctx.store()?;
+            let stopped = store.stop_sealing(&conversation)?;
+            if stopped {
+                eprintln!("[seal] {conversation} no longer seals new messages");
+                ctx.emit("seal_changed", json!({ "conversation": conversation }));
+            }
+            let mut answer = seal_status_value(&ctx)?;
+            answer["stopped"] = json!(stopped);
+            Ok(answer)
+        }
+
+        // Forget one key. Every message it sealed becomes unreadable on this machine, for good —
+        // so the UI asks twice, the way a deletion does.
+        "seal_forget" => {
+            let conversation = param_str(params, "conversation")?;
+            let key_id = param_str(params, "key_id")?;
+            let store = ctx.store()?;
+            let forgotten = store.forget_seal_key(&conversation, &key_id)?;
+            if forgotten {
+                eprintln!("[seal] {conversation} forgot {key_id}: its messages are unreadable here");
+                ctx.emit("seal_changed", json!({ "conversation": conversation }));
+            }
+            let mut answer = seal_status_value(&ctx)?;
+            answer["forgotten"] = json!(forgotten);
+            Ok(answer)
+        }
+
+        // The passphrase behind one key, for the user's own press and nothing else.
+        //
+        // It exists because a colleague who joins the conversation in March has to be GIVEN
+        // something, and a passphrase this app cannot show again would force a rotation of the
+        // whole chat to share it. It is no wider a secret than the derived key in the same row —
+        // either one opens every message — which is why it is a press rather than a field of
+        // `seal_status`.
+        "seal_reveal" => {
+            let conversation = param_str(params, "conversation")?;
+            let key_id = param_str(params, "key_id")?;
+            let store = ctx.store()?;
+            let passphrase = store
+                .seal_passphrase(&conversation, &key_id)?
+                .context("this machine holds no passphrase for that key")?;
+            Ok(json!({ "passphrase": passphrase }))
+        }
+
         // Import a pack exported from another machine. Each entry is validated like
         // `custom_emoji_add`; entries that fail are skipped, and the count of what was
         // added is returned. A pack with one bad row still imports the rest.
@@ -4926,6 +5125,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // message arrives. Stored and read the same way — on unless turned off.
             if let Some(auto) = params.get("emoji_auto_import").and_then(Value::as_bool) {
                 store.set_setting(SETTING_EMOJI_AUTO_IMPORT, if auto { "1" } else { "0" })?;
+            }
+            // Whether a notification about a SEALED chat carries the words. OFF unless turned on,
+            // which is the reverse of the two above — see `SETTING_SEALED_PUSH_WORDS`.
+            if let Some(words) = params.get("sealed_push_words").and_then(Value::as_bool) {
+                store.set_setting(SETTING_SEALED_PUSH_WORDS, if words { "1" } else { "0" })?;
             }
             settings_json(&store)
         }
@@ -7525,6 +7729,9 @@ fn settings_json(store: &Store) -> Result<Value> {
         "available_now": available_now,
         "sender_icons": sender_icons_enabled(store)?,
         "emoji_auto_import": emoji_auto_import_enabled(store)?,
+        // Whether a notification about a SEALED chat carries the words. Off unless the user
+        // turned it on (see `SETTING_SEALED_PUSH_WORDS`).
+        "sealed_push_words": store.get_setting(SETTING_SEALED_PUSH_WORDS)?.as_deref() == Some("1"),
     }))
 }
 
@@ -7735,6 +7942,20 @@ fn sender_icons_enabled(store: &Store) -> Result<bool> {
 /// behaviour, and what bounds it is the code around it (see [`SETTING_EMOJI_AUTO_IMPORT`]).
 fn emoji_auto_import_enabled(store: &Store) -> Result<bool> {
     Ok(store.get_setting(SETTING_EMOJI_AUTO_IMPORT)?.as_deref() != Some("0"))
+}
+
+/// Whether a notification about a sealed chat may carry the WORDS.
+///
+/// OFF unless the user turned it on — the reverse of every other switch read this way, and the
+/// reverse on purpose: a store this backend cannot read must not publish the words of a sealed
+/// conversation to a lock screen on the strength of a failed read.
+fn sealed_push_words(ctx: &Ctx) -> bool {
+    ctx.store()
+        .ok()
+        .and_then(|store| store.get_setting(SETTING_SEALED_PUSH_WORDS).ok())
+        .flatten()
+        .as_deref()
+        == Some("1")
 }
 
 /// Is Ghost mode on? Off unless the stored value is exactly `"1"`, so a missing,
@@ -8834,7 +9055,20 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str, store: Option<&Sto
         // back on the feed like any other frame, and a page that merged it would draw
         // tomorrow's message in today's thread — the very thing the store's own read
         // excludes (see `Message::scheduled_time`).
-        "scheduled_time": m.scheduled_time
+        "scheduled_time": m.scheduled_time,
+        // How this body reached the reader: absent for an ordinary message, "opened" for one
+        // this machine unsealed, and "locked" / "newer" / "damaged" for one it could not (see
+        // `store::MessageSeal`). "opened" is deliberately said out loud: a padlock beside a
+        // message the reader CAN read is how they learn the chat is sealed at all.
+        //
+        // A locked message's `content` is EMPTY above rather than the token — the store keeps
+        // the ciphertext on disk, so a passphrase added tomorrow still opens it, and no page,
+        // preview or notification is ever handed base64.
+        "seal": m.seal.wire(),
+        // WHICH passphrase is missing, for the one state that names one. It is a key id and
+        // never a key: it is what lets the app say which passphrase to ask a colleague for,
+        // instead of "this message cannot be read".
+        "seal_key_id": m.seal.key_id()
     })
 }
 
@@ -9514,7 +9748,14 @@ fn push_live_message(
         .map(|display_name| Message { sender: display_name, ..message.clone() });
     let message = renamed.as_ref().unwrap_or(message);
     let Some(notification) =
-        push_policy::notification_for(message, &placement, self_mri, from_me, now_ms())
+        push_policy::notification_for(
+            message,
+            &placement,
+            self_mri,
+            from_me,
+            now_ms(),
+            sealed_push_words(ctx),
+        )
     else {
         return;
     };
@@ -13730,6 +13971,79 @@ mod tests {
         }
     }
 
+    /// SEALING a chat is the user's own act; asking which chats are sealed is not.
+    ///
+    /// Every one of the four writes decides something a client that merely found this socket must
+    /// not decide: whether the next message goes out in the clear, under which passphrase, and
+    /// whether a key that opens a thread's history is dropped for good. `seal_reveal` is here
+    /// because its ANSWER is the passphrase. `seal_status` stays open: a page has to know whether
+    /// a chat is sealed in order to draw a padlock, and it never needs the secret to do it.
+    #[test]
+    fn sealing_a_chat_needs_the_write_token_and_asking_about_it_does_not() {
+        for method in ["seal_set", "seal_off", "seal_forget", "seal_reveal"] {
+            assert!(MACHINE_METHODS.contains(&method), "{method} is not gated");
+            let err = check_write_allowed(method, &json!({}), Some("tok")).unwrap_err().to_string();
+            assert!(err.contains("write token"), "{method}: {err}");
+            assert!(
+                check_write_allowed(method, &json!({ "write_token": "tok" }), Some("tok")).is_ok()
+            );
+            // A read-only backend refuses them whatever token it is shown: it must not be able to
+            // stop a chat being sealed, nor to hand out a passphrase.
+            assert!(check_write_allowed(method, &json!({ "write_token": "tok" }), None).is_err());
+            // And each one says what it really does, in its own words.
+            assert_ne!(machine_effect(method), "changes this machine", "{method} has no phrase");
+        }
+        // The read is open, on a read-only backend too.
+        assert!(check_write_allowed("seal_status", &json!({}), Some("tok")).is_ok());
+        assert!(check_write_allowed("seal_status", &json!({}), None).is_ok());
+        assert!(!MACHINE_METHODS.contains(&"seal_status"));
+        assert!(!OUTWARD_METHODS.contains(&"seal_status"));
+        // None of them posts to Teams, so none belongs in the outward list — the distinction
+        // three other tests iterate.
+        for method in ["seal_set", "seal_off", "seal_forget", "seal_reveal"] {
+            assert!(!OUTWARD_METHODS.contains(&method), "{method} posts nothing");
+        }
+    }
+
+    /// A page is never handed a key or a passphrase by the status.
+    ///
+    /// The rule `get_settings` holds for a token: it answers WHETHER a chat is sealed and under
+    /// which key id, and a client that merely found this socket learns nothing it could decrypt
+    /// with. The passphrase leaves this machine only through `seal_reveal`, which is a press.
+    #[test]
+    fn the_seal_status_carries_no_key_and_no_passphrase() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
+        let key = teams_lite::seal::derive("hunter two", conversation).unwrap();
+        store.add_seal_key(conversation, &key, "hunter two", 1_700_000_000_000).unwrap();
+
+        let listed = store.sealed_conversations().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].sealing);
+        assert_eq!(listed[0].current_key_id, key.id_hex());
+
+        // Serialized the way `seal_status_value` does it, and then searched for the secrets.
+        let shown = json!({
+            "conversation": listed[0].conversation_id,
+            "sealing": listed[0].sealing,
+            "current_key_id": listed[0].current_key_id,
+            "keys": listed[0].keys.iter().map(|k| json!({
+                "key_id": k.key_id, "is_current": k.is_current, "added_ms": k.added_ms,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string();
+        assert!(!shown.contains("hunter"), "the passphrase must not be in the status: {shown}");
+        assert!(
+            !shown.contains(&teams_lite::seal::hex_of(&key.secret_for_store())),
+            "the key must not be in the status: {shown}"
+        );
+        // And the passphrase is still there for the press that reveals it.
+        assert_eq!(
+            store.seal_passphrase(conversation, &key.id_hex()).unwrap().as_deref(),
+            Some("hunter two")
+        );
+    }
+
     /// Writing a CUSTOM AGENT is the user's own act; reading the list back is not.
     ///
     /// A row decides what a later `@bebou` does in a thread they opted in — which CLI
@@ -14160,6 +14474,8 @@ mod tests {
             "8:orgid:me",
             false,
             1_700_000_000_000,
+            // An unsealed message: the sealed-words setting cannot change its preview.
+            false,
         )
         .expect("a chat message always notifies");
         assert!(notification.title.contains("Bob"), "{}", notification.title);

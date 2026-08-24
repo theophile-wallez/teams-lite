@@ -553,6 +553,14 @@ if ! sanctioned_automation; then
     # from another (MACHINE_METHODS in src/bin/server.rs). Reading them back is not a
     # write and is not listed.
     #
+    # `seal_set`, `seal_off`, `seal_forget` and `seal_reveal` decide whether a conversation's
+    # messages are ENCRYPTED before they reach Teams, and under which passphrase. A script that
+    # turned sealing off would make the next message go out in the clear to a chat whose reader
+    # believes it is sealed; one that set a passphrase would make every message the user posts
+    # unreadable to the colleagues they are writing to; `seal_forget` drops a key and every
+    # message it opened becomes unreadable for good; and `seal_reveal` ANSWERS with a passphrase.
+    # `seal_status` stays allowed: it names which chats are sealed and never a key.
+    #
     # `custom_emoji_add`, `custom_emoji_remove` and `custom_emoji_import` write the emoji
     # pack: a script that could plant art in the pack could post a picture under the
     # user's name on the next send (MACHINE_METHODS in src/bin/server.rs).
@@ -572,7 +580,7 @@ if ! sanctioned_automation; then
     # could put words in the mouth of a program that answers as the user. Reading the list
     # back is not a write and is not listed.
     if grep -qE '(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
-      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|signin_start|signin_frame|signin_input|signin_cancel|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|signin_start|signin_frame|signin_input|signin_cancel|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)'\''|write_token' "$script"; then
+      grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|seal_set|seal_off|seal_forget|seal_reveal|signin_start|signin_frame|signin_input|signin_cancel|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|seal_set|seal_off|seal_forget|seal_reveal|signin_start|signin_frame|signin_input|signin_cancel|update_download|update_apply|restart_backend|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_set_state)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
     # A script has no business naming the write token at all: an ad-hoc one that

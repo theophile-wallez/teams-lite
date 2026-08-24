@@ -306,6 +306,30 @@ FIXTURES = {
     # Settings: writing them stores the integration credentials and can move the
     # GitLab host the stored token is pinned to, so it is a write to the live backend
     # like the push methods (a MACHINE_METHODS entry in src/bin/server.rs).
+    # A SEALED chat: turning sealing off makes the next message go out in the CLEAR to a chat
+    # whose reader believes it is sealed, and setting a passphrase makes every message the user
+    # posts unreadable to the colleagues they are writing to. Revealing one answers with a secret.
+    "seal-off-writer.ts": (
+        "// Stops a chat being sealed on the real backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'seal_off', params: { conversation: '19:x@thread.v2' } }));\n"
+    ),
+    "seal-set-writer.ts": (
+        "// Sets a chat's passphrase on the real backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'seal_set', params: { conversation: '19:x@thread.v2' } }));\n"
+    ),
+    "seal-reveal-writer.ts": (
+        "// Reads a passphrase out of the real backend.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'seal_reveal', params: { conversation: '19:x@thread.v2' } }));\n"
+    ),
+    # Which chats are sealed is a READ: it names no key and changes nothing.
+    "seal-status-reader.ts": (
+        "// Asks which conversations are sealed, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'seal_status' }));\n"
+    ),
     "settings-writer.ts": (
         "// Stores an integration token on the real backend.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
@@ -622,6 +646,10 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/push-subscriber.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/push-tester.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/settings-writer.ts"),
+        # A sealed chat: every write to it is blocked against a live port.
+        ("BLOCK", PROJECT, f"bun run {tmp}/seal-off-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/seal-set-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/seal-reveal-writer.ts"),
         # The local agent: arming it, or widening what it may run, is a write.
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-armer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/agent-tooler.ts"),
@@ -894,6 +922,9 @@ def cases(tmp: Path):
         # Which devices are subscribed is a read, like any other status question.
         ("ALLOW", PROJECT, f"bun run {tmp}/push-status-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/settings-reader.ts"),
+        # Which chats are sealed names no key and changes nothing: diagnosing stays normal work.
+        ("ALLOW", PROJECT, f"bun run {tmp}/seal-status-reader.ts"),
+        ("ALLOW", PROJECT, "grep -rn 'seal_set' src/"),
         # …and so is which conversations the agent answers in.
         ("ALLOW", PROJECT, f"bun run {tmp}/agent-status-reader.ts"),
         # …and so is reading back the names and faces the user chose themselves.
