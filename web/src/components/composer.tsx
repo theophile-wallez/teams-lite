@@ -27,6 +27,12 @@ import {
   postSubjectOffered,
 } from "~/lib/post-subject";
 import { scheduledBanner } from "~/lib/schedule-send";
+import {
+  SEAL_COMPOSER_HINT,
+  SEAL_MISMATCH_HINT,
+  sealIsOn,
+  sealKeyDisagrees,
+} from "~/lib/seal";
 import { copyableMessageText } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { ScheduleSendMenu } from "./schedule-send-menu";
@@ -109,6 +115,13 @@ export function Composer(props: {
   const scheduledHere = useAppState((s) => s.scheduledMessages);
   // Words handed back by the scheduled list's Edit, for the thread they belong to.
   const composerRestore = useAppState((s) => s.composerRestore);
+  // Whether the words in this box will be ENCRYPTED when they leave (see lib/seal.ts). It
+  // comes from the BACKEND, which is what really seals them, and it is false until the
+  // backend has answered: a hopeful padlock over a message that goes out in the clear is
+  // the one thing this hint must never do.
+  const sealStatus = useAppState((s) => s.sealStatus);
+  // The messages on screen, for the one warning no press can reach (see `sealMismatch`).
+  const openMessages = useAppState((s) => s.messages);
   const replyingTo = useAppState((s) => s.replyingTo);
   const openId = useAppState((s) => s.openId);
   // Whether the open thread is a CHANNEL, which is what decides that a post has a TITLE at
@@ -349,6 +362,12 @@ export function Composer(props: {
   const scheduleBanner = scheduledBanner(
     scheduledHere.filter((m) => m.conversation_id === openId).map((m) => m.scheduled_time ?? 0),
   );
+  // Whether these words will be encrypted, and whether the thread disagrees with the
+  // passphrase this machine would seal them under. Both are read from what the app already
+  // holds — the backend's own seal status, and the messages on screen — so neither costs a
+  // request and neither can go stale behind a reader who is already typing.
+  const sealed = sealIsOn(sealStatus, openId);
+  const sealMismatch = sealKeyDisagrees(sealStatus, openId, openMessages);
 
   /** Send the composer's snapshot — now, or at `scheduledAt` if the reader picked a
    *  moment. One path for both, so a scheduled message carries the same pictures, the
@@ -556,6 +575,30 @@ export function Composer(props: {
           {imageError && (
             <div role="alert" data-testid="composer-image-error" className="text-xs text-destructive">
               {imageError}
+            </div>
+          )}
+          {/* WHAT WILL HAPPEN TO THESE WORDS, in one line, above the field they are in.
+              It says the two things the reader decides with and no more: the message is
+              encrypted, and a PICTURE is not — its bytes go to Microsoft's own object
+              store, so nothing in this app can cover them, and a message that looked
+              sealed while carrying a readable screenshot would be a lie (§ A SEALED chat).
+              It is drawn from the BACKEND's own answer, which is what really seals the
+              body, so it can never claim a seal the send will not apply. */}
+          {sealed && (
+            <div data-testid="composer-seal-hint" className="text-xs text-text-faint">
+              {SEAL_COMPOSER_HINT}
+            </div>
+          )}
+          {/* AND THE ONE WARNING NO PRESS REACHES. The dialog says it to whoever sets a
+              passphrase that opens nothing; this says it to whoever was given the wrong one
+              months ago and is writing today. Without it two people seal past each other in
+              silence — each posting messages the other cannot read, each seeing locked rows,
+              each believing the other's app is broken — which is the sharpest failure this
+              feature has. It is `destructive` rather than faint because it is about a message
+              that is ABOUT TO leave, not about one that did. */}
+          {sealMismatch && (
+            <div role="alert" data-testid="composer-seal-mismatch" className="text-xs text-destructive">
+              {SEAL_MISMATCH_HINT}
             </div>
           )}
           {/* Why the last message did not leave, beside the words that are still in the

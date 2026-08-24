@@ -42,6 +42,23 @@ import type { Locator, Page } from "@playwright/test";
  * `afterEach` calls the `{kind:"seal"}` reset. One mock process serves the whole run, so a chat
  * left sealed would change what every later spec's composer says about the message it is about
  * to send — and a message sent into the fixture is a row every later spec would count.
+ *
+ * **TWO TESTS HERE ARE RED, and deliberately so: the COMPOSER half of this feature is not
+ * built.** `SEAL_COMPOSER_HINT` and `SEAL_MISMATCH_HINT` are decided in `lib/seal.ts`, argued in
+ * AGENTS.md § A SEALED chat as rules the app holds, and drawn by nothing —
+ * `web/src/components/composer.tsx` never reads `sealIsOn` or `sealKeyDisagrees`. They are the
+ * two named here, and both are load-bearing rather than cosmetic:
+ *
+ *   - "the COMPOSER says the words are encrypted and a picture is NOT" — a picture is uploaded
+ *     to Microsoft's object store unsealed and is deliberately allowed, so a chat that looked
+ *     sealed while carrying a readable screenshot is a lie the composer is the only surface
+ *     placed to correct;
+ *   - "the COMPOSER carries the mismatch while the thread disagrees with this machine" — the one
+ *     warning NO press reaches, for the reader who was given the wrong passphrase months ago and
+ *     writes today. Without it, two people seal past each other in silence.
+ *
+ * They are left asserting rather than skipped, because a skipped test is a rule nobody is
+ * reminded of. Every other rule the page owns passes.
  */
 
 /** The port the mock is expected on — mirrors `playwright.config.ts`. */
@@ -62,6 +79,18 @@ const A_STRANGER = "zzzz-yyyy-xxxx-wwww-vvvv";
  *  trusting the attribute that claims it. */
 const OPENED_WORDS = "The invoice numbers are in the sheet I shared";
 const LOCKED_WORDS = "I changed the passphrase this morning";
+
+/** The floor every target in this app holds under a thumb, measured with one pixel of slack for
+ *  the browser's own sub-pixel rounding. */
+const TOUCH_FLOOR_PX = 43;
+
+/** A PHONE with a finger: a narrow viewport AND a coarse pointer.
+ *
+ *  It is the three fields of Playwright's own Pixel 7 rather than the whole device, because a
+ *  device descriptor carries `defaultBrowserType` and that one forces a new worker, which a
+ *  describe-level `use` is not allowed to do. The subset is `preview.ts`'s own `PHONE` and for
+ *  its reason: this app reads the pointer and the width, and nothing in it reads a UA string. */
+const PHONE = { viewport: { width: 412, height: 839 }, hasTouch: true, isMobile: true } as const;
 
 function messages(page: Page): Locator {
   return page.locator('[data-testid="message"]');
@@ -250,11 +279,8 @@ test.describe("a sealed chat", () => {
     await expect(opened.locator('[data-testid="reaction-chip-like"]')).toHaveCount(0);
   });
 
-  test("SEALING a chat from the header menu, and the composer then says so", async ({ page }) => {
+  test("SEALING a chat from the header menu", async ({ page }) => {
     await openPlainChat(page);
-    // Nothing about sealing is claimed before the reader asks for it.
-    await expect(composerShell(page)).not.toContainText(SEAL_COMPOSER_HINT);
-
     const dialog = await openSealDialog(page);
     // It opens on the state the BACKEND is in, not on one it remembered: no passphrase here yet.
     await expect(dialog).toHaveAttribute("data-seal-state", "new");
@@ -279,13 +305,34 @@ test.describe("a sealed chat", () => {
     await expect(page.locator('[data-testid="seal-mismatch"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="seal-dialog"]')).toHaveCount(0);
 
-    // What the reader owes their next Enter, on every message rather than once: the words are
-    // encrypted, and a picture is not.
-    await expect(composerShell(page)).toContainText(SEAL_COMPOSER_HINT);
-    // The menu says where the chat now stands, which is how it is found again.
+    // The menu says where the chat now stands, which is how it is found again — and it is read
+    // from the backend's own answer rather than from the press that was just made.
     await page.locator('[data-testid="conversation-menu"]').click();
     await expect(page.locator('[data-testid="conversation-seal"]')).toContainText("Encryption on");
     await page.locator('[data-testid="conversation-menu"]').click();
+    // The message the reader is about to write is sealed, and the row they wrote before it is
+    // not, so the state is a fact about the CONVERSATION rather than about any message in it.
+    await expect(messages(page).first()).not.toHaveAttribute("data-seal", /./);
+  });
+
+  test("the COMPOSER says the words are encrypted and a picture is NOT", async ({ page }) => {
+    // A picture's bytes are uploaded to Microsoft's own object store, so nothing in this feature
+    // can cover them — it is ALLOWED rather than refused, which is the user's own decision, and a
+    // message that looked sealed while carrying a readable screenshot would be a lie. So the one
+    // place that can say it is the composer, on every message rather than once when the chat was
+    // sealed months ago.
+    await openPlainChat(page);
+    // Nothing about sealing is claimed before the reader asks for it: a page that has not heard
+    // from the backend draws NOTHING, because a hopeful padlock would tell the reader their next
+    // message is encrypted while it goes out in the clear.
+    await expect(composerShell(page)).not.toContainText(SEAL_COMPOSER_HINT);
+
+    const dialog = await openSealDialog(page);
+    await dialog.locator('[data-testid="seal-passphrase-field"]').fill(HELD);
+    await dialog.locator('[data-testid="seal-apply"]').click();
+    await expect(page.locator('[data-testid="seal-dialog"]')).toHaveCount(0);
+
+    await expect(composerShell(page)).toContainText(SEAL_COMPOSER_HINT);
   });
 
   test("a GENERATED passphrase is shown once, and revealable afterwards", async ({ page }) => {
@@ -360,24 +407,26 @@ test.describe("a sealed chat", () => {
   test("the COMPOSER carries the mismatch while the thread disagrees with this machine", async ({
     page,
   }) => {
-    // The other side of the same failure, and the one no write reaches: somebody GIVEN the wrong
-    // passphrase months ago, writing today. The fixture is already in that state — it seals
-    // under one key while a colleague's message carries another — so this needs no press at all.
+    // The other side of the same failure, and the one NO WRITE REACHES: somebody given the wrong
+    // passphrase months ago, writing today. `sealSetMismatch` fires on a press and cannot help
+    // them — they press nothing — so this warning is the whole of what stops the sharpest failure
+    // this feature has: two people each sealing under their own passphrase, every message each
+    // posts unreadable to the other, and neither told.
+    //
+    // The fixture is already in that state — it seals under one key while a colleague's message
+    // in it carries another — so this needs no press at all, which is exactly the point.
     await openSealedChat(page);
+    await expect(sealedRow(page, "locked")).toHaveCount(1);
     await expect(composerShell(page)).toContainText(SEAL_MISMATCH_HINT);
 
-    // Adding the colleague's own passphrase is what mends it, and it mends BOTH halves at once:
-    // the warning goes, and every message that key sealed gets its words back.
+    // And it GOES when the disagreement does, rather than sitting there for the rest of the run:
+    // adding the colleague's own passphrase is what mends it.
     const dialog = await openSealDialog(page);
     await dialog.locator('[data-testid="seal-passphrase-field"]').fill(THEIRS);
     await dialog.locator('[data-testid="seal-apply"]').click();
     await expect(page.locator('[data-testid="seal-dialog"]')).toHaveCount(0);
-
     await expect(sealedRow(page, "locked")).toHaveCount(0);
-    await expect(page.locator('[data-testid="message"]', { hasText: LOCKED_WORDS })).toHaveAttribute(
-      "data-seal",
-      "opened",
-    );
+
     await expect(composerShell(page)).not.toContainText(SEAL_MISMATCH_HINT);
     // Still sealed, so the ordinary hint stays: the mismatch went, not the encryption.
     await expect(composerShell(page)).toContainText(SEAL_COMPOSER_HINT);
@@ -396,8 +445,13 @@ test.describe("a sealed chat", () => {
     await dialog.locator('[data-testid="seal-passphrase-field"]').fill(THEIRS);
     await dialog.locator('[data-testid="seal-apply"]').click();
 
-    // Every message that key sealed is readable at once — the promise the row makes.
-    await expect(page.locator('[data-testid="message"]', { hasText: LOCKED_WORDS })).toBeVisible();
+    // Every message that key sealed is readable at once — the promise the row makes, and the one
+    // thing only a browser can prove: the store keeps the ciphertext and decrypts on READ, so
+    // there is nothing to migrate when a key arrives.
+    await expect(sealedRow(page, "locked")).toHaveCount(0);
+    const wasLocked = page.locator('[data-testid="message"]', { hasText: LOCKED_WORDS });
+    await expect(wasLocked).toHaveAttribute("data-seal", "opened");
+    await expect(wasLocked.locator('[data-testid="seal-mark"]')).toBeVisible();
     await expect(page.locator('[data-testid="sealed-message"]')).toHaveCount(1); // the damaged one
     // Both passphrases are kept, oldest first, and the one just added is current.
     const again = await openSealDialog(page);
@@ -469,11 +523,18 @@ test.describe("a sealed chat", () => {
     await closeSealDialog(page);
 
     // What the warning SAID, watched happening: the message this passphrase opened is withheld
-    // again, with its words gone, and it names the passphrase it now needs.
+    // again, with its words gone, and it names the passphrase it now needs. It is the assertion
+    // this whole spec exists for — a unit test can pin the sentence, and only a browser can prove
+    // the words really go.
     await expect(sealedRow(page, "opened")).toHaveCount(0);
     await expect(page.locator("body")).not.toContainText(OPENED_WORDS);
     await expect(sealedRow(page, "locked")).toHaveCount(2);
-    await expect(composerShell(page)).not.toContainText(SEAL_COMPOSER_HINT);
+    // And the chat is offered afresh rather than left claiming a seal no key backs.
+    await page.locator('[data-testid="conversation-menu"]').click();
+    await expect(page.locator('[data-testid="conversation-seal"]')).toContainText(
+      "Encrypt this chat",
+    );
+    await page.locator('[data-testid="conversation-menu"]').click();
   });
 
   test("a CHANNEL and NOTES are never offered one", async ({ page }) => {
@@ -502,7 +563,6 @@ test.describe("a sealed chat", () => {
     // page sends PLAINTEXT over the local socket — the backend seals it — so what this pins is
     // that nothing on this side added a notice to it on the way.
     await openSealedChat(page);
-    await expect(composerShell(page)).toContainText(SEAL_COMPOSER_HINT);
     await sendFromComposer(page, "the numbers are in the sheet");
 
     await expect(messages(page)).toHaveCount(5);
@@ -536,11 +596,13 @@ test.describe("a sealed chat", () => {
     await expect(row.locator('[data-testid="seal-revealed-passphrase"]')).toContainText("hq7m");
 
     // The user sealed that chat, so a preview of it on a locked screen is the one thing they did
-    // not ask for. It still notifies — silence would be worse — with the words withheld.
-    await expect(section.locator('[data-testid="sealed-push-words-toggle"]')).toHaveAttribute(
-      "data-state",
-      "unchecked",
-    );
+    // not ask for. It still notifies — silence would be worse — with the words withheld. The
+    // state is read from `aria-checked`, which is the one a screen reader is given and therefore
+    // the one that has to be right; the switch is deliberately not FLIPPED here, because this
+    // setting has no test hook to put it back and one mock process serves the whole run.
+    const words = section.locator('[data-testid="sealed-push-words-toggle"]');
+    await expect(words).toHaveAttribute("aria-checked", "false");
+    await expect(section).toContainText("says who wrote, and not what they said");
   });
 
   test("a machine with no seal at all says NOTHING about sealing", async ({ page }) => {
@@ -562,33 +624,61 @@ test.describe("a sealed chat", () => {
     await page.locator('[data-testid="conversation-menu"]').click();
   });
 
-  test("every press in the dialog clears the touch floor on a phone", async ({ page }) => {
-    // This app is read from a phone, and a passphrase read off a laptop is typed in on one. The
-    // field is 16px so iOS does not zoom the page on focus, and every target is 44px — the floor
-    // a menu row, a dialog's close and a slider's thumb already hold.
-    await page.setViewportSize({ width: 390, height: 844 });
-    await openSealedChat(page);
-    const dialog = await openSealDialog(page);
+  // A PHONE with a finger, and it has to be a real device rather than a narrow window: every
+  // press in this dialog grows to the touch floor behind `@media (pointer: coarse)`, so
+  // `setViewportSize` alone captures the DESKTOP sizes in a narrow column and the test would
+  // pass on a 36px button. That is not a hypothetical — it is what the first run of this file
+  // measured: `seal-apply` came back 36px tall in a 390px window. `test.use` is a describe-level
+  // option, which is why this one test has a block of its own.
+  test.describe("on a phone", () => {
+    test.use(PHONE);
 
-    const field = dialog.locator('[data-testid="seal-passphrase-field"]');
-    const box = await field.boundingBox();
-    expect(box!.height).toBeGreaterThanOrEqual(43);
-    expect(
-      Number(await field.evaluate((el) => getComputedStyle(el).fontSize.replace("px", ""))),
-    ).toBeGreaterThanOrEqual(16);
+    test("every press in the dialog clears the touch floor", async ({ page }) => {
+      // This app is read from a phone, and a passphrase read off a laptop is typed in on one.
+      // The field is 16px so iOS does not zoom the page on focus, and every target is 44px — the
+      // floor a menu row, a dialog's close and a slider's thumb already hold.
+      await openSealedChat(page);
+      const dialog = await openSealDialog(page);
 
-    for (const id of ["seal-apply", "seal-off", "seal-reveal", "seal-forget"]) {
-      const target = dialog.locator(`[data-testid="${id}"]`).first();
-      const targetBox = await target.boundingBox();
-      expect(targetBox, `${id} is on screen`).not.toBeNull();
-      expect(targetBox!.height, `${id} clears the touch floor`).toBeGreaterThanOrEqual(43);
-    }
+      const field = dialog.locator('[data-testid="seal-passphrase-field"]');
+      const box = await field.boundingBox();
+      expect(box!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR_PX);
+      expect(
+        Number(await field.evaluate((el) => getComputedStyle(el).fontSize.replace("px", ""))),
+      ).toBeGreaterThanOrEqual(16);
 
-    // And the dialog fits the column it is drawn in: a passphrase whose Copy button is off the
-    // right of the screen is one nobody can share.
-    const content = await dialog.boundingBox();
-    expect(content!.x).toBeGreaterThanOrEqual(-1);
-    expect(content!.x + content!.width).toBeLessThanOrEqual(391);
-    await closeSealDialog(page);
+      // Every press the dialog can offer at once: seal again, stop sealing, show a passphrase,
+      // and forget one. Each is asserted by name, because "the buttons are big enough" over a
+      // collection is a test that passes when one of them is not drawn at all.
+      for (const id of ["seal-apply", "seal-close", "seal-off", "seal-reveal", "seal-forget"]) {
+        const target = dialog.locator(`[data-testid="${id}"]`).first();
+        const targetBox = await target.boundingBox();
+        expect(targetBox, `${id} is drawn`).not.toBeNull();
+        expect(targetBox!.height, `${id} clears the touch floor`).toBeGreaterThanOrEqual(
+          TOUCH_FLOOR_PX,
+        );
+      }
+
+      // And the dialog fits the screen it is drawn on: a passphrase whose Copy button is off the
+      // right edge is one nobody can share, which is the whole reason it can be shown again.
+      const width = page.viewportSize()!.width;
+      const content = await dialog.boundingBox();
+      expect(content!.x).toBeGreaterThanOrEqual(-1);
+      expect(content!.x + content!.width).toBeLessThanOrEqual(width + 1);
+
+      // The two presses that arm the destructive act are the same size as the rest: this is the
+      // one act here nothing takes back, and a 28px "Forget it for good" beside a 44px "Keep it"
+      // is a mis-tap that costs a thread's history.
+      await dialog.locator('[data-testid="seal-forget"]').first().click();
+      for (const id of ["seal-forget-confirm", "seal-forget-cancel"]) {
+        const armed = await dialog.locator(`[data-testid="${id}"]`).first().boundingBox();
+        expect(armed, `${id} is drawn`).not.toBeNull();
+        expect(armed!.height, `${id} clears the touch floor`).toBeGreaterThanOrEqual(
+          TOUCH_FLOOR_PX,
+        );
+      }
+      await dialog.locator('[data-testid="seal-forget-cancel"]').first().click();
+      await closeSealDialog(page);
+    });
   });
 });
