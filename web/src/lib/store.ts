@@ -72,6 +72,8 @@ import {
   type ReadReceipt,
   type ReadReceiptSignal,
   type ReplyTo,
+  type SealSetResult,
+  type SealStatus,
   type SettingsPatch,
   type TypingName,
   type TypingSignal,
@@ -542,6 +544,20 @@ export type AppState = {
    *  message nobody touched is absent, which leaves the fold automatic. */
   agentTranscriptsOpen: Record<string, boolean>;
 
+  // ---- a sealed chat (see lib/seal.ts) -------------------------------------
+
+  /** Which conversations this machine seals, and which passphrases it holds for each —
+   *  null until the backend answers.
+   *
+   *  It carries no key and no passphrase: the backend is the encryption boundary, so the
+   *  page never holds one (the secret leaves it only through `sealReveal`, on a press). Null
+   *  rather than an empty status because the two say different things — nothing has been
+   *  ASKED yet, versus nothing here is sealed — and every decision in lib/seal.ts reads null
+   *  as "draw nothing about sealing", which is the reading every unanswered capability takes
+   *  in this app. A hopeful empty status would tell the reader their next message goes out in
+   *  the clear while the backend was about to seal it. */
+  sealStatus: SealStatus | null;
+
   // ---- mail (read-only Outlook surface) ------------------------------------
 
   /** The mailbox's folders, in sidebar order. Empty until the Mail tab is first
@@ -910,6 +926,10 @@ function initialState(): AppState {
       // reason the line above gives: a switch that read "off" until the settings land
       // would tell the user no emoji is being taken while one is.
       emoji_auto_import: true,
+      // OFF, like the backend's own default, and the opposite reading from the two above for
+      // the opposite reason: a switch that read "on" until the settings land would say the
+      // words of a sealed chat are drawn on a lock screen while they are being withheld.
+      sealed_push_words: false,
     },
     linearWorkspace: null,
     push: INITIAL_PUSH_STATE,
@@ -917,6 +937,7 @@ function initialState(): AppState {
     agentRuns: {},
     agentTranscripts: {},
     agentTranscriptsOpen: {},
+    sealStatus: null,
     mailFolders: [],
     mailFolderId: null,
     mailMessages: [],
@@ -1238,6 +1259,11 @@ export class TeamsController {
       // holds an agent CLI at all. Best-effort: a failure leaves the menu saying the
       // backend has not answered, never a switch that pretends to work.
       void this.loadAgentStatus();
+      // Which chats this machine seals, and which passphrases it holds for each. Best-effort
+      // on the same terms, and the failure reads correctly on its own: with no answer nothing
+      // about sealing is drawn at all, which is what the app looked like before the feature —
+      // never a padlock over a message that went out in the clear.
+      void this.loadSealStatus();
       // Whether this machine takes calls, and whether it is in one. Best-effort for
       // the same reason: an unanswered status reads as "off", which is what the
       // backend defaults to.
@@ -1551,6 +1577,32 @@ export class TeamsController {
     on("agent_personas_changed", () => {
       this.forgetPersonaAvatars();
       void this.loadAgentStatus();
+    });
+
+    // A chat was sealed, stopped being sealed, or gained or lost a passphrase — here, or in
+    // the other backend sharing this store.
+    //
+    // TWO HALVES, and the second is the load-bearing one. Re-reading the status is what moves
+    // the padlock and the composer's own sentence. Re-reading the MESSAGES is what makes the
+    // history readable: a locked body is handed to the page EMPTY, never as ciphertext, so
+    // adding the passphrase changes nothing the page is already holding — the reader would
+    // type it in, watch the rows stay locked, and reload. Nothing here can decrypt them
+    // either; the backend decrypts on its own read, so the only way to see the words is to
+    // ask again. That is `forgetPerson`'s shape exactly, and for the same reason: the answer
+    // is derived on the way out of the store, so what is in memory is stale.
+    //
+    // The SIDEBAR is re-read for that same reason — a row's preview is one of those bodies —
+    // and only the conversations: a channel cannot be sealed (`sealCanBeUsed`), so nothing in
+    // that list can have moved.
+    on("seal_changed", (raw) => {
+      const conversation = (raw as { conversation?: string } | null)?.conversation;
+      void this.loadSealStatus();
+      void this.refreshConversations();
+      // Only the thread the event names, when it names one: a passphrase added to another
+      // chat says nothing about the open one, and its own cached page is reconciled by the
+      // `open` that every `openConversation` makes anyway.
+      const openId = this.get().openId;
+      if (openId && (!conversation || openId === conversation)) void this.reconcileOpen(openId);
     });
 
     on("custom_emoji_changed", () => {
@@ -4577,6 +4629,12 @@ export class TeamsController {
     if (openId) void this.reconcileOpen(openId);
     void this.refreshConversations();
     void this.refreshChannels();
+    // And where the seal stands. `seal_changed` is how this page normally hears about it, and
+    // an event that fired while the socket was down is an event nobody replays — so a
+    // passphrase added on the other install on this machine would leave the padlock and the
+    // composer's sentence wrong until a reload. It is a store read on the backend and costs no
+    // network request; the messages above have already been reconciled.
+    void this.loadSealStatus();
     // Mail too, but only if it has been opened: its own reconcile is the backend's
     // newest-window re-read, which `selectMailFolder` triggers.
     if (this.get().mailFolders.length > 0) {

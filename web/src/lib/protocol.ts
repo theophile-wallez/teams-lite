@@ -416,6 +416,25 @@ export type SealKeyRecord = {
 /** What `seal_status` answers, and what `seal_set` / `seal_off` / `seal_forget` answer with. */
 export type SealStatus = { conversations: SealedConversation[] };
 
+/** What `seal_set` answers: the whole fresh status, plus what this machine just did with it.
+ *
+ *  `opens_existing` is the one field that exists to prevent a real failure rather than to
+ *  describe one: two people each set a DIFFERENT passphrase, every message each posts is
+ *  unreadable to the other, and without being told nobody knows — each sees locked rows and
+ *  believes the other's app is broken. `key_ids_in_use` is what the thread's own messages
+ *  were sealed with, read BEFORE the write, so the answer describes what the reader walked
+ *  into. */
+export type SealSetResult = SealStatus & {
+  conversation: string;
+  key_id: string;
+  opens_existing: boolean;
+  key_ids_in_use: string[];
+  /** The passphrase, ONLY when this machine invented it — which is the one time it crosses
+   *  the socket, so the dialog can show the user what to give their colleagues. One they
+   *  typed is one they already have, and it is never echoed back. */
+  passphrase?: string;
+};
+
 export type ReplyTo = {
   compose_time: number;
   sender: string;
@@ -968,6 +987,13 @@ export type AppSettings = {
    *  one thing the pack decides — what `:shipit:` posts under the user's own name on the
    *  next send (see `import_emoji_from_message` in src/bin/server.rs). */
   emoji_auto_import: boolean;
+  /** Whether a push notification about a SEALED chat carries the WORDS. OFF by default, which
+   *  is the reverse of the two switches above and the whole point of it: a notification is
+   *  read on a lock screen, in front of whoever is standing there, and a message the user took
+   *  the trouble to encrypt is the last one they want drawn in the open. Off, the notification
+   *  still arrives and still says which chat — only the words are withheld (see
+   *  `sealed_push_words` in src/bin/server.rs). */
+  sealed_push_words: boolean;
 };
 
 /** The hours "Always available" keeps the user green, in the backend's own local time.
@@ -1021,6 +1047,9 @@ export type SettingsPatch = {
   senderIcons?: boolean;
   /** Turn the emoji auto-import on or off (see {@link AppSettings.emoji_auto_import}). */
   emojiAutoImport?: boolean;
+  /** Let a notification about a sealed chat carry the words (see
+   *  {@link AppSettings.sealed_push_words}). */
+  sealedPushWords?: boolean;
 };
 
 /** Kind discriminant for an enriched GitLab link (mirrors the Rust `LinkMetadata`

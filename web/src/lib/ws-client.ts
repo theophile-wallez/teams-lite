@@ -53,6 +53,8 @@ import type {
   ReactionPick,
   ReadReceiptsResult,
   ReplyTo,
+  SealSetResult,
+  SealStatus,
   SettingsPatch,
   SigninState,
   UpdateCheckResult,
@@ -998,6 +1000,63 @@ export class Backend {
   agentPersonaRemove(name: string): Promise<AgentStatus> {
     return this.writeRequest<AgentStatus>("agent_persona_remove", { name });
   }
+  /** Which conversations this machine seals, and which passphrases it holds for each — by
+   *  key id, never a key (see lib/seal.ts).
+   *
+   *  An open READ, like `get_settings` and for its reason: the answer carries no secret, and
+   *  the page needs it before the user has done anything in order to draw a padlock at all. */
+  sealStatus(): Promise<SealStatus> {
+    return this.request<SealStatus>("seal_status", {});
+  }
+  /** Seal a conversation under a passphrase — the user's, or one the BACKEND invents when
+   *  none is given, which is the only time a passphrase crosses this socket.
+   *
+   *  A WRITE request: it decides that every message this machine posts to that chat leaves
+   *  encrypted, and it writes a secret to the store (a `MACHINE_METHODS` entry in
+   *  src/bin/server.rs, refused read-only). Additive on the backend — every key already held
+   *  is kept and stops being current — so a rotation costs nothing that is already in the
+   *  thread. Answers with the whole fresh status, like the agent setters, plus whether that
+   *  passphrase really opens what the thread already holds. */
+  sealSet(conversation: string, passphrase?: string): Promise<SealSetResult> {
+    // Omitted rather than sent empty: absent is what the backend reads as "generate one", and
+    // an empty string is a passphrase it would refuse.
+    const params: Record<string, string> = { conversation };
+    if (passphrase !== undefined) params.passphrase = passphrase;
+    return this.writeRequest<SealSetResult>("seal_set", params);
+  }
+  /** Stop sealing NEW messages here, and KEEP every key, so the messages already in the
+   *  thread stay readable. A WRITE request, gated like the one above.
+   *
+   *  `stopped` is false when nothing was sealing — which the caller reports rather than
+   *  pretends away, the reading `agent_stop` already takes. */
+  sealOff(conversation: string): Promise<SealStatus & { stopped: boolean }> {
+    return this.writeRequest<SealStatus & { stopped: boolean }>("seal_off", { conversation });
+  }
+  /** Drop one passphrase. Every message it opened becomes unreadable on this machine FOR
+   *  GOOD — the one act in this feature nothing takes back, which is why the UI asks twice.
+   *
+   *  A WRITE request, gated like the two above. */
+  sealForget(
+    conversation: string,
+    keyId: string,
+  ): Promise<SealStatus & { forgotten: boolean }> {
+    return this.writeRequest<SealStatus & { forgotten: boolean }>("seal_forget", {
+      conversation,
+      key_id: keyId,
+    });
+  }
+  /** The passphrase behind one key, for the user's own press and nothing else.
+   *
+   *  It is what lets somebody who joins the chat in March be GIVEN something without rotating
+   *  the whole thread — and it is a WRITE request rather than a read for exactly that reason:
+   *  the answer is the secret itself (`MACHINE_METHODS`, refused read-only). */
+  sealReveal(conversation: string, keyId: string): Promise<{ passphrase: string }> {
+    return this.writeRequest<{ passphrase: string }>("seal_reveal", {
+      conversation,
+      key_id: keyId,
+    });
+  }
+
   /** One custom agent's face, or empty strings when it has none. An open read, and kept out
    *  of the status for the reason emoji art is kept out of the pack: a list is asked for on
    *  every connect and ten faces is megabytes. */
@@ -1327,6 +1386,7 @@ export class Backend {
     if (patch.ghostMode !== undefined) params.ghost_mode = patch.ghostMode;
     if (patch.senderIcons !== undefined) params.sender_icons = patch.senderIcons;
     if (patch.emojiAutoImport !== undefined) params.emoji_auto_import = patch.emojiAutoImport;
+    if (patch.sealedPushWords !== undefined) params.sealed_push_words = patch.sealedPushWords;
     return this.writeRequest<AppSettings>("set_settings", params);
   }
   /** Turn "Always available" on or off — and say which HOURS it keeps — which publishes

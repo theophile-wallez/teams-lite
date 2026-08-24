@@ -5432,6 +5432,122 @@ mod tests {
         hash
     }
 
+    /// **THE PROMISE THIS WHOLE FEATURE RESTS ON**: add the passphrase today, and every message
+    /// already received becomes readable.
+    ///
+    /// It is why the store keeps the CIPHERTEXT and decrypts on read rather than decrypting once at
+    /// ingest. With the plaintext stored instead, a message that arrived before its passphrase did
+    /// would stay a token for ever and would need a migration pass over the history to heal — and a
+    /// participant handed the passphrase a week late is the normal case, not an edge one.
+    #[test]
+    fn a_passphrase_added_today_opens_every_message_already_received() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
+        let sender = "8:orgid:ada";
+        let words = "<p>the merger closes on <b>Friday</b></p>";
+
+        // A colleague's sealed message arrives while this machine holds nothing for the chat.
+        let key = crate::seal::derive("hunter two", conversation).unwrap();
+        let sealed = crate::seal::seal(&key, conversation, sender, words).unwrap();
+        let mut row = message_for_test(conversation, sender, &sealed);
+        store.insert_message(&row).unwrap();
+
+        // It reads as LOCKED, it names which passphrase is missing, and its body is withheld
+        // rather than handed over as base64.
+        let before = store.newest_messages(conversation, 10).unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].seal, MessageSeal::Locked { key_id: key.id_hex() });
+        assert_eq!(before[0].content, "", "a locked body must never reach a caller");
+
+        // The user is given the passphrase and adds it.
+        store.add_seal_key(conversation, &key, "hunter two", 1_700_000_000_000).unwrap();
+
+        // The same stored row now reads as words, with nothing migrated.
+        let after = store.newest_messages(conversation, 10).unwrap();
+        assert_eq!(after[0].seal, MessageSeal::Opened);
+        assert_eq!(after[0].content, words);
+        // And the single-row read agrees with the page read, since both go through `msg_reader`.
+        let one = store.get_message(conversation, &row.id).unwrap().unwrap();
+        assert_eq!(one.content, words);
+
+        // Sealing can be turned OFF and the history stays readable: the key is kept.
+        assert!(store.stop_sealing(conversation).unwrap());
+        assert!(store.current_seal_key(conversation).unwrap().is_none());
+        assert_eq!(store.newest_messages(conversation, 10).unwrap()[0].content, words);
+
+        // Forgetting the key is the one act that takes it back, and it is final.
+        assert!(store.forget_seal_key(conversation, &key.id_hex()).unwrap());
+        let forgotten = store.newest_messages(conversation, 10).unwrap();
+        assert_eq!(forgotten[0].seal, MessageSeal::Locked { key_id: key.id_hex() });
+        assert_eq!(forgotten[0].content, "");
+
+        // An ORDINARY message in the same conversation is untouched throughout.
+        row.id = "plain".to_string();
+        row.content = "<p>hello</p>".to_string();
+        row.seq = 2;
+        row.seal = MessageSeal::None;
+        store.insert_message(&row).unwrap();
+        let mixed = store.newest_messages(conversation, 10).unwrap();
+        let plain = mixed.iter().find(|m| m.id == "plain").unwrap();
+        assert_eq!(plain.seal, MessageSeal::None);
+        assert_eq!(plain.content, "<p>hello</p>");
+    }
+
+    /// WHICH passphrase the messages in a thread are sealed with, read off the messages themselves.
+    ///
+    /// This is what stops the sharpest failure the feature has: two people each set a DIFFERENT
+    /// passphrase, every message each posts is unreadable to the other, and without this nobody is
+    /// told — both see locked rows and each believes the other's app is broken.
+    #[test]
+    fn the_keys_a_thread_is_already_sealed_with_are_readable_without_holding_them() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = "19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2";
+        let sender = "8:orgid:ada";
+
+        // Nothing sealed yet: the first passphrase set here cannot disagree with anything.
+        assert!(store.seal_key_ids_in_use(conversation, 50).unwrap().is_empty());
+
+        let theirs = crate::seal::derive("their words", conversation).unwrap();
+        let body = crate::seal::seal(&theirs, conversation, sender, "<p>hi</p>").unwrap();
+        store.insert_message(&message_for_test(conversation, sender, &body)).unwrap();
+
+        // The key id is readable with NO key in hand, which is what makes the warning possible.
+        assert_eq!(store.seal_key_ids_in_use(conversation, 50).unwrap(), vec![theirs.id_hex()]);
+        // And a DIFFERENT passphrase is visibly a different key, before anything is posted under it.
+        let mine = crate::seal::derive("my words", conversation).unwrap();
+        assert_ne!(mine.id_hex(), theirs.id_hex());
+
+        // An ordinary message contributes no key id at all.
+        let mut plain = message_for_test(conversation, sender, "<p>ordinary</p>");
+        plain.id = "plain".to_string();
+        plain.seq = 2;
+        store.insert_message(&plain).unwrap();
+        assert_eq!(store.seal_key_ids_in_use(conversation, 50).unwrap(), vec![theirs.id_hex()]);
+    }
+
+    /// A message row for the seal tests: the fields the read really uses, and defaults elsewhere.
+    fn message_for_test(conversation: &str, sender_mri: &str, content: &str) -> Message {
+        Message {
+            id: "sealed-1".to_string(),
+            conversation_id: conversation.to_string(),
+            seq: 1,
+            compose_time: 1_700_000_000_000,
+            sender: "Ada Lovelace".to_string(),
+            sender_mri: sender_mri.to_string(),
+            message_type: "RichText/Html".to_string(),
+            content: content.to_string(),
+            attachments: "[]".to_string(),
+            reactions: "[]".to_string(),
+            system_event: String::new(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
+            deleted: false,
+            mentions: "[]".to_string(),
+            scheduled_time: 0,
+            seal: MessageSeal::None,
+        }
+    }
+
     /// EVERY read of a message body goes through the seal, and this is what keeps it that way.
     ///
     /// [`msg_reader`] is the one place a stored ciphertext becomes words — the rule

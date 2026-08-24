@@ -170,6 +170,15 @@ type ChatMessage = {
    *  the mock echoes it that way: what keeps it out of the conversation is the page's rule
    *  and the backend's read, and a mock that withheld it would let a broken one pass. */
   scheduled_time?: number;
+  /** How this message's body reached the reader, or absent for an ordinary one (see
+   *  src/seal.rs and § A sealed chat). The BACKEND is the encryption boundary and decrypts on
+   *  every read, so an `"opened"` row carries its WORDS — which is why the echo below states
+   *  that rather than a ciphertext. A `"locked"` row's `content` is EMPTY here too: a mock that
+   *  handed the page bytes would let a bubble that draws them pass every test. */
+  seal?: "opened" | "locked" | "newer" | "damaged";
+  /** WHICH passphrase a locked message needs, as its key id — never a key. Absent unless
+   *  `seal` is `"locked"`, exactly as the backend sends it. */
+  seal_key_id?: string;
 };
 
 // A structured system/activity event (mirrors protocol.ts SystemEvent and the Rust
