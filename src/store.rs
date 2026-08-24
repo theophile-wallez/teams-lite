@@ -1416,7 +1416,14 @@ impl SealKeyring {
 fn msg_reader(keyring: &SealKeyring) -> impl Fn(&Row) -> rusqlite::Result<Message> + '_ {
     move |row| {
         let mut msg = row_to_msg(row)?;
-        let opened = crate::seal::open(keyring.keys(&msg.conversation_id), &msg.conversation_id, &msg.content);
+        let opened = crate::seal::open(
+            keyring.keys(&msg.conversation_id),
+            &msg.conversation_id,
+            // The sender is bound into the envelope, so the tenant cannot put one colleague's
+            // name over another's sealed words (see `seal::aad`).
+            &msg.sender_mri,
+            &msg.content,
+        );
         msg.seal = match opened {
             crate::seal::Opened::NotSealed => MessageSeal::None,
             crate::seal::Opened::Words(words) => {

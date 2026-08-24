@@ -24,10 +24,16 @@
 //!     [`crate::teams_send`]). A mention is offered anyway, and the composer says so.
 //!   - A PICTURE. Its bytes are uploaded to Microsoft's own object store, so they cannot be
 //!     sealed by anything in this module. The composer says so and the message is marked.
-//!   - The ORDER of messages, and whether one was DELETED. The tenant controls the transport:
-//!     it can drop a message, reorder two, or reattribute one to another sender. The AAD binds
-//!     an envelope to its CONVERSATION, so a ciphertext cannot be replayed into another chat,
-//!     and no further ordering integrity is claimed.
+//!   - The ORDER of messages, and whether one was DELETED. The tenant controls the transport, so
+//!     it can drop a message, hold one back, or reorder two, and no reader can tell. What it
+//!     CANNOT do is change what a sealed message says, move it to another chat, or put somebody
+//!     else's name on it: the AAD binds the conversation and the sender (see [`aad`]). It can
+//!     still REPLAY the same bytes into the same chat at a later moment — binding the
+//!     clientmessageid would close that, and `teams_read` does not parse one off an inbound
+//!     message yet, so it is a stated gap rather than an unknown one.
+//!   - WHO ELSE holds the passphrase. Everybody who has it can read every message ever sealed
+//!     under it, and can seal a message themselves. A padlock is a claim about who can READ,
+//!     never about who wrote — the dialog that takes a passphrase says so.
 //!   - Anything the local AGENT is asked. The prompt carries the thread in the clear to the
 //!     model provider, which is what the user asked for; only the agent's own REPLY is sealed.
 //!
@@ -71,7 +77,7 @@
 //!
 //! ```text
 //!   salt = SHA-256("teams-lite/seal/v1/salt" || conversation id)   [16 bytes]
-//!   prk  = Argon2id(passphrase, salt, m = 64 MiB, t = 3, p = 1)    [32 bytes]
+//!   prk  = Argon2id(canonical(passphrase), salt, m = 64 MiB, t = 3, p = 4)   [32 bytes]
 //!   enc  = HKDF-SHA256-Expand(prk, "…/aes256")                     [32 bytes]
 //!   id   = HKDF-SHA256-Expand(prk, "…/keyid")                      [4 bytes]
 //! ```
@@ -80,6 +86,14 @@
 //! passphrase offline at whatever speed it likes; a fast hash here would undo the feature for
 //! everybody who types a word they can remember. It is run ONCE — when a passphrase is added —
 //! and the derived key is what the store keeps, so no read ever pays for it.
+//!
+//! `canonical` is what makes the feature survive contact with a phone: the passphrase is
+//! lowercased and stripped of every separator before it is derived (see
+//! [`canonical_passphrase`]). Reading a passphrase off a laptop and typing it into a phone is
+//! THE commonest path through this whole feature, and a phone keyboard capitalizes the first
+//! character of a field — so without this, `Abcd-efgh-…` is a different key, every message in
+//! the thread reads as one sealed under a passphrase the reader does not hold, and the sentence
+//! the app shows blames them for a passphrase they typed correctly.
 //!
 //! The salt is derived from the conversation id rather than random-and-published for one
 //! reason: it needs no coordination. Two participants who type the same passphrase must land
@@ -115,6 +129,18 @@ pub const MAGIC: [u8; 3] = [0xA7, 0x1D, 0x5C];
 /// The envelope version. A reader that meets a HIGHER one says so rather than guessing: an
 /// AEAD has no partial credit, so a layout this build does not know is one it must not open.
 pub const VERSION: u8 = 1;
+
+/// The payload is padded up to a multiple of this before it is sealed.
+///
+/// Without it the ciphertext's length IS the plaintext's, to the byte, for ever, in the hands
+/// of the party this feature protects the words from — and over a chat whose answers are "ok",
+/// "yes", "no" and "agreed", the length alone tells them apart with no key at all. 64 bytes
+/// puts every short message in one bucket, which is most of them, and costs at most 63 bytes.
+///
+/// It does not hide everything and is not meant to: a long message is still visibly longer than
+/// a short one, and [`FLAG_DEFLATE`] still says whether the body compressed. What it removes is
+/// the exact length, which is the part that identifies a one-word answer.
+const PAD_BLOCK: usize = 64;
 
 /// Bit 0 of the flags byte: the plaintext was deflated before it was sealed.
 ///
@@ -170,7 +196,12 @@ const POST_OVERHEAD_BUDGET: usize = 12 * 1024;
 /// A decompressed body is never allowed past this. The ciphertext is AUTHENTICATED, so only
 /// somebody holding the key can produce one at all — this is the belt on top of that, because
 /// a deflate stream's output size is not bounded by its input's.
-const MAX_INFLATED: usize = 4 * MAX_SEALED_PLAINTEXT;
+///
+/// It is exactly [`MAX_SEALED_PLAINTEXT`] and not a multiple of it: [`seal`] refuses a longer
+/// plaintext, so anything above this could not have come from this app, and `msg_reader` runs
+/// the inflate on every sealed row of every page — so the bound is an allocation budget
+/// multiplied by the page size, not a one-off.
+const MAX_INFLATED: usize = MAX_SEALED_PLAINTEXT;
 
 /// Argon2id's cost, and the reason for each number.
 ///
@@ -179,9 +210,20 @@ const MAX_INFLATED: usize = 4 * MAX_SEALED_PLAINTEXT;
 /// key it returns is what the store keeps. That is what makes it affordable to be this far
 /// above the usual interactive-login parameters — the usual reason to keep them low is a login
 /// that happens on every request, and nothing here does.
+/// **THESE THREE NUMBERS ARE PART OF THE FORMAT, and moving one is a [`VERSION`] change.**
+/// Nothing in the envelope records them, and it deliberately does not need to: the key id is
+/// derived from the Argon2id output, so a colleague on a build with different parameters
+/// derives a DIFFERENT key from the SAME passphrase — and every message then reads as
+/// `UnknownKey`, whose sentence is "you have not added this passphrase", in both directions,
+/// for a passphrase both people typed correctly and with nothing able to say why.
+/// [`the_kdf_cost_is_pinned_to_the_version`] is what makes that impossible to do by accident.
+///
+/// `p` is 4 rather than 1: the cost an attacker pays is m×t whichever it is, so lanes buy the
+/// DEFENDER wall clock back for nothing — `p = 1` spends the latency budget and gains no
+/// security at all. `m` is RFC 9106's second recommended profile.
 const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON2_PASSES: u32 = 3;
-const ARGON2_LANES: u32 = 1;
+const ARGON2_LANES: u32 = 4;
 
 /// The alphabet a generated passphrase is written in: no `0`, `O`, `1`, `l`, `I`.
 ///
@@ -265,7 +307,7 @@ pub enum Opened {
 /// unrelated keys: a passphrase a colleague was given for one conversation opens nothing else,
 /// even though they hold the words the user typed.
 pub fn derive(passphrase: &str, conversation_id: &str) -> Result<SealKey> {
-    let passphrase = passphrase.trim();
+    let passphrase = canonical_passphrase(passphrase);
     ensure!(!passphrase.is_empty(), "a passphrase cannot be empty");
     ensure!(!conversation_id.is_empty(), "a conversation id is needed to derive a key");
 
@@ -301,7 +343,7 @@ fn expand<const N: usize>(prk: &[u8; 32], label: &[u8]) -> Result<[u8; N]> {
 /// `html` is the body this app would have posted in the clear — the words, the reply's own
 /// quote, the mention spans, everything. All of it goes inside, because a sealed message whose
 /// quote was left in the clear would publish the very words of the message it answers.
-pub fn seal(key: &SealKey, conversation_id: &str, html: &str) -> Result<String> {
+pub fn seal(key: &SealKey, conversation_id: &str, sender_mri: &str, html: &str) -> Result<String> {
     ensure!(
         html.len() <= MAX_SEALED_PLAINTEXT,
         "this message is too long to seal: {} bytes against a limit of {}",
@@ -312,10 +354,11 @@ pub fn seal(key: &SealKey, conversation_id: &str, html: &str) -> Result<String> 
     // Deflate only when it wins. A short message compresses to something longer, and the
     // token a colleague's client has to draw is the thing being kept small.
     let raw = html.as_bytes();
-    let (flags, payload) = match deflate(raw) {
+    let (flags, packed) = match deflate(raw) {
         Ok(packed) if packed.len() < raw.len() => (FLAG_DEFLATE, packed),
         _ => (0u8, raw.to_vec()),
     };
+    let payload = padded(&packed);
 
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
@@ -331,7 +374,7 @@ pub fn seal(key: &SealKey, conversation_id: &str, html: &str) -> Result<String> 
     let sealed = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
-            Payload { msg: &payload, aad: &aad(&envelope[..OFF_NONCE], conversation_id) },
+            Payload { msg: &payload, aad: &aad(&envelope[..OFF_NONCE], conversation_id, sender_mri) },
         )
         .map_err(|_| anyhow::anyhow!("seal the message"))?;
     envelope.extend_from_slice(&sealed);
@@ -345,7 +388,7 @@ pub fn seal(key: &SealKey, conversation_id: &str, html: &str) -> Result<String> 
 /// is what every message in an unsealed chat — and every message sent before a chat was sealed
 /// — takes. That is why this can be applied to EVERY row on the way out of the store without
 /// deciding first whether a conversation is sealed: the envelope answers for itself.
-pub fn open(keys: &[SealKey], conversation_id: &str, body: &str) -> Opened {
+pub fn open(keys: &[SealKey], conversation_id: &str, sender_mri: &str, body: &str) -> Opened {
     let Some(envelope) = envelope_bytes(body) else { return Opened::NotSealed };
     if envelope[OFF_VERSION] != VERSION {
         return Opened::NewerVersion(envelope[OFF_VERSION]);
@@ -355,7 +398,7 @@ pub fn open(keys: &[SealKey], conversation_id: &str, body: &str) -> Opened {
 
     let mut damaged = false;
     for key in keys.iter().filter(|k| k.id == id) {
-        match open_with(key, conversation_id, &envelope) {
+        match open_with(key, conversation_id, sender_mri, &envelope) {
             Ok(words) => return Opened::Words(words),
             // Keep looking: two passphrases can collide on four bytes of key id, so the
             // first key that matches the id is not necessarily the one that sealed this.
@@ -366,18 +409,19 @@ pub fn open(keys: &[SealKey], conversation_id: &str, body: &str) -> Opened {
 }
 
 /// One attempt with one key.
-fn open_with(key: &SealKey, conversation_id: &str, envelope: &[u8]) -> Result<String> {
+fn open_with(key: &SealKey, conversation_id: &str, sender_mri: &str, envelope: &[u8]) -> Result<String> {
     let cipher = Aes256Gcm::new_from_slice(&key.enc).map_err(|e| anyhow::anyhow!("aes key: {e}"))?;
     let plain = cipher
         .decrypt(
             Nonce::from_slice(&envelope[OFF_NONCE..OFF_CIPHERTEXT]),
             Payload {
                 msg: &envelope[OFF_CIPHERTEXT..],
-                aad: &aad(&envelope[..OFF_NONCE], conversation_id),
+                aad: &aad(&envelope[..OFF_NONCE], conversation_id, sender_mri),
             },
         )
         .map_err(|_| anyhow::anyhow!("the authentication tag does not fit"))?;
-    let bytes = if envelope[OFF_FLAGS] & FLAG_DEFLATE != 0 { inflate(&plain)? } else { plain };
+    let packed = unpadded(&plain)?;
+    let bytes = if envelope[OFF_FLAGS] & FLAG_DEFLATE != 0 { inflate(&packed)? } else { packed };
     String::from_utf8(bytes).context("a sealed body that is not UTF-8")
 }
 
@@ -413,12 +457,13 @@ fn envelope_bytes(body: &str) -> Option<Vec<u8>> {
 /// The single base64url token a sealed body is, allowing the one `<p>` wrapper Teams stores it
 /// in and the whitespace it may add around it.
 fn token_of(body: &str) -> Option<&str> {
-    let trimmed = body.trim();
-    let inner = trimmed
-        .strip_prefix("<p>")
-        .and_then(|rest| rest.strip_suffix("</p>"))
-        .unwrap_or(trimmed)
-        .trim();
+    // The `<p>` wrapper is REQUIRED rather than optional, and it is the shape
+    // `examples/sealed_message_probe.rs` measured through the tenant. It is also the last
+    // narrowing between an ordinary message and a false positive: a body this app decides is an
+    // envelope and cannot open is drawn as a locked row, so a colleague's message that happened
+    // to be one bare base64 run would have its words withheld. With the wrapper, the magic and
+    // the length all required, that needs a body somebody deliberately built.
+    let inner = body.trim().strip_prefix("<p>")?.strip_suffix("</p>")?.trim();
     // Long enough to be an envelope at all, so a short word is rejected before it is decoded.
     let smallest = (OFF_CIPHERTEXT + TAG_LEN) * 4 / 3;
     (inner.len() >= smallest
@@ -426,17 +471,57 @@ fn token_of(body: &str) -> Option<&str> {
     .then_some(inner)
 }
 
-/// What the ciphertext is bound to: its own header, and the conversation.
+/// What the ciphertext is bound to: its own header, the conversation, and the SENDER.
 ///
 /// The header is in the AAD so the version, the flags and the key id cannot be flipped by
-/// whoever holds the message; the conversation id is there so a ciphertext the tenant copies
+/// whoever holds the message. The conversation id is there so a ciphertext the tenant copies
 /// into ANOTHER chat fails to open rather than appearing there as words somebody said.
-fn aad(header: &[u8], conversation_id: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(header.len() + conversation_id.len() + 1);
+///
+/// **The sender is there because Microsoft routes the message and owns the `from` field.**
+/// Without it, the tenant can take the envelope one colleague posted and re-deliver the same
+/// bytes as another colleague's message in the same chat: the tag verifies, the words open, and
+/// the history draws the wrong person saying them — with a padlock beside it, which lends them
+/// MORE credibility than an ordinary message has. Authorship is the one thing this app never
+/// misstates (§ Renaming a person), so it is bound rather than trusted.
+///
+/// It is safe to bind because the two spellings are MEASURED to agree byte for byte: the mri the
+/// sealer holds (`Session::self_mri`) is the mri the reader's own parser produces for that
+/// message (`examples/sealed_message_probe.rs`, 2026-08-24). What is inferred rather than
+/// measured is the same equality for a COLLEAGUE's message, which needs a second install of this
+/// app to try — and the failure there is visible rather than silent: their message reads as
+/// damaged, its token stays on disk, and the version byte is what a fix would move.
+fn aad(header: &[u8], conversation_id: &str, sender_mri: &str) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(header.len() + conversation_id.len() + sender_mri.len() + 2);
     out.extend_from_slice(header);
     out.push(0);
     out.extend_from_slice(conversation_id.as_bytes());
+    out.push(0);
+    out.extend_from_slice(sender_mri.as_bytes());
     out
+}
+
+/// The payload as it is sealed: its own length, the bytes, then zeros up to a whole
+/// [`PAD_BLOCK`]. The length prefix is what makes the padding removable — a trailing run of
+/// zeros is not distinguishable from a body that ends in them.
+fn padded(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + bytes.len() + PAD_BLOCK);
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+    while out.len() % PAD_BLOCK != 0 {
+        out.push(0);
+    }
+    out
+}
+
+/// The bytes back out of a padded payload. Every bound is checked: the plaintext is
+/// authenticated, so a failure here can only be a key that opened bytes it should not have —
+/// and reading a length out of somebody else's plaintext must not panic.
+fn unpadded(payload: &[u8]) -> Result<Vec<u8>> {
+    ensure!(payload.len() >= 4, "a sealed payload with no length");
+    let len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+    ensure!(4 + len <= payload.len(), "a sealed payload shorter than its own length");
+    Ok(payload[4..4 + len].to_vec())
 }
 
 fn deflate(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -524,6 +609,30 @@ pub fn check_passphrase(passphrase: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// The form a passphrase is DERIVED from: lowercased, and with every separator and space gone.
+///
+/// A passphrase is read off one screen and typed into another, and the two things that happen on
+/// the way are a capital letter a phone's keyboard added and a hyphen somebody typed as a space.
+/// Both would derive a different key, and the failure is invisible: every message in the thread
+/// comes back as one sealed under a passphrase this machine does not hold, which is the sentence
+/// the app shows somebody who typed theirs correctly.
+///
+/// So the passphrase is case-insensitive and separator-insensitive, deliberately. What that
+/// costs is the entropy of the case and the separators of a passphrase the USER invented — which
+/// is why a generated one is what the dialog offers first: it is drawn from a lowercase alphabet
+/// with no separators of its own to lose, and its 99 bits do not depend on either.
+///
+/// Unicode is NOT normalized here: this crate carries no normalization table, and the alphabet a
+/// generated passphrase uses is ASCII. A passphrase somebody typed in two different Unicode
+/// spellings of one character is a stated gap rather than a silent one.
+pub fn canonical_passphrase(passphrase: &str) -> String {
+    passphrase
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '_' | '.' | '\u{2013}' | '\u{2014}'))
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 /// A sanity bound, well clear of any real passphrase — it catches a whole message pasted into
 /// the field, the way `teams_send::MAX_SUBJECT_CHARS` does for a title.
 pub const MAX_PASSPHRASE_CHARS: usize = 256;
@@ -540,17 +649,20 @@ mod tests {
         SealKey::from_stored([seed, seed, seed, seed], [seed; 32])
     }
 
+    /// Whoever sealed the message under test.
+    const ME: &str = "8:orgid:2367c029-149d-4ebd-a96c-1fe12bfc24cf";
+
     #[test]
     fn a_sealed_body_comes_back_word_for_word() {
         let k = key(1);
         let html = "<p>hello <b>there</b></p>";
-        let body = seal(&k, CHAT, html).unwrap();
-        assert_eq!(open(&[k], CHAT, &body), Opened::Words(html.to_string()));
+        let body = seal(&k, CHAT, ME, html).unwrap();
+        assert_eq!(open(&[k], CHAT, ME, &body), Opened::Words(html.to_string()));
     }
 
     #[test]
     fn the_body_is_one_opaque_token_and_says_nothing() {
-        let body = seal(&key(1), CHAT, "<p>the merger closes on Friday</p>").unwrap();
+        let body = seal(&key(1), CHAT, ME, "<p>the merger closes on Friday</p>").unwrap();
         let inner = body.strip_prefix("<p>").unwrap().strip_suffix("</p>").unwrap();
         assert!(
             inner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
@@ -575,16 +687,16 @@ mod tests {
             "<p>a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2</p>",
             "<p>Deployed 0f8a91c3b2d4e5f60718293a4b5c6d7e8f90a1b2 to production just now</p>",
         ] {
-            assert_eq!(open(&[k.clone()], CHAT, body), Opened::NotSealed, "body: {body}");
+            assert_eq!(open(&[k.clone()], CHAT, ME, body), Opened::NotSealed, "body: {body}");
         }
     }
 
     #[test]
     fn a_message_sealed_with_another_passphrase_names_the_key_rather_than_failing() {
-        let body = seal(&key(1), CHAT, "<p>not for you</p>").unwrap();
-        assert_eq!(open(&[key(2)], CHAT, &body), Opened::UnknownKey([1, 1, 1, 1]));
+        let body = seal(&key(1), CHAT, ME, "<p>not for you</p>").unwrap();
+        assert_eq!(open(&[key(2)], CHAT, ME, &body), Opened::UnknownKey([1, 1, 1, 1]));
         // And with no key at all, which is what a chat nobody has a passphrase for looks like.
-        assert_eq!(open(&[], CHAT, &body), Opened::UnknownKey([1, 1, 1, 1]));
+        assert_eq!(open(&[], CHAT, ME, &body), Opened::UnknownKey([1, 1, 1, 1]));
     }
 
     #[test]
@@ -593,9 +705,9 @@ mod tests {
         // failure as "damaged" would lose a message that is perfectly readable.
         let right = SealKey::from_stored([9, 9, 9, 9], [7; 32]);
         let wrong = SealKey::from_stored([9, 9, 9, 9], [8; 32]);
-        let body = seal(&right, CHAT, "<p>readable</p>").unwrap();
+        let body = seal(&right, CHAT, ME, "<p>readable</p>").unwrap();
         assert_eq!(
-            open(&[wrong, right], CHAT, &body),
+            open(&[wrong, right], CHAT, ME, &body),
             Opened::Words("<p>readable</p>".to_string())
         );
     }
@@ -603,23 +715,39 @@ mod tests {
     #[test]
     fn a_damaged_envelope_is_told_apart_from_an_unknown_key() {
         let k = key(1);
-        let body = seal(&k, CHAT, "<p>hello</p>").unwrap();
+        let body = seal(&k, CHAT, ME, "<p>hello</p>").unwrap();
         let token = body.strip_prefix("<p>").unwrap().strip_suffix("</p>").unwrap();
         let mut bytes = URL_SAFE_NO_PAD.decode(token).unwrap();
         // One bit of the ciphertext, which is what a tag exists to catch.
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
         let damaged = format!("<p>{}</p>", URL_SAFE_NO_PAD.encode(&bytes));
-        assert_eq!(open(&[k], CHAT, &damaged), Opened::Damaged);
+        assert_eq!(open(&[k], CHAT, ME, &damaged), Opened::Damaged);
     }
 
     #[test]
     fn the_conversation_is_bound_so_a_ciphertext_cannot_be_moved() {
         let k = key(1);
-        let body = seal(&k, CHAT, "<p>said in one chat</p>").unwrap();
+        let body = seal(&k, CHAT, ME, "<p>said in one chat</p>").unwrap();
         // The tenant holds the message and can post it anywhere. In another conversation it
         // must not open as words somebody said there.
-        assert_eq!(open(&[k], "19:another@thread.v2", &body), Opened::Damaged);
+        assert_eq!(open(&[k], "19:another@thread.v2", ME, &body), Opened::Damaged);
+    }
+
+    #[test]
+    fn the_sender_is_bound_so_sealed_words_cannot_be_reattributed() {
+        // Microsoft routes the message and owns the `from` field. Re-delivered as somebody
+        // else's, a sealed message must FAIL rather than draw the wrong person's name over the
+        // right words with a padlock beside it.
+        let k = key(1);
+        let body = seal(&k, CHAT, ME, "<p>I approve the payment</p>").unwrap();
+        let colleague = "8:orgid:00000000-0000-0000-0000-000000000000";
+        assert_eq!(open(&[k.clone()], CHAT, colleague, &body), Opened::Damaged);
+        assert_eq!(open(&[k.clone()], CHAT, "", &body), Opened::Damaged);
+        assert_eq!(
+            open(&[k], CHAT, ME, &body),
+            Opened::Words("<p>I approve the payment</p>".to_string())
+        );
     }
 
     #[test]
@@ -627,24 +755,24 @@ mod tests {
         let k = key(1);
         // Long and repetitive, so it really deflates and the flag really matters.
         let html = format!("<p>{}</p>", "the same sentence over and over. ".repeat(50));
-        let body = seal(&k, CHAT, &html).unwrap();
+        let body = seal(&k, CHAT, ME, &html).unwrap();
         let token = body.strip_prefix("<p>").unwrap().strip_suffix("</p>").unwrap();
         let mut bytes = URL_SAFE_NO_PAD.decode(token).unwrap();
         assert_eq!(bytes[OFF_FLAGS] & FLAG_DEFLATE, FLAG_DEFLATE, "that body should deflate");
         bytes[OFF_FLAGS] &= !FLAG_DEFLATE;
         let tampered = format!("<p>{}</p>", URL_SAFE_NO_PAD.encode(&bytes));
-        assert_eq!(open(&[k], CHAT, &tampered), Opened::Damaged);
+        assert_eq!(open(&[k], CHAT, ME, &tampered), Opened::Damaged);
     }
 
     #[test]
     fn a_newer_version_says_so_rather_than_guessing_at_the_layout() {
         let k = key(1);
-        let body = seal(&k, CHAT, "<p>hello</p>").unwrap();
+        let body = seal(&k, CHAT, ME, "<p>hello</p>").unwrap();
         let token = body.strip_prefix("<p>").unwrap().strip_suffix("</p>").unwrap();
         let mut bytes = URL_SAFE_NO_PAD.decode(token).unwrap();
         bytes[OFF_VERSION] = VERSION + 1;
         let newer = format!("<p>{}</p>", URL_SAFE_NO_PAD.encode(&bytes));
-        assert_eq!(open(&[k], CHAT, &newer), Opened::NewerVersion(VERSION + 1));
+        assert_eq!(open(&[k], CHAT, ME, &newer), Opened::NewerVersion(VERSION + 1));
     }
 
     #[test]
@@ -652,29 +780,29 @@ mod tests {
         // A fresh nonce each time. Two identical bodies sealing to identical tokens would
         // tell the tenant that the user repeated themselves, which is what a nonce is for.
         let k = key(1);
-        let a = seal(&k, CHAT, "<p>ok</p>").unwrap();
-        let b = seal(&k, CHAT, "<p>ok</p>").unwrap();
+        let a = seal(&k, CHAT, ME, "<p>ok</p>").unwrap();
+        let b = seal(&k, CHAT, ME, "<p>ok</p>").unwrap();
         assert_ne!(a, b);
-        assert_eq!(open(&[k.clone()], CHAT, &a), open(&[k], CHAT, &b));
+        assert_eq!(open(&[k.clone()], CHAT, ME, &a), open(&[k], CHAT, ME, &b));
     }
 
     #[test]
     fn a_long_body_deflates_and_a_short_one_does_not() {
         let k = key(1);
-        let short = seal(&k, CHAT, "<p>hi</p>").unwrap();
+        let short = seal(&k, CHAT, ME, "<p>hi</p>").unwrap();
         let short_bytes = URL_SAFE_NO_PAD
             .decode(short.strip_prefix("<p>").unwrap().strip_suffix("</p>").unwrap())
             .unwrap();
         assert_eq!(short_bytes[OFF_FLAGS] & FLAG_DEFLATE, 0, "deflating a short body makes it longer");
 
         let long = format!("<p>{}</p>", "a repeated clause, ".repeat(400));
-        let sealed = seal(&k, CHAT, &long).unwrap();
+        let sealed = seal(&k, CHAT, ME, &long).unwrap();
         let bytes = URL_SAFE_NO_PAD
             .decode(sealed.strip_prefix("<p>").unwrap().strip_suffix("</p>").unwrap())
             .unwrap();
         assert_eq!(bytes[OFF_FLAGS] & FLAG_DEFLATE, FLAG_DEFLATE);
         assert!(sealed.len() < long.len(), "a compressible body should seal smaller than it is");
-        assert_eq!(open(&[k], CHAT, &sealed), Opened::Words(long));
+        assert_eq!(open(&[k], CHAT, ME, &sealed), Opened::Words(long));
     }
 
     #[test]
@@ -693,8 +821,8 @@ mod tests {
         );
         // And one byte past the limit is refused HERE rather than by the service.
         let k = key(1);
-        assert!(seal(&k, CHAT, &"x".repeat(MAX_SEALED_PLAINTEXT + 1)).is_err());
-        assert!(seal(&k, CHAT, &"x".repeat(MAX_SEALED_PLAINTEXT)).is_ok());
+        assert!(seal(&k, CHAT, ME, &"x".repeat(MAX_SEALED_PLAINTEXT + 1)).is_err());
+        assert!(seal(&k, CHAT, ME, &"x".repeat(MAX_SEALED_PLAINTEXT)).is_ok());
     }
 
     #[test]
@@ -729,8 +857,8 @@ mod tests {
         let here = derive("hunter two", CHAT).unwrap();
         let there = derive("hunter two", "19:other@thread.v2").unwrap();
         assert_ne!(here.id, there.id);
-        let body = seal(&here, CHAT, "<p>hello</p>").unwrap();
-        assert_eq!(open(&[there], CHAT, &body), Opened::UnknownKey(here.id));
+        let body = seal(&here, CHAT, ME, "<p>hello</p>").unwrap();
+        assert_eq!(open(&[there], CHAT, ME, &body), Opened::UnknownKey(here.id));
     }
 
     #[test]
@@ -776,8 +904,8 @@ mod tests {
             key_bytes_from_hex(&hex_of(&k.secret_for_store())).unwrap(),
         );
         assert_eq!(back.id, k.id);
-        let body = seal(&k, CHAT, "<p>hello</p>").unwrap();
-        assert_eq!(open(&[back], CHAT, &body), Opened::Words("<p>hello</p>".to_string()));
+        let body = seal(&k, CHAT, ME, "<p>hello</p>").unwrap();
+        assert_eq!(open(&[back], CHAT, ME, &body), Opened::Words("<p>hello</p>".to_string()));
         assert!(key_id_from_hex("abc").is_err());
         assert!(key_bytes_from_hex("abcd").is_err());
     }
@@ -787,11 +915,107 @@ mod tests {
         // What the page is told about a message it cannot open: which passphrase, never the
         // ciphertext.
         let k = key(3);
-        let body = seal(&k, CHAT, "<p>hello</p>").unwrap();
+        let body = seal(&k, CHAT, ME, "<p>hello</p>").unwrap();
         assert_eq!(key_id_of(&body), Some([3, 3, 3, 3]));
         assert!(is_sealed(&body));
         assert_eq!(key_id_of("<p>hello</p>"), None);
         assert!(!is_sealed("<p>hello</p>"));
+    }
+
+    #[test]
+    fn a_passphrase_survives_being_retyped_on_a_phone() {
+        // THE commonest path through this feature: read it off the laptop, type it into the
+        // phone — which capitalizes the first character of the field, and where a hyphen is
+        // easily typed as a space. Every one of these must be the SAME chat.
+        let generated = "abcd-efgh-jkmn-pqrs-tuvw";
+        let want = derive(generated, CHAT).unwrap();
+        for typed in [
+            "Abcd-efgh-jkmn-pqrs-tuvw", // a phone keyboard's autocapitalize
+            "ABCD-EFGH-JKMN-PQRS-TUVW", // caps lock
+            "abcd efgh jkmn pqrs tuvw", // the hyphens typed as spaces
+            "abcdefghjkmnpqrstuvw",     // the separators left out
+            "  abcd-efgh-jkmn-pqrs-tuvw  ",
+            "abcd\u{2014}efgh-jkmn-pqrs-tuvw", // an em dash a phone substituted
+        ] {
+            assert_eq!(
+                derive(typed, CHAT).unwrap().id,
+                want.id,
+                "{typed:?} must open the same chat as {generated:?}"
+            );
+        }
+        // And a genuinely different passphrase still is one.
+        assert_ne!(derive("abcd-efgh-jkmn-pqrs-tuvx", CHAT).unwrap().id, want.id);
+    }
+
+    #[test]
+    fn the_exact_length_of_a_message_is_not_published() {
+        // The ciphertext's length would otherwise BE the plaintext's, for ever, in the hands of
+        // the party this feature keeps the words from — and "ok" against "no" is then one byte
+        // apart with no key needed.
+        let k = key(1);
+        let sizes: Vec<usize> = ["<p>ok</p>", "<p>no</p>", "<p>yes</p>", "<p>agreed</p>"]
+            .iter()
+            .map(|html| seal(&k, CHAT, ME, html).unwrap().len())
+            .collect();
+        assert_eq!(
+            sizes.iter().collect::<std::collections::HashSet<_>>().len(),
+            1,
+            "every short answer must seal to one length, got {sizes:?}"
+        );
+        // A long message is still visibly longer: the padding hides the exact length, never the
+        // order of magnitude, and saying otherwise would be a claim this does not earn. The body
+        // has to be INCOMPRESSIBLE to show it — 4096 repeated characters deflate to nothing and
+        // seal SMALLER than a two-letter answer, which is a pleasant accident and not a rule.
+        let mut noise = String::from("<p>");
+        let mut state: u32 = 1;
+        for _ in 0..4096 {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            noise.push(char::from(b'a' + (state >> 16) as u8 % 26));
+        }
+        noise.push_str("</p>");
+        let long = seal(&k, CHAT, ME, &noise).unwrap();
+        assert!(long.len() > sizes[0], "{} vs {}", long.len(), sizes[0]);
+    }
+
+    #[test]
+    fn a_padded_body_of_any_length_comes_back_exactly() {
+        // The padding is removed by a length prefix, so the boundary cases are the ones either
+        // side of a whole block.
+        let k = key(1);
+        for len in [0, 1, 59, 60, 61, 63, 64, 65, 127, 128, 129] {
+            let html = format!("<p>{}</p>", "x".repeat(len));
+            let body = seal(&k, CHAT, ME, &html).unwrap();
+            assert_eq!(open(&[k.clone()], CHAT, ME, &body), Opened::Words(html), "length {len}");
+        }
+    }
+
+    #[test]
+    fn the_kdf_cost_is_pinned_to_the_version() {
+        // These three numbers are part of the FORMAT: the key id comes out of the Argon2id
+        // output, so a build with different parameters derives a different key from the same
+        // passphrase — and both machines then tell their reader they have not added a passphrase
+        // they typed correctly. Moving one of these means moving VERSION with it.
+        assert_eq!(
+            (VERSION, ARGON2_MEMORY_KIB, ARGON2_PASSES, ARGON2_LANES),
+            (1, 65_536, 3, 4),
+            "the KDF cost changed: bump VERSION in the same commit, or a colleague on the other \
+             build cannot read a word this one seals"
+        );
+    }
+
+    #[test]
+    fn only_the_shape_the_tenant_really_returns_is_read_as_an_envelope() {
+        // The `<p>` wrapper is what `examples/sealed_message_probe.rs` measured, and requiring it
+        // is the last narrowing before a false positive costs a colleague their words.
+        let k = key(1);
+        let body = seal(&k, CHAT, ME, "<p>hello</p>").unwrap();
+        let token = body.strip_prefix("<p>").unwrap().strip_suffix("</p>").unwrap();
+        assert!(!is_sealed(token), "a bare token with no wrapper is not an envelope");
+        assert!(!is_sealed(&format!("<p>{token}</p><p>and more</p>")));
+        assert!(!is_sealed(&format!("<div>{token}</div>")));
+        assert!(is_sealed(&body));
+        // The whitespace Teams stores around a body is still allowed.
+        assert!(is_sealed(&format!("  {body}\n")));
     }
 
     #[test]
@@ -801,9 +1025,9 @@ mod tests {
         let k = key(1);
         let html = "<blockquote itemid=\"1755\"><p>the merger closes Friday</p></blockquote>\
                     <p>noted <span itemscope itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">Ada</span></p>";
-        let body = seal(&k, CHAT, html).unwrap();
+        let body = seal(&k, CHAT, ME, html).unwrap();
         assert!(!body.contains("merger"), "the quoted words must not survive in the clear");
         assert!(!body.contains("Ada"), "the mention span travels sealed with the body");
-        assert_eq!(open(&[k], CHAT, &body), Opened::Words(html.to_string()));
+        assert_eq!(open(&[k], CHAT, ME, &body), Opened::Words(html.to_string()));
     }
 }

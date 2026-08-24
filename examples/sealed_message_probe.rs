@@ -48,6 +48,14 @@
 //     whole message ("max allowed size is 102400 bytes"). base64 is 4 bytes out for 3 in, so a
 //     sealed message must be bounded on this side or the send is refused — which is why the
 //     envelope DEFLATES the body first and why `MAX_SEALED_PLAINTEXT` exists.
+//   - THE SENDER'S MRI ROUND-TRIPS IDENTICALLY: sealed under `Session::self_mri`, read back by
+//     this crate's own parser as the same string byte for byte. That is what makes it safe to
+//     BIND the sender into the AAD (`seal::aad`), which is what stops the tenant re-delivering
+//     one colleague's sealed words under another colleague's name.
+//   - THE CLIENTMESSAGEID COMES BACK (`Some("1787569374654")`), so a REPLAY of the same bytes at
+//     a later moment could be bound out too. It is not bound today: `teams_read` parses no
+//     clientmessageid off an inbound message, so the reader has nothing to compare against — a
+//     stated gap rather than an unknown one.
 //   - A CUSTOM `properties.tlsealed` IS KEPT, byte for byte — and its budget is a SEPARATE and
 //     much smaller 28 672 bytes ("Message properties size exceeded"). It is the prettier
 //     carrier (a stock Teams client would draw the notice alone, with no base64 under it) and
@@ -139,6 +147,44 @@ async fn main() -> Result<()> {
                 None => println!("  DROPPED — the service keeps only the properties it knows, so the BODY is the carrier"),
             }
         }
+    }
+
+    // 5. WHAT ELSE THE ENVELOPE COULD BE BOUND TO. The AAD binds the conversation today, so a
+    //    ciphertext cannot be replayed into another chat — but nothing binds the SENDER, and the
+    //    service owns the `from` field. Binding the sender's mri would stop the tenant
+    //    re-delivering one colleague's sealed words as another's, which is the one thing this app
+    //    promises never to misstate. Binding is only safe if the mri the reader sees is the mri
+    //    the sealer used, BYTE FOR BYTE — a mismatch would make every message unreadable, so it
+    //    is measured rather than assumed. The clientmessageid is measured beside it, because
+    //    binding that is what would stop a replay of the same bytes at a later moment.
+    println!("\n=== 5. what the envelope could also be bound to ===");
+    {
+        let id = post(&http, &session, &sealed_body(&envelope_of(280))).await?;
+        posted.push(id.clone());
+        let page = teams_read::fetch_newest(&http, &session, SANDBOX_THREAD).await?;
+        match page.messages.iter().find(|m| m.id == id) {
+            None => println!("  the message did not come back through the parser"),
+            Some(parsed) => println!(
+                "  sender mri: sealed as {:?}, read back as {:?} — {}",
+                session.self_mri,
+                parsed.sender_mri,
+                if parsed.sender_mri == session.self_mri {
+                    "IDENTICAL, so the sender can be bound into the AAD"
+                } else {
+                    "DIFFERENT: binding the sender would make every message unreadable"
+                }
+            ),
+        }
+        let raw = read_raw(&http, &session, &id).await?;
+        let cmid = raw.get("clientmessageid").and_then(Value::as_str);
+        println!(
+            "  clientmessageid on the way back: {:?} — {}",
+            cmid,
+            match cmid {
+                Some(_) => "present, so a replay could be bound out",
+                None => "ABSENT: the service does not return it, so a replay cannot be bound out yet",
+            }
+        );
     }
 
     // 6. The CEILING, in the service's own words, and which half of the message it counts.
