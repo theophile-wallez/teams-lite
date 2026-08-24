@@ -346,6 +346,14 @@ const TEST_HOOKS = process.env.MOCK_TEST_HOOKS === "1";
 let testSendDelayMs = 0;
 let testSendError = "";
 const capturedSends: CapturedSend[] = [];
+/**
+ * Every EDIT the page made, in order — the twin of {@link capturedSends}.
+ *
+ * A chess move is an edit of the player's own ledger message (see web/src/lib/chess-wire.ts), so
+ * without this a spec could see a challenge leave and never see a move: the thread would gain no
+ * message and there would be nothing to assert the wire on.
+ */
+const capturedEdits: { conversation: string; message_id: string; text: string; content_html?: string }[] = [];
 let nextSentImage = 0;
 
 /** Our own identity. The UI tags messages via `is_self`; the MRI is the anchor. */
@@ -7334,7 +7342,19 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const id = requireString(params, "conversation");
       const messageId = requireString(params, "message_id");
       const text = requireString(params, "text");
-      editMessage(id, messageId, text);
+      const html = asObject(params).content_html;
+      if (TEST_HOOKS) {
+        capturedEdits.push({
+          conversation: id,
+          message_id: messageId,
+          text,
+          ...(typeof html === "string" ? { content_html: html } : {}),
+        });
+        // The same refusal a SEND can be armed with: a move that could not go out has to be
+        // reachable, and a move is an edit now.
+        if (testSendError) throw new Error(testSendError);
+      }
+      editMessage(id, messageId, text, typeof html === "string" ? html : undefined);
       return { edited: true };
     }
 
@@ -9123,18 +9143,31 @@ async function handleFrame(ws: Socket, raw: string): Promise<void> {
 /** Edit a stored message in place and broadcast the new content, mirroring the
  *  Rust backend: it PUTs the message resource, updates the local row, then emits
  *  a `message` event that the UI reconciles by id (replacing the old bubble). */
-function editMessage(convId: string, messageId: string, text: string): void {
+function editMessage(
+  convId: string,
+  messageId: string,
+  text: string,
+  contentHtml?: string,
+): void {
   const t = threadFor(convId);
   if (!t) return;
   const msg = t.messages.find((m) => m.id === messageId);
   if (!msg) return;
-  let content = escapeHtml(text);
+  // The RICH body wins over the escaped text, exactly as the Rust `edit` does with it: a
+  // message whose body is markup — a chess ledger, rewritten on every move — is not the same
+  // message once its own line has been escaped into characters.
+  let content = contentHtml?.trim() ? contentHtml.trim() : escapeHtml(text);
   content = substituteCustomEmoji(content);
   if (msg.content === content) return; // no-op edit: nothing to broadcast
   msg.content = content;
   t.recompute();
   broadcast("message", nicknamed(msg));
   broadcast(t.changedEvent, {});
+  // A CHESS MOVE IS AN EDIT of the player's own ledger, so the opponent has to be woken here as
+  // well as on a send: woken only by sends, the mock accepted a challenge and then never answered
+  // a single move. It returns at once for a body that carries no chess line, so an ordinary edit
+  // costs nothing.
+  if (msg.is_self) maybeAnswerMockChess(convId, msg);
 }
 
 /** Flag a stored message as deleted and broadcast it, mirroring the Rust backend's
@@ -9410,14 +9443,328 @@ function mockChessChallenge(convId: string, color: "w" | "b"): string | null {
   const other = t?.participants[0];
   if (!t || !other) return null;
   const game = mockChessGameId();
-  postMockChess(
-    convId,
-    other,
-    game,
-    `open ${color}`,
-    `♟ Chess — I'd like a game. I'm ${color === "w" ? "white" : "black"}.`,
-  );
+  // A LEDGER, exactly as the page writes one: the other machine runs teams-lite too, so its
+  // challenge is the same shape and its every later move EDITS this same message.
+  writeMockLedger(convId, other, game, {
+    ...blankMockLedger(color),
+    opened: true,
+    time: { base: 600, increment: 0 },
+  });
   return game;
+}
+
+// ---- the opponent's own LEDGER --------------------------------------------------------
+//
+// One message per player per game, edited in place (see web/src/lib/chess-wire.ts). The mock
+// keeps its own and rewrites it on every move, because that is what the other machine does —
+// and a mock that answered with a message per move would let a broken merge pass every test.
+//
+// The wire is re-implemented here rather than imported, which is this file's own rule: it stands
+// for another machine, so a divergence between the two spellings has to FAIL a test rather than
+// be impossible.
+
+type MockLedger = {
+  color: "w" | "b";
+  opened: boolean;
+  joined: boolean;
+  time: { base: number; increment: number } | null;
+  at: number | null;
+  moves: { ply: number; san: string; clockMs: number | null }[];
+  resigned: boolean;
+};
+
+function blankMockLedger(color: "w" | "b"): MockLedger {
+  return { color, opened: false, joined: false, time: null, at: null, moves: [], resigned: false };
+}
+
+/** Read one, out of the tokens after `v2`. Null for anything this mock cannot read, which is the
+ *  page's own rule. */
+function mockParseLedger(rest: string): MockLedger | null {
+  const tokens = rest.split(/\s+/).filter(Boolean);
+  let color: "w" | "b" | null = null;
+  const ledger = blankMockLedger("w");
+  for (const token of tokens) {
+    if (token === "w" || token === "b") color = token;
+    else if (token === "open") ledger.opened = true;
+    else if (token === "join") ledger.joined = true;
+    else if (token === "resign") ledger.resigned = true;
+    else if (/^tc\.\d+\+\d+$/.test(token)) {
+      const [base, inc] = token.slice(3).split("+");
+      ledger.time = { base: Number(base), increment: Number(inc) };
+    } else if (/^at\.\d+$/.test(token)) ledger.at = Number(token.slice(3));
+    else if (/^\d/.test(token)) {
+      const move = /^(\d{1,3})\.([^.\s]+)(?:\.(\d{1,7}))?$/.exec(token);
+      if (!move) return null;
+      ledger.moves.push({
+        ply: Number(move[1]),
+        san: move[2] as string,
+        clockMs: move[3] === undefined ? null : Number(move[3]) * 10,
+      });
+    }
+  }
+  if (!color) return null;
+  ledger.color = color;
+  ledger.moves.sort((a, b) => a.ply - b.ply);
+  return ledger;
+}
+
+/** Write one out. Every separator is a FULL STOP: a colon would be a custom emoji code span, and
+ *  the substitution would replace it with an `<img>` and lose the game for both players. */
+function mockSerializeLedger(ledger: MockLedger): string {
+  const out: string[] = [ledger.color];
+  if (ledger.opened) out.push("open");
+  if (ledger.joined) out.push("join");
+  if (ledger.time) out.push(`tc.${ledger.time.base}+${ledger.time.increment}`);
+  if (ledger.at !== null) out.push(`at.${Math.round(ledger.at)}`);
+  for (const move of ledger.moves) {
+    const clock = move.clockMs === null ? "" : `.${Math.max(0, Math.round(move.clockMs / 10))}`;
+    out.push(`${move.ply}.${move.san}${clock}`);
+  }
+  if (ledger.resigned) out.push("resign");
+  return out.join(" ");
+}
+
+/** What the words above the line say — the state, because the message is rewritten. */
+function mockLedgerWords(ledger: MockLedger): string {
+  const parts: string[] = [];
+  if (ledger.opened) parts.push(`I'd like a game. I'm ${ledger.color === "w" ? "white" : "black"}.`);
+  else if (ledger.joined && ledger.moves.length === 0) parts.push("accepted.");
+  if (ledger.moves.length > 0) {
+    const shown = ledger.moves.slice(-6);
+    const elided = shown.length < ledger.moves.length ? "… " : "";
+    parts.push(
+      `my moves: ${elided}${shown
+        .map((m) => `${Math.ceil(m.ply / 2)}${m.ply % 2 === 1 ? "." : "…"} ${m.san}`)
+        .join(" ")}`,
+    );
+  }
+  if (ledger.resigned) parts.push("I resign.");
+  return `♟ Chess — ${parts.join(" ") || "a game."}`;
+}
+
+/** The opponent's own ledger message for one game, when it has one. */
+function findMockLedger(
+  convId: string,
+  who: Person,
+  game: string,
+): { msg: ChatMessage; ledger: MockLedger } | null {
+  const t = threadFor(convId);
+  if (!t) return null;
+  for (const msg of t.messages) {
+    if (msg.sender_mri !== who.mri) continue;
+    const wire = mockChessWire(msg.content);
+    if (!wire || wire.game !== game || !wire.rest.startsWith("v2 ")) continue;
+    const ledger = mockParseLedger(wire.rest.slice(3));
+    if (ledger) return { msg, ledger };
+  }
+  return null;
+}
+
+/** Post the opponent's ledger, or EDIT the one it already has — which is the whole point of the
+ *  ledger, and what makes a sixty-move game two messages in this thread rather than sixty. */
+function writeMockLedger(convId: string, who: Person, game: string, ledger: MockLedger): void {
+  const t = threadFor(convId);
+  if (!t) return;
+  const content = `<p>${mockLedgerWords(ledger)}</p><p><em>— chess ${game} v2 ${mockSerializeLedger(
+    ledger,
+  )}, via teams-lite</em></p>`;
+  const existing = findMockLedger(convId, who, game);
+  if (existing) {
+    existing.msg.content = content;
+    t.recompute();
+    broadcast("message", nicknamed(existing.msg));
+    broadcast(t.changedEvent, {});
+    return;
+  }
+  const seq = nextSeq(t.messages);
+  const msg: ChatMessage = {
+    id: `${convId}#${seq}`,
+    conversation_id: convId,
+    seq,
+    compose_time: Date.now(),
+    sender: who.name,
+    sender_mri: who.mri,
+    content,
+    is_self: false,
+  };
+  t.messages.push(msg);
+  t.recompute();
+  broadcast("message", nicknamed(msg));
+  broadcast(t.changedEvent, {});
+}
+
+/**
+ * Seed a game already in progress: both ledgers, the moves played, and each side's clock exactly
+ * where the caller says.
+ *
+ * It writes the READER's ledger as well as the opponent's, which is the only way a mock can put a
+ * game mid-flight — and it is honest about it: the two messages are the same two a real game
+ * leaves behind, in the same shape, so the page derives it exactly as it derives a game it played
+ * itself. `mine` is the reader's colour, `clock` is what each side has LEFT in ms, and the moves
+ * are SAN from the starting position.
+ */
+function seedMockChessGame(fallbackConvId: string, opts: Record<string, unknown>): string | null {
+  // The conversation may be named INSIDE the seed as well as beside it, and its own value wins: a
+  // caller that named it in one place and had it read from the other seeded a thread nobody was
+  // looking at — which looks exactly like a game that failed to exist.
+  const convId = typeof opts.conversation === "string" ? opts.conversation : fallbackConvId;
+  const t = threadFor(convId);
+  const other = t?.participants[0];
+  if (!t || !other) return null;
+  const mine: "w" | "b" = opts.mine === "b" ? "b" : "w";
+  const theirs: "w" | "b" = mine === "w" ? "b" : "w";
+  const moves = Array.isArray(opts.moves) ? (opts.moves as string[]) : ["e4", "e5", "Nf3", "Nc6"];
+  const base = typeof opts.base === "number" ? opts.base : 600;
+  const increment = typeof opts.increment === "number" ? opts.increment : 0;
+  const clock = (opts.clock ?? {}) as { w?: number; b?: number };
+  const game = mockChessGameId();
+  const now = Date.now();
+
+  // Only the moves that are really legal from the start, so a seed can never make a board the
+  // page has to report as unreplayable.
+  const chess = new Chess();
+  const played: string[] = [];
+  for (const san of moves) {
+    try {
+      chess.move(san);
+      played.push(san);
+    } catch {
+      break;
+    }
+  }
+
+  const sideMoves = (color: "w" | "b"): { ply: number; san: string; clockMs: number | null }[] => {
+    const want = color === "w" ? 1 : 0;
+    const out: { ply: number; san: string; clockMs: number | null }[] = [];
+    played.forEach((san, index) => {
+      const ply = index + 1;
+      if (ply % 2 !== want) return;
+      out.push({ ply, san, clockMs: null });
+    });
+    // The LAST of that side's moves carries the clock the caller asked for; the ones before it
+    // carry a plausible walk down to it, which is what a score sheet shows.
+    const left = clock[color] ?? base * 1000;
+    out.forEach((move, index) => {
+      move.clockMs = Math.max(0, left + (out.length - 1 - index) * 4_000);
+    });
+    return out;
+  };
+
+  // The opponent's ledger, and the reader's own — the reader is the one who opened it.
+  const ourMoves = sideMoves(mine);
+  const theirMoves = sideMoves(theirs);
+  const lastPly = played.length;
+  writeMockLedger(convId, other, game, {
+    ...blankMockLedger(theirs),
+    joined: true,
+    at: lastPly % 2 === (theirs === "w" ? 1 : 0) ? now - 1_000 : now - 30_000,
+    moves: theirMoves,
+  });
+  const seq = nextSeq(t.messages);
+  const ledger = {
+    ...blankMockLedger(mine),
+    opened: true,
+    time: { base, increment },
+    at: lastPly % 2 === (mine === "w" ? 1 : 0) ? now - 1_000 : now - 30_000,
+    moves: ourMoves,
+  };
+  const msg: ChatMessage = {
+    id: `${convId}#${seq}`,
+    conversation_id: convId,
+    seq,
+    // NOW, rather than the moment the game would really have started: the page merges a live
+    // message by id and keeps the history in the order the thread states, and a seeded challenge
+    // dated two minutes ago lands where nothing is looking for it.
+    compose_time: now,
+    sender: "You",
+    sender_mri: SELF_MRI,
+    content: `<p>${mockLedgerWords(ledger)}</p><p><em>— chess ${game} v2 ${mockSerializeLedger(
+      ledger,
+    )}, via teams-lite</em></p>`,
+    is_self: true,
+  };
+  t.messages.push(msg);
+  t.recompute();
+  // The page learns about a message from the live feed, so the reader's own seeded ledger has to
+  // arrive on it too: broadcast only for the opponent's half, the page saw a game whose CHALLENGE
+  // was missing — and a game with no challenge is not a game the derivation will draw.
+  broadcast("message", nicknamed(msg));
+  broadcast(t.changedEvent, {});
+  broadcast("conversations_changed", {});
+  return game;
+}
+
+/**
+ * Play the opponent's next legal move in one game, now.
+ *
+ * The opponent normally answers what the READER posted; a premove posts nothing until it is
+ * legal, so the moment it fires can only be reached by asking the other machine to move on its
+ * own — which is exactly what the other machine does when its player moves.
+ */
+function mockChessPlayNow(convId: string, game: string): void {
+  const t = threadFor(convId);
+  const other = t?.participants[0];
+  if (!t || !other) return;
+  const played = mockMergedMoves(convId, game);
+  const chess = new Chess();
+  for (const move of played) {
+    try {
+      chess.move(move.san);
+    } catch {
+      return;
+    }
+  }
+  if (chess.isGameOver()) return;
+  const held = findMockLedger(convId, other, game);
+  if (!held) return;
+  const ply = played.length + 1;
+  const mine = held.ledger.color;
+  if ((ply % 2 === 1 ? "w" : "b") !== mine) return;
+  const legal = chess.moves();
+  const san = (mockChessReply && legal.includes(mockChessReply) ? mockChessReply : legal[0]) ?? "";
+  if (!san) return;
+  const time = held.ledger.time;
+  const previous =
+    [...held.ledger.moves].reverse().find((m) => m.clockMs !== null)?.clockMs ??
+    (time ? time.base * 1000 : null);
+  writeMockLedger(convId, other, game, {
+    ...held.ledger,
+    at: Date.now(),
+    moves: [
+      ...held.ledger.moves,
+      {
+        ply,
+        san,
+        clockMs:
+          previous === null || !time ? null : Math.max(0, previous - 2_000) + time.increment * 1000,
+      },
+    ],
+  });
+}
+
+/** Every ply of one game as the thread states it, both ledgers merged — the same walk the page
+ *  does, so a mock that disagreed with it would fail a test rather than hide one. */
+function mockMergedMoves(convId: string, game: string): { san: string; clockMs: number | null }[] {
+  const t = threadFor(convId);
+  if (!t) return [];
+  const byPly = new Map<number, { san: string; clockMs: number | null }>();
+  for (const msg of t.messages) {
+    const wire = mockChessWire(msg.content);
+    if (!wire || wire.game !== game) continue;
+    if (wire.rest.startsWith("v2 ")) {
+      const ledger = mockParseLedger(wire.rest.slice(3));
+      if (!ledger) continue;
+      for (const move of ledger.moves) {
+        if (!byPly.has(move.ply)) byPly.set(move.ply, { san: move.san, clockMs: move.clockMs });
+      }
+      continue;
+    }
+    const played = mockChessMove(wire.rest);
+    if (played && !byPly.has(played.ply)) byPly.set(played.ply, { san: played.san, clockMs: null });
+  }
+  const out: { san: string; clockMs: number | null }[] = [];
+  for (let ply = 1; byPly.has(ply); ply += 1) out.push(byPly.get(ply)!);
+  return out;
 }
 
 /** Six lowercase hex characters, the shape the page's own `newChessGameId` mints. */
@@ -9430,10 +9777,10 @@ function mockChessGameId(): string {
 /**
  * Put the opponent back the way this file declares it, and the chess THREAD back to its seed.
  *
- * The thread matters as much as the aim: one game in flight per conversation is a real rule of
- * the feature, so a game a test left unfinished means the next test's header offers no challenge
- * at all. Truncating the fixture is the same discipline `resetMockPersonas` follows — put the
- * seeded state back rather than leaving one test's leftovers in front of the next.
+ * The thread matters as much as the aim: a conversation holds SEVERAL games at once now, so a
+ * game a test left unfinished is a chip in the next test's strip, a row in its menu and a board
+ * in its history. Truncating the fixture is the same discipline `resetMockPersonas` follows —
+ * put the seeded state back rather than leaving one test's leftovers in front of the next.
  */
 function resetMockChess(): void {
   mockChessReply = null;
@@ -9460,107 +9807,67 @@ function mockChessMove(rest: string): { ply: number; san: string } | null {
   return move ? { ply: Number(move[1]), san: move[2] as string } : null;
 }
 
-/** Answer the user's chess message as the other player would. */
+/**
+ * Answer the user's chess message as the other player would.
+ *
+ * It reads BOTH shapes of the wire, because both really occur: a ledger (`v2`), which is what this
+ * app writes now, and the one-message-per-move form every game played before it used. What it
+ * ANSWERS with is always a ledger, because that is what the other machine would write.
+ *
+ * The order of the questions is the whole of it: WHETHER THE MOCK IS ALREADY IN THIS GAME comes
+ * first. A ledger is a state, so the reader's message still says `open` on their fortieth move —
+ * asked "did they open a game?" first, the mock answered "yes, and I have already accepted" and
+ * returned, so it accepted a challenge and then never answered a single move.
+ */
 function maybeAnswerMockChess(convId: string, msg: ChatMessage): void {
   if (mockChessSilent) return;
   const wire = mockChessWire(msg.content);
   if (!wire) return;
   const t = threadFor(convId);
-  // The non-self party of this conversation is the opponent — the mock's own idea of who else
-  // is in a thread, so no second notion of "the other person" is invented here.
+  // The non-self party of this conversation is the opponent — the mock's own idea of who else is
+  // in a thread, so no second notion of "the other person" is invented here.
   const other = t?.participants[0];
   if (!t || !other) return;
+  // Never answer our own edits: the mock's ledger is a message in this thread too, and reading it
+  // back as a move to answer would be a game playing itself.
+  if (msg.sender_mri === other.mri) return;
 
-  // A challenge is accepted — and when the challenger took BLACK the opponent is white, so it
-  // opens. Without that a game the user asked to play as black would sit waiting for a first
-  // move nobody was going to make, which is a dead board rather than an opponent.
-  if (wire.rest.startsWith("open ")) {
-    const opponentIsWhite = wire.rest === "open b";
+  const ledger = wire.rest.startsWith("v2 ") ? mockParseLedger(wire.rest.slice(3)) : null;
+  const v1 = ledger ? null : wire.rest;
+  const held = findMockLedger(convId, other, wire.game);
+
+  /** Answer with a legal move, from the merged position, after a plausible think. */
+  const answer = (): void => {
     setTimeout(() => {
-      postMockChess(convId, other, wire.game, "join", "♟ Chess — accepted.");
-      if (opponentIsWhite) {
-        setTimeout(() => {
-          const opening = new Chess().moves()[0];
-          if (opening) {
-            postMockChess(convId, other, wire.game, `1 ${opening}`, `♟ 1. ${opening}`);
-          }
-        }, MOCK_CHESS_DELAY_MS);
-      }
+      mockChessPlayNow(convId, wire.game);
     }, MOCK_CHESS_DELAY_MS);
-    return;
-  }
-  // The reader ACCEPTED a challenge the mock opened. If the mock took white it has to open,
-  // exactly as it does when the reader challenges and picks black — otherwise a game the reader
-  // just accepted sits waiting for a first move nobody was going to make.
-  if (wire.rest === "join") {
-    const opened = t.messages
-      .map((m) => mockChessWire(m.content))
-      .find((w) => w?.game === wire.game && w.rest.startsWith("open "));
-    if (opened?.rest !== "open w") return;
-    setTimeout(() => {
-      const opening = new Chess().moves()[0];
-      if (opening) postMockChess(convId, other, wire.game, `1 ${opening}`, `♟ 1. ${opening}`);
-    }, MOCK_CHESS_DELAY_MS);
-    return;
-  }
-  if (!mockChessMove(wire.rest)) return;
-
-  // A move is answered with a legal reply, replayed out of the thread rather than out of any
-  // position this file keeps: the messages are the game.
-  setTimeout(() => {
-    const chess = new Chess();
-    let plies = 0;
-    for (const m of t.messages) {
-      const w = mockChessWire(m.content);
-      if (!w || w.game !== wire.game) continue;
-      const played = mockChessMove(w.rest);
-      if (!played) continue;
-      try {
-        chess.move(played.san);
-        plies += 1;
-      } catch {
-        // The thread holds a move that is not legal there — the page says so, and the
-        // opponent has nothing to answer.
-        return;
-      }
-    }
-    if (chess.isGameOver()) return;
-    const legal = chess.moves();
-    // The armed reply when a spec named one, otherwise the first legal move — deterministic,
-    // so a spec can assert on what comes back.
-    const san = (mockChessReply && legal.includes(mockChessReply) ? mockChessReply : legal[0]) ?? "";
-    if (!san) return;
-    const ply = plies + 1;
-    const words = `♟ ${Math.ceil(ply / 2)}${ply % 2 === 1 ? "." : "…"} ${san}`;
-    postMockChess(convId, other, wire.game, `${ply} ${san}`, words);
-  }, MOCK_CHESS_DELAY_MS);
-}
-
-/** Post one chess message as the other party, on the live feed the page really reads. */
-function postMockChess(
-  convId: string,
-  who: Person,
-  game: string,
-  kind: string,
-  words: string,
-): void {
-  const t = threadFor(convId);
-  if (!t) return;
-  const seq = nextSeq(t.messages);
-  const msg: ChatMessage = {
-    id: `${convId}#${seq}`,
-    conversation_id: convId,
-    seq,
-    compose_time: Date.now(),
-    sender: who.name,
-    sender_mri: who.mri,
-    content: `<p>${words}</p><p><em>— chess ${game} ${kind}, via teams-lite</em></p>`,
-    is_self: false,
   };
-  t.messages.push(msg);
-  t.recompute();
-  broadcast("message", nicknamed(msg));
-  broadcast(t.changedEvent, {});
+
+  // NOT IN THE GAME YET: the only thing to decide is whether to accept it.
+  if (!held) {
+    const openedByReader = ledger?.opened === true || v1?.startsWith("open ") === true;
+    if (!openedByReader) return;
+    const readerColor: "w" | "b" = ledger ? ledger.color : v1 === "open b" ? "b" : "w";
+    const mine: "w" | "b" = readerColor === "w" ? "b" : "w";
+    setTimeout(() => {
+      writeMockLedger(convId, other, wire.game, {
+        ...blankMockLedger(mine),
+        joined: true,
+        // The clock is the OPENER's; it is echoed here only so the mock can charge its own moves
+        // against it, and the page reads the opener's ledger for what the game is played with.
+        time: ledger?.time ?? null,
+      });
+      // When the challenger took BLACK the opponent is white, so it opens — without that a game
+      // the user asked to play as black would sit waiting for a first move nobody was going to
+      // make, which is a dead board rather than an opponent.
+      if (mine === "w") answer();
+    }, MOCK_CHESS_DELAY_MS);
+    return;
+  }
+
+  // IN THE GAME: answer whatever the reader just did. `mockChessPlayNow` refuses a turn that is
+  // not the mock's, so this is one question rather than three.
+  answer();
 }
 
 // ---------------------------------------------------------------------------
@@ -10249,6 +10556,11 @@ function editAgentReply(convId: string, messageId: string, content: string): voi
   t.recompute();
   broadcast("message", nicknamed(msg));
   broadcast(t.changedEvent, {});
+  // A CHESS MOVE IS AN EDIT of the player's own ledger, so the opponent has to be woken here as
+  // well as on a send: woken only by sends, the mock accepted a challenge and then never answered
+  // a single move. It returns at once for a body that carries no chess line, so an ordinary edit
+  // costs nothing.
+  if (msg.is_self) maybeAnswerMockChess(convId, msg);
 }
 
 /** Every ~7s, drop an incoming (is_self:false) message into a random chat and
@@ -10680,8 +10992,32 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           body.challenge,
         );
       }
+      // The opponent MOVES now, in the game a spec names. A premove fires when their move
+      // lands and a premove sends nothing, so without this hook there is no way to make the
+      // moment happen at all.
+      if (typeof body.play === "string") {
+        mockChessPlayNow(
+          typeof body.conversation === "string" ? body.conversation : MOCK_CHESS_THREAD,
+          body.play,
+        );
+      }
+      // A game already UNDER WAY, both ledgers written, with the clocks a spec asked for. It is
+      // what makes a RUNNING clock, a nearly-flagged one and a long score sheet reachable at all:
+      // the alternative is a spec that waits ten minutes for a number to move.
+      let seeded: string | null = null;
+      if (body.seed && typeof body.seed === "object") {
+        seeded = seedMockChessGame(
+          typeof body.conversation === "string" ? body.conversation : MOCK_CHESS_THREAD,
+          body.seed as Record<string, unknown>,
+        );
+      }
       return Response.json(
-        { ok: true, reply: mockChessReply, silent: mockChessSilent, game: challenged },
+        {
+          ok: true,
+          reply: mockChessReply,
+          silent: mockChessSilent,
+          game: challenged ?? seeded,
+        },
         { status: 200 },
       );
     }
@@ -11004,11 +11340,14 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         ? Math.max(0, body.delay_ms)
         : 0;
     testSendError = typeof body.error === "string" ? body.error : "";
-    if (body.clear === true) capturedSends.length = 0;
+    if (body.clear === true) {
+      capturedSends.length = 0;
+      capturedEdits.length = 0;
+    }
     return Response.json({ ok: true, delay_ms: testSendDelayMs, error: testSendError });
   }
   if (req.method === "GET" && url.pathname === "/__test/sends") {
-    return Response.json({ sends: capturedSends });
+    return Response.json({ sends: capturedSends, edits: capturedEdits });
   }
   if (req.method === "GET" && url.pathname === "/__test/conversations") {
     return Response.json(

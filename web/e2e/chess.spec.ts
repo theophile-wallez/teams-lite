@@ -2,6 +2,10 @@ import {
   test,
   expect,
   chessChallengeFromOpponent,
+  chessOpponentMoves,
+  fetchCapturedEdits,
+  openChessPage,
+  seedChessGame,
   chessSquareHasPiece,
   closeConversationMenu,
   conversationMenuTrigger,
@@ -96,15 +100,16 @@ test.describe("chess in a conversation", () => {
     await expect(page.locator(board)).toHaveCount(1);
   });
 
-  test("DECLINING a challenge frees the conversation for the next one", async ({ page }) => {
+  test("DECLINING a challenge ends it, and it stops asking for anything", async ({ page }) => {
     await openChessThread(page);
     await chessChallengeFromOpponent(page, "w");
     await page.locator('[data-testid="chess-decline"]').click();
 
     await expect(page.locator(status)).toContainText(/declined/i);
-    // Nothing is waiting for the reader any more…
+    // Nothing is waiting for the reader any more: no dot on the trigger, no chip in the strip.
     await expect(page.locator('[data-testid="chess-your-turn"]')).toHaveCount(0);
-    // …and the header offers a challenge again rather than pointing at a dead game.
+    await expect(page.locator('[data-testid="chess-game-chip"]')).toHaveCount(0);
+    // And the challenge is offered, as it always is now.
     await openChessChallenge(page);
     await closeConversationMenu(page);
   });
@@ -134,12 +139,16 @@ test.describe("chess in a conversation", () => {
     await startChessGame(page, "w");
     const sends = await fetchCapturedSends(page);
     const challenge = sends.at(-1);
-    // The challenge really carried the line the other machine reads back, and a resolved
-    // colour — never the word "random", which would leave two clients disagreeing about who
-    // moves first.
+    // The challenge really carried the LEDGER line the other machine reads back: the game, the
+    // version, a resolved colour — never the word "random", which would leave two clients
+    // disagreeing about who moves first — and the clock the game is played with.
     expect(challenge?.content_html).toMatch(
-      /<p><em>— chess [0-9a-f]{6} open w, via teams-lite<\/em><\/p>$/,
+      /<p><em>— chess [0-9a-f]{6} v2 w open tc\.600\+0, via teams-lite<\/em><\/p>$/,
     );
+    // NO COLON anywhere in it: a colon is a custom emoji code span, and the backend's own
+    // substitution would replace `:e4:` with an `<img>` and lose the game for both players.
+    const line = /— chess [^<]*/.exec(challenge?.content_html ?? "")?.[0] ?? "";
+    expect(line).not.toContain(":");
     // And the words above it, which is all a stock Teams client would show.
     expect(challenge?.content_html).toContain("I'm white");
   });
@@ -233,14 +242,16 @@ test.describe("chess in a conversation", () => {
     await expect(page.locator('[data-testid="chess-your-turn"]')).toBeVisible();
     await expect(header).toHaveAttribute("data-your-turn", "true");
 
-    // And the ROW inside says it in words, and points at the board rather than at a challenge:
-    // one game in flight per conversation, so there is nothing else for it to offer.
+    // And the ROW inside says it in words and points at that game's own page. The CHALLENGE is
+    // still offered beside it, because a conversation holds several games at once — the rule that
+    // refused a second one is gone, and the row that used to replace the challenge is a list.
     const game = await header.getAttribute("data-chess-game");
     await openConversationMenu(page);
-    const row = page.locator('[data-testid="chess-button"]');
+    const row = page.locator('[data-testid="chess-game-row"]');
+    await expect(row).toHaveCount(1);
     await expect(row).toHaveAttribute("data-chess-game", game!);
     await expect(row).toContainText(/your move/i);
-    await expect(page.locator('[data-testid="chess-challenge"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="chess-button"]')).toContainText(/another game/i);
     await closeConversationMenu(page);
 
     // Once the move is out it is not our turn, and the dot goes.
@@ -249,7 +260,7 @@ test.describe("chess in a conversation", () => {
     await expect(page.locator('[data-testid="chess-your-turn"]')).toHaveCount(0);
   });
 
-  test("a resigned game lets the next challenge go out", async ({ page }) => {
+  test("a resigned game leaves its board and stops wanting anything", async ({ page }) => {
     await openChessThread(page);
     await startChessGame(page, "w");
     const resign = page.locator('[data-testid="chess-resign"]');
@@ -310,5 +321,279 @@ test.describe("chess in a conversation", () => {
     // A board is square, whatever width the column gave it.
     const squares = await page.locator('[data-testid="chess-board"]').boundingBox();
     expect(Math.abs(squares!.width - squares!.height)).toBeLessThanOrEqual(2);
+  });
+
+  // ---- the LEDGER: a move EDITS one message rather than posting another --------------
+  test("a MOVE edits the same message, so a game of ten moves is two messages", async ({
+    page,
+  }) => {
+    // The whole point of the ledger. Before it, a sixty-move game was sixty messages in the
+    // conversation; now each player keeps ONE and rewrites it.
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    // A game with an opponent and no moves yet, ours to play: the ledger the reader's own
+    // challenge left behind is the message the move has to rewrite.
+    await seedChessGame(page, { mine: "w", moves: [] });
+    await expect(page.locator(board)).toBeVisible();
+    const before = Number(await page.locator(scroller).getAttribute("data-loaded-count"));
+
+    await playChessMove(page, "e2", "e4");
+    await expect(page.locator('[data-testid="chess-moves"]')).toContainText("1. e4");
+
+    // The history did not grow: the move rewrote the challenge's own message.
+    const after = Number(await page.locator(scroller).getAttribute("data-loaded-count"));
+    expect(after).toBe(before);
+    // And it really was an EDIT on the wire, carrying the ledger's rich body — not a send.
+    const edits = await fetchCapturedEdits(page);
+    const edit = edits.at(-1);
+    expect(edit?.content_html).toMatch(/— chess [0-9a-f]{6} v2 w open tc\.600\+0 at\.\d+ 1\.e4/);
+    expect(page.locator(board)).toHaveCount(1);
+  });
+
+  // ---- the CLOCKS -------------------------------------------------------------------
+  test("both clocks are on screen, and the one that is running counts DOWN", async ({ page }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    // A game already under way, ours to move, with a minute each: the clock is running the
+    // moment the board is drawn.
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5"], base: 60, clock: { w: 40_000, b: 55_000 } });
+    await expect(page.locator(board)).toBeVisible();
+
+    const ours = page.locator('[data-testid="chess-clock-w"]');
+    const theirs = page.locator('[data-testid="chess-clock-b"]');
+    await expect(ours).toBeVisible();
+    await expect(theirs).toBeVisible();
+    // OURS is the one on the clock, and it says so.
+    await expect(ours).toHaveAttribute("data-running", "true");
+    await expect(theirs).not.toHaveAttribute("data-running", "true");
+
+    const first = await ours.textContent();
+    const frozen = await theirs.textContent();
+    await page.waitForTimeout(1_500);
+    // It really moved — and the other one really did not.
+    expect(await ours.textContent()).not.toBe(first);
+    expect(await theirs.textContent()).toBe(frozen);
+  });
+
+  test("a clock that has RUN OUT is claimed, never taken", async ({ page }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    // Their clock is gone and it is their move, so the win is the reader's to claim. Nothing
+    // ends the game by itself: no machine's clock can be trusted over another's.
+    // Three plies, so it is BLACK's move — and black has a move of their own, which is what lets
+    // the wire state their clock at all: a ledger carries a clock per MOVE.
+    await seedChessGame(page, {
+      mine: "w",
+      moves: ["e4", "e5", "Nf3"],
+      base: 60,
+      clock: { w: 30_000, b: 0 },
+    });
+    const claim = page.locator('[data-testid="chess-claim-flag"]');
+    await expect(claim).toBeVisible();
+    await expect(page.locator(status)).toContainText(/ran out of time/i);
+
+    await claim.click();
+    await expect(page.locator(status)).toContainText(/ran out of time/i);
+    // The game is settled, so there is nothing left to press.
+    await expect(page.locator('[data-testid="chess-claim-flag"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="chess-resign"]')).toHaveCount(0);
+  });
+
+  // ---- the STRIP under the header ---------------------------------------------------
+  test("the games running here float under the header, with their clocks", async ({ page }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    const first = await seedChessGame(page, { mine: "w", moves: ["e4", "e5"], base: 600 });
+    const second = await seedChessGame(page, { mine: "b", moves: ["d4"], base: 600 });
+
+    const chips = page.locator('[data-testid="chess-game-chip"]');
+    await expect(chips).toHaveCount(2);
+    // Most urgent first: the game waiting for the reader comes before the one waiting for
+    // somebody else. In the second seed the reader is black with one ply played, so it is theirs.
+    await expect(chips.first()).toHaveAttribute("data-chess-game", second);
+    await expect(chips.first()).toHaveAttribute("data-wants-us", "true");
+    await expect(chips.nth(1)).toHaveAttribute("data-chess-game", first);
+    // Each chip carries BOTH clocks, which is the whole reason it is a chip rather than a dot.
+    await expect(chips.first().locator('[data-testid="chess-chip-clock-ours"]')).toBeVisible();
+    await expect(chips.first().locator('[data-testid="chess-chip-clock-theirs"]')).toBeVisible();
+
+    // It FLOATS: the history keeps its own box, so nothing in the conversation moved.
+    const strip = page.locator('[data-testid="chess-games-strip"]');
+    const stripBox = await strip.boundingBox();
+    const scrollBox = await page.locator(scroller).boundingBox();
+    expect(stripBox!.y).toBeGreaterThanOrEqual(scrollBox!.y - 1);
+    expect(stripBox!.y).toBeLessThan(scrollBox!.y + 40);
+  });
+
+  test("SEVERAL GAMES AT ONCE, each with its own board and its own row", async ({ page }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5"] });
+    await seedChessGame(page, { mine: "b", moves: ["d4"] });
+
+    // Two boards in the history, one per game — the rule that refused a second game is gone.
+    await expect(page.locator(board)).toHaveCount(2);
+    await openConversationMenu(page);
+    await expect(page.locator('[data-testid="chess-game-row"]')).toHaveCount(2);
+    // And the challenge is still there, so a third can start.
+    await expect(page.locator('[data-testid="chess-button"]')).toContainText(/another game/i);
+    await closeConversationMenu(page);
+  });
+
+  // ---- the PAGE ---------------------------------------------------------------------
+  test("the board has a PAGE of its own: the score sheet, the chat, and one composer", async ({
+    page,
+  }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    const game = await seedChessGame(page, { mine: "w", moves: ["e4", "e5", "Nf3", "Nc6"] });
+    await openChessPage(page);
+
+    // The URL is the surface: it survives a reload and can be sent to whoever you are playing.
+    expect(page.url()).toContain(`/chess/${game}`);
+    // The score sheet is a column of pairs, and every ply is a press.
+    await expect(page.locator('[data-testid="chess-score-sheet"]')).toBeVisible();
+    await expect(page.locator('[data-testid="chess-ply-4"]')).toBeVisible();
+    // The conversation is beside it, with the app's ONE composer in it.
+    await expect(page.locator('[data-testid="chess-page-chat"]')).toBeVisible();
+    await expect(page.locator('[data-testid="composer-shell"]')).toHaveCount(1);
+    // The sidebar and the message pane are gone: this is a page, not a panel.
+    await expect(page.locator('[data-testid="message-pane"]')).toHaveCount(0);
+
+    // Back leaves the board for the conversation, never for the chat list.
+    await page.locator('[data-testid="chess-page-back"]').click();
+    await expect(page.locator('[data-testid="message-pane"]')).toBeVisible();
+    await expect(page.locator('[data-testid="conversation-title"]')).toContainText("Chess Club");
+  });
+
+  test("the reader can WALK BACK through the game, and the board says it is not live", async ({
+    page,
+  }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5", "Nf3", "Nc6"] });
+    await openChessPage(page);
+
+    // Four plies in: the knight is out.
+    await expect.poll(async () => chessSquareHasPiece(page, "f3")).toBe(true);
+    await page.locator('[data-testid="chess-nav-prev"]').click();
+    await page.locator('[data-testid="chess-nav-prev"]').click();
+    // Two moves back, so the knight is home again and the page says the board is not live. The
+    // reads POLL because the renderer animates a position change: a piece is still in the DOM at
+    // its old square for a frame or two, which is a fact about the animation and not about the
+    // board's state.
+    await expect(page.locator('[data-testid="chess-page-status"]')).toContainText(/not live/i);
+    await expect.poll(async () => chessSquareHasPiece(page, "f3")).toBe(false);
+    await expect.poll(async () => chessSquareHasPiece(page, "g1")).toBe(true);
+    // A press on a ply in the score sheet goes there…
+    await page.locator('[data-testid="chess-ply-1"]').click();
+    await expect(page.locator('[data-testid="chess-ply-1"]')).toHaveAttribute("data-current", "true");
+    // …and the way back to the live position is one press.
+    await page.locator('[data-testid="chess-nav-live"]').click();
+    await expect.poll(async () => chessSquareHasPiece(page, "f3")).toBe(true);
+    await expect(page.locator('[data-testid="chess-page-status"]')).not.toContainText(/not live/i);
+  });
+
+  test("a PREMOVE is queued while they think, and plays itself when they move", async ({ page }) => {
+    await openChessThread(page);
+    // A game where it is THEIR move, so anything the reader plays is a premove.
+    await setChessOpponent(page, { silent: true });
+    const game = await seedChessGame(page, { mine: "w", moves: ["e4"] });
+    await openChessPage(page);
+    await expect(page.locator('[data-testid="chess-page-status"]')).toContainText(/waiting/i);
+
+    // Queue g1-f3. Nothing is posted: a premove is a private intention.
+    const before = (await fetchCapturedEdits(page)).length;
+    await playChessMove(page, "g1", "f3");
+    await expect(page.locator('[data-testid="chess-premove-hint"]')).toBeVisible();
+    await expect(page.locator('[data-square="f3"] [data-premove="true"]')).toBeVisible();
+    expect((await fetchCapturedEdits(page)).length).toBe(before);
+
+    // Their move lands, and the premove goes out by itself.
+    await chessOpponentMoves(page, game);
+    await expect(page.locator('[data-testid="chess-moves"]')).toContainText("Nf3");
+    await expect(page.locator('[data-testid="chess-premove-hint"]')).toHaveCount(0);
+  });
+
+  test("a PROMOTION asks which piece, over the board, with real pieces", async ({ page }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    // A pawn one square from the eighth rank, and the reader to move it.
+    await seedChessGame(page, {
+      mine: "w",
+      moves: ["e4", "d5", "exd5", "c6", "dxc6", "Qd6", "cxb7", "Qc6"],
+    });
+    await openChessPage(page);
+
+    await playChessMove(page, "b7", "a8");
+    const picker = page.locator('[data-testid="chess-promotion"]');
+    await expect(picker).toBeVisible();
+    // Four pieces, and each one is drawn as a piece rather than as its name.
+    await expect(picker.locator("svg")).not.toHaveCount(0);
+    await page.locator('[data-testid="chess-promote-n"]').click();
+    await expect(page.locator('[data-testid="chess-moves"]')).toContainText("=N");
+  });
+
+  test("an ARROW is drawn by a right-drag on the page, and never in the conversation", async ({
+    page,
+  }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5"] });
+
+    // The card in the history draws none: a right-drag there would take the browser's own menu
+    // away from a message thread.
+    await expect(page.locator('[data-testid="chess-board"][data-scrollable="true"]')).toBeVisible();
+
+    await openChessPage(page);
+    const from = await page.locator('[data-square="d2"]').boundingBox();
+    const to = await page.locator('[data-square="d4"]').boundingBox();
+    await page.mouse.move(from!.x + from!.width / 2, from!.y + from!.height / 2);
+    await page.mouse.down({ button: "right" });
+    await page.mouse.move(to!.x + to!.width / 2, to!.y + to!.height / 2, { steps: 8 });
+    await page.mouse.up({ button: "right" });
+    // The renderer draws it into its own overlay; what this pins is that one exists at all.
+    await expect(page.locator('[data-testid="chess-page"] svg[data-testid="arrows"], [data-testid="chess-page"] line, [data-testid="chess-page"] marker')).not.toHaveCount(0);
+  });
+
+  test("the board in the history does not eat the conversation's SCROLL", async ({ page }) => {
+    // The reported bug: `react-chessboard` writes `touch-action: none` on every piece, so a
+    // finger landing on any of the 32 of them could not scroll the thread — which on a phone is
+    // most of the width of the screen.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    // TWO boards, so the history is really taller than the screen: a thread that overflows
+    // nothing cannot prove anything about scrolling it.
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5"] });
+    await seedChessGame(page, { mine: "b", moves: ["d4"] });
+    await expect(page.locator(board)).toHaveCount(2);
+    await expect
+      .poll(async () =>
+        page.locator(scroller).evaluate((el) => el.scrollHeight - el.clientHeight),
+      )
+      .toBeGreaterThan(100);
+
+    // The board says it gives the scroll away…
+    const pieces = page.locator('[data-testid="chess-board"][data-scrollable="true"] [data-piece]');
+    await expect(pieces.first()).toBeVisible();
+    // …and the browser really computes `pan-y` on a piece, which is what lets a touch scroll.
+    const action = await pieces.first().evaluate((el) => getComputedStyle(el).touchAction);
+    expect(action).toBe("manipulation");
+
+    // And a WHEEL over the board scrolls the history rather than being swallowed. It is measured
+    // DOWNWARD from the top: this history is stuck to its bottom, so wheeling up in a thread with
+    // barely a screenful of overflow is a scroll the pane legitimately takes back — which would
+    // fail this assertion for a reason that is nothing to do with the board.
+    await page.locator(scroller).evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await expect.poll(async () => page.locator(scroller).evaluate((el) => el.scrollTop)).toBe(0);
+    const box = await page.locator('[data-testid="chess-board"]').first().boundingBox();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await page.mouse.wheel(0, 300);
+    await expect
+      .poll(async () => page.locator(scroller).evaluate((el) => el.scrollTop))
+      .toBeGreaterThan(0);
   });
 });

@@ -50,7 +50,7 @@ import {
 } from "~/lib/call-stage";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
-import { CallStageChat } from "./call-stage-chat";
+import { CallStageChat } from "./conversation-chat-panel";
 import { useCallStage } from "./call-stage-context";
 import { LocalVideoFrame, RemoteVideoFrame } from "./call-video";
 import { useAppState, useController } from "./controller-context";

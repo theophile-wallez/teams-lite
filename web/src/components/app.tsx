@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useMatchRoute, useNavigate, useParams } from "@tanstack/react-router";
 import { ControllerProvider, useAppState, useController } from "./controller-context";
 import { CalendarPane } from "./calendar-pane";
@@ -30,6 +30,13 @@ import {
 import { aLayerWasOpen, aModalIsOpen, hasModifier, watchOpenLayers } from "~/lib/platform";
 import { cn } from "~/lib/utils";
 import { installVirtualKeyboardState } from "~/lib/virtual-keyboard";
+
+/**
+ * The chess PAGE carries the rules engine and the board renderer, so it is reached through a lazy
+ * chunk and never sits on the path of a chat — the rule `@pierre/diffs` holds for the diff and the
+ * board's own card already holds in the history.
+ */
+const ChessPage = lazy(() => import("./chess-page").then((m) => ({ default: m.ChessPage })));
 
 export function App() {
   return (
@@ -78,7 +85,7 @@ function AppInner() {
   // The URL is the source of truth for what is open. `/` means nothing; `/c/<id>` a
   // conversation; `/m/<id>` a mail; `/mr/<project>!<iid>` a merge request. `strict: false`
   // lets this shell read any of those params whether or not its route is the matched one.
-  const { conversationId, mailId, mergeRequestId, jobId } = useParams({ strict: false });
+  const { conversationId, mailId, mergeRequestId, jobId, gameId } = useParams({ strict: false });
   const routeConversationId = conversationId ?? null;
   const routeMailId = mailId ?? null;
   // A malformed id resolves to null, which reads as "nothing open" — the page then shows
@@ -111,6 +118,12 @@ function AppInner() {
     return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
   }, [jobId]);
   const onJobRoute = !!matchRoute({ to: "/mr/$mergeRequestId/jobs/$jobId" });
+  // ONE GAME OF CHESS takes the whole screen for the diff's own reasons: the board, the score
+  // sheet and the conversation's own chat are three columns, and a fourth of chat rows beside them
+  // would leave none of them the room. The game is named by the six hex characters its messages
+  // already carry (see lib/chess-wire.ts).
+  const onChessRoute = !!matchRoute({ to: "/c/$conversationId/chess/$gameId" });
+  const routeGameId = typeof gameId === "string" ? gameId : null;
 
   // Below the `md` breakpoint the UI is single-pane: the conversation list is the
   // home screen and a conversation (or Settings) takes the screen over it as a
@@ -311,6 +324,13 @@ function AppInner() {
           controller.cancelReply();
           return;
         }
+        // A BOARD is left for the conversation it is being played in, never for the chat list:
+        // the reader is two surfaces deep, and one Escape does one thing (see § A HOLD is how a
+        // phone reaches a menu for the same rule about one press meaning one thing).
+        if (onChessRoute && routeConversationId) {
+          void navigate({ to: "/c/$conversationId", params: { conversationId: routeConversationId } });
+          return;
+        }
         if (routeConversationId || routeMailId || onMergeRequestRoute || onSettings) {
           goToList();
           return;
@@ -360,6 +380,8 @@ function AppInner() {
       goToMergeRequest,
       goToList,
       callHasTheScreen,
+      onChessRoute,
+      navigate,
     ],
   );
 
@@ -393,6 +415,31 @@ function AppInner() {
           <GitLabDiffPage
             onBack={() => (mergeRequestId ? goToMergeRequest(mergeRequestId) : goToList())}
           />
+        </div>
+      ) : onChessRoute && routeConversationId && routeGameId ? (
+        <div className="flex min-h-0 flex-1">
+          {/* Back leaves the board for the CONVERSATION the game is being played in — that is
+              where the reader was, and the game is one row of it. */}
+          <Suspense
+            fallback={
+              <div
+                data-testid="chess-page-loading"
+                aria-hidden
+                className="flex-1 animate-pulse bg-panel/40"
+              />
+            }
+          >
+            <ChessPage
+              conversationId={routeConversationId}
+              gameId={routeGameId}
+              onBack={() =>
+                void navigate({
+                  to: "/c/$conversationId",
+                  params: { conversationId: routeConversationId },
+                })
+              }
+            />
+          </Suspense>
         </div>
       ) : (
         <div className="relative flex min-h-0 flex-1">

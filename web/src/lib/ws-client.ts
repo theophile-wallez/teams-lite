@@ -584,11 +584,22 @@ export class Backend {
           : undefined,
     });
   }
-  edit(conversation: string, messageId: string, text: string): Promise<{ edited: boolean }> {
+  /** Rewrite one of our own messages. `contentHtml` is the same optional rich body a
+   *  {@link send} carries and is used INSTEAD of escaping `text`: a message whose body is
+   *  markup — a game of chess keeping its record in one message (see lib/chess-wire.ts) —
+   *  cannot be rewritten as escaped plain text without becoming a different message. `text`
+   *  travels either way, for a client that shows no HTML. */
+  edit(
+    conversation: string,
+    messageId: string,
+    text: string,
+    contentHtml?: string,
+  ): Promise<{ edited: boolean }> {
     return this.writeRequest<{ edited: boolean }>("edit", {
       conversation,
       message_id: messageId,
       text,
+      content_html: contentHtml,
     });
   }
   /** Delete one of our own messages. Teams removes it from the thread for everybody,

@@ -258,6 +258,28 @@ export async function fetchCapturedSends(page: Page): Promise<CapturedSend[]> {
   return body.sends;
 }
 
+/** One EDIT the page made, as the mock recorded it. */
+export type CapturedEdit = {
+  conversation: string;
+  message_id: string;
+  text: string;
+  content_html?: string;
+};
+
+/**
+ * Every edit the page has made, in order.
+ *
+ * A chess MOVE is an edit of the player's own ledger message rather than a new message (see
+ * web/src/lib/chess-wire.ts), so this is what proves a move really left — the thread gains no
+ * message for a spec to read the wire off.
+ */
+export async function fetchCapturedEdits(page: Page): Promise<CapturedEdit[]> {
+  const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/sends`);
+  expect(res.ok()).toBeTruthy();
+  const body = (await res.json()) as { edits?: CapturedEdit[] };
+  return body.edits ?? [];
+}
+
 /** Inject a live message through the mock's gated test hook. */
 export async function emitLive(
   page: Page,
@@ -1049,6 +1071,34 @@ export async function chessChallengeFromOpponent(
   return body.game as string;
 }
 
+/**
+ * Seed a game already UNDER WAY: both ledgers, the moves played, and each side's clock where the
+ * caller says. It is the only way to reach a running clock, a nearly-flagged one or a long score
+ * sheet without waiting ten minutes for a number to move.
+ *
+ * `mine` is the READER's colour, `clock` is what each side has left in ms, and the answer is the
+ * game's own id — which is also the last segment of its page's address.
+ */
+export async function seedChessGame(
+  page: Page,
+  body: {
+    mine?: "w" | "b";
+    moves?: string[];
+    clock?: { w?: number; b?: number };
+    base?: number;
+    increment?: number;
+    conversation?: string;
+  } = {},
+): Promise<string> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "chess", seed: body },
+  });
+  expect(res.ok()).toBeTruthy();
+  const answer = (await res.json()) as { game: string | null };
+  expect(answer.game).toBeTruthy();
+  return answer.game as string;
+}
+
 /** Put the chess opponent back the way the mock declares it. */
 export async function resetChess(page: Page): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
@@ -1092,6 +1142,23 @@ export async function startChessGame(page: Page, color: "w" | "b" = "w"): Promis
     /waiting for somebody to accept/i,
     { timeout: 10_000 },
   );
+}
+
+/** Have the OPPONENT play its next move in one game, now — the only way to reach the moment a
+ *  premove fires, since a premove posts nothing until it is legal. */
+export async function chessOpponentMoves(page: Page, game: string): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "chess", play: game },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Open one game's own full-screen PAGE from the card in the history. */
+export async function openChessPage(page: Page): Promise<void> {
+  await page.locator('[data-testid="chess-open-page"]').first().click();
+  await expect(page.locator('[data-testid="chess-page"]')).toBeVisible();
+  // The board is what the page is for, so nothing is asserted until one is drawn.
+  await page.locator('[data-testid="chess-board"]').first().waitFor();
 }
 
 /** Play a move by pressing the piece's square and then its target — the tap-tap a phone uses. */

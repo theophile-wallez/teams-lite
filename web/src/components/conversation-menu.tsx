@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   CallIcon,
@@ -28,11 +29,24 @@ import {
   meetingUnavailableReason,
 } from "~/lib/call";
 import type { ChessGame } from "~/lib/chess-thread";
-import { newChessGameId, type ChessColor } from "~/lib/chess-wire";
+import { CHESS_DEFAULT_TIME, CHESS_TIME_CONTROLS } from "~/lib/chess-clock";
+import {
+  clockWords,
+  newChessGameId,
+  newChessLedger,
+  type ChessColor,
+  type ChessTimeControl,
+} from "~/lib/chess-wire";
 import { convLabel, isGroupChat } from "~/lib/protocol";
 import { sealCanBeUsed, sealMenuLabel } from "~/lib/seal";
 import { cn } from "~/lib/utils";
-import { chessButtonState, chessChallengeLabel, conversationHoldsChess } from "./chess-button";
+import {
+  chessChallengeLabel,
+  chessGameRowLabel,
+  chessMenuState,
+  chessPagePath,
+  conversationHoldsChess,
+} from "~/lib/chess-menu";
 import { useAppState, useController } from "./controller-context";
 import { SealDialog } from "./seal-dialog";
 import {
@@ -72,7 +86,7 @@ const ITEM_ICON = "size-4 shrink-0 text-text-dim";
  * reason where it cannot act. The rules those two of them came with are kept here, because the
  * components that used to argue them (`call-button.tsx`, `agent-menu.tsx`) drew nothing once
  * this file existed and were removed rather than left as dead files with living comments in
- * them. `chess-button.tsx` survives — its pure helpers are read below — and
+ * them. The chess helpers moved to `lib/chess-menu.ts` — a module of pure decisions, read below — and
  * `meeting-join-button.tsx` survives too, since the calendar and the incoming-call banner
  * still draw the real button.
  *
@@ -135,8 +149,13 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
 
   const [open, setOpen] = useState(false);
   const [sealOpen, setSealOpen] = useState(false);
+  const navigate = useNavigate();
   const [challenging, setChallenging] = useState(false);
   const [color, setColor] = useState<"w" | "b" | "random">("random");
+  // THE CLOCK the next challenge carries. Ten minutes out of the box, which is what somebody who
+  // says "fancy a game?" in a chat means — and it is kept across an open and close of the menu
+  // exactly as the colour is, because it is a preference rather than a step.
+  const [time, setTime] = useState<ChessTimeControl | null>(CHESS_DEFAULT_TIME);
   const [chessError, setChessError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
@@ -175,15 +194,18 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
 
   // ---- chess ----------------------------------------------------------------
   //
-  // The pure half comes from chess-button.tsx rather than being restated here: which state the
+  // The pure half comes from lib/chess-menu.ts rather than being restated here: which state the
   // control is in, and what a challenge reaches, are decisions with tests of their own, and two
   // spellings of them would drift at the first group chat.
   const holdsChess = conversationHoldsChess(conversation);
-  const chess = chessButtonState(props.games);
-  // The game in flight, or nothing — asked once, because the trigger's dot, the trigger's own
-  // attributes and the row all answer from it, and three separate readings of the same pair of
-  // conditions is where one of them ends up drawn in a conversation that holds no game.
-  const liveGame = holdsChess && chess.kind === "open" ? chess : null;
+  const chess = chessMenuState(props.games);
+  // EVERY live game, most urgent first, and the FIRST of them is what the trigger states — one
+  // reading of the same pair of conditions, because three separate ones is where one of them ends
+  // up drawn in a conversation that holds no game. A conversation may hold several games at once
+  // (§ Chess in a conversation), so the menu names them all and still offers a challenge.
+  const liveGames = holdsChess ? chess.games : [];
+  const liveGame = liveGames[0] ?? null;
+  const chessWantsUs = holdsChess && chess.wantsUs;
 
   // ---- the local agent ------------------------------------------------------
   const mode = agentModeFor(agent, props.conversationId);
@@ -246,9 +268,18 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
     // disagree about who moves first.
     const mine: ChessColor = color === "random" ? (Math.random() < 0.5 ? "w" : "b") : color;
     setChessError(null);
-    const sent = await controller.sendChessMessage(props.conversationId, {
+    const sent = await controller.publishChessLedger(props.conversationId, {
       game: newChessGameId(),
-      body: { kind: "open", color: mine },
+      // The challenge is the first message of the game, so it SENDS; every move after it edits
+      // this same message (see lib/chess-wire.ts on the ledger).
+      messageId: null,
+      ledger: {
+        ...newChessLedger(mine),
+        opened: true,
+        // The clock the game is played with, stated by whoever proposed it. Ten minutes unless
+        // the reader picked otherwise, which is what somebody who says "fancy a game?" means.
+        time,
+      },
     });
     if (sent) setOpen(false);
     else setChessError("The challenge did not go out — nothing was posted. Try again.");
@@ -282,11 +313,12 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
           // their own. `data-agent-mode` kept its spelling because it is the same fact.
           data-agent-mode={mode}
           data-chess-game={liveGame?.game.id}
-          data-your-turn={liveGame?.ourTurn ? "true" : undefined}
-          data-awaiting-answer={liveGame?.awaitingUs ? "true" : undefined}
+          data-chess-games={liveGames.length > 0 ? liveGames.length : undefined}
+          data-your-turn={liveGames.some((entry) => entry.ourTurn) ? "true" : undefined}
+          data-awaiting-answer={liveGames.some((entry) => entry.awaitingUs) ? "true" : undefined}
           aria-label={
-            liveGame?.wantsUs
-              ? liveGame.awaitingUs
+            chessWantsUs
+              ? liveGames.some((entry) => entry.awaitingUs)
                 ? "This conversation — you have been challenged to chess"
                 : "This conversation — your move"
               : "What this conversation offers"
@@ -303,7 +335,7 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
           {/* The game wants something from the reader — their move, or their answer to a
               challenge. The board may be a screen away, and inside a closed menu this would say
               nothing at all, which is why it rides the trigger rather than the row. */}
-          {liveGame?.wantsUs && (
+          {chessWantsUs && (
             <span
               data-testid="chess-your-turn"
               aria-hidden
@@ -375,32 +407,48 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
               {showCallRow && <DropdownMenuSeparator />}
               <DropdownMenuLabel>Chess</DropdownMenuLabel>
 
-              {liveGame ? (
+              {/* A ROW PER LIVE GAME, most urgent first. It used to be one row for one game,
+                  because one game in flight per conversation was the rule; a group chat holds a
+                  game per pair of people, so the row became a short list. Each one goes to that
+                  game's own PAGE rather than scrolling the history to its board: the page is
+                  where a game is played, and a row that scrolled a conversation to a row was
+                  what the page replaced. */}
+              {liveGames.map((entry) => (
                 <DropdownMenuItem
-                  data-testid="chess-button"
-                  data-chess-game={liveGame.game.id}
+                  key={entry.game.id}
+                  // ITS OWN id, and `chess-button` stays the CHALLENGE row's. The header's single
+                  // control carried `chess-button` while a conversation held one game and offered
+                  // either a board or a challenge; both are drawn at once now, so one id cannot
+                  // mean both — it would resolve to two elements and every existing assertion
+                  // would fail on the ambiguity rather than on the behaviour.
+                  data-testid="chess-game-row"
+                  data-chess-game={entry.game.id}
+                  data-your-turn={entry.ourTurn ? "true" : undefined}
                   aria-label={
-                    liveGame.awaitingUs
-                      ? `${liveGame.game.challenger.name} challenged you to chess — go to the board`
-                      : liveGame.ourTurn
+                    entry.awaitingUs
+                      ? `${entry.game.challenger.name} challenged you to chess — go to the board`
+                      : entry.ourTurn
                         ? "Your move — go to the chess board"
                         : "Go to the chess board"
                   }
-                  onSelect={() =>
-                    controller.requestScrollToMessage(
-                      props.conversationId,
-                      liveGame.game.challengeMessageId,
-                    )
-                  }
+                  onSelect={() => {
+                    setOpen(false);
+                    void navigate({ to: chessPagePath(props.conversationId, entry.game.id) });
+                  }}
                 >
                   <HugeiconsIcon icon={ChessPawnIcon} className={ITEM_ICON} strokeWidth={1.8} />
-                  {liveGame.awaitingUs
-                    ? "You have been challenged"
-                    : liveGame.ourTurn
-                      ? "Your move — go to the board"
-                      : "Go to the board"}
+                  <span className="flex-1 truncate">{chessGameRowLabel(entry)}</span>
+                  {entry.game.time && (
+                    <span className="shrink-0 text-[11px] text-text-faint">
+                      {clockWords(entry.game.time)}
+                    </span>
+                  )}
+                  {entry.wantsUs && (
+                    <span aria-hidden className="size-2 shrink-0 rounded-full bg-primary" />
+                  )}
                 </DropdownMenuItem>
-              ) : (
+              ))}
+              {
                 <>
                   {/* The challenge was a POPOVER hanging off its own button, and a popover cannot
                       live inside a menu row. What it held is three toggles, a sentence and a
@@ -422,7 +470,11 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
                     }}
                   >
                     <HugeiconsIcon icon={ChessPawnIcon} className={ITEM_ICON} strokeWidth={1.8} />
-                    {group ? "Challenge everybody here" : "Challenge to chess"}
+                    {liveGames.length > 0
+                      ? "Start another game"
+                      : group
+                        ? "Challenge everybody here"
+                        : "Challenge to chess"}
                   </DropdownMenuItem>
 
                   {challenging && (
@@ -453,11 +505,41 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
                           </button>
                         ))}
                       </div>
+                      {/* THE CLOCK, in the same shape as the colour: a row of presses rather than
+                          a select, because there are nine of them and every one is one press.
+                          Ten minutes is what it opens on. "No clock" is kept because every game
+                          played before this feature had none, and a game with no clock is a real
+                          thing two people may want. */}
+                      <div className="flex flex-wrap items-center gap-1 px-2.5 pb-1.5">
+                        {CHESS_TIME_CONTROLS.map((option) => {
+                          const picked =
+                            (option.time?.base ?? null) === (time?.base ?? null) &&
+                            (option.time?.increment ?? null) === (time?.increment ?? null);
+                          return (
+                            <button
+                              key={option.label}
+                              type="button"
+                              data-testid={`chess-time-${option.time ? `${option.time.base}-${option.time.increment}` : "none"}`}
+                              onClick={() => setTime(option.time)}
+                              aria-pressed={picked}
+                              className={cn(
+                                "rounded-md px-2 text-xs transition-colors",
+                                "min-h-8 [@media(pointer:coarse)]:min-h-11",
+                                picked
+                                  ? "bg-primary font-medium text-primary-foreground"
+                                  : "border border-border-subtle text-text-dim hover:bg-accent hover:text-foreground",
+                              )}
+                            >
+                              {option.label}
+                            </button>
+                          );
+                        })}
+                      </div>
                       {/* What the press costs, before it is pressed: it is the one fact the user
                           needs and the one thing they cannot take back after. */}
                       <p className="px-2.5 pb-1.5 text-[11px] leading-snug text-text-faint">
                         This posts a message under your name, and everybody in this conversation
-                        sees it. They need teams-lite to play.
+                        sees it. They need teams-lite to play. {clockWords(time)}.
                       </p>
                       <DropdownMenuItem
                         data-testid="chess-challenge"
@@ -488,7 +570,7 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
                     </>
                   )}
                 </>
-              )}
+              }
             </>
           )}
 

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   activeChessGame,
+  activeChessGames,
+  chessClockStateOf,
+  chessEndedByRules,
+  chessGameById,
+  chessGameIsOver,
   chessAwaitsOurAnswer,
   chessAwaitsTheirAnswer,
   chessGameIsSettled,
@@ -9,7 +14,13 @@ import {
   chessTurnIsOurs,
   chessWantsUs,
 } from "./chess-thread";
-import { chessMessageHtml, type ChessWire } from "./chess-wire";
+import {
+  chessMessageHtml,
+  newChessLedger,
+  type ChessColor,
+  type ChessLedger,
+  type ChessWire,
+} from "./chess-wire";
 import type { ChatMessage } from "./protocol";
 
 const ME = { mri: "8:orgid:me", name: "Clement" };
@@ -362,5 +373,358 @@ describe("chessTurnIsOurs", () => {
       chess(ADA, { game: "aaa111", body: { kind: "join" } }),
     ]);
     expect(game && chessTurnIsOurs(game)).toBe(true);
+  });
+});
+
+// ---- v2, the LEDGER ---------------------------------------------------------------
+//
+// One message per player, edited as they move, and the game is the MERGE of the two by ply. The
+// tests below are about the three things that merge has to get right: a ply is attributed to
+// whoever authored the message it came in, the order of play is read off the PLY rather than off
+// message order, and the acts that end a game are anchored at the ply they happened at.
+describe("a game kept as two LEDGERS", () => {
+  const T0 = 1_800_000_000_000;
+
+  /** One player's ledger, as the message that carries it. */
+  function ledger(
+    who: { mri: string; name: string },
+    game: string,
+    over: Partial<ChessLedger> & { color: ChessColor },
+    /** When the MESSAGE was posted. It is what times the accept, so the tests state it. */
+    composeTime = T0,
+  ): ChatMessage {
+    return {
+      ...chess(who, {
+        game,
+        body: { kind: "ledger", ledger: { ...newChessLedger(over.color), ...over } },
+      }),
+      compose_time: composeTime,
+    };
+  }
+
+  /** The commonest shape: white opened a ten-minute game, black accepted, three moves played. */
+  function played(): ChatMessage[] {
+    return [
+      ledger(ME, "aaa111", {
+        color: "w",
+        opened: true,
+        time: { base: 600, increment: 0 },
+        at: T0 + 20_000,
+        moves: [
+          { ply: 1, san: "e4", clockMs: 595_000 },
+          { ply: 3, san: "Nf3", clockMs: 590_000 },
+        ],
+      }),
+      ledger(ADA, "aaa111", {
+        color: "b",
+        joined: true,
+        at: T0 + 15_000,
+        moves: [{ ply: 2, san: "e5", clockMs: 597_000 }],
+      }),
+    ];
+  }
+
+  it("merges the two records into ONE move list, in ply order", () => {
+    const [game] = chessGamesInThread(played());
+    expect(game?.moves).toEqual(["e4", "e5", "Nf3"]);
+    // Three plies played, so it is black to move — read off the ply count and nothing else.
+    expect(game?.turn).toBe("b");
+    expect(game?.challengerColor).toBe("w");
+    expect(game?.opponent?.mri).toBe(ADA.mri);
+    expect(game?.ourColor).toBe("w");
+  });
+
+  it("is ONE row in the history: both messages are absorbed", () => {
+    const messages = played();
+    const [game] = chessGamesInThread(messages);
+    expect(game?.absorbed).toEqual([messages[0]?.id, messages[1]?.id]);
+    // A sixty-move game is these same two messages, which is the whole point of the ledger.
+    expect(game?.absorbed).toHaveLength(2);
+  });
+
+  it("says WHICH message each player edits, so a move rewrites it rather than posting again", () => {
+    const messages = played();
+    const [game] = chessGamesInThread(messages);
+    expect(game?.ledgers.w?.messageId).toBe(messages[0]?.id);
+    expect(game?.ledgers.b?.messageId).toBe(messages[1]?.id);
+    expect(game?.ledgers.w?.ledger.moves).toHaveLength(2);
+  });
+
+  it("carries the clock the OPENER set, and ignores an echo of it from the other side", () => {
+    const [game] = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true, time: { base: 600, increment: 0 } }),
+      ledger(ADA, "aaa111", { color: "b", joined: true, time: { base: 60, increment: 0 } }),
+    ]);
+    // One clock per game, stated by whoever proposed it: two would leave the two boards
+    // counting down at different speeds.
+    expect(game?.time).toEqual({ base: 600, increment: 0 });
+  });
+
+  it("carries what each side had left, and hands the clocks their numbers", () => {
+    const [game] = chessGamesInThread(played());
+    expect(game?.moveClocks).toEqual([595_000, 597_000, 590_000]);
+    const state = game && chessClockStateOf(game);
+    // Each side's own newest statement, and the moment they last acted.
+    expect(state?.stated).toEqual({ w: 590_000, b: 597_000 });
+    expect(state?.actedAt).toEqual({ w: T0 + 20_000, b: T0 + 15_000 });
+    // The clock starts at the ACCEPT, and the accept is timed by its own message rather than by
+    // anything the ledger claims: an edit cannot move it.
+    expect(state?.startedAt).toBe(T0);
+    expect(state?.turn).toBe("b");
+    expect(state?.live).toBe(true);
+    expect(state?.settled).toBe(false);
+  });
+
+  it("stops at a GAP, because a board drawn past one is a position nobody played", () => {
+    // White's ledger holds plies 1 and 3; black's move has not arrived (or its message is not
+    // loaded). Ply 3 is real and unplayable, so the game is one move long.
+    const [game] = chessGamesInThread([
+      ledger(ME, "aaa111", {
+        color: "w",
+        opened: true,
+        moves: [
+          { ply: 1, san: "e4", clockMs: null },
+          { ply: 3, san: "Nf3", clockMs: null },
+        ],
+      }),
+      ledger(ADA, "aaa111", { color: "b", joined: true }),
+    ]);
+    expect(game?.moves).toEqual(["e4"]);
+    expect(game?.turn).toBe("b");
+  });
+
+  it("REFUSES every move in a game nobody accepted", () => {
+    const [game] = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true, moves: [{ ply: 1, san: "e4", clockMs: null }] }),
+    ]);
+    expect(game?.moves).toEqual([]);
+    expect(game?.refusedPlies).toEqual([1]);
+  });
+
+  it("ignores a SECOND ledger from the same player, which would double every move in it", () => {
+    const first = played();
+    const [game] = chessGamesInThread([
+      ...first,
+      ledger(ME, "aaa111", { color: "w", moves: [{ ply: 5, san: "Bb5", clockMs: null }] }),
+    ]);
+    expect(game?.moves).toEqual(["e4", "e5", "Nf3"]);
+    expect(game?.ledgers.w?.messageId).toBe(first[0]?.id);
+  });
+
+  it("anchors a RESIGNATION at the ply it happened, and refuses the moves after it", () => {
+    // White resigned when the game stood at one move. Black's ledger holds a second ply — they
+    // moved before the resignation reached them — and it is absorbed and ignored.
+    const [game] = chessGamesInThread([
+      ledger(ME, "aaa111", {
+        color: "w",
+        opened: true,
+        moves: [{ ply: 1, san: "e4", clockMs: null }],
+        resigned: true,
+      }),
+      ledger(ADA, "aaa111", {
+        color: "b",
+        joined: true,
+        moves: [{ ply: 2, san: "e5", clockMs: null }],
+      }),
+    ]);
+    expect(game?.outcome).toEqual({ kind: "resigned", by: "w" });
+    expect(game?.moves).toEqual(["e4"]);
+  });
+
+  it("is WITHDRAWN when the challenger resigns a ledger nobody accepted", () => {
+    const [game] = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true, resigned: true }),
+    ]);
+    expect(game?.outcome).toEqual({ kind: "declined", withdrawn: true });
+  });
+
+  it("stands a draw offer only at the ply it was made at", () => {
+    const standing = chessGamesInThread([
+      ledger(ME, "aaa111", {
+        color: "w",
+        opened: true,
+        moves: [{ ply: 1, san: "e4", clockMs: null }],
+        drawOfferedAt: 1,
+      }),
+      ledger(ADA, "aaa111", { color: "b", joined: true }),
+    ]);
+    expect(standing[0]?.drawOfferedBy).toBe("w");
+
+    // Black answered with a move, which is what a move MEANS: the offer no longer stands, and
+    // nothing had to clear it.
+    const answered = chessGamesInThread([
+      ledger(ME, "aaa111", {
+        color: "w",
+        opened: true,
+        moves: [{ ply: 1, san: "e4", clockMs: null }],
+        drawOfferedAt: 1,
+      }),
+      ledger(ADA, "aaa111", {
+        color: "b",
+        joined: true,
+        moves: [{ ply: 2, san: "e5", clockMs: null }],
+      }),
+    ]);
+    expect(answered[0]?.drawOfferedBy).toBeNull();
+  });
+
+  it("settles a draw only when the OTHER side accepts the offer that stood", () => {
+    const agreed = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true, drawOfferedAt: 0 }),
+      ledger(ADA, "aaa111", { color: "b", joined: true, drawAcceptedAt: 0 }),
+    ]);
+    expect(agreed[0]?.outcome).toEqual({ kind: "drawAgreed" });
+
+    // Accepting one's own offer settles nothing, and neither does accepting one at a ply the
+    // offer did not stand at.
+    const alone = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true, drawOfferedAt: 0, drawAcceptedAt: 0 }),
+      ledger(ADA, "aaa111", { color: "b", joined: true }),
+    ]);
+    expect(alone[0]?.outcome).toEqual({ kind: "playing" });
+
+    const stale = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true, drawOfferedAt: 0 }),
+      ledger(ADA, "aaa111", { color: "b", joined: true, drawAcceptedAt: 4 }),
+    ]);
+    expect(stale[0]?.outcome).toEqual({ kind: "playing" });
+  });
+
+  it("believes a FLAG only when the arithmetic both machines hold agrees", () => {
+    // A one-minute game: white accepted at T0, has not moved, and black claims the flag two
+    // minutes later. Both machines can check that, so both reach the same answer.
+    const fair = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true, time: { base: 60, increment: 0 } }),
+      ledger(ADA, "aaa111", {
+        color: "b",
+        joined: true,
+        // A claim made one second in: white's minute has not run out, so nothing settles.
+        flagged: { color: "w", at: T0 + 1_000 },
+      }),
+    ]);
+    expect(fair[0]?.outcome).toEqual({ kind: "playing" });
+
+    const claimed = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true, time: { base: 60, increment: 0 } }),
+      // The accept is what starts the clock, and the claim carries its OWN moment: 61 seconds
+      // later, by which time white's minute is gone. The claim must not move the moment it is
+      // checked against, which is why it is not `at:`.
+      ledger(ADA, "aaa111", { color: "b", joined: true, flagged: { color: "w", at: T0 + 61_000 } }),
+    ]);
+    expect(claimed[0]?.outcome).toEqual({ kind: "timeout", loser: "w" });
+
+    // A claim against the player who is NOT on the clock is refused outright.
+    const wrong = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true, time: { base: 60, increment: 0 } }),
+      ledger(ADA, "aaa111", { color: "b", joined: true, flagged: { color: "b", at: T0 + 61_000 } }),
+    ]);
+    expect(wrong[0]?.outcome).toEqual({ kind: "playing" });
+  });
+
+  it("never believes a flag in a game with NO clock", () => {
+    const [game] = chessGamesInThread([
+      ledger(ME, "aaa111", { color: "w", opened: true }),
+      ledger(ADA, "aaa111", {
+        color: "b",
+        joined: true,
+        flagged: { color: "w", at: T0 + 10_000_000 },
+      }),
+    ]);
+    expect(game?.outcome).toEqual({ kind: "playing" });
+  });
+});
+
+describe("several games at once", () => {
+  it("holds every unfinished game, the one that WANTS the reader first", () => {
+    const games = chessGamesInThread([
+      // Ours to move: we opened as white and Ada accepted.
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "aaa111", body: { kind: "join" } }),
+      // Waiting for them: we opened as black, so white is theirs to play.
+      chess(ME, { game: "bbb222", body: { kind: "open", color: "b" } }),
+      chess(GRACE, { game: "bbb222", body: { kind: "join" } }),
+      // Settled, so it is not in the list at all.
+      chess(ADA, { game: "ccc333", body: { kind: "open", color: "w" } }),
+      chess(ME, { game: "ccc333", body: { kind: "join" } }),
+      chess(ME, { game: "ccc333", body: { kind: "resign" } }),
+    ]);
+    expect(activeChessGames(games).map((g) => g.id)).toEqual(["aaa111", "bbb222"]);
+    // And the one the header points at is the first of those.
+    expect(activeChessGame(games)?.id).toBe("aaa111");
+  });
+
+  it("puts the NEWEST first when neither is waiting for the reader", () => {
+    const games = chessGamesInThread([
+      chess(ADA, { game: "aaa111", body: { kind: "open", color: "w" } }),
+      chess(GRACE, { game: "aaa111", body: { kind: "join" } }),
+      chess(ADA, { game: "bbb222", body: { kind: "open", color: "w" } }),
+      chess(GRACE, { game: "bbb222", body: { kind: "join" } }),
+    ]);
+    expect(activeChessGames(games).map((g) => g.id)).toEqual(["bbb222", "aaa111"]);
+  });
+
+  it("finds one by its id, which is how a page reads its own URL", () => {
+    const games = chessGamesInThread([
+      chess(ME, { game: "aaa111", body: { kind: "open", color: "w" } }),
+    ]);
+    expect(chessGameById(games, "aaa111")?.id).toBe("aaa111");
+    expect(chessGameById(games, "nope00")).toBeNull();
+    expect(chessGameById(games, null)).toBeNull();
+  });
+});
+
+describe("a game the RULES ended", () => {
+  it("leaves the live list, so a game somebody WON stops asking for a move", () => {
+    // The pure layer holds no rules engine, on purpose — the strip under the header and the
+    // conversation's menu draw from it. So a mating move says so twice over: SAN's own `#`, and
+    // the `end.` token the mover writes.
+    const mate = chessGamesInThread([
+      chess(ME, {
+        game: "aaa111",
+        body: {
+          kind: "ledger",
+          ledger: {
+            ...newChessLedger("w"),
+            opened: true,
+            moves: [
+              { ply: 1, san: "e4", clockMs: null },
+              { ply: 3, san: "Qh5", clockMs: null },
+              { ply: 5, san: "Qxf7#", clockMs: null },
+            ],
+            ended: "mate",
+          },
+        },
+      }),
+      chess(ADA, {
+        game: "aaa111",
+        body: {
+          kind: "ledger",
+          ledger: {
+            ...newChessLedger("b"),
+            joined: true,
+            moves: [
+              { ply: 2, san: "e5", clockMs: null },
+              { ply: 4, san: "Nc6", clockMs: null },
+            ],
+          },
+        },
+      }),
+    ]);
+    expect(mate[0]?.moves).toHaveLength(5);
+    expect(mate[0] && chessEndedByRules(mate[0])).toBe("mate");
+    expect(mate[0] && chessGameIsOver(mate[0])).toBe(true);
+    // The OUTCOME is still "playing": no message ended it, and that distinction is what the
+    // card's own sentence reads (it asks the rules).
+    expect(mate[0]?.outcome).toEqual({ kind: "playing" });
+    expect(activeChessGames(mate)).toEqual([]);
+  });
+
+  it("reads a mating SAN even from a build that wrote no token", () => {
+    const mate = chessGamesInThread([
+      chess(ME, { game: "bbb222", body: { kind: "open", color: "w" } }),
+      chess(ADA, { game: "bbb222", body: { kind: "join" } }),
+      chess(ME, { game: "bbb222", body: { kind: "move", ply: 1, san: "Qxf7#" } }),
+    ]);
+    expect(mate[0] && chessEndedByRules(mate[0])).toBe("mate");
   });
 });

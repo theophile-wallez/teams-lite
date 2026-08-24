@@ -342,7 +342,10 @@ test.describe("mobile single-pane layout", () => {
           });
       return {
         rows: boxes('[role="menuitem"], [role="menuitemcheckbox"]'),
-        colours: boxes('[data-testid^="chess-color-"]'),
+        // The colour row and the CLOCK row: both are hand-drawn buttons rather than the shared
+        // menu item, so both carry the floor themselves — and nine clocks in a wrapped row is
+        // exactly where a 32px target would come back.
+        colours: boxes('[data-testid^="chess-color-"], [data-testid^="chess-time-"]'),
         width: node.getBoundingClientRect().width,
       };
     });
@@ -350,7 +353,8 @@ test.describe("mobile single-pane layout", () => {
     // Enough rows to be the real menu rather than an empty panel: the call, the game, the
     // seal and the agent switch at the very least.
     expect(targets.rows.length).toBeGreaterThan(3);
-    expect(targets.colours.length).toBe(3);
+    // Three colours and nine clocks.
+    expect(targets.colours.length).toBe(12);
     for (const target of [...targets.rows, ...targets.colours]) {
       expect(target.h, `${target.name} is ${target.h}px tall`).toBeGreaterThanOrEqual(44);
     }

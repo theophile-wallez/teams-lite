@@ -83,7 +83,13 @@ import {
   type WriteLock,
   UNKNOWN_WRITE_LOCK,
 } from "./protocol";
-import { chessMessageHtml, chessMessageText, type ChessWire } from "./chess-wire";
+import {
+  chessMessageHtml,
+  chessMessageText,
+  type ChessLedger,
+  type ChessWire,
+} from "./chess-wire";
+import { chessSlotKey } from "./chess-thread";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import type { AgentPersonaPatch } from "./agent-persona";
 import {
@@ -393,14 +399,39 @@ export type AppState = {
    *  reason (see {@link sendFailureMessage}). It is its own slice rather than `sendError`
    *  because it is drawn somewhere else — at the board, where the player pressed — and a
    *  failed move reported over the composer would be a sentence about words nobody typed. */
-  chessError: string | null;
-  /** A chess move that has left this page and whose message has not come back yet.
+  /**
+   *  KEYED BY GAME (`chessSlotKey`), because a conversation holds several at once: one slot drew
+   *  the sentence about a refused move under EVERY board in the thread, including the games it
+   *  had nothing to do with.
+   */
+  chessError: Record<string, string>;
+  /** A chess move that has left this page and whose message has not come back yet, per GAME.
    *
    *  The board draws it at once, because a board that waits for a round trip before the piece
-   *  moves feels broken — and it is taken back if the send fails, which is the rule
-   *  `removeSentWords` follows for the words. It names the conversation and the game as well
-   *  as the ply, so a move pending in one thread can never be drawn onto another one's board. */
-  chessPending: { conversation: string; game: string; ply: number; san: string } | null;
+   *  moves feels broken — and it is taken back if the publish fails, which is the rule
+   *  `removeSentWords` follows for the words. The KEY names the conversation and the game, so a
+   *  move pending in one game can never be drawn onto another one's board — and a reader who
+   *  moves in two games before either message comes back keeps both. */
+  chessPending: Record<
+    string,
+    {
+      ply: number;
+      san: string;
+      /** What the mover stated they had left, and WHEN they moved. Both are what the two
+       *  clocks are read from, so the optimistic board keeps counting the right one down
+       *  rather than freezing until the message comes back. */
+      clockMs: number | null;
+      at: number;
+    }
+  >;
+  /** The move the reader has set to play the MOMENT their opponent's lands — a premove.
+   *
+   *  It is the app's state rather than the board's because it outlives a remount: the reader
+   *  may set one on the inline card and walk into the full-screen page, and a premove that
+   *  vanished on the way would be a move they believe is queued. It names the conversation and
+   *  the game for the reason a pending move does, and it costs {@link PREMOVE_SPEND_MS} of
+   *  their clock rather than the time their opponent spent thinking. */
+  chessPremove: Record<string, { from: string; to: string; promotion?: "q" | "r" | "b" | "n" }>;
   /** Every message Teams is HOLDING for this account, soonest first — what "see all
    *  scheduled messages" lists. Loaded on demand and after anything that changes it;
    *  empty until then, because a list nobody has opened is a read nobody asked for. */
@@ -879,8 +910,9 @@ function initialState(): AppState {
     updateProgress: null,
     draft: "",
     sendError: null,
-    chessError: null,
-    chessPending: null,
+    chessError: {},
+    chessPending: {},
+    chessPremove: {},
     scheduledMessages: [],
     composerRestore: null,
     replyingTo: null,
@@ -4523,11 +4555,12 @@ export class TeamsController {
       draft: nextDraft,
       // A send fails in one thread; the sentence about it belongs to that thread alone.
       sendError: null,
-      // Both halves of a chess send are the open conversation's too: a sentence about a
-      // refused move must not hang over another chat, and a move pending in the thread the
-      // reader just left must not be drawn onto the board of the one they opened.
-      chessError: null,
-      chessPending: null,
+      // NOTHING chess-related is dropped on a conversation change any more, and that is the
+      // key doing its job: every slot is keyed by conversation AND game, so a sentence about a
+      // refused move cannot hang over another chat and a move pending in the thread the reader
+      // just left cannot be drawn onto the board of the one they opened. What it buys is that a
+      // premove survives the walk to another conversation and back, which is what a queued
+      // intention should do.
         messages: cached?.messages ?? [],
       hasMoreOlder: cached?.has_more ?? false,
       loadingMessages: !cached,
@@ -4687,8 +4720,6 @@ export class TeamsController {
       readReceipts: [],
       mentionCandidates: [],
       sendError: null,
-      chessError: null,
-      chessPending: null,
       });
   }
 
@@ -6387,48 +6418,82 @@ export class TeamsController {
   // the history.
 
   /**
-   * Post one chess message.
+   * Publish one player's own LEDGER: their whole record of one game, in one message.
    *
-   * It rides the existing `send`, which is already the `OUTWARD_METHODS` entry that gates
-   * every post this app makes: a move is the click the user just made, exactly as pressing
-   * Enter in the composer is. Nothing here widens that gate, and this feature has no RPC of
-   * its own.
+   * It rides the existing `send` and `edit`, which are already the `OUTWARD_METHODS` entries
+   * that gate every post this app makes: a move is the click the user just made, exactly as
+   * pressing Enter in the composer is. Nothing here widens either gate, and this feature has no
+   * RPC of its own.
    *
-   * A MOVE is drawn before it lands and TAKEN BACK if the send fails, which is the rule
+   * **THE FIRST ACT SENDS AND EVERY LATER ONE EDITS.** A challenge and an accept are new
+   * messages, because they are how a game reaches the thread at all; every move after that
+   * rewrites the same message, so a sixty-move game costs the conversation two messages rather
+   * than sixty. `messageId` is the reader's own ledger message when they already have one, and
+   * it comes from the DERIVATION (`game.ledgers[ourColor]`) rather than from anything this
+   * store remembers — so a page that reloaded mid-game edits the right message.
+   *
+   * A MOVE is drawn before it lands and TAKEN BACK if the publish fails, which is the rule
    * `removeSentWords` follows for the words — and the failure is reported at the board rather
    * than swallowed into a cue, because a move that did not leave is otherwise invisible.
    */
-  async sendChessMessage(conversationId: string, wire: ChessWire): Promise<boolean> {
-    const pending: AppState["chessPending"] =
-      wire.body.kind === "move"
-        ? {
-            conversation: conversationId,
-            game: wire.game,
-            ply: wire.body.ply,
-            san: wire.body.san,
-          }
-        : null;
-    this.set({ chessError: null, ...(pending ? { chessPending: pending } : {}) });
+  async publishChessLedger(
+    conversationId: string,
+    args: {
+      game: string;
+      ledger: ChessLedger;
+      /** Our own ledger message, or null the first time. */
+      messageId: string | null;
+      /** The move this publish adds, when it adds one — what the board draws at once. */
+      pending?: { ply: number; san: string; clockMs: number | null; at: number };
+    },
+  ): Promise<boolean> {
+    const wire: ChessWire = { game: args.game, body: { kind: "ledger", ledger: args.ledger } };
+    const key = chessSlotKey(conversationId, args.game);
+    const { [key]: _wasError, ...otherErrors } = this.get().chessError;
+    this.set({
+      chessError: otherErrors,
+      ...(args.pending
+        ? { chessPending: { ...this.get().chessPending, [key]: args.pending } }
+        : {}),
+    });
     try {
-      await this.backend.send(
-        conversationId,
-        chessMessageText(wire),
-        undefined,
-        chessMessageHtml(wire),
-      );
+      const text = chessMessageText(wire);
+      const html = chessMessageHtml(wire);
+      if (args.messageId) await this.backend.edit(conversationId, args.messageId, text, html);
+      else await this.backend.send(conversationId, text, undefined, html);
     } catch (e) {
       // Both surfaces, and each has its reader: the status line keeps the RAW failure for
-      // whoever reads a screenshot, the board gets the sentence the player acts on.
+      // whoever reads a screenshot, the board gets the sentence the player acts on — under THAT
+      // board, which is what the key is for.
+      const { [key]: _gone, ...restPending } = this.get().chessPending;
       this.set({
-        status: `chess send failed: ${errText(e)}`,
-        chessError: sendFailureMessage(e),
+        status: `chess ${args.messageId ? "edit" : "send"} failed: ${errText(e)}`,
+        chessError: { ...this.get().chessError, [key]: sendFailureMessage(e) },
         // The move never left, so the board must not keep showing it.
-        ...(pending && this.get().chessPending === pending ? { chessPending: null } : {}),
+        ...(args.pending ? { chessPending: restPending } : {}),
       });
       playCue("error");
       return false;
     }
     return true;
+  }
+
+  /**
+   * Set — or take back — the move that plays itself the moment the opponent's lands.
+   *
+   * It is stored rather than sent: a premove is a private intention, and posting one would be
+   * telling a colleague what the reader is about to do. It becomes a real move through
+   * {@link publishChessLedger} like any other, at which point it costs its player
+   * {@link PREMOVE_SPEND_MS} of clock rather than the minutes their opponent spent.
+   */
+  setChessPremove(
+    conversationId: string,
+    game: string,
+    move: { from: string; to: string; promotion?: "q" | "r" | "b" | "n" } | null,
+  ): void {
+    const key = chessSlotKey(conversationId, game);
+    const { [key]: _gone, ...rest } = this.get().chessPremove;
+    this.set({ chessPremove: move ? { ...rest, [key]: move } : rest });
   }
 
   /**
@@ -6439,10 +6504,11 @@ export class TeamsController {
    * card with the ply count the thread states.
    */
   settleChessMove(conversationId: string, game: string, plies: number): void {
-    const pending = this.get().chessPending;
-    if (!pending) return;
-    if (pending.conversation !== conversationId || pending.game !== game) return;
-    if (plies >= pending.ply) this.set({ chessPending: null });
+    const key = chessSlotKey(conversationId, game);
+    const pending = this.get().chessPending[key];
+    if (!pending || plies < pending.ply) return;
+    const { [key]: _landed, ...rest } = this.get().chessPending;
+    this.set({ chessPending: rest });
   }
 
   // ---- appearance (Light / Dark / System) ---------------------------------

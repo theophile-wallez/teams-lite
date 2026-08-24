@@ -41,6 +41,7 @@ import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
 import { recordingsInConversation, type CallRecording } from "~/lib/call-recording";
 import { chessGamesInThread, type ChessGame } from "~/lib/chess-thread";
 import { CallRecordingCard } from "./call-recording-card";
+import { ChessGamesStrip } from "./chess-games-strip";
 import { useAppState, useController } from "./controller-context";
 import { ConversationMenu } from "./conversation-menu";
 import { useCallOwnsComposer } from "./call-stage-context";
@@ -953,6 +954,11 @@ export function MessagePane(props: { onBack?: () => void }) {
           of the viewport (just above the composer) instead of scrolling away with
           the messages. */}
       <div className="relative flex min-h-0 flex-1 flex-col">
+        {/* EVERY GAME OF CHESS RUNNING HERE, floating under the header: a board is one row in a
+            history that may be a hundred messages long, and a conversation can hold several games
+            at once. It takes no room from the conversation (see chess-games-strip.tsx) and it is
+            drawn only where there is a live game to name. */}
+        <ChessGamesStrip conversationId={openId} games={chessGames} />
         <div
           ref={viewportRef}
           onScroll={onScroll}

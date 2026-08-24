@@ -78,6 +78,32 @@ impl<'a> Placement<'a> {
 /// itself is careful not to carry.
 const SEALED_BODY: &str = "New message";
 
+/// The trailing marker a CHESS message signs itself with, cut off a preview.
+///
+/// The shape is the one `web/src/lib/chess-wire.ts` writes and `chessPreviewText` strips on the
+/// page: the words, then `— chess <game> <state>, via teams-lite`. The game id is six lowercase
+/// hex characters, which is what keeps an agent's own `— claude, via teams-lite` and a
+/// colleague's prose out of this.
+fn without_chess_line(preview: &str) -> String {
+    let Some(at) = preview.rfind("— chess ") else {
+        return preview.to_string();
+    };
+    let line = preview[at..].trim();
+    let rest = match line.strip_prefix("— chess ") {
+        Some(rest) => rest,
+        None => return preview.to_string(),
+    };
+    // `<6 hex> <anything>, via teams-lite`, and nothing else is cut.
+    let Some((game, state)) = rest.split_once(' ') else {
+        return preview.to_string();
+    };
+    let is_game = game.len() == 6 && game.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+    if !is_game || !state.ends_with(", via teams-lite") {
+        return preview.to_string();
+    }
+    preview[..at].trim().to_string()
+}
+
 pub fn notification_for(
     message: &Message,
     placement: &Placement<'_>,
@@ -111,7 +137,13 @@ pub fn notification_for(
     // sidebar), so a sealed chat would otherwise fall through the empty-body gate below and stay
     // silent — a message the reader never hears about at all.
     let sealed = message.seal != crate::store::MessageSeal::None;
-    let words = truncate(&teams_read::preview_for_message(message), MAX_BODY_CHARS);
+    // A CHESS message carries a machine-readable line the reader must never be shown, and a push
+    // is the one surface that gets its words from this side: the page strips it out of a sidebar
+    // preview itself (`chessPreviewText`), and there is no page here. It matters more than it did:
+    // a move used to be its own short line, and a game's whole record now lives in ONE message
+    // that is rewritten as it is played — so an unstripped push would be a screenful of wire with
+    // the sentence it is about pushed off the end of it.
+    let words = truncate(&without_chess_line(&teams_read::preview_for_message(message)), MAX_BODY_CHARS);
     // Two ways a sealed message says nothing about its words, and they must land on the same
     // sentence: the user has not asked for them, or this machine cannot READ them — a message
     // sealed under a passphrase nobody here holds has no words to publish. Falling through to the
@@ -486,4 +518,34 @@ mod tests {
         assert_eq!(asked.body, SEALED_BODY);
     }
 
+
+    /// A push about a game of CHESS says what happened, never the line that carries it.
+    ///
+    /// The page strips the marker out of a sidebar preview itself; a push has no page. A ledger's
+    /// line is some hundreds of characters (one message holds a player's whole record), so left in
+    /// it would push the sentence it is about off the end of the notification.
+    #[test]
+    fn a_push_about_a_game_of_chess_carries_no_wire() {
+        assert_eq!(
+            without_chess_line(
+                "♟ Chess — I'd like a game. I'm white. 10 min. — chess 7f3a1c v2 w open tc.600+0, via teams-lite"
+            ),
+            "♟ Chess — I'd like a game. I'm white. 10 min."
+        );
+        // A newline is how the backend flattens the two blocks of the body.
+        assert_eq!(
+            without_chess_line("♟ 1. e4\n— chess 7f3a1c 1 e4, via teams-lite"),
+            "♟ 1. e4"
+        );
+        // And nothing else is ever cut: an agent's own signature, a colleague's prose, an em dash.
+        assert_eq!(
+            without_chess_line("done — claude, via teams-lite"),
+            "done — claude, via teams-lite"
+        );
+        assert_eq!(without_chess_line("on my way"), "on my way");
+        assert_eq!(
+            without_chess_line("— chess not-a-game 1 e4, via teams-lite"),
+            "— chess not-a-game 1 e4, via teams-lite"
+        );
+    }
 }

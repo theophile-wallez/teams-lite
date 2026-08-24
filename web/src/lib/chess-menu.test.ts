@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { chessButtonState, chessChallengeLabel, conversationHoldsChess } from "./chess-button";
-import type { ChessGame } from "~/lib/chess-thread";
-import type { Conversation } from "~/lib/protocol";
+import {
+  chessChallengeLabel,
+  chessGameRowLabel,
+  chessMenuState,
+  conversationHoldsChess,
+} from "./chess-menu";
+import type { ChessGame } from "./chess-thread";
+import type { Conversation } from "./protocol";
 
 function game(over: Partial<ChessGame> = {}): ChessGame {
   return {
@@ -12,10 +17,16 @@ function game(over: Partial<ChessGame> = {}): ChessGame {
     challengerColor: "w",
     opponent: { mri: "8:orgid:ada", name: "Ada", isSelf: false },
     moves: [],
+    moveClocks: [],
+    time: null,
+    startedAt: null,
+    actedAt: { w: null, b: null },
     turn: "w",
     drawOfferedBy: null,
     outcome: { kind: "playing" },
     ourColor: "w",
+    ledgers: { w: null, b: null },
+    endedByRules: null,
     absorbed: ["m1"],
     refusedPlies: [],
     ...over,
@@ -41,25 +52,32 @@ function conversation(over: Partial<Conversation> = {}): Conversation {
   };
 }
 
-describe("chessButtonState", () => {
-  it("offers a challenge when no game is in flight", () => {
-    expect(chessButtonState([])).toEqual({ kind: "challenge" });
-    // A game somebody resigned is not in flight: the next challenge may go out.
-    expect(chessButtonState([game({ outcome: { kind: "resigned", by: "b" } })])).toEqual({
-      kind: "challenge",
-    });
-    expect(chessButtonState([game({ outcome: { kind: "drawAgreed" } })])).toEqual({
-      kind: "challenge",
-    });
+describe("chessMenuState", () => {
+  it("holds no game when none is in flight, and the menu then only challenges", () => {
+    expect(chessMenuState([])).toEqual({ games: [], wantsUs: false });
+    // A game somebody resigned is not in flight.
+    expect(chessMenuState([game({ outcome: { kind: "resigned", by: "b" } })]).games).toEqual([]);
+    expect(chessMenuState([game({ outcome: { kind: "drawAgreed" } })]).games).toEqual([]);
+    expect(chessMenuState([game({ outcome: { kind: "timeout", loser: "w" } })]).games).toEqual([]);
   });
 
-  it("points at the live game, and says when it is the reader's move", () => {
-    expect(chessButtonState([game()])).toMatchObject({ kind: "open", ourTurn: true, wantsUs: true });
-    expect(chessButtonState([game({ turn: "b" })])).toMatchObject({
-      kind: "open",
+  it("names the live game, and says when it is the reader's move", () => {
+    expect(chessMenuState([game()]).games[0]).toMatchObject({ ourTurn: true, wantsUs: true });
+    expect(chessMenuState([game({ turn: "b" })]).games[0]).toMatchObject({
       ourTurn: false,
       wantsUs: false,
     });
+  });
+
+  it("HOLDS SEVERAL GAMES AT ONCE, the one that wants the reader first", () => {
+    // The rule this replaced was "one game in flight per conversation". A group chat holds a game
+    // per pair of people, and two colleagues may want a second board while the first is going.
+    const theirs = game({ id: "aaa111", turn: "b", challengeSeq: 1 });
+    const ours = game({ id: "bbb222", turn: "w", challengeSeq: 2 });
+    const state = chessMenuState([theirs, ours]);
+    expect(state.games.map((entry) => entry.game.id)).toEqual(["bbb222", "aaa111"]);
+    // The dot on the closed trigger is drawn from ANY of them wanting something.
+    expect(state.wantsUs).toBe(true);
   });
 
   it("is never the reader's turn in a game they are only watching", () => {
@@ -67,8 +85,7 @@ describe("chessButtonState", () => {
       ourColor: null,
       challenger: { mri: "8:orgid:ada", name: "Ada", isSelf: false },
     });
-    expect(chessButtonState([watched])).toMatchObject({
-      kind: "open",
+    expect(chessMenuState([watched]).games[0]).toMatchObject({
       ourTurn: false,
       awaitingUs: false,
       wantsUs: false,
@@ -76,14 +93,12 @@ describe("chessButtonState", () => {
   });
 
   it("says a CHALLENGE is waiting for the reader, which is not their move", () => {
-    // Somebody else opened it and nobody has accepted: the reader owes an answer, not a move.
     const challenged = game({
       opponent: null,
       ourColor: null,
       challenger: { mri: "8:orgid:ada", name: "Ada", isSelf: false },
     });
-    expect(chessButtonState([challenged])).toMatchObject({
-      kind: "open",
+    expect(chessMenuState([challenged]).games[0]).toMatchObject({
       ourTurn: false,
       awaitingUs: true,
       // One dot for one question: the game wants something from the reader either way.
@@ -92,14 +107,29 @@ describe("chessButtonState", () => {
   });
 
   it("wants nothing from the reader while THEY are the one being waited on", () => {
-    const ours = game({ opponent: null });
-    expect(chessButtonState([ours])).toMatchObject({ awaitingUs: false, wantsUs: false });
+    expect(chessMenuState([game({ opponent: null })]).games[0]).toMatchObject({
+      awaitingUs: false,
+      wantsUs: false,
+    });
   });
+});
 
-  it("points at the NEWEST live game when an older one is settled", () => {
-    const settled = game({ id: "aaa111", outcome: { kind: "drawAgreed" } });
-    const live = game({ id: "bbb222" });
-    expect(chessButtonState([settled, live])).toMatchObject({ kind: "open", game: { id: "bbb222" } });
+describe("chessGameRowLabel", () => {
+  it("says what each live game is waiting for, and whom it is against", () => {
+    const [ours] = chessMenuState([game()]).games;
+    expect(ours && chessGameRowLabel(ours)).toBe("Your move — Ada");
+    const [theirs] = chessMenuState([game({ turn: "b" })]).games;
+    expect(theirs && chessGameRowLabel(theirs)).toBe("Ada's move");
+    const [challenged] = chessMenuState([
+      game({
+        opponent: null,
+        ourColor: null,
+        challenger: { mri: "8:orgid:ada", name: "Ada", isSelf: false },
+      }),
+    ]).games;
+    expect(challenged && chessGameRowLabel(challenged)).toBe("Ada challenged you");
+    const [waiting] = chessMenuState([game({ opponent: null })]).games;
+    expect(waiting && chessGameRowLabel(waiting)).toBe("Waiting for somebody to accept");
   });
 });
 

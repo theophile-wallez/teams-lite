@@ -81,6 +81,10 @@
   --color-calendar-line: var(--calendar-line);
   --color-chess-light: var(--chess-light);
   --color-chess-dark: var(--chess-dark);
+  --color-chess-edge: var(--chess-edge);
+  --color-chess-highlight: var(--chess-highlight);
+  --color-chess-premove: var(--chess-premove);
+  --color-chess-target: var(--chess-target);
 
   /* The reading column of a conversation. The history is capped at
    * `max-w-chat`; the composer at `max-w-composer`, which is 10px wider on each
@@ -1105,3 +1109,36 @@ file-tree-container {
 .ansi-log .ansi-magenta-bg { background: color-mix(in oklab, var(--ansi-magenta) 22%, transparent); }
 .ansi-log .ansi-cyan-bg { background: color-mix(in oklab, var(--ansi-cyan) 22%, transparent); }
 .ansi-log .ansi-white-bg { background: color-mix(in oklab, var(--ansi-white) 22%, transparent); }
+
+/* ---- the chess board -------------------------------------------------------
+ *
+ * Two rules the component cannot write for itself, both about the RENDERER's own DOM
+ * (see components/chess-board.tsx, which states why each is here).
+ */
+
+/* THE KING IN CHECK: a glow out of its own square rather than a flat wash. Flat, it
+ * would be a third highlight in a board that already draws two — chess.com's own
+ * shape is a radial one, and this is it. */
+.chess-check {
+  background-image: radial-gradient(
+    circle at center,
+    var(--chess-check) 0%,
+    color-mix(in oklab, var(--chess-check) 70%, transparent) 32%,
+    transparent 78%
+  );
+}
+
+/* A BOARD INSIDE THE SCROLLING HISTORY MUST LET THE HISTORY SCROLL.
+ *
+ * `react-chessboard` writes `touch-action: none` inline on every piece (its own
+ * `Piece`, with no option to change it), which is right for a board that owns the
+ * screen and wrong for one sitting in a conversation: a finger landing on any of the
+ * 32 pieces — most of the width of a phone — could not scroll the thread. An author
+ * `!important` is what beats an inline declaration, and it is scoped to the boards
+ * that asked for it, so the full-screen page keeps dragging by touch. */
+[data-testid="chess-board"][data-scrollable="true"] [data-piece] {
+  /* `manipulation` rather than `pan-y`: it gives back panning in BOTH directions and pinch-zoom —
+   * which a reader of a chat on a phone uses on a 320px board — while still suppressing the
+   * double-tap zoom that would fire on the tap-tap this board is played with. */
+  touch-action: manipulation !important;
+}

@@ -15,10 +15,12 @@ import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppCConversationIdRouteImport } from './routes/_app.c.$conversationId'
 import { Route as AppMMailIdRouteImport } from './routes/_app.m.$mailId'
 import { Route as AppMrMergeRequestIdRouteImport } from './routes/_app.mr.$mergeRequestId'
+import { Route as AppCConversationIdIndexRouteImport } from './routes/_app.c.$conversationId.index'
 import { Route as AppMrMergeRequestIdIndexRouteImport } from './routes/_app.mr.$mergeRequestId.index'
 import { Route as AppMrMergeRequestIdCommitsRouteImport } from './routes/_app.mr.$mergeRequestId.commits'
 import { Route as AppMrMergeRequestIdDiffRouteImport } from './routes/_app.mr.$mergeRequestId.diff'
 import { Route as AppMrMergeRequestIdPipelinesRouteImport } from './routes/_app.mr.$mergeRequestId.pipelines'
+import { Route as AppCConversationIdChessGameIdRouteImport } from './routes/_app.c.$conversationId.chess.$gameId'
 import { Route as AppMrMergeRequestIdJobsJobIdRouteImport } from './routes/_app.mr.$mergeRequestId.jobs.$jobId'
 
 const AppRoute = AppRouteImport.update({
@@ -50,6 +52,11 @@ const AppMrMergeRequestIdRoute = AppMrMergeRequestIdRouteImport.update({
   path: '/mr/$mergeRequestId',
   getParentRoute: () => AppRoute,
 } as any)
+const AppCConversationIdIndexRoute = AppCConversationIdIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppCConversationIdRoute,
+} as any)
 const AppMrMergeRequestIdIndexRoute =
   AppMrMergeRequestIdIndexRouteImport.update({
     id: '/',
@@ -73,6 +80,12 @@ const AppMrMergeRequestIdPipelinesRoute =
     path: '/pipelines',
     getParentRoute: () => AppMrMergeRequestIdRoute,
   } as any)
+const AppCConversationIdChessGameIdRoute =
+  AppCConversationIdChessGameIdRouteImport.update({
+    id: '/chess/$gameId',
+    path: '/chess/$gameId',
+    getParentRoute: () => AppCConversationIdRoute,
+  } as any)
 const AppMrMergeRequestIdJobsJobIdRoute =
   AppMrMergeRequestIdJobsJobIdRouteImport.update({
     id: '/jobs/$jobId',
@@ -83,24 +96,27 @@ const AppMrMergeRequestIdJobsJobIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/settings': typeof AppSettingsRoute
-  '/c/$conversationId': typeof AppCConversationIdRoute
+  '/c/$conversationId': typeof AppCConversationIdRouteWithChildren
   '/m/$mailId': typeof AppMMailIdRoute
   '/mr/$mergeRequestId': typeof AppMrMergeRequestIdRouteWithChildren
   '/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
   '/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
   '/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
+  '/c/$conversationId/': typeof AppCConversationIdIndexRoute
   '/mr/$mergeRequestId/': typeof AppMrMergeRequestIdIndexRoute
+  '/c/$conversationId/chess/$gameId': typeof AppCConversationIdChessGameIdRoute
   '/mr/$mergeRequestId/jobs/$jobId': typeof AppMrMergeRequestIdJobsJobIdRoute
 }
 export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
   '/': typeof AppIndexRoute
-  '/c/$conversationId': typeof AppCConversationIdRoute
   '/m/$mailId': typeof AppMMailIdRoute
   '/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
   '/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
   '/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
+  '/c/$conversationId': typeof AppCConversationIdIndexRoute
   '/mr/$mergeRequestId': typeof AppMrMergeRequestIdIndexRoute
+  '/c/$conversationId/chess/$gameId': typeof AppCConversationIdChessGameIdRoute
   '/mr/$mergeRequestId/jobs/$jobId': typeof AppMrMergeRequestIdJobsJobIdRoute
 }
 export interface FileRoutesById {
@@ -108,13 +124,15 @@ export interface FileRoutesById {
   '/_app': typeof AppRouteWithChildren
   '/_app/settings': typeof AppSettingsRoute
   '/_app/': typeof AppIndexRoute
-  '/_app/c/$conversationId': typeof AppCConversationIdRoute
+  '/_app/c/$conversationId': typeof AppCConversationIdRouteWithChildren
   '/_app/m/$mailId': typeof AppMMailIdRoute
   '/_app/mr/$mergeRequestId': typeof AppMrMergeRequestIdRouteWithChildren
   '/_app/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
   '/_app/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
   '/_app/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
+  '/_app/c/$conversationId/': typeof AppCConversationIdIndexRoute
   '/_app/mr/$mergeRequestId/': typeof AppMrMergeRequestIdIndexRoute
+  '/_app/c/$conversationId/chess/$gameId': typeof AppCConversationIdChessGameIdRoute
   '/_app/mr/$mergeRequestId/jobs/$jobId': typeof AppMrMergeRequestIdJobsJobIdRoute
 }
 export interface FileRouteTypes {
@@ -128,18 +146,21 @@ export interface FileRouteTypes {
     | '/mr/$mergeRequestId/commits'
     | '/mr/$mergeRequestId/diff'
     | '/mr/$mergeRequestId/pipelines'
+    | '/c/$conversationId/'
     | '/mr/$mergeRequestId/'
+    | '/c/$conversationId/chess/$gameId'
     | '/mr/$mergeRequestId/jobs/$jobId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/settings'
     | '/'
-    | '/c/$conversationId'
     | '/m/$mailId'
     | '/mr/$mergeRequestId/commits'
     | '/mr/$mergeRequestId/diff'
     | '/mr/$mergeRequestId/pipelines'
+    | '/c/$conversationId'
     | '/mr/$mergeRequestId'
+    | '/c/$conversationId/chess/$gameId'
     | '/mr/$mergeRequestId/jobs/$jobId'
   id:
     | '__root__'
@@ -152,7 +173,9 @@ export interface FileRouteTypes {
     | '/_app/mr/$mergeRequestId/commits'
     | '/_app/mr/$mergeRequestId/diff'
     | '/_app/mr/$mergeRequestId/pipelines'
+    | '/_app/c/$conversationId/'
     | '/_app/mr/$mergeRequestId/'
+    | '/_app/c/$conversationId/chess/$gameId'
     | '/_app/mr/$mergeRequestId/jobs/$jobId'
   fileRoutesById: FileRoutesById
 }
@@ -204,6 +227,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppMrMergeRequestIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/c/$conversationId/': {
+      id: '/_app/c/$conversationId/'
+      path: '/'
+      fullPath: '/c/$conversationId/'
+      preLoaderRoute: typeof AppCConversationIdIndexRouteImport
+      parentRoute: typeof AppCConversationIdRoute
+    }
     '/_app/mr/$mergeRequestId/': {
       id: '/_app/mr/$mergeRequestId/'
       path: '/'
@@ -232,6 +262,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppMrMergeRequestIdPipelinesRouteImport
       parentRoute: typeof AppMrMergeRequestIdRoute
     }
+    '/_app/c/$conversationId/chess/$gameId': {
+      id: '/_app/c/$conversationId/chess/$gameId'
+      path: '/chess/$gameId'
+      fullPath: '/c/$conversationId/chess/$gameId'
+      preLoaderRoute: typeof AppCConversationIdChessGameIdRouteImport
+      parentRoute: typeof AppCConversationIdRoute
+    }
     '/_app/mr/$mergeRequestId/jobs/$jobId': {
       id: '/_app/mr/$mergeRequestId/jobs/$jobId'
       path: '/jobs/$jobId'
@@ -241,6 +278,19 @@ declare module '@tanstack/react-router' {
     }
   }
 }
+
+interface AppCConversationIdRouteChildren {
+  AppCConversationIdIndexRoute: typeof AppCConversationIdIndexRoute
+  AppCConversationIdChessGameIdRoute: typeof AppCConversationIdChessGameIdRoute
+}
+
+const AppCConversationIdRouteChildren: AppCConversationIdRouteChildren = {
+  AppCConversationIdIndexRoute: AppCConversationIdIndexRoute,
+  AppCConversationIdChessGameIdRoute: AppCConversationIdChessGameIdRoute,
+}
+
+const AppCConversationIdRouteWithChildren =
+  AppCConversationIdRoute._addFileChildren(AppCConversationIdRouteChildren)
 
 interface AppMrMergeRequestIdRouteChildren {
   AppMrMergeRequestIdCommitsRoute: typeof AppMrMergeRequestIdCommitsRoute
@@ -264,7 +314,7 @@ const AppMrMergeRequestIdRouteWithChildren =
 interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute
   AppIndexRoute: typeof AppIndexRoute
-  AppCConversationIdRoute: typeof AppCConversationIdRoute
+  AppCConversationIdRoute: typeof AppCConversationIdRouteWithChildren
   AppMMailIdRoute: typeof AppMMailIdRoute
   AppMrMergeRequestIdRoute: typeof AppMrMergeRequestIdRouteWithChildren
 }
@@ -272,7 +322,7 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
   AppIndexRoute: AppIndexRoute,
-  AppCConversationIdRoute: AppCConversationIdRoute,
+  AppCConversationIdRoute: AppCConversationIdRouteWithChildren,
   AppMMailIdRoute: AppMMailIdRoute,
   AppMrMergeRequestIdRoute: AppMrMergeRequestIdRouteWithChildren,
 }

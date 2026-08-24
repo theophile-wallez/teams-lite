@@ -4668,176 +4668,330 @@ pins every rule above, including that the instruction reaches no message. **What
 against the tenant is the pairing**: the signature, the trigger and the prompt are pinned in
 Rust and against the mock, so what is untested is one real `@bebou` run in the user's own app.
 
-## Chess in a conversation (a game IS the thread)
+## Chess in a conversation (a game IS the thread, and it has a PAGE)
 
-The user can play chess against anybody in a conversation who also runs teams-lite, from a
-row of that conversation's own MENU (§ ONE MENU in a conversation's header). Every challenge,
-acceptance, move, draw offer and
-resignation is an ordinary Teams message; the board is one row in the history, derived from
-those messages. `web/src/lib/chess-wire.ts` is the line a chess message signs itself with,
-`chess-thread.ts` the games a thread holds, `web/src/components/chess-game-card.tsx` the board
-(and the only place `chess.js` is imported), `chess-button.tsx` the header's control.
+The user can play chess against anybody in a conversation who also runs teams-lite, from a row of
+that conversation's own MENU (§ ONE MENU in a conversation's header) — several games at once if
+they like. Every game is carried by ordinary Teams messages; the board is a row in the history,
+and one game in FULL is a page of its own. `web/src/lib/chess-wire.ts` is the line a chess message
+signs itself with, `chess-thread.ts` derives every game from the thread's own messages,
+`chess-clock.ts` does the clocks, `chess-act.ts` decides what a press publishes, `chess-menu.ts`
+what the header offers, `chess-sound.ts` what a move sounds like,
+`web/src/components/chess-board.tsx` draws the board (and is the only place `react-chessboard` is
+touched), `use-chess-game.ts` is every behaviour a board has, `chess-game-card.tsx` the row in the
+history, `chess-page.tsx` the full-screen page, `chess-score-sheet.tsx` its right column and
+`chess-games-strip.tsx` the strip under the header.
 
 **Teams has no private data channel, and that constraint is the whole design.** A move has to
-reach another machine and a message in the conversation is the only carrier — so a game is
-played in the thread, under the user's name, visible to everybody in it. What that buys is that
-**nothing about a game is stored**: the position replays out of the thread's own history, so a
-reload, a phone and a game played while this app was closed all draw the same board, and there
-is nothing to reconcile when a frame is lost. It is the property the agent's overlay has ("the
-row in the history IS the Teams message") with no overlay left at all — no RPC, no schema, no
-new gate.
+reach another machine and a message in the conversation is the only carrier — so a game is played
+in the thread, under the user's name, visible to everybody in it. What that buys is that **nothing
+about a game is stored**: the position replays out of the thread's own history, so a reload, a
+phone and a game played while this app was closed all draw the same board, and there is nothing to
+reconcile when a frame is lost. It is the property the agent's overlay has ("the row in the history
+IS the Teams message") with no overlay left at all — no RPC, no schema, no new gate.
 
-- **It needs no consent gate of its own, and gets no relaxation either.** `send` is already an
-  `OUTWARD_METHODS` entry and a move rides in its params, exactly as a mention and a picture do.
-  What that rests on is that a move IS the click the user just made — the same argument as
-  pressing Enter in the composer, or the one-click approval. The two ends of a game are explicit
-  presses: the challenge (whose popover says, before the press, that a message goes out under
-  their name and everybody in the conversation sees it) and the acceptance. The automation hook
-  already blocks a script that names `send` against a live port, so the guardrails needed no
-  change.
-- **The wire is read from the WORDS, never from markup** — the choice `agent-message.ts`,
-  `agent-tag.ts` and `tracker-ref.ts` all make. A chess message ends with one
-  `<p><em>— chess <game> <kind>, via teams-lite</em></p>`, the shape `agent_policy::Signature`
-  writes, and carries above it the words a stock Teams client shows (`♟ 1. e4`). So every game
-  already in a thread renders, nothing is added to the wire, and a colleague's client shows
-  exactly what the user's account posted. The kinds are `open w` / `open b` / `join` /
-  `<ply> <san>` / `draw` / `draw-ok` / `resign`, and a line this build cannot parse leaves an
-  ordinary message rather than a game with a hole in it. The game id is six lowercase hex
-  characters — narrow on purpose, so `— claude, via teams-lite` can never be read as a game.
-- **The PLY NUMBER is explicit, so a duplicate is detectable.** Two messages claiming one ply is
-  a real state — two clients, one racing reconnect — and the earlier one wins because the walk
-  is in order; the later is refused rather than applied on top. A move is accepted only from the
-  player whose turn it is and only once somebody accepted, which is what keeps a third person in
-  a group chat out of the game: that is the derivation rather than a rule the UI applies.
-- **RANDOM is resolved at the press.** The wire never says "random" — a colour nothing decided
-  is a game whose two clients could disagree about who moves first.
-- **A game the rules cannot replay is SAID, naming the ply**, never drawn as a board that
-  silently disagrees with the other player's. And the message-decided outcomes — a resignation,
-  an agreed draw — are stated BEFORE the position is consulted at all: asking the rules about a
-  game somebody resigned would answer "your move".
-- **A move is drawn before it lands and TAKEN BACK if the send fails**, with the sentence at the
-  BOARD (`chessError`, over `sendFailureMessage`). It is the composer's rule — this app never
-  posts without the user, so it must never leave them believing it did — and the board is where
-  it belongs rather than over a composer holding words nobody typed. A board that waited for a
-  round trip before the piece moved would feel broken, which is why the pending move is drawn;
-  it is forgotten when the thread really holds it, and never from a frame.
-- **A game is ONE row, at the message that started it**, and every later message of it is
-  ABSORBED into that row — so a sixty-move game adds nothing to the thread's length and the
-  board does not move under the reader as it is played. Two things follow in `message-pane.tsx`:
-  `rowOfMessage` maps from the ROW index rather than the message index (with a game absorbing
-  several messages the two are no longer the same number), and the recordings rebuild re-maps a
-  chess row's absorbed ids too — without that a deep link to a move would scroll to nothing.
-  `CHESS_ROW_PX` is a constant the estimate knows, for the reason `TIME_MARK_ROW_PX` is one.
-- **A CONVERSATION holds a game; a team CHANNEL does not.** A channel's history is drawn as
-  THREADS, so a board there would have to live inside one and answer a different question about
-  where it sits — a later feature, never a quiet addition. It costs nothing: the sandbox thread
-  `19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2` is a group CHAT, so the one place a send is
-  pre-authorized is covered. Notes offers no game either — nobody to play.
-- **THE INVITATION HAS TWO SIDES, and the app shipped with only one of them.** A challenge is
-  answered from the board itself — **Accept — play black** / **Not now** — and the challenger's
-  own side of that wait is **Withdraw the challenge**. Every one of those is the same
-  `sendChessMessage` the moves ride (`join` / `decline` / `resign`, over the one `answer` in the
-  card), so no gate moved. It is written down because of how it was missed: the MOCK accepted
-  every challenge on its own, so `join` was only ever sent by the fixture — the challenged
-  player's card was a board with **nothing to press at all**, and eleven E2E tests passed over
-  it. A mock that plays only the easier half of a two-sided feature is a fixture that lies. Five
-  rules hold it, and each is pinned by a test:
-  - **WHOSE answer is owed decides the whole card** (`chessAwaitsOurAnswer` /
-    `chessAwaitsTheirAnswer` in `chess-thread.ts`). The status line reads from two sides —
-    "Waiting for somebody to accept." for the challenger, "<Ada> challenged you to a game — you
-    would play black." for the person challenged — because ONE sentence for both told the
-    challenged reader that somebody else was being waited on, which is the state they were in the
-    middle of answering.
-  - **A seat NOBODY holds is drawn as a SEAT, not as a person**, and it says whose it is: a dashed
-    empty circle rather than tinted initials (which is how this app draws a colleague with no
-    photo — `label="Nobody yet"` reduced to `NY`, ink naming nobody), labelled "You, if you
-    accept" for anybody who is not the challenger and "Waiting for somebody" for the challenger
-    themselves. A group chat is covered by the same rule, because there the seat really is the
-    first taker's.
-  - **A DECLINE and a WITHDRAWAL are two outcomes, and neither is a loss** (`ChessOutcome`'s
-    `declined { withdrawn }`). A `resign` on a game nobody accepted is read as the challenger
-    taking it back rather than as a resignation — a game that never started cannot be lost — and
-    a `decline` from the challenger themselves, or on a game already accepted, is refused by the
-    derivation. Both settle the game, which is what frees the conversation for the next challenge.
-  - **The HEADER says something is waiting rather than that it is the reader's move**
-    (`data-awaiting-answer` beside `data-your-turn`, and one dot for both — `chessWantsUs`). A
-    challenge to answer and a move to play are two different asks; the dot is the same, because
-    what it means is "this game wants something from you".
-  - **A spectator is offered none of it.** The controls follow the same derivation as a move, so a
-    third person in a group chat watching two colleagues play sees a board with no buttons.
-- **One game in flight per conversation.** A challenge is refused while a game is unfinished
-  there; a finished one leaves its board where it is and lets the next challenge start.
-- **`chess.js` is in that same LAZY chunk** (1.4.0, BSD-2-Clause, zero dependencies), and it is
-  imported in exactly one file — the card. The pure halves — the wire and the derivation — carry
-  no dependency at all, which is what lets the pane decide a board row exists and the header draw
-  its turn dot without a rules engine, or a chessboard, on the path of every chat.
-- **THE BOARD IS `react-chessboard`, and two hand-rolled boards were tried first.** It is the
-  second surface in this app drawn by somebody else's renderer, after `@pierre/diffs` for a
-  patch, and the seam is where the care goes. What is theirs is everything a chessboard is
-  judged on and nothing this app has an opinion about: the piece art, picking a piece up and
-  dropping it, the animation between two positions, the coordinates down the edges. What stays
-  ours is the MEANING — which square is lit and why, whose turn it is, whether a press means
-  anything at all.
-  - **The pieces are why.** Hugeicons ships a complete chess set, so § Project shape was
-    satisfied on paper — but a piece there is several OPEN paths (a pawn is its base, two curves
-    and a bare line), so `fill` cannot make a solid body out of one: each subpath fills to its
-    own implied closure. Drawn as line art in two inks with a heavier halo behind, **both armies
-    came out looking identical at board size** — captured, looked at, rejected. The Unicode
-    glyphs (`♚♛♜♝♞♟` solid for both sides, outlined in the opposite ink) fixed that and still
-    looked like text in a grid. A board is a thing people have opinions about, and this one is
-    now drawn by a library whose whole job it is.
-  - **It is MIT with two `@dnd-kit` dependencies and React 19 as a peer**, and it lives inside
-    the board's own lazy chunk: measured on the built client, `chess-game-card-*.js` is 114 KB
-    of its own and the main app chunk holds ZERO references to it. So a reader who never opens
-    a game never downloads a chessboard — the rule `@pierre/diffs` holds for Shiki.
-  - **`icon-library.test.ts` still passes and is still the rule.** A board component that ships
-    its own piece art is not an icon library, exactly as `@pierre/diffs` shipping a highlighter
-    is not: no second icon PACKAGE is installed, and every glyph in the app's own chrome is
-    hugeicons'.
-  - **The library holds NO game state.** `position` is a FEN the card computes by replaying the
-    thread's own messages, so the board is still a reading of the history rather than a second
-    copy of the game — which is the property this whole feature rests on. A drop is answered
-    synchronously with "is that legal", and the move then travels as a message like every other.
-  - **`squareRenderer` is what makes the pair work.** It renders INSIDE their own `data-square`
-    element and replaces the styling hook they apply there, so this app draws its own selected
-    ring, legal-move dot, last-move tint and check wash — and carries the data attributes a spec
-    and a capture read. Their `squareStyles` option is deliberately unused: two places styling
-    one square is how the two would drift.
-  - **The SQUARES are the app's own theme tokens and the pieces are not.** `--chess-light` /
-    `--chess-dark` follow the appearance setting, because a board is a surface that has to sit
-    in a light or a dark page; "white piece" is a fact about chess. Their notation ink is a brown
-    that belongs to their default board, so each coordinate is drawn in the OTHER square's colour.
-  - **Arrows and auto-scroll are OFF.** A right-click that drew an arrow would take the
-    browser's own menu away, and a board that scrolled itself would move a virtualized history
-    under the reader.
-- **Both gestures end in ONE function** (`play` in the card): the tap-tap a phone uses, and a
-  piece dropped by the pointer. Neither can play a move the other would refuse, and dragging is
-  offered only to the player whose turn it is and only for their own pieces — so a spectator's
-  board and a settled game are a board nobody can move on.
+### A MOVE EDITS ONE MESSAGE (the ledger), it does not post another
 
-`web/mock/server.ts` plays the OPPONENT (`maybeAnswerMockChess`), because a game needs two
-machines and the suite has one: it accepts a challenge, opens as white when the challenger took
-black — without that a game the user asked to play as black would sit waiting for a first move
-nobody was going to make — and answers each move with a legal reply, replayed out of the thread's
-own messages rather than a position it keeps. **It can also be the CHALLENGER**
-(`mockChessChallenge`, over the hook's `challenge`), which is the half that was missing and the
-only way the reader's own accept is ever exercised — the bug above is what earned it. The hook
-NAMES its conversation (`{kind:"chess", challenge:"w", conversation}`), because its default is the
-chess spec's own thread and a challenge posted anywhere but the open one is a test of nothing.
-`{kind:"chess"}` also aims the reply or silences it, and **a spec MUST reset it**: the reset also
-truncates the `Chess Club` fixture back
-to its seed, because one game left unfinished means the next test's header offers no challenge at
-all. That thread exists for the reason the ten-picture message taught this suite — a game posts
-several messages and the board absorbs them, so played in a shared fixture it would move the rows
-a later spec counts on. `cd web && bun run preview -- --out /tmp/chess --chess` captures the
-control, the popover, the board in both themes, a game in progress with its score sheet, the
-armed resignation, the board at a phone's width and — LAST, on the settled game above it, because
-`shot` crops the first match and a live challenge would stand in front of every board below it —
-the card a reader meets when somebody challenges THEM; `web/e2e/chess.spec.ts` pins every rule
-above. **What is unverified against the tenant is the pairing**: the wire rides `send`, which is
-measured, and everything else is pinned in unit tests and against the mock — so what is untested
-is one real challenge accepted by a colleague who also runs teams-lite, which is the user's own
-click, in the sandbox chat.
+A sixty-move game used to be sixty messages. It is now TWO: **one message per player per game,
+edited in place** — that player's whole record, rewritten on every move — and the game is the
+MERGE of the two ledgers by ply.
+
+**One per PLAYER rather than one per game, because a shared message is impossible.** This app
+refuses to edit a message that is not the user's own and so does the backend before the network
+(§ Sending messages), so each player keeps their own record. That also keeps authorship exactly as
+strong as it was when every move was its own message: a ply is signed by whoever authored the
+message that holds it, and nobody can write a move into somebody else's ledger.
+
+The line is versioned and read from the WORDS, never from markup — the choice `agent-message.ts`,
+`agent-tag.ts` and `tracker-ref.ts` all make:
+
+    — chess 7f3a1c v2 w open tc.600+0 at.1756060012345 1.e4.59830 3.Nf3.59200, via teams-lite
+
+Eleven rules hold it, and each is pinned by a test:
+
+- **NO COLON EVER APPEARS IN A LEDGER LINE**, and that is not a matter of taste. The backend
+  substitutes custom emoji into every outbound body on a send AND on an edit, and
+  `custom_emoji::code_spans_in_text` matches `:name:` ANYWHERE in the text — no whitespace needed
+  in front of it — for any lowercase name in the user's own pack. A move written `1:e4:59830`
+  therefore carries the code span `:e4:`, and a pack holding an emoji of that name (packs grow on
+  their own — § Custom emoji imports a colleague's) would replace it with an `<img …>`. That breaks
+  `SIGNATURE`'s own `[^<]*` and the game is unreadable for BOTH players for good, with nothing left
+  to repair it with, because the app can no longer see a game to edit. Every separator is a full
+  stop, which is chess's own notation, and `serializeLedger` is asserted to write no colon at all.
+- **A ledger is a STATE, not a stream.** The whole line is written again on every act, so a token
+  that is no longer true is simply not written and there is no history inside the message to
+  disagree with itself. It is what makes `drawOfferedAt` and a resignation ply-anchored rather than
+  ordered.
+- **`at.<epoch ms>` is the moment that author last MOVED**, and never "the newest thing I did". A
+  draw offer, a resignation and a flag claim all leave it alone. One token doing both jobs made a
+  flag claim move the very instant it was checked against — the claim said "your clock ran out" and
+  by carrying its own time forward also said the opponent's clock had only just started, so the
+  claim disproved itself.
+- **THE ACCEPT IS TIMED BY ITS OWN MESSAGE.** An edited message keeps the `compose_time` it was
+  first posted at, and for the accepting player that IS the moment they accepted — stamped by the
+  service rather than claimed by a client. Reading it off `at.` made the moment the clock starts
+  from move forward every time that player moved again.
+- **The order of play is read off the PLY, never off message order.** A ledger keeps the `seq` of
+  the message it was first posted as, so the challenger's ledger has the LOWEST seq in the game and
+  holds their fortieth move. `chessGamesInThread` is therefore COLLECT-THEN-RESOLVE rather than the
+  incremental walk it was.
+- **A ply belongs to one colour and to one player.** A ledger claiming the other side's parity is
+  refused whole (white's second ply is 3, never 2), a ply two messages claim goes to the earlier
+  message, and a move from somebody who is not in the game is refused — the derivation rather than
+  a rule the UI applies, which is what keeps a third person in a group chat out of it.
+- **A GAP stops the game.** Plies are taken from 1 while they are contiguous: the history pages
+  older, so a board drawn past a missing ply is a position nobody played.
+- **The acts that END a game are anchored at a PLY**, so a move claimed after a resignation is
+  absorbed and ignored exactly as it was when message order could say so.
+- **THE v1 SHAPE STILL REPLAYS.** One derivation reads both: every game played before this is one
+  message per act, and its acts are ordered by their own `seq` (`plyAtSeq`). A v1 game has no clock
+  and needs none — its moves are timed by their own messages.
+- **A LEDGER THIS BUILD CANNOT READ leaves an ordinary message**, which is the rule an unknown v1
+  kind already followed. So a `v3` line from a newer build draws its words and no board, and an
+  UNKNOWN token inside a v2 line is IGNORED rather than fatal — a build that gains a token does not
+  make its games unreadable to this one.
+- **The words above the line state the STATE**, because they are rewritten with it: "my moves: 1.
+  e4 2. Nf3", bounded to the last six, plus the clock on a challenge and a sentence for each
+  terminal act. A message whose words said one move while its line held forty would lie to every
+  client but this one.
+
+**THE `edit` RPC GAINED ONE OPTIONAL `content_html`**, exactly as `send` has one, because it
+escaped its text and a ledger line cannot survive that. It is the same trust boundary the send
+already draws — a client supplies the body of its own message either way — and the same
+`OUTWARD_METHODS` entry it was: no new gate, no mentions (the list still travels on a send and an
+agent's own edit still builds its own), no way to retitle a post (the subject is still read from
+the store) and no way past the seal (which still runs last). `web/mock/server.ts` mirrors it.
+
+**What an edit COSTS, stated because it is real and it is a trade the user asked for:**
+
+- **A MOVE NO LONGER NOTIFIES.** An edit does not bump a conversation's preview and does not push,
+  so a colleague whose app is CLOSED is buzzed by the challenge and the accept and by nothing after
+  them. With a clock running that is the honest exchange — a game against somebody who is not
+  looking is lost on time either way — and an OPEN page still redraws the board on every edit,
+  because the backend broadcasts the whole stored message.
+- **THE LEDGER IS THE GAME'S RECORD.** One corrupted body ends the game for both players with
+  nothing to repair it with, where the old shape lost one move per bad message. That is why the
+  colon rule above is a rule rather than a preference.
+- **A COLLEAGUE ON STOCK TEAMS sees one message rewritten sixty times**, wearing Teams' own edited
+  mark, rather than a conversation. The words state a growing score sheet, which is the most useful
+  thing that message can say.
+
+**A PUSH ABOUT A CHESS MESSAGE CARRIES NO WIRE** (`push_policy::without_chess_line`). The page
+strips the marker out of a sidebar preview itself and a push has no page — and it matters more than
+it did: a move used to be its own short message, and a whole game's record now lives in one line of
+several hundred characters, so an unstripped push would be a screenful of wire with the sentence it
+is about pushed off the end of it. Nothing else is ever cut: an agent's own `— claude, via
+teams-lite`, a colleague's prose and a bare em dash are all left alone, which is what the six-hex
+game id and the exact trailing shape are checked for.
+
+### SEVERAL GAMES AT ONCE
+
+"One game in flight per conversation" was the rule and it is gone. A group chat holds a game per
+pair of people, and two colleagues wanting a second board while the first is still going was the
+commonest ask this feature had. `activeChessGames` answers every live game MOST URGENT FIRST — one
+waiting for the reader before one waiting for somebody else, the newest before the older — and that
+order is the derivation's rather than a component's, because what wants the reader's attention is
+what they should meet first. Nothing is refused for being the second game; the conversation's menu
+names every live game and still offers a challenge ("Start another game").
+
+**A STRIP OF THE RUNNING GAMES FLOATS UNDER THE HEADER** (`chess-games-strip.tsx`), because a board
+is one row in a history that may be a hundred messages long. One chip per game: whose game, whose
+move, BOTH clocks, a dot when it wants the reader, and a press that opens that game's page. Four
+rules, each pinned:
+
+- **it FLOATS rather than taking room** — an overlay at the top of the history, so nothing in the
+  conversation moves when a game starts or ends (the failure the scheduled banner avoids by sitting
+  above the composer rather than inside it). The container passes pointer events through; only the
+  chips take them.
+- **the CLOCK ticks in the chip and nowhere else** (`useChessClock`, in a module with no `chess.js`
+  in it), so a running game redraws a 60px pill four times a second instead of re-rendering a
+  virtualized history that already re-renders on every scroll that mounts a row.
+- **it is bounded and says what it left out**: three chips, then a count. A row of eight pills is a
+  second sidebar, and on a phone it would cover the first message of the conversation.
+- **every chip clears the 44px touch floor**, which every target this app draws for a thumb does.
+
+### THE PAGE (`/c/<conversation>/chess/<game>`)
+
+One game, the whole screen: the board in the middle, the score sheet down the right, and the
+conversation's own chat under it. It is chess.com's shape and it is what the feature was missing —
+the card in the history is a board in a column a phone's width wide, between things people said,
+which is the right place to play A MOVE and the wrong place to play a GAME.
+
+- **A ROUTE, never a piece of state** — the rule the merge request's diff, its pipeline graph and a
+  job's log all hold. Three things come with the URL and none is available to a `useState`: it
+  survives a reload, it can be sent to whoever you are playing, and the browser's own Back leaves
+  it. It is a CHILD of the conversation's route, so the shell opens the thread exactly as it always
+  did and the page never loads a history of its own.
+- **The shell draws it INSTEAD of the sidebar and the pane**, rather than over them: there is no
+  overlay to dismiss, and the app's ONE composer is this page's while it is up — the pane that
+  usually holds it is not mounted, so the sentinel a sanctioned driver proves its target with still
+  has exactly one answer. A live call's chat panel is the one thing that can also hold it, so the
+  page asks (`useCallOwnsComposer`) rather than drawing a second.
+- **Each column scrolls itself and the page never scrolls.** Below `md` it is one column — board,
+  the score sheet as a single line, then the chat — because a table of pairs and a chat cannot both
+  have room at 390px, and the chat is what a game in a conversation is for.
+- **The board is bounded by the shorter of the room it has**, so it is never wider than the window
+  is tall.
+- **ESCAPE LEAVES THE BOARD FOR THE CONVERSATION**, never the conversation for the chat list: the
+  reader is two surfaces deep, and one Escape does one thing. It is decided in the shell, where
+  every other Escape already is.
+- **A game the URL names and the thread does not hold SAYS so** — the history pages older, so a
+  game may simply not be loaded yet.
+- **The chat beside the board is the app's own thread** (`ConversationChatPanel`, shared with the
+  call stage): the same history, drafts, live feed and read state, and the same composer under the
+  same consent. A message is READ there and acted on in the conversation itself.
+
+### WHAT A BOARD DOES (`use-chess-game.ts`, shared by the card and the page)
+
+- **A move is drawn before it lands and TAKEN BACK if it does not leave**, with the sentence at the
+  board — the composer's own rule, because a move that did not go out is otherwise invisible.
+- **The reader can WALK BACK through the game**: four 44px controls, a press on any ply of the score
+  sheet, and ArrowLeft/ArrowRight/Home/End on the page — ignored the moment the reader is typing,
+  because this page holds the composer. A move arriving while they are in the past LEAVES them
+  there; the board snaps to the live position only on the TRANSITION to their own turn, because
+  their clock is running and leaving them reviewing would cost them the game. Reading that as a
+  STATE rather than a transition was a real bug: with `atLive === false` in the condition, pressing
+  Back on one's own turn took the reader straight back, so the game could not be walked through at
+  all on the one turn a player most wants to.
+- **A press while reviewing the past comes BACK to live and plays nothing.** A board that swallows a
+  press says nothing about why, and the reader presses again.
+- **A PREMOVE is a private intention.** It is queued while the opponent thinks (their move drawn in
+  its own tint — never the yellow a real move wears), it is stored per conversation and game so it
+  survives the walk from the card to the page, it publishes NOTHING until it is legal, and the
+  moment their move lands it plays itself. A premove the arriving position makes illegal is dropped
+  rather than posted. It is taken back by a right press, and by a left press on anything that is
+  not the reader's own piece.
+- **A PREMOVE COSTS 0.1 s** (`PREMOVE_SPEND_MS`), whatever the wall clock says: it is a move that
+  was already decided, so charging the minutes the opponent spent thinking would punish the reader
+  for the opponent's time, and charging nothing would make a premoved game free.
+- **The sounds follow the POSITION, not the press**, so a move arriving from the other machine
+  sounds exactly like one played here.
+- **Nothing is playable except at the live position, on the reader's own turn, with nothing of
+  theirs already in flight** — a second press before the first move's message came back would claim
+  a ply the thread has not reached.
+
+### THE CLOCKS (default ten minutes, on both sides of the board)
+
+The wire carries the time control once (`tc.<base>+<inc>`, whole seconds, from whoever opened the
+game), the moment of each player's last move (`at.`), and per ply what the mover had LEFT after
+playing it (centiseconds, so a sixty-move line stays short). Everything else is arithmetic
+(`chess-clock.ts`), which is what makes a reload, a phone picked up later and an app that was
+closed for an hour all reach the same two numbers.
+
+- **EACH PLAYER IS AUTHORITATIVE FOR THEIR OWN CLOCK, and nothing pretends otherwise.** There is no
+  server here — a move is a message — so the mover states their own remaining time. What CAN be
+  proved is the ceiling, and it is: `chessClockCeilingMs` clamps a stated clock to
+  `base + increment × their own plies`, using only what both machines hold, so both clamp the same
+  way. A player who states a little less than the ceiling is not caught, and that limit is written
+  where the trust is rather than papered over — the same trust a friendly game already extends to a
+  colleague who could also take a move back by hand.
+- **NOTHING ENDS A GAME ON A TIMER.** A clock at zero makes a win CLAIMABLE by whoever is not on the
+  clock (`flag.<colour>.<at>`), and the other machine re-checks the arithmetic at the claimed moment
+  (`chessFlagIsFair`) before it believes it: a claim against the player who is not on the clock, a
+  claim on one's own clock, one that names no moment and one the numbers disagree with are all
+  refused. So a laptop that went to sleep never loses a game by itself, and a flag nobody claims
+  leaves the game where it was — which is what lichess does with no server in the middle.
+- **The side to move counts down from the moment their OPPONENT acted**, and the first move of a
+  game from the ACCEPT — which is what makes white's first move cost them something. A game nobody
+  has joined holds two still clocks: nobody is on the clock in a game that is not a game yet.
+- **A game with no clock draws none**, which is every game played before this and what "No clock"
+  in the picker means. A dash nobody can act on would be worse.
+- **The clocks are drawn on BOTH sides of the board**, on the seat they belong to, with the running
+  one carrying the ink; under thirty seconds it turns, and below twenty it counts tenths, because
+  whole seconds tell nobody whether they can still make a move. A clock is redrawn four times a
+  second, ten times below twenty seconds, and NOT AT ALL while nothing is running or the tab is
+  hidden.
+- **The picker is nine presses in the challenge form**, opening on ten minutes, and it is kept
+  across an open and close of the menu exactly as the colour is: it is a preference, not a step.
+
+### THE LOOK, AND THE SOUNDS
+
+- **THE BOARD IS CHESS.COM'S BOARD** — `#ebecd0` and `#779556` — and it is the one surface in this
+  app that does NOT follow the appearance setting: the two greens are stated identically in both
+  themes, so a reader never has to re-learn their own squares. The cost is stated where the rule
+  is: a light board sits in a dark page, which is exactly what chess.com's own dark interface does.
+  Everything drawn ON the board follows it — one yellow for the selected square and the last move,
+  a distinct tint for a premove (a decision is not a move that happened), a grey dot for a legal
+  square and a ring round a piece that can be taken, and a RADIAL red glow for the king in check,
+  because flat it would be a third highlight on a board that already has two.
+- **ARROWS ARE DRAWN BY A RIGHT-DRAG, ON THE PAGE ONLY.** They were refused before on the argument
+  that a right-click takes the browser's own menu away; the user asked for them, so the argument is
+  theirs — and the split is where it costs nothing: a page a reader is thinking on gets them, a
+  conversation does not. The gesture is the renderer's own (nothing here reimplements one), a left
+  click clears them and so does a new position, and the ink is amber rather than the board's yellow,
+  because an arrow is the one thing on the board nobody else can see.
+- **A PROMOTION IS ASKED WITH PIECES, over the square the pawn is landing on** — a column of four,
+  strongest at the top, drawn with the renderer's own art so the queen in the picker is the queen
+  that lands. It was four words in a row under the board, which is the one shape a chess player
+  never meets. It is dismissed by a press anywhere else and by Escape (on CAPTURE, so the shell's
+  own Escape does not also leave the conversation), and the four `chess-promote-*` ids are kept so
+  what every existing assertion means survived the change of shape.
+- **THE SOUNDS ARE SYNTHESIZED AND ONLY THE PAGE MAKES THEM** (`chess-sound.ts`). Twelve of them,
+  each with its own SHAPE rather than the same click at another volume — a knock for a move, two for
+  a capture, an alert over the knock for check, a rising arpeggio for a promotion, three notes for a
+  result — because a reader should hear which it was without looking. Nothing is downloaded: they
+  are oscillators and one noise burst, the way `cuelume` builds the app's own cues, and a dozen
+  small files would be a dozen requests on a page whose promise is that displaying it makes none.
+  The AudioContext is created on the first sound a PRESS asks for and resumed on every play (iOS
+  suspends it whenever the app goes away), a HIDDEN document plays nothing, and the whole palette
+  answers to the app's own `soundsEnabled` — a reader who turned the app's cues off did not ask for
+  a board to be the exception. The CARD in the history makes no sound at all: a conversation that
+  clicked at every move of every game in it is one nobody can read in an open-plan office.
+
+### THE CARD IN THE HISTORY, AND THE SCROLL IT USED TO EAT
+
+The card is a board the reader can play a move on and read a clock off, with a press that opens the
+page. It deliberately has no sounds, no arrows and no touch dragging — and that last one is a BUG
+FIX rather than a preference:
+
+**`react-chessboard` writes `touch-action: none` inline on every one of the 32 pieces** (its own
+`Piece`, with no option to change it), which is right for a board that owns the screen and wrong for
+one sitting in a scrolling history: a finger landing on an occupied square could not scroll the
+conversation, and on a phone the board is most of the width of it. On the reader's own turn a second
+cause stacked on it — dnd-kit's TouchSensor calls `preventDefault()` on a non-passive `touchmove`,
+which kills the scroll over the WHOLE board. So the card sets `scrollable`: an author `!important`
+rule frees the pieces to `touch-action: manipulation` (both directions and pinch-zoom back, the
+double-tap zoom a tap-tap board would otherwise trigger still suppressed) and touch dragging is off
+with it. Moves are played by TAP-TAP on a phone and by dragging with a mouse, and the history
+scrolls either way. A spec reads the computed style and wheels over the board, because "it scrolls"
+is the whole fix. One more thing the renderer's DOM costs: every piece is a dnd-kit draggable, which
+spreads `role="button" tabIndex={0}` onto its wrapper — 32 tab stops per board — so they are taken
+out of the tab order, because a board is played by pressing squares and a piece is not a control.
+
+### THE MOCK, AND WHAT IS NOT VERIFIED
+
+`web/mock/server.ts` plays the OPPONENT, because a game needs two machines and the suite has one:
+it keeps a LEDGER of its own and EDITS it, which is what the other machine really does — a mock that
+answered with a message per move would let a broken merge pass every test. It accepts a challenge,
+opens as white when the challenger took black, answers each move with a legal reply replayed out of
+the thread's own messages, and charges its own clock what it really waited. Three hooks and each
+exists because a moment cannot be reached otherwise: `challenge` makes the mock the CHALLENGER (its
+absence once hid the fact that the app had no Accept button while eleven tests passed), `seed` puts a
+game mid-flight with the clocks a spec chose (the alternative is a spec that waits ten minutes for a
+number to move), and `play` makes the opponent move on its own, which is the only way to reach the
+instant a premove fires — a premove posts nothing until it is legal. **A spec MUST reset**: one mock
+process serves the whole run, and a conversation holds several games at once now, so a game left
+unfinished is a chip in the next test's strip, a row in its menu and a board in its history.
+
+`cd web && bun run preview -- --out /tmp/chess --chess` captures the control, the challenge form
+with its clock, the board in both themes, a game in progress with its score sheet, the armed
+resignation, the board at a phone's width, the card a colleague's challenge leaves, the STRIP of
+running games, the full-screen PAGE in both themes and at a phone's width, the promotion picker, a
+premove and a clock down to its last seconds. `web/e2e/chess.spec.ts` pins every rule the page owns,
+and `chess-wire.test.ts`, `chess-thread.test.ts`, `chess-clock.test.ts`, `chess-act.test.ts`,
+`chess-menu.test.ts` and `chess-sound.test.ts` the pure ones — the last of which pins the palette
+without an AudioContext anywhere: which sound a move earns, that every sound has its own shape
+rather than being one click at another volume, and that each is short and quiet enough to happen
+every few seconds.
+
+**What is unverified against the tenant is the pairing, and one new thing.** The wire rides `send`
+and `edit`, both measured, and everything else is pinned in unit tests and against the mock — so
+what is untested is one real challenge accepted by a colleague who also runs teams-lite, which is
+the user's own click in the sandbox chat. NEW and unmeasured: **no probe has posted a ledger line
+and read it back byte for byte.** The sealed-message probe measured base64url surviving at 10 923
+characters and the v1 line has always survived, so a line of letters, digits, spaces, `+` and `.`
+is expected to — but expected is not measured, and a `.`-separated ledger is the one part of this
+feature that a tenant has never seen.
 
 ## Renaming a person, and giving them a face (LOCAL, and gated)
 

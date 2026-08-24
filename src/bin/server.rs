@@ -4608,10 +4608,33 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let conv = param_str(params, "conversation")?;
             let message_id = param_str(params, "message_id")?;
             let text = param_str(params, "text")?;
+            // The RICH body, exactly as `send` takes one, and used INSTEAD of escaping the
+            // text. It is what lets a message whose body is MARKUP be rewritten at all: a game
+            // of chess keeps one player's whole record in one message and edits it on every
+            // move (see web/src/lib/chess-wire.ts), and that record is a paragraph plus the
+            // signed line the other machine reads back. Escaped as plain text it would come
+            // back as characters rather than as that line, so the game would stop replaying —
+            // the message would still be there and every reader would have lost the board.
+            //
+            // It is the same trust boundary the send already draws: a client supplies the body
+            // of its own message either way, and this method is the same OUTWARD_METHODS entry
+            // it was. What it does NOT gain is a mention (the list travels on a send, and an
+            // agent's own edit builds its own), a title (read from the store, never a client's)
+            // or a way past the seal — all three are below, unchanged.
+            let content_html = params
+                .get("content_html")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .map(|html| html.trim().to_string())
+                .filter(|html| !html.is_empty());
 
-            // Custom emoji: the edit path escapes the plain text, then runs the same
-            // substitution over it that a send does. So an emoji survives an edit.
-            let escaped = teams_send::escape_html(text.trim());
+            // Custom emoji: the edit path escapes the plain text — or takes the rich body as
+            // it is — then runs the same substitution over it that a send does. So an emoji
+            // survives an edit.
+            let escaped = match content_html.as_deref() {
+                Some(html) => html.to_string(),
+                None => teams_send::escape_html(text.trim()),
+            };
             let emoji_art = custom_emoji_art_in(&ctx, &escaped);
 
             // The TITLE the post already has, carried through the edit. Measured against
@@ -4652,7 +4675,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let emoji_art = emoji_art.clone();
                     let subject = subject.clone();
                     let seal_key = seal_key.clone();
-                    let escaped = teams_send::escape_html(text.trim());
+                    let escaped = match content_html.as_deref() {
+                        Some(html) => html.to_string(),
+                        None => teams_send::escape_html(text.trim()),
+                    };
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
                         let (rewritten_html, _emoji_ids) = if !emoji_art.is_empty() {
@@ -14903,6 +14929,48 @@ mod tests {
             handler.contains("subject.as_deref()"),
             "the title has to reach `edit_message`; read from the store and dropped on the \
              floor is the same silent loss."
+        );
+    }
+
+    /// An EDIT may carry a RICH BODY, and it changes nothing else about the edit.
+    ///
+    /// A game of chess keeps one player's whole record in one message and rewrites it on every
+    /// move (see web/src/lib/chess-wire.ts), and that record is a paragraph plus the signed line
+    /// the other machine reads back. Escaped as plain text — which is all this handler took — the
+    /// line came back as characters rather than as a line, so the game stopped replaying: the
+    /// message was still there and every reader had lost the board.
+    ///
+    /// It is the same trust boundary `send` already draws, and this test is about the three
+    /// things that must NOT have moved with it.
+    #[test]
+    fn an_edit_may_carry_a_rich_body_and_nothing_else_changed() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code.split("\"edit\" => {").nth(1).expect("the edit handler");
+        let handler = handler.split("\"react\" => {").next().expect("it ends at the next arm");
+        assert!(
+            handler.contains("content_html"),
+            "the edit has to take the rich body, or a message whose body is markup cannot be \
+             rewritten at all."
+        );
+        assert!(
+            handler.contains("escape_html"),
+            "and it still escapes a PLAIN text edit, which is every other edit in the app."
+        );
+        // The three rails that did not move.
+        assert!(
+            handler.contains("&[],"),
+            "an edit still carries NO mention list: the composer's mentions travel on the send."
+        );
+        assert!(
+            handler.contains("subject.as_deref()"),
+            "it still restates the post's own title, read from the store."
+        );
+        assert!(
+            handler.contains("seal_key.as_ref()"),
+            "and it is still SEALED where the chat is sealed — fail-closed, exactly as the send \
+             is: a rewrite that went out in the clear would publish the words of a message the \
+             reader had sealed."
         );
     }
 

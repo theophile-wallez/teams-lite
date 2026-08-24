@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Loading02Icon } from "@hugeicons/core-free-icons";
+import { chessWireIn } from "~/lib/chess-wire";
 import { bodyFormat, mentionsByItemId, type ChatMessage } from "~/lib/protocol";
 import { agentAuthorship } from "~/lib/agent-message";
 import { Avatar } from "./avatar";
@@ -8,40 +9,61 @@ import { Composer } from "./composer";
 import { useAppState } from "./controller-context";
 import { RichContent } from "./rich-content";
 import { SystemEventLine } from "./system-event-line";
+import { cn } from "~/lib/utils";
 
 /**
- * The meeting's chat, in the stage's side panel.
+ * A conversation's chat, in a narrow column beside something else.
  *
- * It is the app's OWN thread seen through a 21rem column: the panel's tab navigates the
- * app to that conversation, so the history, the drafts, the live feed and the read state
- * are the ones the conversation already has — there is no second history loader here, and
- * a message sent from the panel is sent by the same composer, under the same consent, as
- * one sent from the pane behind it.
+ * TWO SURFACES draw it and both are full-screen surfaces that put the thread beside what the
+ * reader came for: a live CALL's side panel (§ A call is a PAGE), and the CHESS page, where the
+ * game is being played in this very conversation and what is being said while people play is the
+ * other half of it. One component rather than two, because "the app's own thread in 21rem" is one
+ * problem with one answer — and because the composer below is the app's ONE composer, which two
+ * copies of this panel would give two answers about.
+ *
+ * It is the app's OWN thread seen through that column: the surface above navigates the app to the
+ * conversation, so the history, the drafts, the live feed and the read state are the ones the
+ * conversation already has — there is no second history loader here, and a message sent from the
+ * panel is sent by the same composer, under the same consent, as one sent from the pane.
  *
  * Three things follow from that, and each is deliberate:
  *
  * - **The composer is the app's one composer, MOVED.** It carries the live sentinel a
  *   sanctioned driver proves its target with, so a second one would give that question two
- *   answers (see `useCallOwnsComposer`). The pane behind renders none while this panel
- *   holds it, which costs nothing: a full stage covers that pane completely.
+ *   answers (see `useCallOwnsComposer`). The pane behind renders none while a call panel
+ *   holds it, and on the chess page the pane is not mounted at all — either way there is
+ *   exactly one.
  * - **A message is READ here, and acted on there.** No reactions, no edit, no delete, no
- *   "…" menu — a call's side panel is for following what is being said and saying
- *   something back. Everything else is one fold away, in the conversation itself, where it
- *   has the room its menus need.
- * - **The tab NAVIGATES, so opening it marks the thread read** — exactly as clicking that
- *   chat in the sidebar does, and for the same reason: the user asked to see it. Nothing
- *   here opens a conversation on its own.
+ *   "…" menu — a side column is for following what is being said and saying something back.
+ *   Everything else is one fold away, in the conversation itself, where it has the room its
+ *   menus need.
+ * - **Opening it marks the thread read** — exactly as clicking that chat in the sidebar does,
+ *   and for the same reason: the user asked to see it. Nothing here opens a conversation on
+ *   its own.
  */
-export function CallStageChat(props: { conversation: string }) {
+export function ConversationChatPanel(props: {
+  conversation: string;
+  /** The panel's own name, because a spec asks a call's panel and a chess page's about
+   *  different things. The call's original ids are what its own specs still read. */
+  testId?: string;
+  transcriptTestId?: string;
+  className?: string;
+  /** Whether the panel draws the composer. A live call whose own chat panel is open already
+   *  holds it, and two would be two answers to "which conversation does a keystroke land in". */
+  composer?: boolean;
+}) {
   const openId = useAppState((s) => s.openId);
   const messages = useAppState((s) => s.messages);
   const loading = useAppState((s) => s.loadingMessages);
   const ready = openId === props.conversation;
 
   return (
-    <div data-testid="call-stage-chat" className="flex min-h-0 flex-1 flex-col">
+    <div
+      data-testid={props.testId ?? "call-stage-chat"}
+      className={cn("flex min-h-0 flex-1 flex-col", props.className)}
+    >
       {ready && !loading ? (
-        <ChatTranscript messages={messages} />
+        <ChatTranscript messages={messages} testId={props.transcriptTestId} />
       ) : (
         <div className="flex flex-1 items-center justify-center gap-2 text-xs text-text-faint">
           <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.8} />
@@ -50,9 +72,14 @@ export function CallStageChat(props: { conversation: string }) {
       )}
       {/* The one composer, held here while this panel is open. It is the conversation's
           own, so a half-written message survives the fold and lands in the right thread. */}
-      {ready && <Composer focusToken={props.conversation} />}
+      {ready && props.composer !== false && <Composer focusToken={props.conversation} />}
     </div>
   );
+}
+
+/** The call stage's own spelling of the panel, keeping the ids its specs read. */
+export function CallStageChat(props: { conversation: string }) {
+  return <ConversationChatPanel conversation={props.conversation} />;
 }
 
 /** The newest of the thread, oldest first, stuck to the bottom.
@@ -61,10 +88,18 @@ export function CallStageChat(props: { conversation: string }) {
  *  during a call rather than scrolled through, and mounting the whole backlog beside a
  *  live video stage would cost the call frames. What is above the last
  *  {@link TRANSCRIPT_MESSAGES} is in the conversation itself. */
-function ChatTranscript(props: { messages: ChatMessage[] }) {
+function ChatTranscript(props: { messages: ChatMessage[]; testId?: string }) {
   const scroller = useRef<HTMLDivElement | null>(null);
   const shown = useMemo(
-    () => props.messages.slice(-TRANSCRIPT_MESSAGES),
+    () =>
+      props.messages
+        // A CHESS message is a game rather than something somebody said, and the history draws it
+        // as a BOARD (see components/chess-game-card.tsx). Left in, this column showed the raw
+        // signed line the game is carried by — which is the one thing the whole feature promises
+        // is drawn nowhere. The pane absorbs them into their board; this panel has no board, so
+        // it leaves them out: the game is on screen beside it.
+        .filter((message) => chessWireIn(message) === null)
+        .slice(-TRANSCRIPT_MESSAGES),
     [props.messages],
   );
   const newest = shown[shown.length - 1]?.id;
@@ -95,7 +130,7 @@ function ChatTranscript(props: { messages: ChatMessage[] }) {
   return (
     <div
       ref={scroller}
-      data-testid="call-stage-transcript"
+      data-testid={props.testId ?? "call-stage-transcript"}
       // The bottom padding is the composer's own fade: that overlay hangs off the box's top
       // edge, so without room under the last line it would dissolve the newest message
       // instead of the empty strip above the field.

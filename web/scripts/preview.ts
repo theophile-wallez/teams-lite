@@ -1961,11 +1961,97 @@ if (import.meta.main) {
       await shot(`${out}-challenged-dark.png`, challenged);
       await setTheme("light");
 
+      // ---- THE STRIP, AND THE PAGE ------------------------------------------------------
+      //
+      // Everything above is the card in the conversation. What follows is the two surfaces the
+      // feature grew: the STRIP of running games floating under the header, and one game in FULL
+      // on its own page. Both are captured off a SEEDED game rather than a played one, for the
+      // reason a clock cannot be photographed otherwise — a seed puts the moves and both clocks
+      // exactly where this shot needs them, and a played game would be four minutes of waiting.
+      const seed = async (body: Record<string, unknown>): Promise<string> => {
+        const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+          data: { kind: "chess", seed: { conversation, ...body } },
+        });
+        const answer = (await res.json()) as { game: string | null };
+        return answer.game ?? "";
+      };
+      // Two games at once, which is the rule that replaced "one game in flight": the strip names
+      // both, most urgent first, each with its own two clocks.
+      const played = await seed({
+        mine: "w",
+        moves: ["e4", "e5", "Nf3", "Nc6"],
+        base: 600,
+        clock: { w: 512_000, b: 486_000 },
+      });
+      await seed({ mine: "b", moves: ["d4"], base: 600, clock: { b: 25_000 } });
+      const strip = '[data-testid="chess-games-strip"]';
+      await page.locator(strip).waitFor();
+      await page.waitForTimeout(300);
+      await shot(`${out}-strip-light.png`, strip);
+      await setTheme("dark");
+      await shot(`${out}-strip-dark.png`, strip);
+      await setTheme("light");
+
+      // The PAGE: the board in the middle, the score sheet down the right, the conversation's own
+      // chat under it. It is opened from the STRIP's own chip, which is a press a reader really
+      // makes and — unlike the card in the history — is on screen whatever the reader has
+      // scrolled to: the history is virtualized, so a board four screens up is not in the DOM at
+      // all. The game is NAMED, because the first card may be a challenge nobody accepted, whose
+      // board has no moves to walk back through.
+      await page.locator(`[data-testid="chess-game-chip"][data-chess-game="${played}"]`).click();
+      await page.locator('[data-testid="chess-page"]').waitFor();
+      await page.locator('[data-testid="chess-score-sheet"]').waitFor();
+      await page.waitForTimeout(400);
+      await shot(`${out}-page-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-page-dark.png`);
+      await setTheme("light");
+
+      // The board WALKED BACK, which is the one state a score sheet exists for: the ply the reader
+      // is reading is marked, and the page says the board is not live.
+      await page.locator('[data-testid="chess-nav-prev"]').click();
+      await page.locator('[data-testid="chess-nav-prev"]').click();
+      await page.waitForTimeout(400);
+      await shot(`${out}-review-light.png`);
+      await page.locator('[data-testid="chess-nav-live"]').click();
+      await page.waitForTimeout(300);
+
+      // The PROMOTION picker: four pieces over the square the pawn lands on, drawn with the
+      // renderer's own art. It needs a position with a pawn one square away, so it is seeded.
+      await page.goBack();
+      await page.locator('[data-testid="message-pane"]').waitFor();
+      const promoting = await seed({
+        mine: "w",
+        moves: ["e4", "d5", "exd5", "c6", "dxc6", "Qd6", "cxb7", "Qc6"],
+        base: 600,
+      });
+      await page
+        .locator(`[data-testid="chess-game-chip"][data-chess-game="${promoting}"]`)
+        .click();
+      await page.locator('[data-testid="chess-page"]').waitFor();
+      await page.locator('[data-square="b7"]').click();
+      await page.locator('[data-square="a8"]').click();
+      await page.locator('[data-testid="chess-promotion"]').waitFor();
+      await page.waitForTimeout(300);
+      await shot(`${out}-promotion-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-promotion-dark.png`);
+      await setTheme("light");
+      await page.keyboard.press("Escape");
+
+      // A PHONE: one column, the board over the moves over the chat.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(400);
+      await shot(`${out}-page-mobile-light.png`);
+      await page.setViewportSize(VIEWPORT);
+
       console.log(
         `[preview] wrote ${out}-button-{light,dark}.png, ${out}-challenge-{light,dark}.png, ` +
           `${out}-board-{light,dark}.png, ${out}-mid-game-light.png, ` +
-          `${out}-resign-armed-light.png, ${out}-mobile-light.png and ` +
-          `${out}-challenged-{light,dark}.png`,
+          `${out}-resign-armed-light.png, ${out}-mobile-light.png, ` +
+          `${out}-challenged-{light,dark}.png, ${out}-strip-{light,dark}.png, ` +
+          `${out}-page-{light,dark}.png, ${out}-review-light.png, ` +
+          `${out}-promotion-{light,dark}.png and ${out}-page-mobile-light.png`,
       );
     });
     process.exit(0);

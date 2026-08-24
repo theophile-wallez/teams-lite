@@ -17,6 +17,7 @@ function render(over: Partial<Parameters<typeof ChessBoard>[0]> = {}): string {
       targets={[]}
       lastMove={null}
       check={null}
+      premove={null}
       {...over}
     />,
   );
@@ -104,5 +105,36 @@ describe("ChessBoard", () => {
     // Nothing to assert in the markup — the option travels to the renderer — so this pins
     // that the prop is accepted and the board still draws.
     expect(drawn(render({ animate: false })).length).toBe(64);
+  });
+
+  it("marks a PREMOVE in its own tint, never as a move that happened", () => {
+    // A premove is a decision, not a move: the yellow the last move wears would say the board
+    // has already played it.
+    const html = render({ premove: ["g1", "f3"], lastMove: ["e2", "e4"] });
+    expect(html).toMatch(/data-square-state="f3"[^>]*data-premove="true"/);
+    expect(html).toMatch(/data-square-state="f3"[^>]*bg-chess-premove/);
+    // And the last move keeps the board's own highlight.
+    expect(html).toMatch(/data-square-state="e4"[^>]*data-last-move="true"/);
+  });
+
+  it("says whether a TOUCH over it scrolls the page, because a card in the history must", () => {
+    // The renderer writes `touch-action: none` on every piece; a board inside a scrolling
+    // conversation frees it (see styles/app.css) and gives up touch dragging with it.
+    expect(render({ scrollable: true })).toContain('data-scrollable="true"');
+    expect(render()).not.toContain("data-scrollable");
+  });
+
+  it("asks WHICH PIECE over the board, drawn with the renderer's own art", () => {
+    const html = render({ promotion: { from: "e7", to: "e8", color: "w" } });
+    // The four pieces, in the order every board offers them, and each one is a real piece
+    // rather than the word for it.
+    expect(html).toContain('data-testid="chess-promotion"');
+    for (const piece of ["q", "n", "r", "b"]) {
+      expect(html).toContain(`data-testid="chess-promote-${piece}"`);
+    }
+    expect(html).toContain("Promote to Queen");
+    // It is drawn INSIDE the board, over the file the pawn is landing on.
+    const at = html.indexOf('data-testid="chess-promotion"');
+    expect(html.slice(0, at)).toContain('data-testid="chess-board"');
   });
 });

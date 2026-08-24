@@ -161,13 +161,40 @@
    * week view draws 24 of them and they must recede behind the events. */
   --calendar-line: #eeeef0;
 
-  /* A chess board's two squares. They follow the THEME while the pieces do not
-   * (see components/chess-pieces.tsx): the board is a surface in this app and has
-   * to sit in a light or a dark page, while "white piece" is a fact about chess.
-   * A muted green rather than a brown, so the board belongs beside the app's own
-   * indigo instead of reading as a photograph of a different product. */
-  --chess-light: #eae9e0;
-  --chess-dark: #92a68a;
+  /* THE BOARD IS CHESS.COM'S BOARD, and it is the one surface in this app that does
+   * NOT follow the appearance setting — the values below are repeated verbatim in
+   * the dark theme, which is what makes that true.
+   *
+   * It used to be a muted green that dimmed for a dark page, on the argument that a
+   * board is a surface of this app and has to sit in a light or a dark one. The
+   * user asked for chess.com's colours, and the argument is theirs: a board is a
+   * board, everybody who plays online recognises these two greens, and a board that
+   * changed colour with the app's theme is one whose squares a player has to
+   * re-learn twice a day. The cost is stated plainly — a light board sits in a dark
+   * page, which is exactly what chess.com's own dark interface does.
+   *
+   * "White piece" was already a fact about chess rather than a colour of this app
+   * (the pieces are the renderer's own art), so nothing about them changes. */
+  --chess-light: #ebecd0;
+  --chess-dark: #779556;
+  /* The border round the board, and the one inside the promotion picker. */
+  --chess-edge: rgba(0, 0, 0, 0.18);
+  /* The square the reader picked, and the move that was just played: one yellow for
+   * both, over the square rather than instead of it, so a highlighted dark square is
+   * still a dark square. It is chess.com's own wash. */
+  --chess-highlight: rgba(255, 255, 51, 0.5);
+  /* A PREMOVE is not a move that has happened, so it is never the yellow above. */
+  --chess-premove: rgba(64, 128, 255, 0.36);
+  /* A legal destination: a grey dot on an empty square, a ring round a piece that can
+   * be taken. Ink rather than accent — the board's own vocabulary, not the app's. */
+  --chess-target: rgba(0, 0, 0, 0.16);
+  /* The king in check: a glow out of its own square rather than a flat wash, which in
+   * a board that already has two highlights would read as a third. */
+  --chess-check: rgba(226, 34, 34, 0.85);
+  /* The reader's own arrows, drawn by a right-drag. Amber, because it is the one thing
+   * on the board that nobody else can see. */
+  --chess-arrow: rgba(255, 170, 0, 0.78);
+  --chess-arrow-alt: rgba(64, 128, 255, 0.72);
 
   /* Elevation — "shadow as a border": a crisp 1px ring + a 1–2px micro-drop.
    * Elevation scales by opacity + tiny offset, never by wide blur. */
@@ -223,11 +250,21 @@
   --row-hovered: #232323;
   --row-open: #2a2a2a;
 
-  /* The board, dimmed for a dark page. The two squares keep their relationship —
-   * light against dark — so the pieces' fixed inks read on both, exactly as they do
-   * in the light theme. */
-  --chess-light: #6f6e66;
-  --chess-dark: #435240;
+  /* THE BOARD DOES NOT DIM. These are the same two greens the light theme states, on
+   * purpose: chess.com's board is chess.com's board in their dark interface too, and
+   * a board whose squares changed with the app's appearance is one a player has to
+   * re-learn. The token is repeated rather than dropped so that this is a DECISION a
+   * reader of this file meets, rather than something they have to notice is missing.
+   * Everything drawn ON the board is repeated with it, for the same reason. */
+  --chess-light: #ebecd0;
+  --chess-dark: #779556;
+  --chess-edge: rgba(0, 0, 0, 0.45);
+  --chess-highlight: rgba(255, 255, 51, 0.5);
+  --chess-premove: rgba(64, 128, 255, 0.36);
+  --chess-target: rgba(0, 0, 0, 0.16);
+  --chess-check: rgba(226, 34, 34, 0.85);
+  --chess-arrow: rgba(255, 170, 0, 0.78);
+  --chess-arrow-alt: rgba(64, 128, 255, 0.72);
 
   --bubble-mine: #2f3569;
   --bubble-mine-foreground: #ffffff;

@@ -1,196 +1,73 @@
 /**
  * One game of chess, drawn as a row in the history where it was started.
  *
- * This is the LAZY chunk and the only place `chess.js` is imported: the move list the thread
- * states is replayed into a position here, and what is legal is ASKED of the rules rather than
- * worked out. The pure half — which games exist, who plays, whose turn it is — is
- * `lib/chess-thread.ts` and carries no dependency, which is what keeps a rules engine off the
- * path of every chat (the rule `@pierre/diffs` holds for the diff renderer).
+ * This is the card in the CONVERSATION, and everything about it is bounded by that: it sits in a
+ * virtualized history a phone's column wide, between things people said, so it is a board the
+ * reader can play a move on and read a clock off — and nothing more. The whole experience is one
+ * press away, on the game's own page (§ The chess PAGE), and this card is what points there.
  *
- * Four things this card owes the reader:
- *   - the board is oriented from THEIR side, and a spectator sees white at the bottom;
- *   - a move goes out on their press and is TAKEN BACK if the send fails, with the sentence
- *     here — the composer's rule, because a move that did not leave is otherwise invisible;
- *   - a move list the rules cannot replay is SAID, never drawn as a board that silently
- *     disagrees with the other player's;
- *   - a resignation and an agreed draw are facts about the THREAD, so they are stated before
- *     the position is consulted at all.
+ * What it deliberately does NOT do, and why:
+ *   - **no sound.** A conversation that clicked at every move of every game in it is one nobody
+ *     can read in an open-plan office. The page has the sounds, because that is where a reader is
+ *     playing rather than reading.
+ *   - **no arrows.** A right-drag here would take the browser's own menu away from a message
+ *     thread, which is a worse trade than an annotation nobody asked for.
+ *   - **no touch dragging.** A finger over this board scrolls the CONVERSATION (see
+ *     `scrollable` in chess-board.tsx): the history is what the reader is holding, and a board
+ *     that ate the scroll made half the width of a phone unscrollable. Moves are played by
+ *     tap-tap there, and by dragging with a mouse.
+ *
+ * The logic is `use-chess-game.ts`, shared with the page, so the two can never disagree about what
+ * a press means.
  */
 
-import { Chess, type Move, type Square } from "chess.js";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { ArrowExpand01Icon } from "@hugeicons/core-free-icons";
+import { useNavigate } from "@tanstack/react-router";
 import { useReducedMotion } from "motion/react";
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
+import { formatChessClock } from "~/lib/chess-clock";
+import { chessPagePath } from "~/lib/chess-menu";
 import {
   chessAwaitsOurAnswer,
   chessAwaitsTheirAnswer,
+  chessGameIsOver,
   chessGameIsSettled,
   chessPlayerOf,
-  chessTurnIsOurs,
   type ChessGame,
   type ChessPlayer,
 } from "~/lib/chess-thread";
-import type { ChessColor } from "~/lib/chess-wire";
+import { clockWords, type ChessColor } from "~/lib/chess-wire";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { ChessBoard } from "./chess-board";
-import { useOptionalAppState, useOptionalController } from "./controller-context";
-
-/** What the rules say about the move list the thread holds. */
-type Replay = {
-  chess: Chess;
-  /** The ply the replay stopped at, when a move was not legal there. */
-  brokeAt: number | null;
-  lastMove: [string, string] | null;
-};
-
-function replay(moves: string[]): Replay {
-  const chess = new Chess();
-  let lastMove: [string, string] | null = null;
-  for (let i = 0; i < moves.length; i += 1) {
-    try {
-      const made = chess.move(moves[i] as string);
-      lastMove = [made.from, made.to];
-    } catch {
-      return { chess, brokeAt: i + 1, lastMove };
-    }
-  }
-  return { chess, brokeAt: null, lastMove };
-}
+import { useOptionalController } from "./controller-context";
+import { useChessGame } from "./use-chess-game";
 
 export default function ChessGameCard(props: {
   game: ChessGame;
   conversationId: string;
   className?: string;
 }) {
-  // The optional hooks are the seam `RichContent` already uses: this card renders in a
-  // virtualized history and is server-rendered by its own tests, so it must draw a board with
-  // no provider around it — read-only, which is exactly what a board with no controller is.
   const controller = useOptionalController();
-  const chessError = useOptionalAppState((s) => s.chessError, null);
-  const pending = useOptionalAppState((s) => s.chessPending, null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [promotion, setPromotion] = useState<{ from: string; to: string } | null>(null);
+  // Safe with no router around it: the hook reads a context that is simply absent in a
+  // server-rendered test, and only the callback would need one (see tracker-ref-chip.tsx).
+  const navigate = useNavigate();
   const [armedResign, setArmedResign] = useState(false);
   // A position change is animated by the renderer; a reader who asked for no motion gets none.
   const reduceMotion = useReducedMotion();
+  const board = useChessGame({
+    game: props.game,
+    conversationId: props.conversationId,
+    sounds: false,
+  });
+  const game = board.game;
 
-  const game = props.game;
-
-  // A move this page has sent and not yet seen come back is drawn as if it had landed: a board
-  // that waits for a round trip before the piece moves feels broken.
-  const moves = useMemo(() => {
-    if (
-      pending &&
-      pending.conversation === props.conversationId &&
-      pending.game === game.id &&
-      pending.ply === game.moves.length + 1
-    ) {
-      return [...game.moves, pending.san];
-    }
-    return game.moves;
-  }, [game.id, game.moves, pending, props.conversationId]);
-
-  // Once the thread really holds the move, the pending one is forgotten and the board is
-  // drawing the history rather than a guess.
-  useEffect(() => {
-    controller?.settleChessMove(props.conversationId, game.id, game.moves.length);
-  }, [controller, game.id, game.moves.length, props.conversationId]);
-
-  const { chess, brokeAt, lastMove } = useMemo(() => replay(moves), [moves]);
-  const orientation: ChessColor = game.ourColor ?? "w";
-  const settled = chessGameIsSettled(game) || chess.isGameOver() || brokeAt !== null;
-  // Ours to move only while nothing of ours is already in flight: a second press before the
-  // first move's message comes back would claim a ply the thread has not reached.
-  const ourMove =
-    !settled && chessTurnIsOurs(game) && moves.length === game.moves.length && !!controller;
-
-  /** Every legal move out of the selected square. */
-  const fromSelected: Move[] = useMemo(() => {
-    if (!ourMove || !selected) return [];
-    return chess.moves({ square: selected as Square, verbose: true });
-  }, [chess, ourMove, selected]);
-
-  const targets = useMemo(() => [...new Set(fromSelected.map((m) => m.to))], [fromSelected]);
-
-  /** The king in check, which is the one square the renderer cannot work out for itself. */
-  const check = useMemo(() => {
-    if (!chess.inCheck()) return null;
-    for (const rank of chess.board()) {
-      for (const cell of rank) {
-        if (cell?.type === "k" && cell.color === chess.turn()) return cell.square;
-      }
-    }
-    return null;
-  }, [chess]);
-
-  /** Play from one square to another, asking the rules what that move IS. Both gestures end
-   *  here — the tap-tap a phone uses and a piece dropped by the pointer — so neither can play
-   *  a move the other would refuse. Answers whether the move was legal. */
-  function play(from: string, to: string): boolean {
-    const onto = chess.moves({ square: from as Square, verbose: true }).filter((m) => m.to === to);
-    if (onto.length === 0) return false;
-    // A promotion is the one move two squares cannot say on their own.
-    if (onto.some((m) => m.promotion)) setPromotion({ from, to });
-    else void send(onto[0]?.san ?? "");
-    return true;
-  }
-
-  function press(square: string): void {
-    if (!ourMove) return;
-    if (selected === square) {
-      setSelected(null);
-      return;
-    }
-    if (selected && play(selected, square)) {
-      setSelected(null);
-      return;
-    }
-    // Selecting one's own piece, and nothing else: a press on an empty square with nothing
-    // selected means nothing.
-    const piece = chess.get(square as Square);
-    setSelected(piece && piece.color === game.ourColor ? square : null);
-  }
-
-  function drop(from: string, to: string): boolean {
-    if (!ourMove) return false;
-    setSelected(null);
-    return play(from, to);
-  }
-
-  async function send(san: string): Promise<void> {
-    if (!san || !controller) return;
-    await controller.sendChessMessage(props.conversationId, {
-      game: game.id,
-      body: { kind: "move", ply: game.moves.length + 1, san },
-    });
-  }
-
-  async function promote(piece: "q" | "r" | "b" | "n"): Promise<void> {
-    if (!promotion) return;
-    // The SAN is asked of the rules rather than spelled here: a promotion's own notation
-    // carries the capture, the file and the check, and writing it by hand is a second parser.
-    const probe = replay(game.moves).chess;
-    const target = promotion;
-    setPromotion(null);
-    try {
-      const made = probe.move({ from: target.from, to: target.to, promotion: piece });
-      await send(made.san);
-    } catch {
-      /* The position moved under the reader; the board will redraw from the thread. */
-    }
-  }
-
-  const canAct = !settled && !!game.ourColor && !!game.opponent && !!controller;
   // A challenge waiting for an answer, and WHOSE answer it is. These two are the whole of the
   // challenged player's experience: without them their side of a fresh challenge is a board with
-  // nothing to press, which is what the mock's own auto-accept hid.
+  // nothing to press, which is what the mock's own auto-accept once hid.
   const awaitingUs = !!controller && chessAwaitsOurAnswer(game);
   const awaitingThem = !!controller && chessAwaitsTheirAnswer(game);
-
-  /** Answer a challenge, or take one back. */
-  function answer(body: { kind: "join" } | { kind: "decline" } | { kind: "resign" }): void {
-    void controller?.sendChessMessage(props.conversationId, { game: game.id, body });
-  }
 
   return (
     <article
@@ -201,70 +78,59 @@ export default function ChessGameCard(props: {
         props.className,
       )}
     >
-      <ChessSide game={game} color={orientation === "w" ? "b" : "w"} />
+      <ChessSeat game={game} color={other(board.orientation)} clock={board.clock} />
       <ChessBoard
         id={`chess-${game.id}`}
-        fen={chess.fen()}
-        orientation={orientation}
-        playable={ourMove ? game.ourColor : null}
-        selected={selected}
-        targets={targets}
-        lastMove={lastMove}
-        check={check}
+        fen={board.fen}
+        orientation={board.orientation}
+        playable={board.ourMove ? game.ourColor : null}
+        selected={board.selected}
+        targets={board.targets}
+        lastMove={board.lastMove}
+        check={board.check}
+        premove={board.premove}
+        promotion={board.promotion}
+        onPromote={board.promote}
+        onPromotionCancel={board.cancelPromotion}
         animate={!reduceMotion}
-        {...(ourMove ? { onSquare: press, onDrop: drop } : {})}
+        // The history is what the reader is holding: a touch here scrolls the conversation.
+        scrollable
+        arrows={false}
+        {...(controller ? { onSquare: board.press, onDrop: board.drop, onRightClick: board.rightClick } : {})}
       />
-      <ChessSide game={game} color={orientation} />
+      <ChessSeat game={game} color={board.orientation} clock={board.clock} />
 
       <p data-testid="chess-status" className="mt-1 text-xs text-text-dim">
-        {statusOf(game, chess, brokeAt, ourMove)}
+        {board.status}
       </p>
 
-      {moves.length > 0 && (
+      {board.moves.length > 0 && (
         <p
           data-testid="chess-moves"
-          // One scrollable line of pairs, UNDER the board: this card sits in a chat column
-          // that is a phone's width at its narrowest, and a second column beside the board
-          // would take the board down to nothing.
+          // One scrollable line of pairs, UNDER the board: this card sits in a chat column that is
+          // a phone's width at its narrowest, and a second column beside the board would take the
+          // board down to nothing. The PAGE is where the score sheet has room to be a column.
           className="mt-1 overflow-x-auto whitespace-nowrap text-[11px] text-text-faint"
         >
-          {scoreSheet(moves)}
+          {scoreSheetLine(board.moves.map((m) => m.san))}
         </p>
       )}
 
-      {chessError && (
+      {board.error && (
         <p data-testid="chess-error" className="mt-1 text-[11px] text-destructive">
-          {chessError}
+          {board.error}
         </p>
-      )}
-
-      {promotion && (
-        <div className="mt-2 flex items-center gap-2">
-          <span className="text-[11px] text-text-dim">Promote to</span>
-          {(["q", "r", "b", "n"] as const).map((piece) => (
-            <button
-              key={piece}
-              type="button"
-              data-testid={`chess-promote-${piece}`}
-              onClick={() => void promote(piece)}
-              className="rounded-md border border-border-subtle px-2 py-0.5 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground"
-            >
-              {PROMOTION_LABEL[piece]}
-            </button>
-          ))}
-        </div>
       )}
 
       {/* Somebody challenged the reader. This is the one state where the card asks for an answer
-          rather than a move, so it says WHO asked and offers both answers — a challenge nobody
-          can decline would sit in the conversation for ever, and one game is in flight at a
-          time, so it would block the next one too. */}
+          rather than a move, so it says WHO asked and offers both answers — a challenge nobody can
+          decline would sit in the conversation for ever. */}
       {awaitingUs && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <button
             type="button"
             data-testid="chess-accept"
-            onClick={() => answer({ kind: "join" })}
+            onClick={() => board.act({ kind: "join" })}
             className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground"
           >
             Accept — play {game.challengerColor === "w" ? "black" : "white"}
@@ -272,31 +138,53 @@ export default function ChessGameCard(props: {
           <button
             type="button"
             data-testid="chess-decline"
-            onClick={() => answer({ kind: "decline" })}
-            className="rounded-md border border-border-subtle px-2 py-0.5 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+            onClick={() => board.act({ kind: "decline" })}
+            className={SECONDARY}
           >
             Not now
           </button>
+          {game.time && (
+            <span data-testid="chess-time-control" className="text-[11px] text-text-faint">
+              {clockWords(game.time)}
+            </span>
+          )}
         </div>
       )}
 
-      {/* The challenger's own side of that wait: they can take the offer back, which is what
-          frees the conversation for another game. */}
+      {/* The challenger's own side of that wait: they can take the offer back, which is what frees
+          the board for another game. */}
       {awaitingThem && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <button
             type="button"
             data-testid="chess-withdraw"
-            onClick={() => answer({ kind: "resign" })}
-            className="rounded-md border border-border-subtle px-2 py-0.5 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+            onClick={() => board.act({ kind: "resign" })}
+            className={SECONDARY}
           >
             Withdraw the challenge
           </button>
+          {game.time && (
+            <span data-testid="chess-time-control" className="text-[11px] text-text-faint">
+              {clockWords(game.time)}
+            </span>
+          )}
         </div>
       )}
 
-      {canAct && (
+      {board.canAct && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
+          {/* A clock that has run out is claimed rather than taken: nothing here ends a game on a
+              timer, because no machine's clock can be trusted over another's. */}
+          {board.flagClaimable && (
+            <button
+              type="button"
+              data-testid="chess-claim-flag"
+              onClick={() => board.act({ kind: "flag" })}
+              className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground"
+            >
+              Claim the win on time
+            </button>
+          )}
           <button
             type="button"
             data-testid="chess-resign"
@@ -308,12 +196,9 @@ export default function ChessGameCard(props: {
                 return;
               }
               setArmedResign(false);
-              void controller?.sendChessMessage(props.conversationId, {
-                game: game.id,
-                body: { kind: "resign" },
-              });
+              board.act({ kind: "resign" });
             }}
-            className="rounded-md border border-border-subtle px-2 py-0.5 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+            className={SECONDARY}
           >
             {armedResign ? "Resign — nothing takes it back" : "Resign"}
           </button>
@@ -321,13 +206,8 @@ export default function ChessGameCard(props: {
             <button
               type="button"
               data-testid="chess-draw-accept"
-              onClick={() =>
-                void controller?.sendChessMessage(props.conversationId, {
-                  game: game.id,
-                  body: { kind: "drawAccepted" },
-                })
-              }
-              className="rounded-md border border-border-subtle px-2 py-0.5 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+              onClick={() => board.act({ kind: "drawAccept" })}
+              className={SECONDARY}
             >
               Accept the draw
             </button>
@@ -336,121 +216,135 @@ export default function ChessGameCard(props: {
               type="button"
               data-testid="chess-draw"
               disabled={game.drawOfferedBy === game.ourColor}
-              onClick={() =>
-                void controller?.sendChessMessage(props.conversationId, {
-                  game: game.id,
-                  body: { kind: "draw" },
-                })
-              }
-              className="rounded-md border border-border-subtle px-2 py-0.5 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+              onClick={() => board.act({ kind: "draw" })}
+              className={cn(SECONDARY, "disabled:pointer-events-none disabled:opacity-50")}
             >
               {game.drawOfferedBy === game.ourColor ? "Draw offered" : "Offer a draw"}
             </button>
           )}
         </div>
       )}
+
+      {/* THE WAY IN. Everything this card leaves out — the score sheet as a column, the moves
+          walked back through, the arrows, the sounds, the chat beside the board — is one press
+          away, and the press is a LINK rather than a button: the browser's own affordances
+          (the status bar, a middle click, "copy link") are worth keeping on the one control that
+          changes the address. */}
+      <a
+        href={chessPagePath(props.conversationId, game.id)}
+        data-testid="chess-open-page"
+        className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-border-subtle px-2 py-1 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground"
+        onClick={(event) => {
+          // Every modified click is the browser's: a new tab, a new window. Only a plain left
+          // press is ours to keep inside the app — the rule a tracker reference already holds.
+          if (event.defaultPrevented || event.button !== 0) return;
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          void navigate({ to: chessPagePath(props.conversationId, game.id) });
+        }}
+      >
+        <HugeiconsIcon icon={ArrowExpand01Icon} className="size-3.5" strokeWidth={1.8} />
+        {chessGameIsOver(game) ? "Review the game" : "Open the board"}
+      </a>
     </article>
   );
 }
 
-const PROMOTION_LABEL = { q: "Queen", r: "Rook", b: "Bishop", n: "Knight" } as const;
+const SECONDARY =
+  "rounded-md border border-border-subtle px-2 py-0.5 text-xs text-text-dim transition-colors hover:bg-accent hover:text-foreground";
+
+function other(color: ChessColor): ChessColor {
+  return color === "w" ? "b" : "w";
+}
 
 /**
- * One side of the board, named. Drawn above and below the board the way a board is read, and the
- * face and the name are the app's own — so a colleague the user renamed is named here exactly as
- * they are above their own bubbles.
+ * One side of the board: who is playing it, and what their clock reads.
+ *
+ * Drawn above and below the board the way a board is read, and the face and the name are the
+ * app's own — so a colleague the user renamed is named here exactly as they are above their own
+ * bubbles.
  *
  * A seat NOBODY holds is drawn as an empty seat rather than as a person: no initials, because
  * tinted initials are how this app draws a colleague it has no photo for and "Nobody yet" reduced
  * to `NY` is ink that names nothing. And it says WHOSE it is from the reader's own position — the
- * seat opposite a challenger is the reader's to take, so telling them somebody else is being
- * waited for is the same mistake the status line made before it read from two sides.
+ * seat opposite a challenger is the reader's to take.
  */
-function ChessSide(props: { game: ChessGame; color: ChessColor }) {
+export function ChessSeat(props: {
+  game: ChessGame;
+  color: ChessColor;
+  clock: { white: number | null; black: number | null; running: ChessColor | null; flagged: ChessColor | null };
+  /** A page draws the same seat larger, because it has the room for it. */
+  big?: boolean;
+}) {
   const player: ChessPlayer | null = chessPlayerOf(props.game, props.color);
-  // Not the controller's question: whether a press would WORK is the card's, and whether the seat
+  // Not the controller's question: whether a press would WORK is the board's, and whether the seat
   // is the reader's is a fact about the game. A settled challenge is nobody's to take.
-  const oursToTake =
-    !player && !props.game.challenger.isSelf && !chessGameIsSettled(props.game);
+  const oursToTake = !player && !props.game.challenger.isSelf && !chessGameIsSettled(props.game);
+  const ms = props.color === "w" ? props.clock.white : props.clock.black;
+  const running = props.clock.running === props.color;
+  const flagged = props.clock.flagged === props.color;
   return (
-    <header className="flex items-center gap-2 py-1.5">
+    <header className={cn("flex items-center gap-2 py-1.5", props.big && "gap-3 py-2")}>
       {player ? (
         <Avatar
           seed={player.mri}
           label={player.name}
           photo={{ kind: "user", id: player.mri }}
-          className="size-6"
+          className={props.big ? "size-8" : "size-6"}
         />
       ) : (
         <span
           aria-hidden
-          className="size-6 shrink-0 rounded-full border border-dashed border-border-subtle"
+          className={cn(
+            "shrink-0 rounded-full border border-dashed border-border-subtle",
+            props.big ? "size-8" : "size-6",
+          )}
         />
       )}
       <span
         className={cn(
-          "truncate text-xs font-medium",
+          "truncate font-medium",
+          props.big ? "text-sm" : "text-xs",
           player ? "text-foreground" : "text-text-dim",
         )}
       >
-        {player
-          ? player.isSelf
-            ? "You"
-            : player.name
-          : oursToTake
-            ? "You, if you accept"
-            : "Waiting for somebody"}
+        {player ? (player.isSelf ? "You" : player.name) : oursToTake ? "You, if you accept" : "Waiting for somebody"}
       </span>
-      <span className="ml-auto shrink-0 text-[11px] text-text-faint">
+      <span className={cn("shrink-0 text-text-faint", props.big ? "text-xs" : "text-[11px]")}>
         {props.color === "w" ? "White" : "Black"}
       </span>
+      {/* THE CLOCK, on the side it belongs to — both of them on screen at once, which is how a
+          player reads a game. It is drawn only where there is one: a game with no time control
+          shows nothing rather than a dash nobody can act on. */}
+      {ms !== null && (
+        <span
+          data-testid={`chess-clock-${props.color}`}
+          data-running={running ? "true" : undefined}
+          data-flagged={flagged ? "true" : undefined}
+          className={cn(
+            "ml-auto shrink-0 rounded-md px-1.5 font-mono tabular-nums",
+            props.big ? "py-1 text-lg" : "text-xs",
+            // A running clock is the one the reader is watching, so it is the one with ink behind
+            // it; the other is quiet. Under thirty seconds it turns, because that is the moment
+            // the number starts to matter more than the position.
+            flagged
+              ? "bg-destructive/15 text-destructive"
+              : running
+                ? ms < 30_000
+                  ? "bg-destructive/15 text-destructive"
+                  : "bg-accent text-foreground"
+                : "text-text-dim",
+          )}
+        >
+          {formatChessClock(ms)}
+        </span>
+      )}
     </header>
   );
 }
 
-/**
- * What the reader needs to know, in one line.
- *
- * The MESSAGE-decided outcomes come first: a resignation and an agreed draw are facts about the
- * thread rather than about the position, and asking the rules about a game somebody resigned
- * would answer "your move".
- */
-function statusOf(game: ChessGame, chess: Chess, brokeAt: number | null, ourMove: boolean): string {
-  if (brokeAt !== null) {
-    return `This game cannot be replayed — move ${brokeAt} is not legal in the position before it.`;
-  }
-  if (game.outcome.kind === "resigned") {
-    const who = chessPlayerOf(game, game.outcome.by);
-    return who?.isSelf ? "You resigned." : `${who?.name ?? "They"} resigned.`;
-  }
-  if (game.outcome.kind === "drawAgreed") return "Draw agreed.";
-  if (game.outcome.kind === "declined") {
-    return game.outcome.withdrawn
-      ? `${game.challenger.isSelf ? "You" : game.challenger.name} withdrew the challenge.`
-      : "Challenge declined.";
-  }
-  if (chess.isCheckmate()) {
-    const loser = chessPlayerOf(game, chess.turn());
-    return loser?.isSelf ? "Checkmate — you lost." : `Checkmate — ${loser?.name ?? "they"} lost.`;
-  }
-  if (chess.isStalemate()) return "Stalemate — a draw.";
-  if (chess.isInsufficientMaterial()) return "A draw: neither side can mate.";
-  if (chess.isDraw()) return "A draw.";
-  // A challenge waiting for an answer reads from OPPOSITE sides, and one sentence for both was
-  // the bug: the challenged player was told somebody else was being waited on.
-  if (!game.opponent) {
-    if (game.challenger.isSelf) return "Waiting for somebody to accept.";
-    return `${game.challenger.name} challenged you to a game — you would play ${
-      game.challengerColor === "w" ? "black" : "white"
-    }.`;
-  }
-  if (ourMove) return chess.inCheck() ? "Your move — you are in check." : "Your move.";
-  const them = chessPlayerOf(game, chess.turn());
-  return `Waiting for ${them?.isSelf ? "you" : (them?.name ?? "them")}.`;
-}
-
-/** `1. e4 e5  2. Nf3` — the way a score sheet reads. */
-function scoreSheet(moves: string[]): string {
+/** `1. e4 e5  2. Nf3` — the way a score sheet reads, on one line. */
+export function scoreSheetLine(moves: string[]): string {
   const out: string[] = [];
   for (let i = 0; i < moves.length; i += 2) {
     const black = moves[i + 1];
