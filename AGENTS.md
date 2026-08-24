@@ -4914,7 +4914,10 @@ user's. What changes is only what is asked.
   and, only when the user asks for it and only during the hours they set in the zone they
   named, publishing their own (`src/teams_presence.rs`,
   see § The user's own status), the READ-ONLY conversation roster an @mention list is
-  built from (`src/teams_members.rs`, see § @mentions), the one-to-one AUDIO CALLING
+  built from (`src/teams_members.rs`, see § @mentions), the per-chat ENCRYPTION that seals a
+  message's words before they reach Teams (`src/seal.rs`, read back by `Store::seal_keyring` and
+  applied at the last moment of a send by `teams_send::seal_body` — see § A SEALED chat), the
+  one-to-one AUDIO CALLING
   plane (`src/calling.rs` plus the calling half of `src/trouter.rs` — see § Audio calls
   and NATIVE-CALLING.md), the READ-ONLY rich link
   previews for the trackers the user works in (`src/link_preview.rs` dispatching to
