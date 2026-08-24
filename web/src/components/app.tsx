@@ -27,7 +27,7 @@ import {
   parseMergeRequestId,
   sameMergeRequest,
 } from "~/lib/gitlab-mr";
-import { aModalIsOpen, hasModifier } from "~/lib/platform";
+import { aLayerWasOpen, aModalIsOpen, hasModifier, watchOpenLayers } from "~/lib/platform";
 import { cn } from "~/lib/utils";
 import { installVirtualKeyboardState } from "~/lib/virtual-keyboard";
 
@@ -132,6 +132,11 @@ function AppInner() {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   useEffect(() => installVirtualKeyboardState(), []);
+  // Whether a dismissable layer was open when a key was pressed, recorded in the CAPTURE phase
+  // so the Escape handler below can ask a question that is impossible to answer later (see
+  // lib/platform.ts `watchOpenLayers`). Installed at mount, which is what puts it ahead of every
+  // layer's own listener.
+  useEffect(() => watchOpenLayers(), []);
 
   const goToConversation = useCallback(
     (id: string) => {
@@ -288,20 +293,19 @@ function AppInner() {
         return;
       }
       if (e.key === "Escape") {
-        // SOMEBODY ELSE ALREADY ANSWERED THIS KEY. Every Radix layer — a dialog, a popover, a
-        // dropdown menu — listens on `document` in the CAPTURE phase and calls
-        // `preventDefault()` when it dismisses itself, so by the time this bubble-phase handler
-        // runs the flag says whether the reader's Escape was aimed at a layer or at the app.
-        // This is what stops one Escape doing two things: it closed the conversation's own menu
-        // AND left the conversation, and closed the Add-emoji form AND navigated out of
-        // Settings — the reader's place gone, from the one key that means "put that away".
-        if (e.defaultPrevented) return;
-        // AND A DIALOG THAT IS UP BUT DID NOT CONSUME THE KEY still owns it. The two rules do
-        // different jobs and neither replaces the other: a native `datetime-local` input eats
-        // Escape for its own calendar, so nothing ever prevents the default and the flag above
-        // says nothing — while a dialog is plainly still what the reader was dismissing. A MENU
-        // is deliberately NOT in that net: one that is animating away after a row was CLICKED
-        // would swallow the next Escape, which is the one that cancels a pending reply.
+        // A LAYER THE READER WAS LOOKING AT OWNS THE KEY, and whether one was is answered from
+        // the capture phase rather than from here — `watchOpenLayers` asks before Radix has
+        // moved anything, because by the time this bubble handler runs the layer it dismissed
+        // already reads `closed` and is still mounted for its exit animation. That timing is
+        // the whole of it, and both wrong answers shipped: reading nothing let one Escape close
+        // the conversation's own menu AND leave the conversation, and reading mere PRESENCE let
+        // a menu that was closing swallow the Escape that cancels the pending reply its own row
+        // had just started.
+        if (aLayerWasOpen()) return;
+        // AND A DIALOG THAT IS UP BUT NEVER SAW THE KEY still owns it. A native
+        // `datetime-local` input eats Escape for its own calendar (§ Sending a message LATER),
+        // so nothing above ever hears it — while the dialog is plainly still what the reader
+        // was dismissing.
         if (aModalIsOpen()) return;
         if (replyingTo) {
           controller.cancelReply();

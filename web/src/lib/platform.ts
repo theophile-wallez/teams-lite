@@ -62,6 +62,9 @@ export function hasModifier(event: Pick<KeyboardEvent, "ctrlKey" | "metaKey">): 
  * dialog in EITHER state is also the right rule rather than a workaround: while one is
  * animating away it is still what the reader's Escape was aimed at.
  *
+ * It is asked at KEYDOWN CAPTURE time and never later — see `watchOpenLayers` below, which is
+ * the whole reason the `data-state` trap has an answer at all.
+ *
  * **A MENU is deliberately NOT matched here, and that was tried.** Folding a conversation's
  * three header controls into one dropdown (§ ONE MENU in a conversation's header) made Escape
  * close the menu AND leave the conversation, so `role="menu"` was added — and it broke the
@@ -113,4 +116,46 @@ export function useCoarsePointer(): boolean {
     return () => query.removeEventListener("change", onChange);
   }, []);
   return coarse;
+}
+
+/**
+ * Whether a dismissable LAYER was open at the moment the reader last pressed a key.
+ *
+ * This exists because the obvious test cannot be made at the obvious time. The app shell's own
+ * shortcuts run on a bubble-phase listener, and every Radix layer dismisses itself from a
+ * CAPTURE-phase listener on the same document — so by the time the shell asks, the layer the
+ * reader just dismissed has already been moved to `data-state="closed"` and is still mounted for
+ * its exit animation. Two states, one reading, and both of the wrong answers were shipped:
+ *
+ *   - Reading PRESENCE (any `[role="menu"]`) made a menu that was closing swallow the next
+ *     Escape — the one that cancels the pending reply the menu's own row had just started, which
+ *     `messaging.spec.ts` catches.
+ *   - Reading nothing at all let one Escape do two things: close the conversation's menu AND
+ *     leave the conversation.
+ *
+ * So the question is asked FIRST, in the capture phase, before Radix has moved anything: at that
+ * instant `data-state` still says what the reader was looking at. The shell installs this once
+ * and reads {@link aLayerWasOpen} from its own handler.
+ *
+ * Registration order is what makes it work, and it is not an accident: this is installed when
+ * the app mounts, and a layer's own listener is installed when that layer OPENS — later, on the
+ * same phase and the same target, so this one runs first.
+ */
+let layerWasOpen = false;
+
+/** Install the capture-phase watch. Returns its own cleanup, for a `useEffect`. */
+export function watchOpenLayers(): () => void {
+  if (typeof document === "undefined") return () => {};
+  const onKeyDownCapture = () => {
+    layerWasOpen =
+      document.querySelector('[role="dialog"][data-state="open"], [role="menu"][data-state="open"]') !==
+      null;
+  };
+  document.addEventListener("keydown", onKeyDownCapture, { capture: true });
+  return () => document.removeEventListener("keydown", onKeyDownCapture, { capture: true });
+}
+
+/** Whether a layer was open when the current key was pressed (see {@link watchOpenLayers}). */
+export function aLayerWasOpen(): boolean {
+  return layerWasOpen;
 }
