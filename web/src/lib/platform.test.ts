@@ -69,20 +69,25 @@ describe("aModalIsOpen", () => {
     }
   }
 
-  it("stands the shell aside for a dialog and for a MENU", () => {
-    // A menu counts because a conversation's three header controls became one dropdown: the
-    // chess challenge used to be a popover, which is `role="dialog"` and was absorbed, and
-    // folding it into a menu made Escape close the menu AND leave the conversation.
+  it("stands the shell aside for a dialog", () => {
     withLayer("dialog", "open", () => expect(aModalIsOpen()).toBe(true));
-    withLayer("menu", "open", () => expect(aModalIsOpen()).toBe(true));
   });
 
-  it("counts a layer that is animating AWAY, because Radix has already moved its state", () => {
+  it("counts a dialog that is animating AWAY, because Radix has already moved its state", () => {
     // Radix listens for Escape in the CAPTURE phase, so by the time the shell's bubble-phase
     // handler runs, the layer it just dismissed reads `closed` and is still mounted. Testing
     // `data-state` is what made a first attempt at this do nothing at all.
     withLayer("dialog", "closed", () => expect(aModalIsOpen()).toBe(true));
-    withLayer("menu", "closed", () => expect(aModalIsOpen()).toBe(true));
+  });
+
+  it("does NOT stand aside for a menu, which is what `defaultPrevented` covers", () => {
+    // Matching a menu here was tried and broke the opposite case: a menu whose row was CLICKED
+    // is still mounted for its exit animation, and it swallowed the Escape that cancels the
+    // pending reply that row had just started. A menu the reader dismissed WITH Escape is
+    // handled by the shell's own `event.defaultPrevented` check instead — every Radix layer
+    // calls `preventDefault()` when it dismisses on that key.
+    withLayer("menu", "open", () => expect(aModalIsOpen()).toBe(false));
+    withLayer("menu", "closed", () => expect(aModalIsOpen()).toBe(false));
   });
 
   it("does not stand aside for anything else", () => {

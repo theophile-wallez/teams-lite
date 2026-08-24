@@ -288,12 +288,20 @@ function AppInner() {
         return;
       }
       if (e.key === "Escape") {
-        // A DIALOG owns the key while one is open, and this handler stands aside for it.
-        // Radix dismisses the top layer itself; what it cannot do is stop a listener on
-        // `document` that is not part of its layer stack — so Escape in the Add-emoji or the
-        // custom-agent form closed the dialog AND navigated out of Settings, taking the
-        // reader's place with it. It is the same failure the calendar's own popover documents
-        // ("Escape closes the MENU, and the panel takes the next one"), one layer up.
+        // SOMEBODY ELSE ALREADY ANSWERED THIS KEY. Every Radix layer — a dialog, a popover, a
+        // dropdown menu — listens on `document` in the CAPTURE phase and calls
+        // `preventDefault()` when it dismisses itself, so by the time this bubble-phase handler
+        // runs the flag says whether the reader's Escape was aimed at a layer or at the app.
+        // This is what stops one Escape doing two things: it closed the conversation's own menu
+        // AND left the conversation, and closed the Add-emoji form AND navigated out of
+        // Settings — the reader's place gone, from the one key that means "put that away".
+        if (e.defaultPrevented) return;
+        // AND A DIALOG THAT IS UP BUT DID NOT CONSUME THE KEY still owns it. The two rules do
+        // different jobs and neither replaces the other: a native `datetime-local` input eats
+        // Escape for its own calendar, so nothing ever prevents the default and the flag above
+        // says nothing — while a dialog is plainly still what the reader was dismissing. A MENU
+        // is deliberately NOT in that net: one that is animating away after a row was CLICKED
+        // would swallow the next Escape, which is the one that cancels a pending reply.
         if (aModalIsOpen()) return;
         if (replyingTo) {
           controller.cancelReply();
