@@ -281,6 +281,182 @@ the service accepting the property on the messages endpoint — one endpoint for
 channel alike — and one titled post in an announcement channel stays the user's own click, in
 their own app.
 
+## A SEALED chat (the words are encrypted before they reach Teams)
+
+A chat is not sealed by default. The user marks one, sets or generates a passphrase, and from
+then on every message this app POSTS to that conversation carries a ciphertext where its words
+used to be. Each participant who also runs teams-lite adds the same passphrase and reads the
+conversation in the clear; the tenant, Microsoft, and anybody reading the thread in a stock
+client sees one opaque token. `src/seal.rs` holds the envelope and every crypto decision,
+`Store::seal_keyring` and `msg_reader` (src/store.rs) the read, `teams_send::seal_body` the
+write, and `web/src/lib/seal.ts` every decision the page makes.
+
+**THE THREAT IS THE TENANT, NEVER THE MACHINE.** Everything else this app holds is already in the
+clear on this disk — the store keeps every message the user ever synced — so encrypting at rest
+here would be theatre. What is bought is that the words never exist on Microsoft's side at all.
+Three things follow, and they are the whole architecture:
+
+- **The BACKEND is the encryption boundary**, exactly as it is the custom-emoji substitution
+  boundary: the page sends plaintext over the local socket and the backend seals it before the
+  POST. So the page holds no crypto at all, and the agent — which runs HERE — can seal what it
+  posts.
+- **The KEY lives in the local store**, so the passphrase is entered ONCE and covers the phone and
+  the laptop alike, which reach one backend. A per-browser key would be entered per device, which
+  is the opposite of what the feature promises.
+- **The store keeps the CIPHERTEXT and decrypts on READ.** That is what makes "add the passphrase
+  later and every message already received becomes readable" work, and it is why there is nothing
+  to migrate when a key arrives.
+
+**EVERY FACT ABOUT THE CARRIER IS MEASURED**, by `examples/sealed_message_probe.rs` — the sanctioned
+way to try it live, pinned to the sandbox chat, and it removes every message it posts:
+
+    . bin/broker-env.sh && teams_lite_export_broker_bus && \
+      cargo run --example sealed_message_probe
+
+Measured 2026-08-24 on the real tenant, and each number decides something:
+
+- **THE BODY IS A CARRIER.** A base64url token came back BYTE FOR BYTE at 374 characters and at
+  10 923, through Teams' own server-side sanitizer and through `teams_read`'s parse. An AEAD has no
+  partial credit — one byte changed anywhere and the message is unreadable for everybody, for ever
+  — so this is the fact the whole feature rests on.
+- **AN EDIT KEEPS IT**, identically. That is the agent path, whose every streaming frame is a
+  re-seal.
+- **THE CEILING IS 102 400 BYTES**, the service's own `MessageSizeExceeded` on a whole message. base64
+  is four bytes out for three in, so `seal::MAX_SEALED_PLAINTEXT` (64 KiB) bounds a body on this side
+  and `the_ceilings_close` pins the arithmetic — the rule the composer's three picture ceilings hold.
+- **THE SENDER'S MRI ROUND-TRIPS IDENTICALLY**, which is what made it safe to BIND the sender into
+  the envelope (below).
+- **A CUSTOM `properties.tlsealed` IS KEPT** byte for byte, on a SEPARATE and much smaller budget
+  (28 672 bytes). It is the prettier carrier — a stock client would draw no base64 at all — and it is
+  deliberately NOT what ships: it is an undocumented field, and the day the service drops one the
+  message is lost for everybody with nothing to report, while the body is the field the service has
+  never dropped.
+
+**THE BODY CARRIES NO READABLE TEXT: no notice, no words, no name of this app.** One opaque
+base64url token is the whole body. A sentence saying "sealed with teams-lite" would be the one
+readable part of a sealed message — it would tell the tenant which client the user runs and tell
+everybody that this conversation has something to hide. What marks the message is inside the token,
+where nobody can read it: `seal::MAGIC` and a version in its first decoded bytes. The cost is stated
+where the rule is: a colleague on a stock client is shown a token with nothing to explain it, and
+this app's own reader draws a locked row instead.
+
+Fourteen rules hold it, and each is pinned by a test:
+
+- **A conversation is sealed IFF it holds a CURRENT key.** One state rather than two, because
+  "sealed with no key" is a chat nothing can be sent to and "a key but not sealed" is a chat whose
+  reader cannot tell what the next Enter publishes. Turning sealing off clears the flag and KEEPS
+  every key, so the messages already in the thread stay readable — dropping one is `seal_forget`,
+  which is the single act here that nothing takes back.
+- **EVERY read of a body goes through ONE place** (`msg_reader`), which is the rule `SELECT_COLS`
+  holds for a person's name and for its reason: a resolution the CALLER has to remember is one a
+  caller will forget, and the read that forgot this one would hand a page, a notification or an
+  agent a base64 token in place of somebody's words.
+  `every_read_of_a_body_goes_through_the_seal` scans the file so a new read cannot skip it.
+- **The SEAL runs LAST on the way out**, after every check and every property that reads the body.
+  `attach_mentions` requires each mention to have a span in the body and finds none in a ciphertext,
+  so sealing before it would refuse every send in a sealed chat that mentions anybody. Sealing after
+  keeps the check honest — the span really is there, in the plaintext — and keeps the name out of
+  the clear.
+- **It is FAIL-CLOSED at every POST.** A body over the ceiling, a key that cannot be used, or a
+  store this backend cannot read all REFUSE the send with the words still in the composer. Falling
+  through to the plaintext body would post in the clear to a chat the reader believes is sealed,
+  which is the one outcome this whole feature must never have.
+- **The SENDER is bound into the envelope**, because Microsoft routes the message and owns the
+  `from` field. Without it the tenant could re-deliver one colleague's envelope under another
+  colleague's name: the tag verifies, the words open, and the history draws the wrong person saying
+  them — with a padlock beside it, which lends them MORE credibility than an ordinary message.
+  Authorship is the one thing this app never misstates (§ Renaming a person), so it is bound rather
+  than trusted. The conversation is bound too, so a ciphertext cannot be moved to another chat.
+- **A PASSPHRASE IS CASE- AND SEPARATOR-INSENSITIVE**, and that is not a nicety. Reading one off a
+  laptop and typing it into a phone is THE commonest path through this feature, and a phone keyboard
+  capitalizes the first character of a field — so without it `Abcd-efgh-…` is a different key, every
+  message reads as one sealed under a passphrase the reader does not hold, and the app blames them
+  for a passphrase they typed correctly. What it costs is the entropy of the case and the separators
+  of a passphrase the USER invented, which is why a GENERATED one is what the dialog offers first:
+  20 symbols of a lowercase alphabet, a little under 100 bits, with nothing to lose.
+- **The payload is PADDED to 64 bytes.** Otherwise the ciphertext's length IS the plaintext's, to the
+  byte, for ever, in the hands of the party the words are kept from — and over a chat whose answers
+  are "ok", "yes" and "no", the length alone tells them apart with no key at all. It hides the exact
+  length and never the order of magnitude, and saying otherwise would be a claim it does not earn.
+- **The KDF cost is part of the FORMAT.** Argon2id at 64 MiB, t=3, p=4, and the key id comes out of
+  its output — so a build with different parameters derives a DIFFERENT key from the SAME passphrase,
+  and both machines then tell their reader they have not added a passphrase they typed correctly.
+  `the_kdf_cost_is_pinned_to_the_version` makes that impossible to do by accident. `p` is 4 rather
+  than 1 because lanes cost an attacker nothing and buy the defender wall clock back.
+- **A locked message's `content` is EMPTY on the wire, never the token.** The store keeps the
+  ciphertext on disk, so a passphrase added tomorrow still opens it — and no page, sidebar preview or
+  notification is ever handed base64. A sealed body previews as NOTHING for the same reason
+  (`preview_for_message`), and `Store::derived_preview` then fills the gap from a read that has been
+  through `msg_reader`, so the words appear on every sidebar read with nothing to migrate.
+- **FOUR outcomes, not a boolean** (`MessageSeal`): an ordinary message, one this machine OPENED, one
+  sealed under a passphrase it does not hold, one from a newer build, and one whose bytes fail their
+  own authentication. Each is a different sentence and a different next move, and collapsing them
+  into "this message cannot be read" is what makes an encrypted chat feel broken. `opened` is said
+  out loud on purpose: a padlock beside a message the reader CAN read is how they learn the
+  conversation is sealed at all.
+- **THE SHARPEST FAILURE IS TWO PEOPLE WITH TWO PASSPHRASES**, and it is the one thing that would
+  otherwise be silent: each posts messages the other cannot read, both see locked rows, and each
+  believes the other's app is broken. `Store::seal_key_ids_in_use` reads the key ids off the messages
+  the thread ALREADY holds, `seal_set` answers whether the new passphrase opens them, and the
+  composer carries `SEAL_MISMATCH_HINT` while it does not.
+- **A PICTURE is not sealed, and the composer says so.** Its bytes are uploaded to Microsoft's own
+  object store, so nothing in this module can cover them. It is allowed rather than refused — the
+  user's own decision — and a message that looked sealed while carrying a readable screenshot would
+  be a lie, so `SEAL_COMPOSER_HINT` names it before the send.
+- **A @MENTION is allowed, and its span travels SEALED.** `properties.mentions` stays in the clear,
+  which is what makes the notification happen, so Teams learns WHO was mentioned and not what was
+  said. The person is notified and sees a locked message until they have the passphrase.
+- **The AGENT reads in the clear and its REPLY is sealed.** That is the user's own decision: the
+  prompt carries the thread to the model provider, and what the agent POSTS goes through the same
+  seal as anything else — including the streaming edits, about one a second, each with a fresh nonce.
+
+**What a sealed chat does NOT hide**, and each is a deliberate stated limit rather than an oversight:
+WHO said something, WHEN, in WHICH conversation and roughly how long it was (Teams routes the
+message; the metadata is the routing); the ORDER of messages and whether one was DELETED (the tenant
+holds the transport); a REPLAY of the same bytes into the same chat at a later moment — binding the
+clientmessageid would close that, it is measured to come back on a read, and `teams_read` parses none
+off an inbound message yet, so it is a stated gap rather than an unknown one; and WHO ELSE holds the
+passphrase — everybody who has it can read every message ever sealed under it and can seal one
+themselves, so a padlock is a claim about who can READ and never about who wrote. There is no forward
+secrecy, and there cannot be while the requirement is "add the passphrase later and every message
+already received becomes readable": that requirement is the exact negation of it.
+
+**The GATES.** `seal_status` is OPEN — a page has to know whether a chat is sealed in order to draw a
+padlock, and it never needs the secret to do it (the rule `get_settings` holds for a token, and no
+key or passphrase is ever in that answer). `seal_set`, `seal_off`, `seal_forget` and `seal_reveal` are
+`MACHINE_METHODS`: the write token, refused read-only, and the automation hook blocks each against a
+live port. Each one decides something a client that merely found this socket must not decide —
+whether the next message goes out in the clear, under which passphrase, and whether a key that opens
+a thread's history is dropped for good — and `seal_reveal` is there because its ANSWER is the
+passphrase. That reveal exists for one reason: a colleague who joins the conversation next month has
+to be GIVEN something, and a passphrase this app could not show again would force a rotation of the
+whole chat to share it. The passphrase is no wider a secret than the derived key in the same row —
+either one opens every message — which is why it is a press rather than a field of a status payload.
+
+**A PUSH notification hides the words by default, and it still notifies.** The backend holds the key,
+so it could publish them either way, and the payload is encrypted to the device (RFC 8291) — what the
+setting decides is whether the words of a chat the user deliberately sealed appear on a locked screen.
+Silence would be worse than a preview that says nothing, so a sealed message notifies with a neutral
+sentence; `SETTING_SEALED_PUSH_WORDS` (Settings, off by default) asks for the words. A message this
+machine cannot READ lands on that same sentence rather than falling through the empty-body gate, which
+would have made it silent.
+
+**A CHANNEL cannot be sealed yet**, and the reason is the one a channel holds no game of chess: its
+history is drawn as THREADS, so a sealed post there has to answer a different question about where
+the padlock sits. The backend refuses it at the RPC and `sealCanBeUsed` never offers it, so it is a
+stated limit rather than a control that reports a refusal. Notes offers none either: there is nobody
+to share a passphrase with.
+
+`web/mock/server.ts` reproduces the whole flow with no tenant and no crypto, with a sealed fixture
+carrying all four message states at once and a `{kind:"seal"}` hook a spec MUST reset. `cd web && bun
+run preview -- --out /tmp/seal --seal` captures the menu row, the dialog in both themes, a generated
+passphrase, the four states, the composer's hint, the mismatch warning, the armed forget and the
+dialog at a phone's width; `web/e2e/seal.spec.ts` pins every rule the page owns and
+`web/src/lib/seal.test.ts` the pure ones. **What is UNVERIFIED against the tenant is the pairing**:
+the carrier, the ceiling, the edit and the sender's mri are all measured through this crate's own
+functions (above), and what nobody has done is seal a message in one install and open it in a
+colleague's — which needs a second machine running this app, and is the user's own click.
+
 ## Sending a message LATER (the SERVICE holds it, and this app can take it back)
 
 The composer can hand a message to Teams to deliver at a moment the user picked — Slack's

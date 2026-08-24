@@ -361,7 +361,60 @@ export type ChatMessage = {
    *  other message (measured against the tenant), so this is what tells a page that a
    *  frame is tomorrow's message rather than today's — see {@link messageIsHeld}. */
   scheduled_time?: number;
+  /** How this message's body reached the reader, or absent for an ordinary one.
+   *
+   *  A SEALED chat encrypts every body this app posts to it before it reaches Teams
+   *  (see lib/seal.ts and § A sealed chat). The BACKEND holds the key and decrypts on
+   *  every read, so the page normally receives plain words and needs no crypto at all —
+   *  this field is what says a message went through that, and what says when it could
+   *  not:
+   *
+   *  - `"opened"` — it was sealed and this machine read it. `content` holds the words.
+   *    Said out loud on purpose: a padlock beside a message the reader CAN read is how
+   *    they learn the conversation is sealed at all.
+   *  - `"locked"` — sealed under a passphrase this machine does not hold. `content` is
+   *    EMPTY, never the ciphertext; {@link ChatMessage.seal_key_id} says which
+   *    passphrase is missing.
+   *  - `"newer"` — sealed by a newer build of this app than the one reading it.
+   *  - `"damaged"` — recognisably sealed, and the bytes fail their own authentication.
+   *
+   *  Absent from an older backend, and the reader then treats the message as ordinary —
+   *  which is what it was before this existed. */
+  seal?: "opened" | "locked" | "newer" | "damaged" | null;
+  /** WHICH passphrase a locked message needs, as its key id — never a key.
+   *
+   *  It is what lets the app say which passphrase to ask a colleague for, instead of
+   *  "this message cannot be read". Absent unless {@link ChatMessage.seal} is
+   *  `"locked"`. */
+  seal_key_id?: string | null;
 };
+
+/** One conversation this machine holds a seal passphrase for, as `seal_status` answers it.
+ *
+ *  It carries no key and no passphrase, deliberately: the page needs to know WHETHER a chat
+ *  is sealed in order to draw a padlock and a composer hint, and it never needs the secret to
+ *  do it — the rule `get_settings` holds for a token. The passphrase leaves the backend only
+ *  through `seal_reveal`, which is a press the user makes. */
+export type SealedConversation = {
+  conversation: string;
+  /** Whether NEW messages here are sealed, i.e. whether one of these keys is current. A chat
+   *  can hold keys and not be sealing: sealing was turned off, and the keys were KEPT so the
+   *  messages already in the thread still open. */
+  sealing: boolean;
+  /** The key new messages are sealed with, or "" when sealing is off. */
+  current_key_id: string;
+  keys: SealKeyRecord[];
+};
+
+/** One passphrase this machine holds for a conversation, without the passphrase. */
+export type SealKeyRecord = {
+  key_id: string;
+  is_current: boolean;
+  added_ms: number;
+};
+
+/** What `seal_status` answers, and what `seal_set` / `seal_off` / `seal_forget` answer with. */
+export type SealStatus = { conversations: SealedConversation[] };
 
 export type ReplyTo = {
   compose_time: number;
