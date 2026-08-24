@@ -85,7 +85,15 @@ async fn main() -> Result<()> {
     let request = agent::Request {
         backend,
         prompt: prompt.clone(),
-        system_prompt: agent_policy::system_prompt(backend.name, "teams-lite sandbox"),
+        // Who summoned it: this probe IS the user, asking from a command line, so the
+        // account it signed in as is the honest answer. It carries no `<people>` block —
+        // there is no store read here — which is exactly the shape a thread this machine
+        // can name nobody in takes.
+        system_prompt: agent_policy::system_prompt(
+            backend.name,
+            "teams-lite sandbox",
+            &session.self_name,
+        ),
         resume_session: None,
         workspace: agent::default_workspace(),
         // The read-only default, never what the store happens to hold: a probe that

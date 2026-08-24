@@ -1268,6 +1268,33 @@ pub struct PersonOverrideSummary {
     pub updated_at: i64,
 }
 
+/// One person a conversation holds, with the two names KEPT APART: what the USER calls
+/// them, and what TEAMS does. See [`Store::thread_people`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadPerson {
+    pub mri: String,
+    /// The name the USER gave them, or `""` when they never renamed them.
+    pub nickname: String,
+    /// The name TEAMS holds — the newest one this identity has written under anywhere in
+    /// the store — or `""` when this machine never captured one.
+    pub teams_name: String,
+}
+
+impl ThreadPerson {
+    /// The name this app STATES for them, which is every other read's answer: the
+    /// [`nicknamed!`] ladder, spelled over the two halves this row keeps apart.
+    ///
+    /// `""` when neither half is known — somebody the store cannot name at all, which a
+    /// caller drops rather than draws (a row showing an MRI is a row nobody can read).
+    pub fn name(&self) -> &str {
+        if self.nickname.is_empty() {
+            &self.teams_name
+        } else {
+            &self.nickname
+        }
+    }
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -5042,6 +5069,58 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Everybody who has written in a conversation, most recent contributor first, with the
+    /// two names KEPT APART: the nickname the user gave them, and the name Teams holds.
+    ///
+    /// It is [`Store::thread_senders`] with the [`nicknamed!`] ladder taken to pieces, and
+    /// the one caller needs exactly that. The local agent is told who is in the room
+    /// (`agent_policy::people`), and one name cannot say who somebody is: "Bebou" is who
+    /// the user means and the name to answer with, "Lucas Silva" is who the tenant, a
+    /// colleague's own message and a merge request call the same person. Every other read
+    /// collapses the two on purpose, because a surface draws one name — this is the one
+    /// place both halves are the answer.
+    ///
+    /// Only a PERSON (`8:…`), which is the rule [`Store::named_people`] already states and
+    /// the ladder's own third rung holds: a thread activity's author is the THREAD, so
+    /// grouping on a non-person MRI would lend the newest of those rows' names to all the
+    /// rest. A Teams app that posts is left out for the same reason it is left out of the
+    /// mention list — it is not one of the people in the room.
+    ///
+    /// Local and network-free, like [`Store::thread_senders`]: a member who has never
+    /// written is NOT here, because nothing this store holds names them and no line of the
+    /// transcript is theirs. Whoever can be @mentioned is a separate, network read
+    /// (`thread_mentionable_people` in src/bin/server.rs).
+    pub fn thread_people(&self, conversation_id: &str, limit: i64) -> Result<Vec<ThreadPerson>> {
+        // Both names are resolved OUTSIDE the aggregate, on the grouping key, so neither
+        // can depend on which row `MAX(seq)` picked — the rule `thread_senders` holds. The
+        // Teams half is the newest NAMED row for that identity rather than the grouped
+        // row's own `sender`, because a frame carries a name in `imdisplayname` and in
+        // nothing else and plenty arrive without one (see [`nicknamed!`]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT messages.sender_mri,
+                    COALESCE((SELECT o.display_name FROM person_overrides o
+                              WHERE o.mri = messages.sender_mri), ''),
+                    COALESCE((SELECT named.sender FROM messages named
+                              WHERE named.sender_mri = messages.sender_mri
+                                AND named.sender <> ''
+                              ORDER BY named.seq DESC LIMIT 1), ''),
+                    MAX(messages.seq) AS last_seq
+             FROM messages
+             WHERE messages.conversation_id = ?1 AND messages.sender_mri LIKE '8:%'
+             GROUP BY messages.sender_mri
+             ORDER BY last_seq DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![conversation_id, limit], |r| {
+            Ok(ThreadPerson {
+                mri: r.get(0)?,
+                nickname: r.get(1)?,
+                teams_name: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Everybody Teams has NAMED to this machine: one `(mri, name)` pair per person and per
     /// name they have written under, with no override applied.
     ///
@@ -7196,6 +7275,61 @@ mod tests {
             s.teams_display_name_for_mri("8:orgid:rob").unwrap().as_deref(),
             Some("Robert SMITH")
         );
+    }
+
+    /// The one read that hands BOTH names over, because the local agent is the one caller
+    /// for which a nickname alone is not an answer: it has to know that "Bob" is the person
+    /// a colleague's message calls "Robert SMITH".
+    #[test]
+    fn thread_people_keeps_the_nickname_and_teams_own_name_apart() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_conversation_full(&upd("grp", "Team chat", 500, ConversationKind::Group)).unwrap();
+        s.insert_message(&msg_from("grp", 1, "Robert SMITH", "8:orgid:rob")).unwrap();
+        s.insert_message(&msg_from("grp", 2, "Grace HOPPER", "8:orgid:grace")).unwrap();
+        // Nameless, from somebody the store knows perfectly well off another row.
+        s.insert_message(&msg_from("grp", 3, "", "8:orgid:rob")).unwrap();
+        // Not a person: a thread activity's author is the THREAD, and it must never be
+        // listed as one of the people in the room.
+        s.insert_message(&msg_from("grp", 4, "Meeting", "19:thread@thread.v2")).unwrap();
+        s.set_person_name("8:orgid:rob", Some("Bob"), 1_000).unwrap();
+
+        let people = s.thread_people("grp", 10).unwrap();
+        assert_eq!(
+            people,
+            vec![
+                // Most recent contributor first, and BOTH names — the row that carried no
+                // name at all is still the person the store can name.
+                ThreadPerson {
+                    mri: "8:orgid:rob".into(),
+                    nickname: "Bob".into(),
+                    teams_name: "Robert SMITH".into(),
+                },
+                ThreadPerson {
+                    mri: "8:orgid:grace".into(),
+                    nickname: String::new(),
+                    teams_name: "Grace HOPPER".into(),
+                },
+            ]
+        );
+        // And the collapsed answer is the one every other read gives.
+        assert_eq!(people[0].name(), "Bob");
+        assert_eq!(people[1].name(), "Grace HOPPER");
+        assert_eq!(
+            s.display_name_for_mri("8:orgid:rob").unwrap().as_deref(),
+            Some(people[0].name()),
+        );
+
+        // Somebody this machine cannot name at all is listed with nothing, which the caller
+        // drops: a line showing an MRI is a line nobody can read.
+        s.insert_message(&msg_from("grp", 5, "", "8:orgid:stranger")).unwrap();
+        let stranger = &s.thread_people("grp", 10).unwrap()[0];
+        assert_eq!(stranger.mri, "8:orgid:stranger");
+        assert_eq!(stranger.name(), "");
+
+        // The bound is the caller's, and it cuts the OLDEST contributors.
+        let newest = s.thread_people("grp", 1).unwrap();
+        assert_eq!(newest.len(), 1);
+        assert_eq!(newest[0].mri, "8:orgid:stranger");
     }
 
     /// A message can arrive with an identity and NO name — `imdisplayname` is the only

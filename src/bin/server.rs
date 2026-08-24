@@ -8977,6 +8977,32 @@ fn mention_candidates(
     (people, unnamed)
 }
 
+/// Put the name the USER gave somebody over whatever Teams called them.
+///
+/// It runs LAST, after the roster and after the directory lookup, because both of those are
+/// a Teams-sourced name — and the directory pass OVERWRITES, so an override applied before
+/// it would be undone by the very lookup that names a silent member.
+///
+/// [`Store::thread_senders`] already resolved this for whoever has WRITTEN in the thread
+/// (the `nicknamed!` ladder), and this is the half that was missing: a colleague the user
+/// renamed who has never written here was offered under Teams' own name, in the composer's
+/// own "@" list and in what the local agent is told it may name. That is the one place
+/// § Renaming a person's promise — a rename reaches every name this app STATES — was not
+/// kept, and the mock has always answered the other way (`members` in web/mock/server.ts),
+/// which is the shape this app is reviewed against.
+///
+/// Pure, so the rule is unit-tested without a tenant.
+fn rename_mentionables(
+    people: &mut [teams_members::ThreadMember],
+    renamed: &std::collections::HashMap<String, String>,
+) {
+    for person in people.iter_mut() {
+        if let Some(name) = renamed.get(&person.mri) {
+            person.display_name = name.clone();
+        }
+    }
+}
+
 /// Everybody a message in one conversation may @mention, named, most relevant first.
 ///
 /// A pure READ: the roster GET (src/teams_members.rs) and the short-profile lookup that
@@ -9011,10 +9037,19 @@ async fn thread_mentionable_people(
         .await
         .unwrap_or_default();
 
-    let (mut people, unnamed) = {
+    let (mut people, unnamed, renamed) = {
         let store = ctx.store()?;
         let senders = store.thread_senders(conversation_id, MAX_MENTION_MEMBERS as i64)?;
-        mention_candidates(&roster, &senders, &self_mri)
+        // What the USER calls these people, read once: `person_overrides` is EMPTY unless
+        // they have renamed somebody, so this costs a scan of nothing on most machines.
+        let renamed: std::collections::HashMap<String, String> = store
+            .person_overrides()?
+            .into_iter()
+            .filter(|person| !person.display_name.trim().is_empty())
+            .map(|person| (person.mri, person.display_name))
+            .collect();
+        let (people, unnamed) = mention_candidates(&roster, &senders, &self_mri);
+        (people, unnamed, renamed)
     };
     if !unnamed.is_empty() {
         let session = ctx.session().await?;
@@ -9030,6 +9065,7 @@ async fn thread_mentionable_people(
             }
         }
     }
+    rename_mentionables(&mut people, &renamed);
     // Somebody we cannot name is somebody the user cannot pick out of a list, and
     // somebody an answer cannot write either, so they are left out rather than offered
     // as an MRI.
@@ -10254,6 +10290,26 @@ fn agent_request(
         .messages_before(&command.conversation_id, i64::MAX, 60)
         .unwrap_or_default();
     let transcript = agent_policy::transcript(&history, &command.message_id);
+    // WHO is in the room, with the nickname the user gave each of them and Teams' own name
+    // beside it — the names the transcript's own lines open with. Store-only and
+    // network-free, so it costs the trigger path nothing: whoever can be @mentioned is a
+    // separate read, made once the run starts (`thread_mentionable_people`).
+    let people = agent_policy::people(
+        &store
+            .thread_people(&command.conversation_id, agent_policy::PEOPLE_LISTED as i64)
+            .unwrap_or_default(),
+        &command.sender_mri,
+    );
+    // And who ASKED, through the one ladder — so the agent is told the name the user's own
+    // app uses for them, rather than being the only person in the room it cannot name. The
+    // trigger's own row already carries it (every read resolves the name), and the identity
+    // answers first for the one path where it does not: a frame the store could not re-read.
+    let asked_by = store
+        .display_name_for_mri(&command.sender_mri)
+        .ok()
+        .flatten()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| command.sender.clone());
     let title = store.conversation_context(&command.conversation_id, self_mri).unwrap_or_default();
     let workspace = store
         .get_setting(agent::SETTING_WORKSPACE)?
@@ -10271,10 +10327,11 @@ fn agent_request(
         // `/review` is still the first thing it reads. It appears in no message body.
         prompt: command.lead_prompt(&agent_policy::prompt_with_context(
             &command.prompt,
+            &people,
             &transcript,
             command.answering.as_deref(),
         )),
-        system_prompt: agent_policy::system_prompt(command.identity(), &title),
+        system_prompt: agent_policy::system_prompt(command.identity(), &title, &asked_by),
         resume_session: store
             .get_setting(&agent_session_key(
                 &command.conversation_id,
@@ -14907,6 +14964,52 @@ mod tests {
         assert_eq!(message_json(&broken, "Alice", "8:me", None)["mentions"], json!([]));
     }
 
+    /// The @mention list: one list from two sources, us left out, and the name the USER gave
+    /// somebody over whatever Teams called them.
+    ///
+    /// That last rule is the one this list used to break. `thread_senders` resolves a rename
+    /// for whoever has WRITTEN in the thread, so a renamed colleague was offered under their
+    /// nickname there and under Teams' own name when they had only ever been in the roster —
+    /// two answers to "what is this person called" inside one menu.
+    #[test]
+    fn the_mention_list_merges_both_sources_and_a_rename_wins_over_them() {
+        let member = |mri: &str, name: &str| teams_members::ThreadMember {
+            mri: mri.to_string(),
+            display_name: name.to_string(),
+        };
+        let roster = vec![
+            member("8:orgid:me", "Théophile WALLEZ"),
+            member("8:orgid:lucas", "Lucas Silva"),
+            // In the chat, never seen writing in it: the roster is all we know of them.
+            member("8:orgid:rob", "Robert SMITH"),
+            // Not a person, so never mentionable at all.
+            member("28:app", "Jira"),
+        ];
+        let senders = vec![("8:orgid:lucas".to_string(), "Bebou".to_string())];
+        let (mut people, unnamed) = mention_candidates(&roster, &senders, "8:orgid:me");
+
+        // Recent contributors first, we are left out, and the app is not a person.
+        assert_eq!(
+            people.iter().map(|p| p.display_name.as_str()).collect::<Vec<_>>(),
+            vec!["Bebou", "Robert SMITH"],
+        );
+        assert!(unnamed.is_empty(), "everybody here is named by one source or the other");
+
+        // A rename reaches BOTH of them — the one the ladder already renamed, and the one
+        // only the roster knew.
+        let renamed = [
+            ("8:orgid:lucas".to_string(), "Bebou".to_string()),
+            ("8:orgid:rob".to_string(), "Bob".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        rename_mentionables(&mut people, &renamed);
+        assert_eq!(
+            people.iter().map(|p| p.display_name.as_str()).collect::<Vec<_>>(),
+            vec!["Bebou", "Bob"],
+        );
+    }
+
     /// An EDIT must carry the post's TITLE, and read it from THIS machine's store.
     ///
     /// Measured against the tenant (2026-08-23, `examples/channel_subject_probe.rs`): the
@@ -16001,6 +16104,77 @@ mod lifecycle_tests {
         assert!(plain.prompt.starts_with("coucou"), "{}", plain.prompt);
         assert_eq!(plain.model.as_deref(), Some("sonnet"));
         assert!(plain.system_prompt.contains("You are claude"), "{}", plain.system_prompt);
+    }
+
+    /// WHO the run is answering, and who it is answering AMONG — the whole wiring between
+    /// the store's own names and the prompt. Each half is a way for the agent to be the
+    /// only participant in the room who cannot name anybody.
+    #[test]
+    fn a_run_is_told_who_is_in_the_room_and_who_asked() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_conversation("19:c@thread.v2", "Team chat", 0).unwrap();
+        let wrote = |seq: i64, sender: &str, mri: &str, content: &str| {
+            store
+                .insert_message(&Message {
+                    seal: Default::default(),
+                    id: format!("m{seq}"),
+                    conversation_id: "19:c@thread.v2".into(),
+                    seq,
+                    compose_time: seq,
+                    sender: sender.into(),
+                    sender_mri: mri.into(),
+                    message_type: "RichText/Html".into(),
+                    content: content.into(),
+                    attachments: "[]".into(),
+                    reactions: "[]".into(),
+                    system_event: String::new(),
+                    thread_root_id: String::new(),
+                    thread_subject: String::new(),
+                    deleted: false,
+                    scheduled_time: 0,
+                    mentions: "[]".into(),
+                })
+                .unwrap();
+        };
+        wrote(1, "Lucas Silva", "8:orgid:lucas", "<p>the deploy is stuck</p>");
+        wrote(2, "Théophile WALLEZ", "8:orgid:me", "<p>@claude who broke it?</p>");
+        // The user calls one of them something else, which is the name every surface of
+        // this app already draws for them.
+        store.set_person_name("8:orgid:lucas", Some("Bebou"), 1_000).unwrap();
+
+        let command = agent_policy::Command {
+            conversation_id: "19:c@thread.v2".into(),
+            // The trigger is `m2`, so it is dropped from the transcript — it is the request.
+            message_id: "m2".into(),
+            prompt: "who broke it?".into(),
+            answering: None,
+            sender: "Théophile WALLEZ".into(),
+            sender_mri: "8:orgid:me".into(),
+            compose_time: 2,
+            backend: &agent_policy::BACKENDS[0],
+            persona: None,
+        };
+        let asked = agent_request(&store, &command, "8:orgid:me").unwrap();
+
+        // The room: the nickname the user gave somebody, with Teams' own name beside it so
+        // the agent can tell that a colleague's message means the same person.
+        assert!(asked.prompt.contains("Bebou (Teams name: Lucas Silva)"), "{}", asked.prompt);
+        // And the person who asked is marked, since the trigger itself is not in the
+        // transcript to say so.
+        assert!(
+            asked.prompt.contains("Théophile WALLEZ — they sent the request below"),
+            "{}",
+            asked.prompt
+        );
+        // The transcript's own lines carry the SAME name, which is what makes one readable
+        // with the other.
+        assert!(asked.prompt.contains("Bebou: the deploy is stuck"), "{}", asked.prompt);
+        // …and the system prompt names them, so the agent can answer the person by name.
+        assert!(
+            asked.system_prompt.contains("under the account of Théophile WALLEZ, who summoned you"),
+            "{}",
+            asked.system_prompt
+        );
     }
 
     #[test]

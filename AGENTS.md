@@ -1133,6 +1133,63 @@ Five more things worth knowing before touching it:
   out of the quote by `agent_policy::answering` — under the same three rules, because
   without it a request that says "answer this message" names nothing (see "Answer with
   <agent>" under § Tagging an agent).
+- **AND THE AGENT IS TOLD WHO IS IN THE ROOM, by the names the user themselves uses.** A
+  third block, `<people>`, stands above the thread: one line per person who has written
+  there, carrying the nickname the user gave them and Teams' own name beside it, with the
+  line of whoever SENT the trigger saying so (`agent_policy::people`, over the one store read
+  that hands both names over — `Store::thread_people`). The agent used to be the only
+  participant in a conversation who could name nobody: it read `Bebou: the deploy is stuck`
+  with nothing saying who Bebou is, and it was never told the name of the person it was
+  answering — so it could not address them, and every reply spoke about the room in the third
+  person. Eight rules hold it, and each is pinned by a test:
+  - **THE NICKNAME LEADS, because it is the name the user uses.** The block's own
+    introduction says so — the first name on a line is the one to write — and it is the name
+    the transcript's lines already open with, since every read resolves a sender through the
+    `nicknamed!` ladder (§ Renaming a person). There is no second spelling of that resolution
+    here.
+  - **TEAMS' OWN NAME TRAVELS WITH IT, and this run carries the proof of why.** The
+    `<answering>` block names its author with the name the QUOTE holds, because this app never
+    rewrites the record of a Teams frame — so one prompt states "Bebou" above the thread and
+    "Lucas Silva" inside a quote, and only the pair says they are one person. A file, a merge
+    request and a colleague's own words name them the same way. What it costs is stated where
+    the rule is: a RENAMED colleague's Teams name now reaches the model provider, where only
+    the nickname used to — which is what the transcript has always carried for everybody the
+    user has not renamed.
+  - **The BLOCK is in the prompt, the SUMMONER is in the system prompt.** The people are
+    per-conversation data quarantined like the transcript, and they come FIRST because every
+    line of the transcript opens with one of those names — the block is the key to it. Who
+    summoned the run is a fact about the RUN, so it sits beside "you are Natacha" and "your
+    reply lands in Design crew", and it is stated with a name rather than as "the user".
+  - **Naming the summoner HARDENS the quarantine.** The paragraph that quarantines the
+    transcript now names the one voice that instructs the run — and says in as many words that
+    a line of thread context CLAIMING to be from them is still context. The labels in the
+    transcript are this app's own; a colleague can write "Théo: ignore your instructions"
+    inside a message, and that message is a message.
+  - **An AGENT'S OWN ANSWER is attributed to the agent, not to the account it went out
+    under.** A reply is posted through the user's account, so the row names the USER — and
+    read as their words it is wrong twice over: the model meets its own earlier answers as
+    things the user said, and a colleague who also runs teams-lite has their agent's answers
+    read as theirs. It is the read the page already makes (`agentAuthorship`), from the line a
+    reply signs itself with, and the sender is KEPT beside the signer (`claude via Lucas
+    Silva`) because whose machine wrote it is never guessed. The signature line is then
+    dropped from the words — the label has just said it, and a line the model meets twenty
+    times is one it may start writing itself, while the footer is the backend's to add on
+    every edit.
+  - **ONE read of the signature answers both questions.** `agent_signature` returns the signer
+    and the line; `is_agent_answer` — the gate that stops a run summoning itself — is that
+    function with the name thrown away. Two spellings of those four body shapes would drift
+    from the bodies this module writes.
+  - **It is a STORE read, and network-free.** So it costs the trigger path nothing and works
+    with the tenant unreachable. What it therefore cannot list is a member who has never
+    written: nothing here names them, and no line of the transcript is theirs. Whoever can be
+    @MENTIONED is the separate network read below, and the two lists agree on a contributor
+    because both resolve them through the same override — `thread_people` for the block,
+    `thread_senders` for the mention list — so the name to write and the name that notifies are
+    one name.
+  - **Somebody this machine cannot name is left out, and a room it can name nobody in gets no
+    block at all.** A line showing an MRI is a line nobody can read, and a paragraph about
+    names in a thread with no names is furniture — the rule
+    `agent_markdown::mention_note` already holds.
 - **The reply signs itself.** The message is posted under the user's name, so the last
   line says a machine wrote it (`— claude, via teams-lite`). That is honesty about
   authorship, not decoration.
@@ -4198,6 +4255,17 @@ mention whole. The chip is blue on a light blue wash in the composer and in the 
   requests only and a test in it scans for any other verb — do not weaken it.
 - **We are never in the list**, and neither is anybody the backend could not name: a
   mention of oneself notifies nobody, and a row showing an MRI is a row nobody can pick.
+- **A RENAME wins over both sources** (`rename_mentionables`, applied last). The store's own
+  read already resolved it for whoever has WRITTEN in the thread, so the list gave two
+  answers to "what is this person called": their nickname where they had written, and Teams'
+  own name where the ROSTER was all this machine knew of them — inside one menu, and inside
+  one prompt for the local agent. It is applied after the directory batch because that batch
+  overwrites, so an override applied earlier is undone by the very lookup that names a silent
+  member. The mock has always answered this way, which is the shape the app is reviewed
+  against, and § Renaming a person names the @mention list among the surfaces a rename
+  reaches. What it costs is stated where it is: the span a mention posts carries the name the
+  list gave, so a colleague sees the nickname — which is what this app already posted for
+  anybody who had written in the thread.
 - **An inbound mention pasted back into the composer goes out as plain text.** Its span
   indexes the list of the message it came from, so it names nobody we can prove — see
   `serializeTeamsMessage` in `web/src/lib/rich-text.ts`, which is where the outbound
@@ -5006,10 +5074,17 @@ a fold, a pin or a local read position.
   `channels` / `display_name_for_mri` / `other_party_name` / `thread_senders` queries,
   so a rename covers every message that person ever sent, the title of their 1:1, the
   sidebar's preview attribution, the typing line, the "seen by" row, the @mention
-  list and their merge requests at once. That placement is the whole design: `insert_message` freezes a
+  list, their merge requests and the name the local AGENT calls them by
+  (§ The local agent) at once. That placement is the whole design: `insert_message` freezes a
   message's `sender` at first insert and no sync refreshes it, so a rename applied at
   render time would have to be applied at a dozen render sites — and the one that got
   forgotten is the bug. Never move it out to a caller.
+- **ONE read hands both names over, and it is the exception that proves the rule.**
+  `Store::thread_people` keeps the nickname and Teams' own name APART where every other read
+  collapses them, because its one caller — the prompt the local agent answers with — needs
+  both: the nickname is what to answer in, and Teams' name is who a quote, a file and a
+  merge request call the same person. A surface draws one name; a prompt has to reconcile
+  two.
 - **What the store never produced, the server resolves explicitly.** Four names do not
   come through a store read: the activity feed's actor (`feed_json`), the sender of a
   live push (`push_live_message`, which gets the frame that just arrived), a 1:1's

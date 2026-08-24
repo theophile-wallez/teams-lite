@@ -69,7 +69,10 @@ pub struct Mentionable {
 const MENTION_NAME_CHARS: usize = 128;
 
 /// How many names the note in the system prompt lists. See [`mention_note`].
-const MENTION_NOTE_NAMES: usize = 40;
+///
+/// It bounds the `<people>` block of the same prompt too — `agent_policy::PEOPLE_LISTED` is
+/// this constant, not a copy of it — because the two are read side by side.
+pub(crate) const MENTION_NOTE_NAMES: usize = 40;
 
 /// Render an answer as the HTML body of a Teams message, mentioning nobody.
 pub fn to_html(markdown: &str) -> String {
