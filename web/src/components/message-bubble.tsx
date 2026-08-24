@@ -13,6 +13,7 @@ import {
   MoreHorizontalIcon,
   PencilIcon,
   SmilePlusIcon,
+  SquareLock02Icon,
 } from "@hugeicons/core-free-icons";
 import {
   bodyFormat,
@@ -50,6 +51,7 @@ import {
   parseMessageBody,
 } from "~/lib/rich-text";
 import { projectNamedIn } from "~/lib/tracker-ref";
+import { sealIsLocked, sealLockedAction, sealLockedMessage, sealStateOf } from "~/lib/seal";
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun, type AgentTranscript } from "~/lib/agent-run";
 import { agentTagsInMessage } from "~/lib/agent-tag";
@@ -86,6 +88,7 @@ import { useAppState, useController } from "./controller-context";
 import { useMessageGestures } from "./use-message-gestures";
 import { bodyIsOnlyEmoji, extractableCustomEmoji } from "~/lib/custom-emoji";
 import { AddEmojiDialog } from "./add-emoji-dialog";
+import { SealDialog } from "./seal-dialog";
 
 // emoji-mart and its dataset are ~1.5 MB and only needed once someone reaches
 // past the six quick reactions, so the full picker is a lazy chunk.
@@ -99,6 +102,16 @@ const EmojiPicker = lazy(() => import("./emoji-picker"));
  *  than crowding whatever follows: the next message, or this message's "seen by"
  *  line. */
 const REACTION_OVERHANG = "mb-7";
+
+/** What the padlock beside a message this app OPENED says, in its tooltip and to a screen
+ *  reader (see lib/seal.ts and § A SEALED chat).
+ *
+ *  It is drawn per MESSAGE and not once per conversation, which is the opposite of the rule
+ *  the time mark and the sender name follow — and it is not a repetition, because a sealed
+ *  chat holds both kinds of row at once: everything written before it was sealed is in the
+ *  clear on Microsoft's side and carries no mark. Which of the two a row is, is exactly the
+ *  reader's question, and this quiet mark is the only place the app answers it. */
+const SEAL_MARK_LABEL = "Encrypted before it reached Teams";
 
 /** Resolved enrichment for a set of links, keyed by URL: `undefined` while a
  *  lookup is in flight, `null` when the link is not an enrichable integration,
@@ -216,6 +229,10 @@ function useEnrichedLinks(urls: string[]): LinkResults {
  * GitLab links that resolve to a rich integration are shown as a preview card
  * and removed from the body text (never both). When the message is *only* such a
  * link, the bubble chrome is dropped entirely and just the card is shown.
+ *
+ * A message whose body was SEALED and could not be opened here draws none of that: it is one
+ * withheld line saying why, the way a deleted message is (see {@link SealedContent}), and one
+ * this app DID open carries a quiet padlock at the foot of its words instead.
  *
  * Likewise, a message that is *only* an image (inline or an image attachment,
  * with no text) drops the bubble chrome and instead frames the picture on a soft
@@ -504,6 +521,20 @@ function MessageBubbleImpl(props: {
   const isDeleted = props.message.deleted === true;
   const revealable = isDeleted && (bodyHasContent || hasAttachments);
 
+  // How this body reached the reader (see lib/seal.ts). The BACKEND is the encryption
+  // boundary, so what arrives here is either the words or the fact that they could not be
+  // had — never a ciphertext for this component to make sense of.
+  const sealState = sealStateOf(props.message);
+  // A body this app could not read. It renders the locked row below INSTEAD of its content,
+  // the shape a deletion already takes: the row keeps its place in the history and says why
+  // its words are not in it.
+  const isLocked = sealIsLocked(props.message);
+  // The one thing that would help, where anything would (`sealLockedAction`): a missing
+  // passphrase is something the reader can ask a colleague for, while damaged bytes and a
+  // build too old to read the envelope are not.
+  const sealAction = sealLockedAction(props.message);
+  const [sealDialogOpen, setSealDialogOpen] = useState(false);
+
   // A message with NO visible payload at all: an empty body, no attachment, no
   // quote, no link card — and not a deletion, which has its own placeholder. Such a
   // message is either a Teams payload this client cannot show (a voice memo, a form
@@ -515,8 +546,13 @@ function MessageBubbleImpl(props: {
   // An agent's reply is never unshowable, even when its body is empty: the placeholder
   // the backend posts the instant a trigger lands ("claude is thinking…") IS an empty
   // body, and it is the most informative thing on screen at that moment.
+  // A locked message is none of those either, and it is checked here rather than left to
+  // luck: its `content` is EMPTY on the wire, so read as an ordinary message it matches every
+  // clause below and the bubble would say "Unsupported message" — blaming this client for a
+  // payload it understands perfectly and a passphrase it simply does not hold.
   const isUnsupported =
     !isDeleted &&
+    !isLocked &&
     !props.editing &&
     !agent &&
     !bodyHasContent &&
@@ -524,11 +560,14 @@ function MessageBubbleImpl(props: {
     !parsed.quote &&
     cards.length === 0;
 
-  // A message nobody can act on: gone (deleted) or unshowable (unsupported). There
-  // is nothing to reply to, copy, edit or react to, so the actions menu does not
-  // appear on it. Reactions already on it still show — they are information the
-  // reader would otherwise lose.
-  const inert = isDeleted || isUnsupported;
+  // A message nobody can act on: gone (deleted), unshowable (unsupported), or sealed under a
+  // passphrase this machine does not hold. There is nothing to reply to, copy, edit or react
+  // to — every one of those acts on a body, and a locked row has none here — so the actions
+  // menu, the swipe-to-reply gesture and the hold that opens the menu are all off it.
+  // Reactions already on an unsupported message still show: they are information the reader
+  // would otherwise lose. A LOCKED one follows the deleted row instead and shows none (see
+  // `chipsShown`).
+  const inert = isDeleted || isUnsupported || isLocked;
 
   // Media- and link-only messages render without the standard rounded, colored
   // bubble — an image gets the atelier mat, a recording its video card, a link or
@@ -536,8 +575,16 @@ function MessageBubbleImpl(props: {
   // placeholder is the body. An agent's reply keeps one too: its mark and its status
   // line belong to a bubble, and an answer that happens to be one link is still an
   // answer.
+  // A locked message keeps a bubble for the reason a deleted one does: its placeholder IS the
+  // body. The clause is not decoration — a picture's BYTES are never sealed (§ A SEALED chat),
+  // so a colleague's sealed message can arrive with a readable attachment beside a body this
+  // machine cannot open, and `imageOnly` would then drop the chrome around a row whose whole
+  // content is one sentence.
   const bare =
-    !isDeleted && !agent && (linkOnly || imageOnly || recordingOnly || cardOnly || emojiOnly);
+    !isDeleted &&
+    !isLocked &&
+    !agent &&
+    (linkOnly || imageOnly || recordingOnly || cardOnly || emojiOnly);
 
   // An answer is being written into this message. Two ways to know, and both count:
   // this app is watching the run (`agentRun`), or the message itself says its answer is
@@ -569,8 +616,10 @@ function MessageBubbleImpl(props: {
   const reactions = props.message.reactions ?? [];
   const myReactionKey = reactions.find((r) => r.mine)?.key;
   // Chips only show on a live, non-edited message, so only then is there an
-  // overhang to reserve room for.
-  const chipsShown = reactions.length > 0 && !props.editing && !isDeleted;
+  // overhang to reserve room for. A LOCKED row is off that list with the deleted one: a chip
+  // is a control that toggles a reaction on the message under it, and this row is a statement
+  // about a body that is not here — the words it is about cannot even be read.
+  const chipsShown = reactions.length > 0 && !props.editing && !isDeleted && !isLocked;
 
   // The full emoji picker (all ~1550 Teams reactions), anchored to the bubble so
   // it survives the ⋯ menu it was opened from — that menu closes on select, and a
@@ -884,6 +933,10 @@ function MessageBubbleImpl(props: {
         data-card-only={cardOnly ? "true" : undefined}
         data-deleted={isDeleted ? "true" : undefined}
         data-unsupported={isUnsupported ? "true" : undefined}
+        // The seal state itself rather than a boolean, because the four are four different
+        // rows: a capture and a spec have to be able to tell an opened one from each of the
+        // three that are withheld (see lib/seal.ts).
+        data-seal={sealState ?? undefined}
         style={{ x: messageGestures.x, touchAction: "pan-y" }}
         {...messageGestures.handlers}
         className={cn(
@@ -911,10 +964,11 @@ function MessageBubbleImpl(props: {
           !bare &&
             cn(
               "max-w-[76%] rounded-2xl px-3.5 py-2",
-              // A deleted message — and one with nothing to show — drops the accent
+              // A deleted message — one with nothing to show, and one whose words are
+              // sealed under a passphrase this machine does not hold — drops the accent
               // fill for a muted, dashed "ghost" bubble (the same on both sides) so
               // it reads as absent rather than as a real message.
-              isDeleted || isUnsupported
+              isDeleted || isUnsupported || isLocked
                 ? "border border-dashed border-border bg-transparent text-text-dim shadow-none"
                 : mine
                 ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
@@ -1021,6 +1075,33 @@ function MessageBubbleImpl(props: {
           <DeletedContent mine={mine} revealable={revealable}>
             {mediaBody}
           </DeletedContent>
+        ) : isLocked ? (
+          // A body this app could not read: the locked row, and nothing else from the
+          // message. It stands BEFORE every branch below because none of them can be asked
+          // about a body that is not here — an agent's reply is recognised from the line it
+          // signs itself with, a link card from the links in the words, an emoji-only message
+          // from the emoji: all of them read a body, and this one has none to read.
+          <>
+            <SealedContent
+              sentence={sealLockedMessage(props.message)}
+              onAddPassphrase={
+                sealAction === "add-passphrase" ? () => setSealDialogOpen(true) : undefined
+              }
+            />
+            {/* The same dialog the conversation's own menu opens, mounted beside the press
+                that asks for it: this row knows the conversation the passphrase belongs to,
+                and a bubble cannot reach one the pane holds. It is mounted only on the rows
+                that OFFER it — in a chat whose colleague rotated their passphrase that is
+                every row on screen, and a closed dialog portals nothing, so the per-row shape
+                costs a context each and no markup. */}
+            {sealAction === "add-passphrase" ? (
+              <SealDialog
+                conversationId={props.message.conversation_id}
+                open={sealDialogOpen}
+                onOpenChange={setSealDialogOpen}
+              />
+            ) : null}
+          </>
         ) : (
           <>
             {agent && props.agentRun ? (
@@ -1088,6 +1169,36 @@ function MessageBubbleImpl(props: {
                   ),
                 )}
               </div>
+            ) : null}
+
+            {/* This message went through the seal and this machine opened it: a padlock at
+                the foot of what it says, on the trailing edge where every client puts a
+                message's own metadata. It is deliberately quiet — 12px of the bubble's own
+                ink at 60% — because it is a fact about the message and not a badge on it,
+                and it is said HERE rather than once above the thread because a sealed chat
+                also holds the rows written before it was sealed, which carry no mark.
+
+                It rides with the CONTENT rather than with the bubble, so a message that is
+                only a picture, or only a card, still says it — those drop the bubble chrome
+                and would otherwise be the one kind of sealed message that says nothing. */}
+            {sealState === "opened" ? (
+              <span
+                data-testid="seal-mark"
+                role="img"
+                // A `title` on an `<svg>` is not a tooltip — that needs a `<title>` child —
+                // so the span carries both the tooltip and the accessible name, and the
+                // glyph inside it is hidden.
+                title={SEAL_MARK_LABEL}
+                aria-label={SEAL_MARK_LABEL}
+                className="mt-0.5 flex justify-end opacity-60"
+              >
+                <HugeiconsIcon
+                  icon={SquareLock02Icon}
+                  className="size-3"
+                  strokeWidth={1.8}
+                  aria-hidden
+                />
+              </span>
             ) : null}
 
             {chipsShown ? (
@@ -1599,6 +1710,51 @@ function UnsupportedContent() {
         aria-hidden
       />
       <span className="italic">Unsupported message</span>
+    </div>
+  );
+}
+
+/**
+ * The body of a message this app could not read: one muted line in the ghost bubble a
+ * deletion gets, saying why the words are not there — and, where that is a passphrase this
+ * machine does not hold, the one press that mends it.
+ *
+ * It is {@link DeletedContent}'s shape on purpose. Both are a row whose body is withheld, so
+ * a reader who has learned what one means has learned the other, and both keep their place in
+ * the history rather than leaving a hole the next message replies into. What it deliberately
+ * does NOT have is a Reveal: a deletion may still be cached in this store, while a locked
+ * message is a ciphertext nothing here can turn into words, and an affordance that could only
+ * ever fail is worse than none. The words come back the moment the passphrase does — which is
+ * what the press below is for, not a reveal.
+ *
+ * The sentence comes from `sealLockedMessage` and never from here: a missing passphrase, a
+ * build too old to read the envelope and damaged bytes are three different next moves, and one
+ * sentence for all three is what makes an encrypted chat feel broken.
+ */
+function SealedContent(props: { sentence: string; onAddPassphrase?: () => void }) {
+  return (
+    <div data-testid="sealed-message" className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <HugeiconsIcon
+        icon={SquareLock02Icon}
+        className="size-3.5 shrink-0"
+        strokeWidth={1.6}
+        aria-hidden
+      />
+      <span className="italic">{props.sentence}</span>
+      {props.onAddPassphrase ? (
+        <button
+          type="button"
+          data-testid="sealed-add-passphrase"
+          onClick={props.onAddPassphrase}
+          // The Reveal affordance's own shape, at this app's touch floor: a locked row is read
+          // from a phone as much as from anywhere, and 20px of pill is not a thumb's target.
+          // No glyph of its own — the row opens with a padlock a centimetre away, and the same
+          // mark twice in one line says nothing the second time.
+          className="inline-flex items-center rounded-full px-2 py-0.5 text-xs not-italic text-primary transition-colors hover:bg-primary/10 [@media(pointer:coarse)]:min-h-11"
+        >
+          Add the passphrase
+        </button>
+      ) : null}
     </div>
   );
 }

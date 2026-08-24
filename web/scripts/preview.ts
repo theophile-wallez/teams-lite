@@ -61,6 +61,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/ask --answer-with # "Answer with <agent>" on a message
 //   bun run web/scripts/preview.ts --out /tmp/mr --merge-request # review + approve a merge request
 //   bun run web/scripts/preview.ts --out /tmp/chat --chat-menu  # chat sections + the row's "…" menu
+//   bun run web/scripts/preview.ts --out /tmp/seal --seal       # a chat whose words are encrypted
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -864,16 +865,78 @@ export async function openReactionPicker(page: Page): Promise<void> {
  * this one click.
  */
 /**
- * Open the local-agent menu in the header of the conversation on screen.
+ * Open the menu in the header of the conversation on screen — the ONE control that header
+ * carries, and everything the conversation offers is inside it: the call it places or the
+ * meeting it joins, a game of chess, whether the chat is encrypted, and whether this thread
+ * answers an `@claude` message (`web/src/components/conversation-menu.tsx`).
  *
- * That menu holds both halves of the agent's consent — where this machine answers, and
- * what the program it runs may read (`web/src/components/agent-menu.tsx`) — so it is
- * worth looking at as a whole rather than one switch at a time.
+ * The sentinel is asserted here rather than at each row, because every outward action a
+ * conversation has is now one press behind this one: against the real backend a click in here
+ * rings somebody's phone, posts a challenge under the user's name, or tells a machine it may
+ * answer for them.
+ */
+export async function openConversationMenu(page: Page): Promise<void> {
+  await assertMockBackend(page);
+  // IDEMPOTENT, because the mock's live feed re-renders the pane every few seconds and a
+  // non-modal Radix menu can be unmounted in that window — so a capture that switches theme
+  // between two shots of this menu may find it gone. Calling this again before each shot is
+  // cheap and re-asserts the sentinel; a bare click would toggle an open menu shut instead.
+  if (!(await page.locator('[data-testid="conversation-menu-content"]').count())) {
+    await page.locator('[data-testid="conversation-menu"]').click();
+  }
+  // The agent switch, which is the one row EVERY conversation has: a channel offers no call,
+  // Notes offers no game, and neither can be waited on as proof the menu is open.
+  await page.waitForSelector('[data-testid="agent-mode-toggle"]');
+}
+
+/**
+ * Close it again by pressing its own trigger — never with Escape, which the app's own
+ * window-level handler reads as "leave this conversation" and which would take the composer off
+ * screen with the menu.
+ */
+export async function closeConversationMenu(page: Page): Promise<void> {
+  if (!(await page.locator('[data-testid="conversation-menu-content"]').count())) return;
+  await page.locator('[data-testid="conversation-menu"]').click();
+  await page.waitForSelector('[data-testid="conversation-menu-content"]', { state: "detached" });
+}
+
+/**
+ * The local-agent half of that menu, which is what most captures of it are about: where this
+ * machine answers, and what the program it runs may read.
+ *
+ * It is the same menu — the agent switch stopped having a trigger of its own when the header's
+ * three controls became one — so this is an alias kept for the captures that name it, and for
+ * the reader who comes looking for the old surface.
  */
 export async function openAgentMenu(page: Page): Promise<void> {
-  await assertMockBackend(page);
-  await page.locator('[data-testid="agent-menu"]').click();
-  await page.waitForSelector('[data-testid="agent-mode-toggle"]');
+  await openConversationMenu(page);
+}
+
+/**
+ * Open that menu and press the row that places a CALL — one person in a 1:1, everybody at once
+ * in a group chat.
+ *
+ * A call is two presses now, which is the cost the one-trigger header pays for a target that
+ * does not move between conversations; this helper is where that cost is spelled once rather
+ * than at every capture.
+ */
+export async function callFromMenu(page: Page): Promise<void> {
+  await openConversationMenu(page);
+  await page.locator('[data-testid="call-button"]').click();
+  await page.waitForSelector('[data-testid="conversation-menu-content"]', { state: "detached" });
+}
+
+/**
+ * Open that menu and press the row that JOINS the meeting this thread was minted for.
+ *
+ * Only a MEETING chat offers it, and only there: a calendar event keeps its own labelled
+ * "Join here" beside its way out to Teams, so a capture of that surface clicks the button
+ * directly and never comes through here.
+ */
+export async function joinMeetingFromMenu(page: Page): Promise<void> {
+  await openConversationMenu(page);
+  await page.locator('[data-testid="meeting-join-here"]').click();
+  await page.waitForSelector('[data-testid="conversation-menu-content"]', { state: "detached" });
 }
 
 export async function openSettings(page: Page): Promise<void> {
@@ -892,7 +955,10 @@ export async function openSettings(page: Page): Promise<void> {
  */
 export async function turnAgentOn(page: Page): Promise<void> {
   await assertMockBackend(page);
-  const menu = page.locator('[data-testid="agent-menu"]');
+  // The conversation's own menu, which is where the switch lives now — and which still states
+  // the mode on its trigger, so what is checked below is the app's own attribute rather than
+  // our memory of clicking.
+  const menu = page.locator('[data-testid="conversation-menu"]');
   const isOn = async () => (await menu.getAttribute("data-agent-mode")) === "reply";
 
   // Retried, because the mock's live feed re-renders the pane every few seconds and a
@@ -905,7 +971,7 @@ export async function turnAgentOn(page: Page): Promise<void> {
       await toggle.waitFor({ state: "visible", timeout: 5_000 });
       await toggle.click({ timeout: 5_000 });
       await page.waitForFunction(
-        `document.querySelector('[data-testid="agent-menu"]')?.getAttribute("data-agent-mode") === "reply"`,
+        `document.querySelector('[data-testid="conversation-menu"]')?.getAttribute("data-agent-mode") === "reply"`,
         undefined,
         { timeout: 5_000 },
       );
@@ -1784,33 +1850,48 @@ if (import.meta.main) {
   // A game of CHESS played in a conversation. Every challenge, accept and move is an ordinary
   // Teams message carrying a trailing marker, and the whole run of them collapses into ONE
   // board row where the game started (see AGENTS.md § Chess in a conversation). The mock plays
-  // the opponent, so the capture walks a real game: the header's control, the popover that
-  // says what the press costs, the board once somebody accepted, a few moves with the score
+  // the opponent, so the capture walks a real game: the conversation's own menu, the challenge
+  // rows that say what the press costs, the board once somebody accepted, a few moves with the
   // sheet under them, the board at a phone's width, and — last, because it needs a settled game
   // above it — the card a reader meets when somebody challenges THEM.
   if (args.includes("--chess")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       const conversation = await openConversation(page, "Agent Sandbox");
-      const button = page.locator('[data-testid="chess-button"]');
-      await button.waitFor();
-      // The control up close: a 20px pawn in a row of 20px glyphs is where this is right or
-      // wrong, so it is captured at a raised pixel density.
-      await shot(`${out}-button-light.png`, '[data-testid="chess-button"]');
+      // The header's control up close. It is ONE trigger for the whole conversation now, so
+      // what this shot is for has changed: not whether a pawn reads at 20px, but whether the
+      // trigger carries the attention DOT a game that wants a move puts on it. Captured at a
+      // raised pixel density for that reason.
+      await shot(`${out}-button-light.png`, '[data-testid="conversation-menu"]');
       await setTheme("dark");
-      await shot(`${out}-button-dark.png`, '[data-testid="chess-button"]');
+      await shot(`${out}-button-dark.png`, '[data-testid="conversation-menu"]');
       await setTheme("light");
 
       // The challenge: the colour, and the sentence that says a message goes out under the
-      // user's name and everybody in the conversation sees it.
-      await button.click();
-      await page.locator('[data-testid="chess-challenge"]').waitFor();
-      await page.waitForTimeout(200);
+      // user's name and everybody in the conversation sees it. It is rows of the conversation's
+      // menu rather than a popover of its own, so the shot is the whole page — the menu is
+      // portaled, and a crop of the trigger would not hold it. Two presses, as before: the
+      // menu, then the row that discloses what a challenge costs.
+      //
+      // Re-asserted before every shot and before the press: the mock's feed re-renders the pane
+      // and a closed menu forgets the disclosure, so a capture that only opened it once would
+      // photograph an app with no menu in it and say nothing about that.
+      const openChallenge = async (): Promise<void> => {
+        await openConversationMenu(page);
+        if (!(await page.locator('[data-testid="chess-challenge"]').count())) {
+          await page.locator('[data-testid="chess-button"]').click();
+        }
+        await page.locator('[data-testid="chess-challenge"]').waitFor();
+        await page.waitForTimeout(200);
+      };
+      await openChallenge();
       await shot(`${out}-challenge-light.png`);
       await setTheme("dark");
+      await openChallenge();
       await shot(`${out}-challenge-dark.png`);
       await setTheme("light");
 
       // Sent, and the mock accepts: the board arrives as one row in the history.
+      await openChallenge();
       await page.locator('[data-testid="chess-challenge"]').click();
       const board = page.locator('[data-testid="chess-game"]');
       await board.waitFor();
@@ -1890,6 +1971,164 @@ if (import.meta.main) {
     process.exit(0);
   }
 
+  // A SEALED chat: the words of every message this app posts are encrypted before they reach
+  // Teams (see AGENTS.md § A SEALED chat). The page holds no crypto at all, so every surface
+  // here is a reading of what the backend tells it — which is exactly why it is worth
+  // photographing: the whole feature is words, a quiet mark, and one dialog.
+  //
+  // TWO threads, and the split is what makes the run possible rather than a convenience:
+  //
+  //   * an ORDINARY chat the script seals itself, which is the flow a reader really walks and
+  //     the only place the first passphrase, the generated one and the PLAIN composer hint
+  //     exist;
+  //   * the mock's own "Sealed Chat" fixture, which carries all four message states at once and
+  //     is permanently in DISAGREEMENT with this machine (a colleague rotated their passphrase)
+  //     — so it is where the mismatch is captured, and where the plain hint never can be.
+  if (args.includes("--seal")) {
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      const dialog = '[data-testid="seal-dialog"]';
+      const composer = '[data-testid="composer-shell"]';
+
+      /** Open the dialog from the conversation's own menu — the one place a chat is sealed,
+       *  because that is the surface which says who is in the conversation.
+       *
+       *  IDEMPOTENT for `openConversationMenu`'s own reason: the mock's live feed re-renders the
+       *  pane every few seconds, so a capture that opened this once and then switched theme may
+       *  find it gone. */
+      const openDialog = async (): Promise<void> => {
+        if (await page.locator(dialog).count()) return;
+        await openConversationMenu(page);
+        await page.locator('[data-testid="conversation-seal"]').click();
+        await page.locator(dialog).waitFor();
+        await page.waitForTimeout(250); // the dialog fades in; capture it settled
+      };
+
+      // ---- the chat this script seals itself -------------------------------------------
+      await openConversation(page, "Plain Text");
+      await clearComposer(page);
+
+      // The row that offers it, in the menu the header's one trigger opens. A whole-page shot,
+      // because the menu is portaled and a crop of the trigger would not hold it.
+      await openConversationMenu(page);
+      await shot(`${out}-menu-light.png`);
+      await setTheme("dark");
+      await openConversationMenu(page);
+      await shot(`${out}-menu-dark.png`);
+      await setTheme("light");
+      await closeConversationMenu(page);
+
+      // The dialog with no passphrase yet — the state most readers meet it in. Both themes,
+      // because what it mostly IS is sentences, and how a paragraph of them sits on a card is
+      // the thing a screenshot answers.
+      await openDialog();
+      await shot(`${out}-dialog-light.png`, dialog);
+      await setTheme("dark");
+      await openDialog();
+      await shot(`${out}-dialog-dark.png`, dialog);
+      await setTheme("light");
+
+      // A passphrase the app made: five groups it can be read aloud in, with the press beside
+      // it that copies the whole thing. This answer is the ONE time a passphrase crosses the
+      // socket, so this shot is the whole of the reader's chance to share it.
+      await openDialog();
+      await page.locator('[data-testid="seal-apply"]').click();
+      await page.locator('[data-testid="seal-generated"]').waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-generated-light.png`, dialog);
+      await setTheme("dark");
+      await shot(`${out}-generated-dark.png`, dialog);
+      await setTheme("light");
+      await page.locator('[data-testid="seal-close"]').click();
+      await page.locator(dialog).waitFor({ state: "detached" });
+
+      // The PLAIN composer hint, which only a chat with no disagreement can show: the words are
+      // encrypted, and a picture is not. Cropped to the composer, because eleven words at the
+      // foot of a 1200px page say nothing at that size.
+      await page.locator(composer).waitFor();
+      await page.waitForTimeout(300);
+      await shot(`${out}-composer-light.png`, composer);
+      await setTheme("dark");
+      await shot(`${out}-composer-dark.png`, composer);
+      await setTheme("light");
+
+      // ---- the fixture, which holds every state at once --------------------------------
+      await openConversation(page, "Sealed Chat");
+      await page.locator('[data-testid="message"][data-seal="locked"]').waitFor();
+      await page.waitForTimeout(300);
+      // The four rows together, which is the only way to review them: each says something
+      // different and the reader's next move differs, so a surface that collapsed two of them
+      // would only be caught by having all four side by side.
+      await shot(`${out}-states-light.png`, '[data-testid="message-pane"]');
+      await setTheme("dark");
+      await shot(`${out}-states-dark.png`, '[data-testid="message-pane"]');
+      await setTheme("light");
+
+      // The MISMATCH at the composer, which needs no press at all: this chat seals under one
+      // passphrase while a colleague's message in it carries another, and without this sentence
+      // nobody is told — each posts messages the other cannot read and each blames the other's
+      // app.
+      await shot(`${out}-mismatch-composer-light.png`, composer);
+      await setTheme("dark");
+      await shot(`${out}-mismatch-composer-dark.png`, composer);
+      await setTheme("light");
+
+      // And the same failure caught one moment EARLIER, from the other side: a passphrase that
+      // does not open what the thread already holds, reported while the reader is still in front
+      // of the field that mends it.
+      await openDialog();
+      await page.locator('[data-testid="seal-passphrase-field"]').fill("zzzz-yyyy-xxxx-wwww-vvvv");
+      await page.locator('[data-testid="seal-apply"]').click();
+      await page.locator('[data-testid="seal-mismatch"]').waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-mismatch-light.png`, dialog);
+      await setTheme("dark");
+      await shot(`${out}-mismatch-dark.png`, dialog);
+      await setTheme("light");
+
+      // The armed FORGET: the one act in this feature that no later press takes back, so the
+      // sentence saying what it costs is what the second press is really about. The row it is
+      // armed on is the one that is NOT current, so the shot also shows the current one intact
+      // beside it — which is what makes "this passphrase" rather than "the passphrase" readable.
+      await page.locator('[data-testid="seal-forget"]').first().click();
+      await page.locator('[data-testid="seal-forget-warning"]').waitFor();
+      await page.waitForTimeout(200);
+      await shot(`${out}-forget-armed-light.png`, dialog);
+      await setTheme("dark");
+      await shot(`${out}-forget-armed-dark.png`, dialog);
+      await setTheme("light");
+      await page.locator('[data-testid="seal-forget-cancel"]').first().click();
+
+      // A PHONE, which is where the sharing half of this feature really happens: a passphrase is
+      // read off a laptop and typed in here. Everything about the dialog that could go wrong is
+      // only visible at 390px — a Copy button off the right edge, a passphrase wrapped mid-group,
+      // a paragraph of notes pushing the press off the bottom.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(400);
+      await shot(`${out}-mobile-dialog-light.png`);
+      await page.locator('[data-testid="seal-reveal"]').first().click();
+      await page.locator('[data-testid="seal-revealed-passphrase"]').first().waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-mobile-revealed-light.png`);
+      await page.locator('[data-testid="seal-close"]').click();
+      await page.locator(dialog).waitFor({ state: "detached" });
+      await shot(`${out}-mobile-states-light.png`);
+      await page.setViewportSize(VIEWPORT);
+
+      // Leave the shared mock the way it declares itself: one mock process serves the whole
+      // run, and a chat this script sealed would change what every later capture's composer says
+      // about the message it is about to send.
+      await emit({ kind: "seal" });
+      console.log(
+        `[preview] wrote ${out}-menu-{light,dark}.png, ${out}-dialog-{light,dark}.png, ` +
+          `${out}-generated-{light,dark}.png, ${out}-composer-{light,dark}.png, ` +
+          `${out}-states-{light,dark}.png, ${out}-mismatch-composer-{light,dark}.png, ` +
+          `${out}-mismatch-{light,dark}.png, ${out}-forget-armed-{light,dark}.png and ` +
+          `${out}-mobile-{dialog,revealed,states}-light.png`,
+      );
+    });
+    process.exit(0);
+  }
+
   // A MERGE REQUEST in a message: the two rows its ⋯ menu grows. "Review !44 with
   // Claude", which drafts like "Answer with" does, and the approval — the one action in
   // this app that writes to a tracker, so the capture walks its whole shape: the row, the
@@ -1960,7 +2199,7 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // Audio calling: the button in a 1:1 header, a call ringing with a working Answer, the
+  // Audio calling: the call row in a 1:1's own menu, a call ringing with a working Answer, the
   // PAGE it becomes once answered — its people, its chat, its picture — and the window
   // that page folds into and is dragged around in.
   //
@@ -1970,16 +2209,27 @@ if (import.meta.main) {
   // the machine (see web/mock/server.ts and src/lib/call-media.ts).
   if (args.includes("--call")) {
     await withPreview(async ({ page, shot, setTheme, emit }) => {
-      // 1. The header button, live with no step in between: the backend registered as a
-      //    device the user's calls ring on at startup, and there is no switch anywhere.
+      // 1. The call row, live with no step in between: the backend registered as a device the
+      //    user's calls ring on at startup, and there is no switch anywhere. It is a row of the
+      //    conversation's own menu now rather than a glyph in its header, so the crop is the
+      //    menu — which is portaled, and is not inside the header's box at all.
       const conversationId = await openConversation(page, "Ava Thompson");
-      await shot(`${out}-button-light.png`, '[data-testid="message-pane"] header');
+      await openConversationMenu(page);
+      await page.waitForTimeout(200);
+      await shot(`${out}-button-light.png`, '[data-testid="conversation-menu-content"]');
+      await closeConversationMenu(page);
 
       // 2. A window whose backend does not take calls at all — a read-only one, or the
-      //    second install beside the user's app. The control stays and says so.
+      //    second install beside the user's app. The row stays, disabled, and the reason
+      //    stands under it in WORDS: it used to be a tooltip, which on a phone is a sentence
+      //    that does not exist.
       await emit({ kind: "calling", enabled: false });
       await page.waitForTimeout(300);
-      await shot(`${out}-off-light.png`, '[data-testid="message-pane"] header');
+      await openConversationMenu(page);
+      await page.waitForSelector('[data-testid="conversation-call-reason"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-off-light.png`, '[data-testid="conversation-menu-content"]');
+      await closeConversationMenu(page);
       await emit({ kind: "call_invite", reset: true });
       await page.waitForTimeout(300);
 
@@ -2035,10 +2285,12 @@ if (import.meta.main) {
       await page.locator('[data-testid="call-hangup"]').first().click();
       await page.waitForSelector('[data-testid="call-stage"]', { state: "detached" });
 
-      // 4b. A GROUP chat: the same button, and a label that says it rings everybody. Then
+      // 4b. A GROUP chat: the same row, and words that say it rings everybody. Then
       //     the stage, which names the CONVERSATION and fills in who picked up.
       await openConversation(page, "Platform Team");
-      await shot(`${out}-group-button-light.png`, '[data-testid="message-pane"] header');
+      await openConversationMenu(page);
+      await page.waitForTimeout(200);
+      await shot(`${out}-group-button-light.png`, '[data-testid="conversation-menu-content"]');
       await page.locator('[data-testid="call-button"]').click();
       await page.waitForSelector('[data-testid="call-stage"]');
       await shot(`${out}-group-dialing-light.png`);
@@ -2053,14 +2305,18 @@ if (import.meta.main) {
       //     for is the one action it gets — and once joined, that thread's own chat is the
       //     panel beside the picture.
       await openConversation(page, "Design Sync");
-      await shot(`${out}-meeting-chat-light.png`, '[data-testid="message-pane"] header');
-      // The control on its own. It is a 20px glyph and whether it reads as a MEETING rather
-      // than as the handset next door is the whole of this row, so `--dpr` is worth passing
-      // when this shot is the one being judged.
+      await openConversationMenu(page);
+      await page.waitForTimeout(200);
+      await shot(`${out}-meeting-chat-light.png`, '[data-testid="conversation-menu-content"]');
+      // The row on its own. Both actions wear the handset, so the WORDS are what tell a join
+      // from a ring — which is what a menu buys and a row of 20px glyphs could not.
       await shot(`${out}-meeting-chat-icon.png`, '[data-testid="meeting-join-here"]');
       await setTheme("dark");
-      await shot(`${out}-meeting-chat-dark.png`, '[data-testid="message-pane"] header');
+      await openConversationMenu(page);
+      await page.waitForTimeout(200);
+      await shot(`${out}-meeting-chat-dark.png`, '[data-testid="conversation-menu-content"]');
       await setTheme("light");
+      await openConversationMenu(page);
       await page.locator('[data-testid="meeting-join-here"]').click();
       await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
       await page.waitForTimeout(600);
@@ -2203,7 +2459,7 @@ if (import.meta.main) {
       // 1. A live call, with the control in its header. The tooltip is the whole promise, so
       //    the crop is the header the control sits in.
       await openConversation(page, "Ava Thompson");
-      await page.locator('[data-testid="call-button"]').click();
+      await callFromMenu(page);
       await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
       await page.waitForTimeout(900);
       await shot(`${out}-control-light.png`, '[data-testid="call-stage"] header');
@@ -2244,7 +2500,7 @@ if (import.meta.main) {
       //     Every one is a canvas, so the frame is dark: what these shots are for is the
       //     LAYOUT and the labels the recorder draws into the file.
       await openConversation(page, "Design Sync");
-      await page.locator('[data-testid="meeting-join-here"]').click();
+      await joinMeetingFromMenu(page);
       await page.waitForSelector('[data-testid="call-stage"][data-phase="connected"]');
       await page.waitForSelector('[data-testid="call-video-frame"]', { timeout: 30_000 });
       await page.locator('[data-testid="call-camera"]').click();
@@ -3683,8 +3939,12 @@ if (import.meta.main) {
         await openAgentMenu(page);
         await shot(`${out}-light.png`, element);
         await setTheme("dark");
+        // Re-asserted: the helper is idempotent, and the mock's feed re-renders the pane
+        // between two shots often enough to lose a non-modal menu.
+        await openAgentMenu(page);
         await shot(`${out}-dark.png`, element);
         await setTheme("light");
+        await openAgentMenu(page);
         await page.locator('[data-testid="agent-tool-grant-grafana"]').click();
         await page.waitForSelector('[data-testid="agent-tool-grant-grafana"][data-granted="true"]');
         await shot(`${out}-granted-light.png`, element);

@@ -22,7 +22,11 @@
 //   3. immediately before the click it reads the button's OWN `data-join-url` out of the
 //      page and throws unless that link names the pinned meeting. That value comes from
 //      the store, not from our assumption — the live counterpart of the MOCK sentinel and
-//      the twin of the composer's `data-conversation-id` check;
+//      the twin of the composer's `data-conversation-id` check. Under `--from-chat` the
+//      Join is a ROW of the conversation's own menu rather than a button in its header
+//      (see components/conversation-menu.tsx), so that mode opens the menu first — which
+//      changes nothing about the proof: the row states the same `data-meeting-thread` the
+//      button did, and it is still read in the moment before the click;
 //   4. it ALWAYS hangs up, on every path out, including a throw. A driver that joined and
 //      stayed would leave a silent participant in a real meeting.
 //
@@ -103,6 +107,12 @@ const AGENDA_WINDOWS_BACK = 3;
 
 const APP_READY_TIMEOUT_MS = 60_000;
 const JOIN_BUTTON_TIMEOUT_MS = 30_000;
+/** How many times the conversation's menu is re-opened before `--from-chat` gives up.
+ *
+ *  A live page re-renders on every frame its feed delivers, and a non-modal Radix menu can be
+ *  unmounted between the press that opens it and the row being reached. Only the OPENING is
+ *  retried; the proof is read afterwards, so no attempt can carry a stale one forward. */
+const MENU_OPEN_ATTEMPTS = 4;
 /** How long to watch a joined call before hanging up, unless `--hold` says otherwise. */
 const DEFAULT_HOLD_SECONDS = 25;
 
@@ -582,7 +592,11 @@ async function findInThisWindow(page: Page) {
  * the sidebar of a live app cannot prove which thread was opened.
  *
  * Two proofs before the click, both out of the app's own state: the composer says which
- * conversation is open, and the button says which meeting it joins.
+ * conversation is open, and the row says which meeting it joins.
+ *
+ * The Join is a row of that conversation's MENU here, not a control in its header, so this
+ * opens the menu — the one step this mode gained, and the cheap half of it: opening a menu
+ * reaches nobody. The proof is unchanged and is still `assertPinnedMeeting`'s.
  */
 async function findPinnedJoinButtonInChat(page: Page, origin: string) {
   await page.goto(`${origin}/c/${encodeURIComponent(AUTHORIZED_MEETING_THREAD)}`, {
@@ -597,7 +611,46 @@ async function findPinnedJoinButtonInChat(page: Page, origin: string) {
         `meeting's thread ${AUTHORIZED_MEETING_THREAD}.\n  now at: ${page.url()}`,
     );
   }
-  return page.locator('[data-testid="meeting-join-here"]').first();
+  const trigger = page.locator('[data-testid="conversation-menu"]').first();
+  await trigger.waitFor({ timeout: APP_READY_TIMEOUT_MS });
+  const row = page.locator('[data-testid="meeting-join-here"]').first();
+  // Retried, because a live page re-renders on every frame its feed delivers and a non-modal
+  // Radix menu can be unmounted between the press that opens it and the row being reached.
+  // Nothing about the target is remembered across an attempt: only the OPENING is retried, and
+  // the proof is read afterwards from whatever row is on screen then.
+  for (let attempt = 1; attempt <= MENU_OPEN_ATTEMPTS; attempt += 1) {
+    try {
+      if (!(await row.count())) await trigger.click({ timeout: 5_000 });
+      await row.waitFor({ timeout: JOIN_BUTTON_TIMEOUT_MS / MENU_OPEN_ATTEMPTS });
+      break;
+    } catch {
+      await page.waitForTimeout(400);
+    }
+  }
+  if (!(await row.count())) {
+    throw new Error(
+      `REFUSING TO JOIN: the menu of ${AUTHORIZED_MEETING_THREAD} never offered a join row. ` +
+        `That is what a thread whose id names no meeting looks like, and also what a bundle ` +
+        `staged before the menu existed looks like — check \`bin/teams-lite-service.sh ` +
+        `status\` and re-stage with \`update\`.`,
+    );
+  }
+  // A menu row is a `div[role=menuitem]`, so "disabled" is Radix's own attribute rather than a
+  // form control's. Read as the attribute, because a driver that silently read "enabled" off
+  // the wrong spelling would click a control the app had refused.
+  if ((await row.getAttribute("data-disabled")) !== null) {
+    throw new Error(
+      "The join row is disabled, so this window does not take calls (a read-only backend, or " +
+        "a call already in flight) — and this script will not click a disabled row. What the " +
+        "app says is beside it: " +
+        ((await page
+          .locator('[data-testid="conversation-call-reason"]')
+          .first()
+          .innerText()
+          .catch(() => "")) || "(no reason stated)"),
+    );
+  }
+  return row;
 }
 
 /**

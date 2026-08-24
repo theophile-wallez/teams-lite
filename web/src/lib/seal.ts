@@ -147,6 +147,30 @@ export function sealKeyDisagrees(
   return messages.some((m) => m.seal === "locked" && !!m.seal_key_id && !known.has(m.seal_key_id));
 }
 
+/** What the DIALOG says once a passphrase has been set that does not open the messages the
+ *  thread already holds — and null when there is nothing to warn about.
+ *
+ *  The same failure {@link SEAL_MISMATCH_HINT} covers at the composer, caught one moment earlier
+ *  and from the other side: `seal_set` reads what the thread's own messages were sealed with
+ *  BEFORE it writes, so the reader is told while they are still in front of the field that mends
+ *  it, rather than after they have written a message nobody can read. Both are needed — this one
+ *  never fires for somebody who was given the wrong passphrase months ago and only writes today. */
+export function sealSetMismatch(outcome: {
+  opens_existing: boolean;
+  key_ids_in_use: string[];
+}): string | null {
+  // A thread carrying no sealed message at all has nothing this passphrase could fail to open,
+  // which is what sealing a chat for the first time IS — and it is the common case, so it must
+  // never earn a warning. The backend already answers `opens_existing` true there; the second
+  // half of the test is what makes that independent of it.
+  if (outcome.opens_existing || outcome.key_ids_in_use.length === 0) return null;
+  return (
+    "Everything you send from now on is encrypted with this passphrase — but it does not open " +
+    "the messages already here, which were encrypted with a different one. Ask whoever wrote " +
+    "them for theirs, and add it here too."
+  );
+}
+
 /** What the dialog says before the reader hands out a passphrase.
  *
  *  Both halves are load-bearing. A colleague who has the passphrase can read every message ever
@@ -165,6 +189,12 @@ export const SEAL_STORAGE_NOTE =
  *  in the thread, and no later click makes them readable here again. */
 export const SEAL_FORGET_WARNING =
   "Every message this passphrase opened becomes unreadable on this machine. No later action brings it back.";
+
+/** How long a passphrase may be. The backend's own bound (`seal::MAX_PASSPHRASE_CHARS`), spelled
+ *  here so the field refuses the 257th character as it is typed rather than collecting a
+ *  passphrase the write comes back refused for — the rule `POST_SUBJECT_MAX_CHARS` already holds
+ *  for a channel post's title. */
+export const SEAL_PASSPHRASE_MAX_CHARS = 256;
 
 /** The passphrase, as the dialog shows one the app generated: in groups, so it can be read
  *  aloud and retyped.

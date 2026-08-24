@@ -21,9 +21,10 @@
 //          | push_status | push_subscribe | push_unsubscribe | push_test
 //          | mail_folders | mail_list | mail_backfill | mail_body | mail_attachment
 //          | mail_mark_read
+//          | seal_status | seal_set | seal_off | seal_forget | seal_reveal
 // Events:  status | realtime_status | message | conversations_changed
 //          | channels_changed | typing | call | read_receipt
-//          | mail_folders_changed | mail_list_updated
+//          | mail_folders_changed | mail_list_updated | seal_changed
 //
 // Run it (from the web/ directory):
 //   export PATH="$HOME/.bun/bin:$PATH"
@@ -2455,6 +2456,153 @@ function seedChessThread(): void {
   mockChessSeedCount = messages.length;
 }
 
+/**
+ * Register the SEALED thread: a chat whose messages this app encrypts before they reach Teams
+ * (see the seal block further down, and § A sealed chat).
+ *
+ * Its own thread for the reason the ten-picture message and the chess board both taught this
+ * suite: one mock process serves the whole run, and a chat left sealed changes what every later
+ * spec's composer says about the next message. A sealed row in a shared fixture would do that to
+ * every spec that opens it.
+ *
+ * It holds all FOUR states a message can be in at once, which is the whole point of it — each
+ * says something different and the reader's next move differs, so a surface that collapsed them
+ * would only be caught by having them side by side:
+ *
+ *  - an ORDINARY message, from before the chat was sealed. It draws no padlock at all.
+ *  - an OPENED one: sealed, and this machine holds the passphrase, so its words are here. The
+ *    padlock beside words the reader CAN read is how they learn the chat is sealed.
+ *  - a DAMAGED one: recognisably sealed, and the bytes fail their own authentication. It travels
+ *    with no `seal_key_id`, which is the backend's own rule — that field is for a LOCKED row, where
+ *    it says which passphrase to ask a colleague for. No passphrase mends broken bytes.
+ *  - a LOCKED one, NEWEST, sealed under a passphrase this machine does not hold — a colleague who
+ *    rotated theirs. It is newest so a spec presses the row it is about, and it is what makes the
+ *    mismatch warning reachable with no write: this chat is sealing under one key while a message
+ *    in it carries another, which is the sharpest failure the feature has.
+ *
+ * Its blank sidebar preview is not an oversight: a locked row's content is empty, so an empty
+ * preview is what the real store answers with for a chat whose newest message is one.
+ *
+ * A capture of the PLAIN composer hint therefore cannot come from here — the mismatch is
+ * permanent in this fixture — and belongs on an ordinary chat the script seals itself, which is
+ * the flow a reader really walks through anyway.
+ */
+const MOCK_SEALED_THREAD = "19:sealed-demo@thread.v2";
+
+/** The passphrase this machine holds for that thread, fixed so a spec can reveal it and assert
+ *  on the words. Shaped like one the app would generate — five groups of four from the
+ *  generator's own alphabet — so what a capture shows is what a real reveal looks like. */
+const MOCK_SEAL_PASSPHRASE = "hq7m-tvbe-2xkr-9pfd-swn4";
+
+/** The passphrase the COLLEAGUE rotated to, which this machine deliberately never stores: only
+ *  its key id is known here, off a message that arrived sealed under it.
+ *
+ *  It is a real string rather than a bare id so the locked row can actually be OPENED from the
+ *  app — a spec types this into the dialog, the key ids agree, and every message it sealed gets
+ *  its words back, which is the promise `sealLockedAction` makes. */
+const MOCK_SEAL_OTHER_PASSPHRASE = "kbzq-4wtn-9mrd-3sfv-hp6e";
+
+/** What the two sealed rows of that thread SAY. Named because each appears twice — as the body the
+ *  seed pushes, and as the words `mockSealWithheld` gives back once the passphrase arrives — and
+ *  two spellings of one message is a fixture that can disagree with itself. */
+const MOCK_SEAL_OPENED_WORDS = "<p>The invoice numbers are in the sheet I shared.</p>";
+const MOCK_SEAL_LOCKED_WORDS = "<p>I changed the passphrase this morning — here is the new one.</p>";
+
+/** How many messages the seed put in that thread, so the test hook can put it back. */
+let mockSealSeedCount = 0;
+
+function seedSealedThread(): void {
+  const convId = MOCK_SEALED_THREAD;
+  const base = Date.now() - 19 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[3]!;
+
+  // The four rows are pushed with their WORDS and no seal state at all: what each one comes back
+  // as is decided by `seedSealedThreadState` below, out of the keys this machine holds — which is
+  // the same order the real thing works in, where the store holds one body and a read decides
+  // whether the reader gets it.
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: "<p>Before we turned this on, everything here was in the clear.</p>",
+      is_self: false,
+    },
+    0,
+  );
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content: MOCK_SEAL_OPENED_WORDS,
+      is_self: true,
+    },
+    60_000,
+  );
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: "",
+      is_self: false,
+    },
+    120_000,
+  );
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: MOCK_SEAL_LOCKED_WORDS,
+      is_self: false,
+    },
+    180_000,
+  );
+
+  addFixtureConversation(convId, "Sealed Chat", messages);
+  mockSealSeedCount = messages.length;
+  seedSealedThreadState();
+}
+
+/**
+ * The seal state that thread starts every run in: the passphrase this machine holds, which key
+ * sealed each row, and the words a withheld row is withholding.
+ *
+ * Split out of the seed because it is what the `{kind:"seal"}` hook calls to put the fixture back,
+ * and ONE place declaring the fixture's seal state is what stops the reset from drifting away from
+ * the seed. Everything about the four rows follows from the two tables below — the real store reads
+ * both out of the stored ciphertext, so it knows the key of an OPENED row as well as of a locked
+ * one, which is what lets a new passphrase open one and `seal_forget` lock it back up.
+ */
+function seedSealedThreadState(): void {
+  const held = mockSealKeyId(MOCK_SEAL_PASSPHRASE);
+  const rotated = mockSealKeyId(MOCK_SEAL_OTHER_PASSPHRASE);
+  mockSeals.set(MOCK_SEALED_THREAD, {
+    sealing: true,
+    keys: [{ key_id: held, is_current: true, added_ms: Date.now() - 19 * 24 * 60 * 60_000 }],
+    passphrases: new Map([[held, MOCK_SEAL_PASSPHRASE]]),
+  });
+
+  // A DAMAGED row names its key in the real store too — the id is in the envelope header, and it
+  // is only the body that fails its authentication — so it counts towards what `seal_set` reports
+  // as in use. What no passphrase does is mend it.
+  mockSealKeyOfMessage.set(`${MOCK_SEALED_THREAD}#2`, held);
+  mockSealKeyOfMessage.set(`${MOCK_SEALED_THREAD}#3`, held);
+  mockSealKeyOfMessage.set(`${MOCK_SEALED_THREAD}#4`, rotated);
+  mockSealWithheld.set(`${MOCK_SEALED_THREAD}#2`, MOCK_SEAL_OPENED_WORDS);
+  mockSealWithheld.set(`${MOCK_SEALED_THREAD}#4`, MOCK_SEAL_LOCKED_WORDS);
+
+  // The damaged row is the one state STATED rather than derived: `mockSealApplyKeys` only ever
+  // answers opened or locked, because those are the two a key decides. Broken bytes are not a
+  // question about a key, so nothing about the tables above could produce this row.
+  const damaged = store.get(MOCK_SEALED_THREAD)?.messages.find(
+    (m) => m.id === `${MOCK_SEALED_THREAD}#3`,
+  );
+  if (damaged) damaged.seal = "damaged";
+
+  mockSealApplyKeys(MOCK_SEALED_THREAD);
+}
+
 /** Register a thread the "stop a run" spec drives, of its own so a reply it leaves behind
  *  cannot match another agent test's bubble. One plain message, off by default like every
  *  fixture but the sandbox — the spec opts it in and hands it back off. */
@@ -3409,6 +3557,12 @@ const mockSettings = {
   // that decides it is pure Rust (`custom_emoji::take_as`) and pinned there. What this
   // mock owes the UI is the switch's own state.
   emoji_auto_import: true,
+  // OFF, like the real backend's default — the reverse of the two above (see
+  // `SETTING_SEALED_PUSH_WORDS` in src/bin/server.rs). The user sealed that chat, so a preview of
+  // it on a locked screen is the one thing they did not ask for; a sealed chat still notifies with
+  // this off, and says a message arrived rather than what it said. The mock pushes nothing at all,
+  // so here it is only the switch's own state.
+  sealed_push_words: false,
 };
 
 /** Devices that "subscribed" to push notifications, keyed by endpoint (the real
@@ -4150,6 +4304,7 @@ function settingsView(): {
   available_now: boolean;
   sender_icons: boolean;
   emoji_auto_import: boolean;
+  sealed_push_words: boolean;
 } {
   const host = mockSettings.gitlab_host.trim() || "gitlab.com";
   const hours = parseMockHours(mockSettings.available_hours);
@@ -4170,6 +4325,7 @@ function settingsView(): {
       (hours === null || mockHoursCoverNow(hours, mockSettings.available_zone)),
     sender_icons: mockSettings.sender_icons,
     emoji_auto_import: mockSettings.emoji_auto_import,
+    sealed_push_words: mockSettings.sealed_push_words,
   };
 }
 
@@ -7801,6 +7957,132 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return { added, errors };
     }
 
+    // ---- a SEALED chat (see the seal block below, src/seal.rs and § A sealed chat) ------
+    // The mock holds no crypto at all. It keeps the passphrases, the key ids and which key each
+    // message was sealed under, which is everything these five methods answer with.
+
+    // Which conversations this machine holds a passphrase for, and which of them it is SEALING.
+    // OPEN like `get_settings`, and for its reason: it answers which chats are sealed and under
+    // which key id, never with a key or a passphrase — the one question a page must be able to
+    // ask before it draws a padlock or a composer hint.
+    case "seal_status":
+      return sealStatusView();
+
+    // Set — or GENERATE — the passphrase a conversation is sealed with, and start sealing.
+    //
+    // Additive, exactly as `Store::add_seal_key` is: every key already held is kept and stops
+    // being current, so the messages it sealed still open. That is what makes a rotation, and a
+    // colleague changing the passphrase, cost nothing already in the thread. A key set again keeps
+    // the `added_ms` it had, so its place in the list does not move under the reader.
+    case "seal_set": {
+      const conversation = requireString(params, "conversation");
+      // A CHANNEL cannot be sealed, refused here as the backend refuses it: its history is drawn
+      // as threads, and a sealed post there would have to answer a different question about where
+      // the padlock sits. A mock that accepted one would let a control that reports a refusal ship.
+      if (mockIsChannelThreadId(conversation)) {
+        throw new Error("a channel cannot be sealed yet — this is for a chat");
+      }
+      const raw = asObject(params).passphrase;
+      if (raw !== undefined && typeof raw !== "string") {
+        throw new Error("passphrase must be a string");
+      }
+      // ABSENT means generate one, which is what the dialog offers first: a passphrase the app
+      // made carries its own entropy and does not lean on the derivation for safety.
+      const generated = raw === undefined;
+      const passphrase = raw === undefined ? mockGeneratePassphrase() : mockCheckPassphrase(raw);
+      const keyId = mockSealKeyId(passphrase);
+      // WHICH keys the thread's own messages already carry, read BEFORE the write so the answer
+      // describes what the reader is walking into rather than what they have just done.
+      const inUse = mockSealKeyIdsInUse(conversation);
+      const opensExisting = inUse.length === 0 || inUse.includes(keyId);
+
+      const seal: MockSeal = mockSeals.get(conversation) ?? {
+        sealing: false,
+        keys: [],
+        passphrases: new Map(),
+      };
+      if (!seal.keys.some((key) => key.key_id === keyId)) {
+        seal.keys.push({ key_id: keyId, is_current: false, added_ms: Date.now() });
+      }
+      seal.passphrases.set(keyId, passphrase);
+      mockSealSetCurrent(seal, keyId);
+      mockSeals.set(conversation, seal);
+      // The rows already in the thread are re-read against the keys now held, which is what opens
+      // the locked ones this passphrase covers — the whole point of adding it from a locked row.
+      mockSealApplyKeys(conversation);
+      broadcast("seal_changed", { conversation });
+
+      return {
+        ...sealStatusView(),
+        conversation,
+        key_id: keyId,
+        opens_existing: opensExisting,
+        key_ids_in_use: inUse,
+        // The passphrase travels back ONLY when this machine invented it, so the dialog can show
+        // the user what to give their colleagues. One they typed is one they already have — and
+        // this is the single time it crosses the socket, which is why it is not a field of
+        // `seal_status`.
+        ...(generated ? { passphrase } : {}),
+      };
+    }
+
+    // Stop sealing NEW messages, and KEEP every key. A chat that stops being sealed is still full
+    // of sealed messages, and dropping the passphrase would make every one of them unreadable —
+    // which is the one act here nothing takes back, and it is `seal_forget` below.
+    case "seal_off": {
+      const conversation = requireString(params, "conversation");
+      const seal = mockSeals.get(conversation);
+      const stopped = seal?.sealing === true;
+      if (stopped) {
+        // Nothing is re-read: every key stays, so every message already in the thread opens
+        // exactly as it did. What stops is the sealing of NEW ones.
+        mockSealSetCurrent(seal, null);
+        broadcast("seal_changed", { conversation });
+      }
+      return { ...sealStatusView(), stopped };
+    }
+
+    // Forget one key. Every message it opened becomes unreadable on this machine, for good — so
+    // the surface asks twice, the way a deletion does. The rows really do lock back up here, which
+    // is what makes that warning something a spec can watch happen.
+    case "seal_forget": {
+      const conversation = requireString(params, "conversation");
+      const keyId = requireString(params, "key_id");
+      const seal = mockSeals.get(conversation);
+      const before = seal?.keys.length ?? 0;
+      let forgotten = false;
+      if (seal) {
+        seal.keys = seal.keys.filter((key) => key.key_id !== keyId);
+        seal.passphrases.delete(keyId);
+        forgotten = seal.keys.length < before;
+        if (forgotten) {
+          // Sealing stops with the CURRENT key going, and a conversation with no keys left leaves
+          // the list altogether: the real query joins on the rows, so no rows means no entry.
+          const current = seal.keys.find((key) => key.is_current);
+          mockSealSetCurrent(seal, current?.key_id ?? null);
+          if (seal.keys.length === 0) mockSeals.delete(conversation);
+          mockSealApplyKeys(conversation);
+          broadcast("seal_changed", { conversation });
+        }
+      }
+      return { ...sealStatusView(), forgotten };
+    }
+
+    // The passphrase behind one key, for the user's own press and nothing else.
+    //
+    // It exists because a colleague who joins the conversation in March has to be GIVEN something,
+    // and a passphrase this app could not show again would force a rotation of the whole chat just
+    // to share it.
+    case "seal_reveal": {
+      const conversation = requireString(params, "conversation");
+      const keyId = requireString(params, "key_id");
+      const passphrase = mockSeals.get(conversation)?.passphrases.get(keyId);
+      if (passphrase === undefined) {
+        throw new Error("this machine holds no passphrase for that key");
+      }
+      return { passphrase };
+    }
+
     // ---- push notifications ------------------------------------------------
     // The mock accepts a subscription and answers with a plausible status, so a
     // spec or `bun run preview` can drive the whole Settings flow. It never sends
@@ -8360,6 +8642,10 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       if (typeof o.sender_icons === "boolean") mockSettings.sender_icons = o.sender_icons;
       if (typeof o.emoji_auto_import === "boolean") {
         mockSettings.emoji_auto_import = o.emoji_auto_import;
+      }
+      // Whether a notification about a SEALED chat carries the words.
+      if (typeof o.sealed_push_words === "boolean") {
+        mockSettings.sealed_push_words = o.sealed_push_words;
       }
       return settingsView();
     }
@@ -9048,6 +9334,12 @@ function scheduleSendEcho(
       // `thread_subject` on every inbound message. Echoing it is what makes the whole
       // rendering half testable — the heading a thread is drawn with is this field.
       ...(subject ? { thread_root_id: `${convId}#${seq}`, thread_subject: subject } : {}),
+      // A message posted to a SEALED chat comes back OPENED, with its words intact. That is what
+      // the real backend answers with and it is not a shortcut: the encryption boundary is the
+      // backend, which seals on the way out and decrypts on every read, so what a page ever sees
+      // of its own sent message is the plain body plus this flag. A mock that echoed a ciphertext
+      // would draw a locked row for the reader's own message and let a broken one pass every test.
+      ...(mockSealIsOn(convId) ? { seal: "opened" as const } : {}),
       // The body's mention spans carry only an index; this is what says whom each one
       // names, so a sent mention comes back rendered as a mention (like the real echo).
       ...(mentions && mentions.length > 0
@@ -9062,6 +9354,10 @@ function scheduleSendEcho(
         : {}),
     };
     t.messages.push(msg);
+    // Which key sealed it, and the words to give back — recorded exactly as the seed records them
+    // for its own rows, so a rotation and a `seal_forget` treat a message the reader sent like any
+    // other. Without it their own message would be the one row in the thread nothing could lock.
+    mockSealNoteSent(convId, msg);
     t.setDraft(""); // the accepted send clears the persisted draft
     broadcast("message", nicknamed(msg));
     // A message the service is HOLDING is in no conversation yet, so it marks nothing read,
@@ -9265,6 +9561,306 @@ function postMockChess(
   t.recompute();
   broadcast("message", nicknamed(msg));
   broadcast(t.changedEvent, {});
+}
+
+// ---------------------------------------------------------------------------
+// A SEALED chat, with no crypto anywhere in it (mirrors src/seal.rs and the five `seal_*`
+// methods in src/bin/server.rs).
+//
+// The real feature encrypts every body the backend posts to a sealed conversation and decrypts
+// on every store read, so the ENVELOPE is the one part of it a mock has no business imitating:
+// the page holds no key, no passphrase derivation and no ciphertext, and what it is told is
+// `seal` on each message plus what `seal_status` answers. So this block keeps exactly that —
+// which passphrases a conversation holds, which one is current, and which key each message was
+// sealed under — and not one byte of encryption. A mock that invented an envelope of its own
+// would be a second thing to keep in step with the one that really posts.
+//
+// Two side tables stand in for the ciphertext a real store holds, because the store reads both
+// OUT of it: which key sealed each row (`seal::key_id_of`), and the words a locked row is
+// withholding. Keeping them here is what lets a passphrase the reader adds OPEN the rows already
+// in the thread, and `seal_forget` lock them back up — the two promises the surface makes that a
+// mock holding only "sealing yes/no" could never show.
+//
+// It is all in Maps for the reason every other mock table is: one process, no SQLite, and a
+// restart forgets it.
+// ---------------------------------------------------------------------------
+
+/** The alphabet a generated passphrase is drawn from, and its shape — `seal::PASSPHRASE_ALPHABET`
+ *  and its two counts. Spelled here so a passphrase this mock invents survives being read off one
+ *  screen and typed into another exactly as a real one does: no `i`, `l`, `o`, `0` or `1`. */
+const MOCK_SEAL_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+const MOCK_SEAL_GROUPS = 5;
+const MOCK_SEAL_GROUP_LEN = 4;
+
+/** A sanity bound on a passphrase the user typed — `seal::MAX_PASSPHRASE_CHARS`. It catches a
+ *  whole message pasted into the field, the way a channel post's title bound does. */
+const MOCK_SEAL_MAX_CHARS = 256;
+
+/** How many of a thread's newest messages `seal_set` reads to answer "does this passphrase open
+ *  what is already here" — `SEAL_SCAN_DEPTH` in src/bin/server.rs. */
+const MOCK_SEAL_SCAN_DEPTH = 50;
+
+/** One conversation's seal state: the `seal_keys` rows of one chat, minus the derived key.
+ *
+ *  `sealing` and the keys' own `is_current` are ONE fact — the store answers `sealing` by finding
+ *  a current row — so every writer goes through {@link mockSealSetCurrent} and nothing else ever
+ *  touches either. Two places setting them is how they would come to disagree, and a chat that
+ *  says it is sealing while no key is current is the "hopeful sealed" state this app refuses to
+ *  have. */
+type MockSeal = {
+  sealing: boolean;
+  keys: { key_id: string; is_current: boolean; added_ms: number }[];
+  passphrases: Map<string, string>;
+};
+
+/** Every conversation this machine holds a passphrase for, keyed by conversation id. A chat with
+ *  no entry — and one whose last key was forgotten — is simply absent, which is what makes
+ *  "nothing here is sealed" the absence of a row rather than a flag. */
+const mockSeals = new Map<string, MockSeal>();
+
+/** Which key each sealed MESSAGE was sealed under, keyed by message id.
+ *
+ *  Never a field ON the message: a message is serialized straight to the wire, and `seal_key_id`
+ *  travels for a LOCKED row alone. */
+const mockSealKeyOfMessage = new Map<string, string>();
+
+/** The words a withheld row is withholding, keyed by message id — what a store read gives back
+ *  the moment its passphrase arrives. A locked row's `content` is empty on the wire, so this is
+ *  the only place they can live. */
+const mockSealWithheld = new Map<string, string>();
+
+/** Whether an id names a CHANNEL, the way `teams_read::is_channel_thread_id` reads one: the
+ *  thread id before the first `;`, ending in `@thread.tacv2`. */
+function mockIsChannelThreadId(id: string): boolean {
+  return (id.split(";")[0] ?? "").endsWith("@thread.tacv2");
+}
+
+/** Whether NEW messages in this conversation are sealed — the one question the send echo asks. */
+function mockSealIsOn(convId: string): boolean {
+  return mockSeals.get(convId)?.sealing === true;
+}
+
+/** Record what the ciphertext of a message the reader just sent would say: which key sealed it,
+ *  and the words a later lock would have to withhold.
+ *
+ *  A no-op in a chat that is not sealing, which is nearly all of them. */
+function mockSealNoteSent(convId: string, msg: ChatMessage): void {
+  const seal = mockSeals.get(convId);
+  if (!seal?.sealing) return;
+  const current = seal.keys.find((key) => key.is_current);
+  if (!current) return;
+  mockSealKeyOfMessage.set(msg.id, current.key_id);
+  mockSealWithheld.set(msg.id, msg.content);
+}
+
+/** Generate a passphrase the way `seal::generate_passphrase` does: five groups of four, joined
+ *  with a hyphen so it can be read aloud and retyped.
+ *
+ *  It draws on `Math.random` rather than this file's seeded PRNG deliberately, for two reasons: a
+ *  generated passphrase that repeated across runs would be a fixture pretending to be a secret,
+ *  and every fixture's place in the sidebar depends on the seeded sequence not moving (see
+ *  `addFixtureConversation`) — so an RPC must never draw from it. */
+function mockGeneratePassphrase(): string {
+  const groups: string[] = [];
+  for (let group = 0; group < MOCK_SEAL_GROUPS; group += 1) {
+    let word = "";
+    for (let c = 0; c < MOCK_SEAL_GROUP_LEN; c += 1) {
+      word += MOCK_SEAL_ALPHABET[Math.floor(Math.random() * MOCK_SEAL_ALPHABET.length)];
+    }
+    groups.push(word);
+  }
+  return groups.join("-");
+}
+
+/** The form a passphrase is derived FROM: lowercased, with every space and separator gone —
+ *  `seal::canonical_passphrase`.
+ *
+ *  Mirrored rather than skipped, because it is what makes a passphrase read off one screen and
+ *  typed into another open the same chat: a capital letter a phone's keyboard added, or a hyphen
+ *  somebody typed as a space, must not answer a different key id. A mock that answered two ids
+ *  for one passphrase would show the reader a mismatch warning nothing was wrong with. */
+function mockCanonicalPassphrase(passphrase: string): string {
+  // The separators the Rust drops. The two dashes are escaped rather than typed, because a row of
+  // look-alike glyphs is a set nobody can check: hyphen, underscore, full stop, en dash, em dash.
+  const separators = "-_.\u2013\u2014";
+  return [...passphrase]
+    .filter((c) => !/\s/.test(c) && !separators.includes(c))
+    .join("")
+    .toLowerCase();
+}
+
+/** An 8-hex key id, stable for a passphrase and for nothing else.
+ *
+ *  The real one is the Argon2id key's own digest, salted with the conversation, so one passphrase
+ *  names a different key in two chats. A mock holds no KDF and needs none: what a surface is
+ *  built on is that the same passphrase means the same key, so a spec can type one in two places
+ *  and watch the ids agree. A key id is no secret either — `seal_status` publishes it in the real
+ *  backend too, which is what lets the app say WHICH passphrase to ask a colleague for. */
+function mockSealKeyId(passphrase: string): string {
+  const canonical = mockCanonicalPassphrase(passphrase);
+  // FNV-1a over 32 bits: short, dependency-free, and spread well enough that two passphrases a
+  // spec picks by hand do not land on one id.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < canonical.length; i += 1) {
+    hash ^= canonical.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+/** Refuse a passphrase the backend would refuse (`seal::check_passphrase`) and answer the trimmed
+ *  form. Not a strength meter: what it catches is an empty field, a whole message pasted into
+ *  one, and the invisible characters a copy out of a chat brings with it — a passphrase carrying a
+ *  stray newline is one that will not open the chat on the other machine, and nothing would say
+ *  why. A mock that accepted what the backend refuses hides that instead of failing a test. */
+function mockCheckPassphrase(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) throw new Error("a passphrase cannot be empty");
+  if ([...trimmed].length > MOCK_SEAL_MAX_CHARS) {
+    throw new Error(`a passphrase is at most ${MOCK_SEAL_MAX_CHARS} characters`);
+  }
+  const control = [...trimmed].find((c) => {
+    const code = c.codePointAt(0) ?? 0;
+    return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+  });
+  if (control !== undefined) throw new Error(`a passphrase cannot hold ${JSON.stringify(control)}`);
+  return trimmed;
+}
+
+/** Make one key current, or none of them — the only place `is_current` and `sealing` are written.
+ *
+ *  `null` is what `seal_off` does: every key stays, so the messages it sealed still open, and only
+ *  NEW messages stop being sealed. Dropping a key is the other method, and the one nothing takes
+ *  back. */
+function mockSealSetCurrent(seal: MockSeal, keyId: string | null): void {
+  for (const key of seal.keys) key.is_current = key.key_id === keyId;
+  seal.sealing = keyId !== null && seal.keys.some((key) => key.key_id === keyId);
+}
+
+/** What `seal_status` answers: which conversations hold a passphrase, which key ids, and which one
+ *  is current — never a key and never a passphrase, which is the rule `get_settings` holds for a
+ *  token.
+ *
+ *  Ordered as the store's own query orders it (conversation ascending, keys oldest first), so a
+ *  spec reading `keys[0]` here reads what it would read there. A conversation whose keys are all
+ *  forgotten is dropped rather than answered empty: the real query joins on the rows, so no rows
+ *  means no entry. */
+function sealStatusView(): {
+  conversations: {
+    conversation: string;
+    sealing: boolean;
+    current_key_id: string;
+    keys: { key_id: string; is_current: boolean; added_ms: number }[];
+  }[];
+} {
+  const conversations = [...mockSeals.entries()]
+    .filter(([, seal]) => seal.keys.length > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([conversation, seal]) => {
+      const keys = [...seal.keys].sort((a, b) => a.added_ms - b.added_ms);
+      const current = keys.find((key) => key.is_current);
+      return {
+        conversation,
+        sealing: seal.sealing && current !== undefined,
+        current_key_id: current?.key_id ?? "",
+        keys: keys.map((key) => ({
+          key_id: key.key_id,
+          is_current: key.is_current,
+          added_ms: key.added_ms,
+        })),
+      };
+    });
+  return { conversations };
+}
+
+/** WHICH keys the messages already in a thread were sealed under: newest first, deduped, over the
+ *  newest {@link MOCK_SEAL_SCAN_DEPTH} — the mock's own half of `Store::seal_key_ids_in_use`.
+ *
+ *  It is the whole point of what `seal_set` answers back. Two colleagues each setting their own
+ *  passphrase is the sharpest failure this feature has: every message each posts is unreadable to
+ *  the other, and without this nobody is told — both see locked rows and each believes the other's
+ *  app is broken. */
+function mockSealKeyIdsInUse(convId: string): string[] {
+  const t = threadFor(convId);
+  if (!t) return [];
+  const newest = t.messages.slice(-MOCK_SEAL_SCAN_DEPTH).reverse();
+  const seen: string[] = [];
+  for (const msg of newest) {
+    const keyId = mockSealKeyOfMessage.get(msg.id);
+    if (keyId && !seen.includes(keyId)) seen.push(keyId);
+  }
+  return seen;
+}
+
+/** Re-read a thread's sealed rows against the keys this machine now holds, the way the real store
+ *  does it on EVERY read: a row whose key is held comes back opened with its words, and one whose
+ *  key is not comes back locked and empty.
+ *
+ *  It is what makes both halves of the surface real rather than stated. Adding a passphrase opens
+ *  every message already in the thread at once, which is the promise `sealLockedAction` makes on a
+ *  locked row; forgetting one locks them back up, which is what `SEAL_FORGET_WARNING` says it
+ *  costs. A mock that only remembered "this chat is sealed" could show neither.
+ *
+ *  A `"newer"` and a `"damaged"` row are left exactly where they are: those are facts about the
+ *  build and about the bytes, and no passphrase changes either. */
+function mockSealApplyKeys(convId: string): void {
+  const cs = store.get(convId);
+  if (!cs) return;
+  const held = new Set(mockSeals.get(convId)?.keys.map((key) => key.key_id) ?? []);
+  for (const msg of cs.messages) {
+    if (msg.seal === "newer" || msg.seal === "damaged") continue;
+    const keyId = mockSealKeyOfMessage.get(msg.id);
+    if (!keyId) continue;
+    if (held.has(keyId)) {
+      msg.seal = "opened";
+      msg.content = mockSealWithheld.get(msg.id) ?? msg.content;
+      delete msg.seal_key_id;
+    } else {
+      msg.seal = "locked";
+      msg.seal_key_id = keyId;
+      msg.content = "";
+    }
+  }
+  // The sidebar preview follows the words, exactly as it does in the real backend — where the
+  // summary is built from a body a store read had already decrypted. No event goes with it: the
+  // Rust handler emits `seal_changed` and nothing else, so a page that needed more than that to
+  // catch up would have the same bug against the real one.
+  recomputeSummary(cs);
+}
+
+/** Put every conversation's seal state back the way this file declares it, and the sealed FIXTURE
+ *  back to its seed — the `{kind:"seal"}` test hook.
+ *
+ *  A spec MUST call it. One mock process serves the whole E2E run, and a chat left sealed changes
+ *  what every later spec's composer says about the next message it sends — which is the same
+ *  discipline `resetMockChess` follows for a game left unfinished.
+ *
+ *  It takes the padlock off every message ANYWHERE, not just the keys: a spec that sealed an
+ *  ordinary chat and posted into it left rows marked `"opened"`, and clearing the keys alone would
+ *  leave them claiming a seal no key backs — a message drawn with a padlock in a chat the surface
+ *  says is not sealed. The words are given back as each mark goes, because a withheld row is empty.
+ *  And the fixture is truncated as well as re-stated, because a sealed message a spec sent into it
+ *  is a row every later spec would count. */
+function resetMockSeal(): void {
+  for (const cs of store.values()) {
+    let touched = false;
+    for (const msg of cs.messages) {
+      if (msg.seal === undefined) continue;
+      msg.content = mockSealWithheld.get(msg.id) ?? msg.content;
+      delete msg.seal;
+      delete msg.seal_key_id;
+      touched = true;
+    }
+    if (touched) recomputeSummary(cs);
+  }
+  mockSeals.clear();
+  mockSealKeyOfMessage.clear();
+  mockSealWithheld.clear();
+  const cs = store.get(MOCK_SEALED_THREAD);
+  if (cs && cs.messages.length > mockSealSeedCount) cs.messages.length = mockSealSeedCount;
+  seedSealedThreadState();
+  broadcast("seal_changed", { conversation: MOCK_SEALED_THREAD });
+  broadcast("conversations_changed", {});
 }
 
 // ---------------------------------------------------------------------------
@@ -10089,6 +10685,18 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         { status: 200 },
       );
     }
+    // Put every SEALED chat back the way this file declares it: the seal state of every
+    // conversation dropped and rebuilt, and the sealed fixture truncated to its seed.
+    //
+    // A spec MUST call it. One mock process serves the whole run, and a chat left sealed changes
+    // what every later spec's composer says about the message it is about to send — and a sealed
+    // message it sent is a row every later one would count. There is nothing to ARM: what a spec
+    // needs is reachable through the RPCs themselves, and the fixture already holds a locked row
+    // under a passphrase this machine does not have.
+    if (body.kind === "seal") {
+      resetMockSeal();
+      return Response.json({ ok: true, seal: sealStatusView() }, { status: 200 });
+    }
     // Arm where this page stands with the write lock, so the banner that says "this window
     // can read, but not send" can be driven (see write-lock-banner.tsx). A spec MUST reset
     // it: one mock process serves the whole run, and a left-behind banner sits above every
@@ -10837,6 +11445,7 @@ seedForwardedMessages();
 seedPlainTextSamples();
 seedStopAgentThread();
 seedChessThread();
+seedSealedThread();
 seedAgentSandbox();
 seedMergeRequestReview();
 seedCustomEmojiThread();

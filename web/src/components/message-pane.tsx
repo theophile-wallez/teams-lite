@@ -42,9 +42,7 @@ import { recordingsInConversation, type CallRecording } from "~/lib/call-recordi
 import { chessGamesInThread, type ChessGame } from "~/lib/chess-thread";
 import { CallRecordingCard } from "./call-recording-card";
 import { useAppState, useController } from "./controller-context";
-import { AgentMenu } from "./agent-menu";
-import { CallButton } from "./call-button";
-import { ChessButton } from "./chess-button";
+import { ConversationMenu } from "./conversation-menu";
 import { useCallOwnsComposer } from "./call-stage-context";
 import { AgentPendingBubble } from "./agent-reply";
 import { Avatar, conversationFallback, conversationPhoto, type AvatarPhoto } from "./avatar";
@@ -934,16 +932,18 @@ export function MessagePane(props: { onBack?: () => void }) {
             </p>
           ) : null}
         </div>
-        {/* The header's own controls, as one group on the right: the call this
-            conversation offers — ring the person, ring the whole group, or JOIN the meeting
-            the thread was minted for, and only where it would really work (see
-            components/call-button.tsx) — and whether this thread answers an `@claude`
-            message (per conversation on purpose — see components/agent-menu.tsx). */}
+        {/* ONE control, and everything this conversation offers is inside it: the call it
+            places or the meeting it joins, a game of chess, whether the chat is encrypted, and
+            whether this thread answers an `@claude` message. It used to be three controls in
+            this slot, each drawn only where it applied — so the target moved between
+            conversations, which is the whole argument for the menu (see
+            components/conversation-menu.tsx). */}
         {openId && (
-          <div className="ml-auto flex shrink-0 items-center gap-1">
-            <CallButton conversationId={openId} />
-            <ChessButton conversationId={openId} games={chessGames} />
-            <AgentMenu conversationId={openId} />
+          // The header keeps the layout decision, as it did when this slot held a row of
+          // three: where the controls sit is the header's business, and the menu's is what
+          // is in them.
+          <div className="ml-auto shrink-0">
+            <ConversationMenu conversationId={openId} games={chessGames} />
           </div>
         )}
       </header>

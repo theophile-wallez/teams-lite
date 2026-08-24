@@ -24,6 +24,7 @@ const SETTINGS: AppSettings = {
   available_now: false,
   sender_icons: true,
   emoji_auto_import: true,
+  sealed_push_words: false,
 };
 
 describe("hoursDraft", () => {

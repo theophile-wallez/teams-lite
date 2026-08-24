@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage, SealStatus } from "./protocol";
 import {
   SEAL_COMPOSER_HINT,
+  SEAL_PASSPHRASE_MAX_CHARS,
   sealCanBeUsed,
   sealHoldsKey,
   sealIsLocked,
@@ -13,6 +14,7 @@ import {
   sealLockedMessage,
   sealMenuLabel,
   sealPassphraseGroups,
+  sealSetMismatch,
   sealStateOf,
 } from "./seal";
 
@@ -141,6 +143,26 @@ describe("the warning that stops two people sealing past each other", () => {
     expect(sealKeyDisagrees(rotated, CHAT, theirs)).toBe(false);
   });
 
+  it("says nothing about the FIRST passphrase a chat is given", () => {
+    // A chat being sealed for the first time holds no sealed message, so there is nothing this
+    // passphrase could have failed to open — and it is the common case, which must never be met
+    // with a warning. The empty list is checked as well as the backend's own verdict, so the
+    // sentence stays right whichever of the two an older build answers with.
+    expect(sealSetMismatch({ opens_existing: true, key_ids_in_use: [] })).toBeNull();
+    expect(sealSetMismatch({ opens_existing: false, key_ids_in_use: [] })).toBeNull();
+    expect(sealSetMismatch({ opens_existing: true, key_ids_in_use: ["99999999"] })).toBeNull();
+  });
+
+  it("says what to do when the passphrase opens nothing already in the thread", () => {
+    // Said at the dialog, while the reader is still in front of the field that mends it: the
+    // colleague who wrote those messages is the only source of the passphrase that opens them.
+    const said = sealSetMismatch({ opens_existing: false, key_ids_in_use: ["99999999"] });
+    expect(said).not.toBeNull();
+    expect(said).toContain("Ask whoever wrote them");
+    // Never a key id: it names no passphrase anybody could ask a colleague for.
+    expect(said).not.toContain("99999999");
+  });
+
   it("stays quiet where this machine is not sealing, and where nothing is locked", () => {
     const theirs = [message({ seal: "locked", seal_key_id: "99999999", content: "" })];
     expect(sealKeyDisagrees(status({ sealing: false }), CHAT, theirs)).toBe(false);
@@ -155,6 +177,13 @@ describe("what the reader is told", () => {
     // A picture's bytes go to Microsoft's own object store, so nothing here can seal them —
     // and a message that looked sealed while carrying a readable screenshot would be a lie.
     expect(SEAL_COMPOSER_HINT).toContain("Pictures");
+  });
+
+  it("states the backend's own ceiling, so the field refuses before a write does", () => {
+    // `seal::MAX_PASSPHRASE_CHARS`. The two must agree: a field that collected more would earn a
+    // refusal for a passphrase the reader had already finished typing — and one they may have
+    // read off a colleague's screen, so retyping it is not free.
+    expect(SEAL_PASSPHRASE_MAX_CHARS).toBe(256);
   });
 
   it("draws a generated passphrase in the groups it was made in", () => {

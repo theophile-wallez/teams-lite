@@ -39,6 +39,7 @@ import { CustomAgentsSettings } from "./custom-agents-settings";
 import { CustomEmojiSettings } from "./custom-emoji-settings";
 import { MaintenanceSettings } from "./maintenance-settings";
 import { RenamedPeopleSettings } from "./renamed-people-settings";
+import { SealSettings } from "./seal-settings";
 import { useAppState, useController } from "./controller-context";
 import { LinearLogo } from "./linear-logo";
 import { Button } from "./ui/button";
@@ -115,6 +116,11 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <GitLabSettings />
           <LinearSettings />
           <GhostModeSettings />
+          {/* Inside the privacy run and between its two neighbours on purpose: who is told the
+              user READ a message, then who can read what they WRITE, then what leaves this
+              machine for a stranger's server. It draws nothing at all on a backend with no seal
+              (see components/seal-settings.tsx). */}
+          <SealSettings />
           <SenderIconSettings />
           <AlwaysAvailableSettings />
           <CallRecordingsSettings />

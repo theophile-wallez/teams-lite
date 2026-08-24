@@ -5561,6 +5561,141 @@ export class TeamsController {
     return status;
   }
 
+  // ---- a sealed chat (see lib/seal.ts) -------------------------------------
+  //
+  // The BACKEND is the encryption boundary (src/seal.rs): it seals every body it posts to a
+  // sealed conversation and decrypts on every store read. So nothing below holds a key, a
+  // passphrase or a byte of ciphertext — the four writes are asks, and the one secret that
+  // ever comes back (`sealReveal`) is handed to the caller and never kept in state, which is
+  // read by every subscriber and printed by every devtool.
+
+  /** Read which chats this machine seals, and which passphrases it holds for each.
+   *
+   *  Best-effort, like the agent status beside it: a backend too old to know the method
+   *  answers `unknown method`, and that must read as "nothing to say" rather than as a fault.
+   *  The status then stays null and no surface says anything about sealing at all. */
+  private async loadSealStatus(): Promise<void> {
+    try {
+      this.set({ sealStatus: await this.backend.sealStatus() });
+    } catch {
+      // ignore — null is what makes every seal decision draw nothing (see AppState.sealStatus).
+    }
+  }
+
+  /**
+   * Seal a conversation under a passphrase — the user's own, or one the backend invents when
+   * none is given.
+   *
+   * It is the consent gate of the whole feature and not a display preference: from here on,
+   * every message this machine posts to THAT chat leaves encrypted, and a colleague without
+   * the passphrase reads none of them. So it is a write request, it names the conversation
+   * explicitly, and the status that lands in state is the backend's own — a refused write
+   * leaves what is really stored on screen.
+   *
+   * Returns the two things only the dialog needs: the passphrase when the BACKEND invented it
+   * (the one time it crosses the socket, so the user can be shown what to give their
+   * colleagues), and whether it opens the sealed messages the thread ALREADY holds — the
+   * warning that catches two people sealing one chat under two different passphrases, which
+   * is the sharpest failure this feature has.
+   *
+   * The MESSAGES are not re-read here. This write emits `seal_changed`, and that handler is
+   * where the re-read lives — one path for our own write and for the other backend's, rather
+   * than two that have to stay in step.
+   *
+   * Rejects with the backend's reason (a channel, a passphrase it refuses) so the dialog can
+   * say why.
+   */
+  async sealSet(
+    conversationId: string,
+    passphrase?: string,
+  ): Promise<{ passphrase?: string; opens_existing: boolean; key_ids_in_use: string[] }> {
+    let result: SealSetResult;
+    try {
+      result = await this.backend.sealSet(conversationId, passphrase);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.adoptSealStatus(result);
+    playCue("success");
+    return {
+      passphrase: result.passphrase,
+      opens_existing: result.opens_existing,
+      key_ids_in_use: result.key_ids_in_use,
+    };
+  }
+
+  /**
+   * Stop sealing NEW messages here, and keep every passphrase — so the messages already in
+   * the thread stay readable.
+   *
+   * That is the whole difference from {@link sealForget}, and it is why this one needs no
+   * confirmation: nothing becomes unreadable. Whether anything was really sealing is in the
+   * fresh status this adopts, so there is nothing for the caller to report.
+   *
+   * Rejects on failure, so the control that called it can say why.
+   */
+  async sealOff(conversationId: string): Promise<void> {
+    try {
+      this.adoptSealStatus(await this.backend.sealOff(conversationId));
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    playCue("success");
+  }
+
+  /**
+   * Forget one passphrase. Every message it opened becomes unreadable on this machine, for
+   * good.
+   *
+   * The one act in this feature that no later call takes back — the messages are still in the
+   * thread and nothing here can open them again — so the surface asks twice, the way a
+   * deletion does (see SEAL_FORGET_WARNING).
+   *
+   * Rejects on failure, so the control that called it can say why.
+   */
+  async sealForget(conversationId: string, keyId: string): Promise<void> {
+    try {
+      this.adoptSealStatus(await this.backend.sealForget(conversationId, keyId));
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    playCue("success");
+  }
+
+  /**
+   * The passphrase behind one key, for the user's own press.
+   *
+   * It exists so somebody who joins the conversation in March can be GIVEN something: a
+   * passphrase this app could not show again would force a rotation of the whole chat just to
+   * share it. Handed straight back to the caller and never written into state — a secret in a
+   * reactive store is a secret every subscriber holds — and it sounds no cue, because nothing
+   * changed: showing it IS the feedback.
+   *
+   * Rejects when this machine holds no passphrase for that key, so the row can say so.
+   */
+  async sealReveal(conversationId: string, keyId: string): Promise<string> {
+    try {
+      const { passphrase } = await this.backend.sealReveal(conversationId, keyId);
+      return passphrase;
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+  }
+
+  /** Take the status out of what a seal write answered, and nothing else.
+   *
+   *  Every one of them answers with the whole fresh view PLUS what it just did — and for
+   *  `seal_set` that includes the passphrase. Assigning the answer wholesale would put that
+   *  secret into reactive state, where it would outlive the dialog and reach every subscriber,
+   *  so only the conversations are kept. */
+  private adoptSealStatus(answer: SealStatus): void {
+    this.set({ sealStatus: { conversations: answer.conversations } });
+  }
+
   // ---- push notifications (see lib/push.ts) --------------------------------
 
   /**

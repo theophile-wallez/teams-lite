@@ -19,8 +19,12 @@
 //   2. it hands the caller no raw `page`, so there is nothing to navigate away with;
 //   3. the conversation is opened BY THAT ID rather than clicked for in the sidebar, and
 //      two things out of the app's own state are read immediately before the click: the
-//      composer's `data-conversation-id`, and the call button's own `data-conversation-id`.
-//      Either one disagreeing throws instead of ringing;
+//      composer's `data-conversation-id`, and the call ROW's own `data-conversation-id`.
+//      Either one disagreeing throws instead of ringing. The call is a row of the
+//      conversation's own menu now rather than a button in its header (see
+//      components/conversation-menu.tsx), so this opens that menu first — which changes
+//      nothing about the proof: the row states the same attribute the button did, and it is
+//      still read off the app's state in the moment before the click;
 //   4. it ALWAYS hangs up, on every path out, including a throw. A driver that rang
 //      somebody and walked away would leave their phone buzzing.
 //
@@ -65,6 +69,13 @@ export const AUTHORIZED_CALL_CONVERSATION =
 
 const APP_READY_TIMEOUT_MS = 60_000;
 const CALL_BUTTON_TIMEOUT_MS = 30_000;
+/** How many times the conversation's menu is re-opened before giving up.
+ *
+ *  A live page re-renders on every frame the feed delivers, and a non-modal Radix menu can be
+ *  unmounted between the press that opens it and the row being reached. Each attempt re-proves
+ *  the target from scratch, so a retry can never carry a stale proof forward — it is only the
+ *  OPENING that is retried. */
+const MENU_OPEN_ATTEMPTS = 4;
 /** How long to watch a live call before hanging up, unless `--hold` says otherwise. A real
  *  person's phone is ringing for every second of this, so it is short. */
 const DEFAULT_HOLD_SECONDS = 12;
@@ -176,12 +187,12 @@ export async function withCallLive<T>(
 }
 
 /**
- * The call button of the pinned conversation, with both proofs read before it is returned.
+ * The call ROW of the pinned conversation, with both proofs read before it is returned.
  *
  * The conversation is opened by its own ID — never clicked for in the sidebar, which cannot
- * prove which thread was opened — and then two independent statements out of the app's own
- * state have to agree: the composer says which conversation is open, and the button says
- * whom it would ring.
+ * prove which thread was opened — its menu is opened, and then two independent statements out
+ * of the app's own state have to agree: the composer says which conversation is open, and the
+ * row says whom it would ring.
  */
 async function findPinnedCallButton(page: Page, origin: string) {
   await page.goto(`${origin}/c/${encodeURIComponent(AUTHORIZED_CALL_CONVERSATION)}`, {
@@ -196,24 +207,63 @@ async function findPinnedCallButton(page: Page, origin: string) {
         `  now at: ${page.url()}`,
     );
   }
-  const button = page.locator('[data-testid="call-button"]').first();
-  await button.waitFor({ timeout: CALL_BUTTON_TIMEOUT_MS });
+  const button = await openCallRow(page);
   const target = await button.getAttribute("data-conversation-id");
   if (target !== AUTHORIZED_CALL_CONVERSATION) {
     throw new Error(
-      `REFUSING TO CALL: this app is talking to the real Teams account, and the button on ` +
+      `REFUSING TO CALL: this app is talking to the real Teams account, and the row on ` +
         `screen rings ${target ?? "an unknown conversation"}, not the pinned one.\n` +
         `  now at: ${page.url()}\n` +
         `A click here would make a stranger's phone ring. Do not work around this.`,
     );
   }
-  if (await button.isDisabled()) {
+  // A menu row is a `div[role=menuitem]`, so "disabled" is Radix's own attribute rather than a
+  // form control's — read as the attribute rather than through `isDisabled()`, because a driver
+  // that silently read "enabled" off the wrong spelling would click a control the app refused.
+  if ((await button.getAttribute("data-disabled")) !== null) {
     throw new Error(
-      "The call button is disabled, so calling is off in Settings on this machine — and " +
-        "this script will not click a disabled button.",
+      "The call row is disabled, so this window does not take calls (a read-only backend, or " +
+        "a call already in flight) — and this script will not click a disabled row. What the " +
+        "app says is beside it: " +
+        ((await page
+          .locator('[data-testid="conversation-call-reason"]')
+          .first()
+          .innerText()
+          .catch(() => "")) || "(no reason stated)"),
     );
   }
   return button;
+}
+
+/**
+ * Open the open conversation's own menu and hand back its call row.
+ *
+ * The call moved into that menu, so this is the one step the driver gained — and it is the
+ * cheap half: opening a menu reaches nobody. Retried, because a live page re-renders on every
+ * frame its feed delivers and a non-modal Radix menu can be unmounted in that window. Nothing
+ * about the target is remembered across an attempt; the proof is read by the caller after this
+ * returns, from the row that is on screen then.
+ */
+async function openCallRow(page: Page) {
+  const trigger = page.locator('[data-testid="conversation-menu"]').first();
+  await trigger.waitFor({ timeout: APP_READY_TIMEOUT_MS });
+  const row = page.locator('[data-testid="call-button"]').first();
+  for (let attempt = 1; attempt <= MENU_OPEN_ATTEMPTS; attempt += 1) {
+    try {
+      if (!(await row.count())) await trigger.click({ timeout: 5_000 });
+      await row.waitFor({ timeout: CALL_BUTTON_TIMEOUT_MS / MENU_OPEN_ATTEMPTS });
+      return row;
+    } catch {
+      await page.waitForTimeout(400);
+    }
+  }
+  throw new Error(
+    "REFUSING TO CALL: this conversation's menu never offered a call row. That is what a " +
+      "conversation with nobody to ring looks like (Notes), and also what a bundle staged " +
+      "before the menu existed looks like — check `bin/teams-lite-service.sh status` and " +
+      "re-stage with `update`. It rings the pinned conversation and no other; do not point " +
+      "it elsewhere.",
+  );
 }
 
 /** Fields whose value names why a call ended, or why a request was refused. Read from every
