@@ -339,14 +339,16 @@ describe("MessageBubble — a message this machine could not read", () => {
 });
 
 describe("MessageBubble — a message this machine opened", () => {
-  it("says so with a quiet padlock, and keeps the words", () => {
+  it("DRAWS NOTHING, and answers on hover", () => {
+    // A padlock per bubble was the first shape and it was too loud: a sealed conversation is
+    // sealed, and a mark on every row repeats one fact as many times as there are messages.
+    // What stays is the answer for whoever asks — a plain `title` on the message itself.
     const out = render(message({ seal: "opened", content: "<p>the invoice numbers</p>" }));
     expect(out).toContain('data-seal="opened"');
-    expect(out).toContain('data-testid="seal-mark"');
+    expect(out).not.toContain('data-testid="seal-mark"');
     expect(out).toContain('title="Encrypted before it reached Teams"');
-    expect(out).toContain('aria-label="Encrypted before it reached Teams"');
     expect(out).toContain("the invoice numbers");
-    // It is a padlock beside words the reader CAN read: an ordinary bubble, no withheld row.
+    // Words the reader CAN read: an ordinary bubble, no withheld row.
     expect(out).toContain("bg-bubble-incoming");
     expect(out).not.toContain('data-testid="sealed-message"');
   });
@@ -356,7 +358,9 @@ describe("MessageBubble — a message this machine opened", () => {
     expect(out).toContain('data-testid="message-actions"');
   });
 
-  it("marks a picture-only message too, which drops the bubble the mark would sit in", () => {
+  it("answers on a picture-only message too, which has no bubble to draw a mark in", () => {
+    // The title rides the MESSAGE rather than its content, so the shapes that drop the bubble
+    // chrome — a picture, a card, a link — still answer.
     const out = render(
       message({
         seal: "opened",
@@ -365,7 +369,13 @@ describe("MessageBubble — a message this machine opened", () => {
       }),
     );
     expect(out).toContain('data-image-only="true"');
-    expect(out).toContain('data-testid="seal-mark"');
+    expect(out).toContain('title="Encrypted before it reached Teams"');
+  });
+
+  it("says nothing at all on a message that was never sealed", () => {
+    const out = render(message({ content: "<p>ordinary</p>" }));
+    expect(out).not.toContain("data-seal=");
+    expect(out).not.toContain("Encrypted before it reached Teams");
   });
 
   it("says nothing on a deleted message that had been sealed", () => {

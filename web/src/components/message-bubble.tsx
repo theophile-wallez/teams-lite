@@ -113,6 +113,18 @@ const REACTION_OVERHANG = "mb-7";
  *  reader's question, and this quiet mark is the only place the app answers it. */
 const SEAL_MARK_LABEL = "Encrypted before it reached Teams";
 
+/** Nothing is DRAWN on a message that went through the seal, and that is the user's own call.
+ *
+ *  A padlock per bubble was the first shape and it was too loud: a sealed conversation is sealed,
+ *  and a mark on every row of it repeats one fact as many times as there are messages — which is
+ *  what a stamp per bubble was already fixed for (§ When a message was sent). What stays is the
+ *  answer for whoever asks: the bubble carries {@link SEAL_MARK_LABEL} as a plain `title`, so
+ *  resting on a message says it was encrypted and nothing says it otherwise.
+ *
+ *  The cost is stated where the rule is: there is no hover on a phone, so this app tells a reader
+ *  a chat is encrypted by the small mark in its composer and by the row in its menu, both of
+ *  which are per CONVERSATION — which is the level the fact really lives at. */
+
 /** Resolved enrichment for a set of links, keyed by URL: `undefined` while a
  *  lookup is in flight, `null` when the link is not an enrichable integration,
  *  or the provider-tagged metadata once resolved. */
@@ -937,6 +949,11 @@ function MessageBubbleImpl(props: {
         // rows: a capture and a spec have to be able to tell an opened one from each of the
         // three that are withheld (see lib/seal.ts).
         data-seal={sealState ?? undefined}
+        // The ONLY thing a message that went through the seal says about it (see
+        // `SEAL_MARK_LABEL`): resting on it answers, and nothing is drawn otherwise. A locked
+        // row is different and keeps its own words — its body is not there, and that has to be
+        // readable without a pointer.
+        title={sealState === "opened" ? SEAL_MARK_LABEL : undefined}
         style={{ x: messageGestures.x, touchAction: "pan-y" }}
         {...messageGestures.handlers}
         className={cn(
@@ -1169,36 +1186,6 @@ function MessageBubbleImpl(props: {
                   ),
                 )}
               </div>
-            ) : null}
-
-            {/* This message went through the seal and this machine opened it: a padlock at
-                the foot of what it says, on the trailing edge where every client puts a
-                message's own metadata. It is deliberately quiet — 12px of the bubble's own
-                ink at 60% — because it is a fact about the message and not a badge on it,
-                and it is said HERE rather than once above the thread because a sealed chat
-                also holds the rows written before it was sealed, which carry no mark.
-
-                It rides with the CONTENT rather than with the bubble, so a message that is
-                only a picture, or only a card, still says it — those drop the bubble chrome
-                and would otherwise be the one kind of sealed message that says nothing. */}
-            {sealState === "opened" ? (
-              <span
-                data-testid="seal-mark"
-                role="img"
-                // A `title` on an `<svg>` is not a tooltip — that needs a `<title>` child —
-                // so the span carries both the tooltip and the accessible name, and the
-                // glyph inside it is hidden.
-                title={SEAL_MARK_LABEL}
-                aria-label={SEAL_MARK_LABEL}
-                className="mt-0.5 flex justify-end opacity-60"
-              >
-                <HugeiconsIcon
-                  icon={SquareLock02Icon}
-                  className="size-3"
-                  strokeWidth={1.8}
-                  aria-hidden
-                />
-              </span>
             ) : null}
 
             {chipsShown ? (

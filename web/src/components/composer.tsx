@@ -7,6 +7,7 @@ import {
   ImageAdd01Icon,
   Loading02Icon,
   SentIcon,
+  SquareLock02Icon,
   TextFontIcon,
 } from "@hugeicons/core-free-icons";
 import type { AgentAnswer } from "~/lib/agent-answer";
@@ -467,7 +468,7 @@ export function Composer(props: {
         )}
         <ScheduledMessagesDialog open={scheduledOpen} onOpenChange={setScheduledOpen} />
         <div
-          className="flex cursor-text flex-col gap-2 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
+          className="relative flex cursor-text flex-col gap-2 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
           onMouseDown={(event) => {
             // Clicking anywhere in the box focuses the field, except the action
             // buttons (send / format bar / image), the field itself, and the TITLE —
@@ -505,6 +506,37 @@ export function Composer(props: {
               weight it is drawn in and ruled off from them — which is the differentiation
               the whole feature is about. Native `maxLength` is the ceiling, so the field
               refuses the 251st character instead of the send refusing the title. */}
+          {/* THAT THESE WORDS WILL BE ENCRYPTED, and nothing else: one quiet mark in the
+              corner of the box the reader is typing in.
+              It was two sentences above the field — what the seal covers, and the warning that
+              the thread disagrees with this machine's passphrase — and both were too loud for a
+              standing state: a line that is there on every message of every sealed chat is
+              furniture, and it pushed the field down. The words survive where they are ACTED on
+              rather than merely true: the dialog states what the seal covers and what it does
+              not, and it is the dialog that reports a passphrase opening nothing already in the
+              thread (`sealSetMismatch`).
+              A DISAGREEMENT says so on HOVER and never in colour: the mark stays as quiet in that
+              state as in the ordinary one, because a red glyph in the corner of the box is the
+              same interruption the red line was. What it costs is stated plainly — there is no
+              hover on a phone, so a phone reader meets that warning in the dialog behind the
+              header's menu, which is also where it can be acted on.
+              It cannot collide with the post TITLE above it: a channel is the only conversation
+              with that field and a channel cannot be sealed (`sealCanBeUsed`). */}
+          {sealed && (
+            <span
+              data-testid="composer-seal-mark"
+              data-seal-mismatch={sealMismatch ? "true" : undefined}
+              role="img"
+              // A `title` on an `<svg>` is not a tooltip, so the span carries both it and the
+              // accessible name and the glyph inside is hidden.
+              title={sealMismatch ? SEAL_MISMATCH_HINT : SEAL_COMPOSER_HINT}
+              aria-label={sealMismatch ? SEAL_MISMATCH_HINT : SEAL_COMPOSER_HINT}
+              className="pointer-events-auto absolute right-2.5 top-2 z-10 text-text-faint/60"
+            >
+              <HugeiconsIcon icon={SquareLock02Icon} className="size-3" strokeWidth={1.8} aria-hidden />
+            </span>
+          )}
+
           {subjectOffered && (
             <input
               type="text"
@@ -575,30 +607,6 @@ export function Composer(props: {
           {imageError && (
             <div role="alert" data-testid="composer-image-error" className="text-xs text-destructive">
               {imageError}
-            </div>
-          )}
-          {/* WHAT WILL HAPPEN TO THESE WORDS, in one line, above the field they are in.
-              It says the two things the reader decides with and no more: the message is
-              encrypted, and a PICTURE is not — its bytes go to Microsoft's own object
-              store, so nothing in this app can cover them, and a message that looked
-              sealed while carrying a readable screenshot would be a lie (§ A SEALED chat).
-              It is drawn from the BACKEND's own answer, which is what really seals the
-              body, so it can never claim a seal the send will not apply. */}
-          {sealed && (
-            <div data-testid="composer-seal-hint" className="text-xs text-text-faint">
-              {SEAL_COMPOSER_HINT}
-            </div>
-          )}
-          {/* AND THE ONE WARNING NO PRESS REACHES. The dialog says it to whoever sets a
-              passphrase that opens nothing; this says it to whoever was given the wrong one
-              months ago and is writing today. Without it two people seal past each other in
-              silence — each posting messages the other cannot read, each seeing locked rows,
-              each believing the other's app is broken — which is the sharpest failure this
-              feature has. It is `destructive` rather than faint because it is about a message
-              that is ABOUT TO leave, not about one that did. */}
-          {sealMismatch && (
-            <div role="alert" data-testid="composer-seal-mismatch" className="text-xs text-destructive">
-              {SEAL_MISMATCH_HINT}
             </div>
           )}
           {/* Why the last message did not leave, beside the words that are still in the

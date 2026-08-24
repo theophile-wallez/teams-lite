@@ -43,22 +43,14 @@ import type { Locator, Page } from "@playwright/test";
  * left sealed would change what every later spec's composer says about the message it is about
  * to send — and a message sent into the fixture is a row every later spec would count.
  *
- * **TWO TESTS HERE ARE RED, and deliberately so: the COMPOSER half of this feature is not
- * built.** `SEAL_COMPOSER_HINT` and `SEAL_MISMATCH_HINT` are decided in `lib/seal.ts`, argued in
- * AGENTS.md § A SEALED chat as rules the app holds, and drawn by nothing —
- * `web/src/components/composer.tsx` never reads `sealIsOn` or `sealKeyDisagrees`. They are the
- * two named here, and both are load-bearing rather than cosmetic:
- *
- *   - "the COMPOSER says the words are encrypted and a picture is NOT" — a picture is uploaded
- *     to Microsoft's object store unsealed and is deliberately allowed, so a chat that looked
- *     sealed while carrying a readable screenshot is a lie the composer is the only surface
- *     placed to correct;
- *   - "the COMPOSER carries the mismatch while the thread disagrees with this machine" — the one
- *     warning NO press reaches, for the reader who was given the wrong passphrase months ago and
- *     writes today. Without it, two people seal past each other in silence.
- *
- * They are left asserting rather than skipped, because a skipped test is a rule nobody is
- * reminded of. Every other rule the page owns passes.
+ * **NOTHING IS DRAWN ON A MESSAGE, and nothing is written in the composer.** Both were tried
+ * louder and both were cut back, on the same argument: a padlock on every row of a sealed chat
+ * repeats one fact as many times as there are messages, and a line above the field is furniture
+ * on every message of every sealed chat. What is left is the smallest thing that still answers —
+ * a plain `title` on the message, and one quiet mark in the corner of the box — and the WORDS
+ * live where they are acted on, which is the dialog. So the two tests that used to read a
+ * sentence out of the composer now read the mark's own `title`, and each also asserts that the
+ * sentence is NOT in the box.
  */
 
 /** The port the mock is expected on — mirrors `playwright.config.ts`. */
@@ -209,26 +201,29 @@ test.describe("a sealed chat", () => {
     await expect(page.locator("body")).not.toContainText("Unsupported message");
   });
 
-  test("the PADLOCK marks what went through the seal, and only that", async ({ page }) => {
+  test("a message that went through the seal DRAWS NOTHING, and answers on hover", async ({
+    page,
+  }) => {
     await openSealedChat(page);
 
-    // It is drawn per MESSAGE rather than once above the thread, which is the opposite of the
-    // rule the time mark follows — because a sealed chat holds both kinds of row at once, and
-    // which of the two a row is, is exactly the reader's question.
-    await expect(page.locator('[data-testid="seal-mark"]')).toHaveCount(1);
-    await expect(sealedRow(page, "opened").locator('[data-testid="seal-mark"]')).toBeVisible();
-    await expect(messages(page).first().locator('[data-testid="seal-mark"]')).toHaveCount(0);
+    // A padlock per bubble was the first shape and it was too loud: a sealed conversation is
+    // sealed, and a mark on every row of it repeats one fact as many times as there are
+    // messages. Nothing is drawn on any row, anywhere in the thread.
+    await expect(page.locator('[data-testid="seal-mark"]')).toHaveCount(0);
 
-    // It says what it means to a pointer and to a screen reader alike: a bare glyph beside
-    // somebody's words is a mark nobody can look up.
-    await expect(sealedRow(page, "opened").locator('[data-testid="seal-mark"]')).toHaveAttribute(
-      "aria-label",
+    // What stays is the answer for whoever asks, on the message itself — and it is on the
+    // OPENED row alone, because the same thread also holds the messages written before it was
+    // sealed and those went out in the clear.
+    await expect(sealedRow(page, "opened")).toHaveAttribute(
+      "title",
       /encrypted before it reached teams/i,
     );
+    await expect(messages(page).first()).not.toHaveAttribute("title", /encrypted/i);
 
-    // A withheld row draws no padlock of its own beside the sentence — the sentence IS the
-    // statement, and the mark would claim the message reached the reader.
-    await expect(sealedRow(page, "locked").locator('[data-testid="seal-mark"]')).toHaveCount(0);
+    // A withheld row says its own sentence instead: its body is not there, and that has to be
+    // readable without a pointer.
+    await expect(sealedRow(page, "locked")).not.toHaveAttribute("title", /encrypted/i);
+    await expect(sealedRow(page, "locked")).toContainText(/passphrase this app does not have/i);
   });
 
   test("a LOCKED row is inert: no actions, and no reaction chip", async ({ page }) => {
@@ -325,14 +320,21 @@ test.describe("a sealed chat", () => {
     // Nothing about sealing is claimed before the reader asks for it: a page that has not heard
     // from the backend draws NOTHING, because a hopeful padlock would tell the reader their next
     // message is encrypted while it goes out in the clear.
-    await expect(composerShell(page)).not.toContainText(SEAL_COMPOSER_HINT);
+    await expect(page.locator('[data-testid="composer-seal-mark"]')).toHaveCount(0);
 
     const dialog = await openSealDialog(page);
     await dialog.locator('[data-testid="seal-passphrase-field"]').fill(HELD);
     await dialog.locator('[data-testid="seal-apply"]').click();
     await expect(page.locator('[data-testid="seal-dialog"]')).toHaveCount(0);
 
-    await expect(composerShell(page)).toContainText(SEAL_COMPOSER_HINT);
+    // It is a MARK and not a sentence: a line above the field is furniture on every message of
+    // every sealed chat, and it pushed the field down. The words live where they are ACTED on,
+    // in the dialog. So the composer says it in the corner, quietly, and answers on hover.
+    const mark = page.locator('[data-testid="composer-seal-mark"]');
+    await expect(mark).toBeVisible();
+    await expect(mark).toHaveAttribute("title", SEAL_COMPOSER_HINT);
+    await expect(mark).toHaveAttribute("aria-label", SEAL_COMPOSER_HINT);
+    await expect(composerShell(page)).not.toContainText(SEAL_COMPOSER_HINT);
   });
 
   test("a GENERATED passphrase is shown once, and revealable afterwards", async ({ page }) => {
@@ -417,7 +419,13 @@ test.describe("a sealed chat", () => {
     // in it carries another — so this needs no press at all, which is exactly the point.
     await openSealedChat(page);
     await expect(sealedRow(page, "locked")).toHaveCount(1);
-    await expect(composerShell(page)).toContainText(SEAL_MISMATCH_HINT);
+    // Said on the mark rather than in red words under the field: a red line in the box the reader
+    // is typing in is an interruption, and the warning is acted on in the dialog. The mark stays
+    // as quiet in this state as in the ordinary one — only what it SAYS changes.
+    const mark = page.locator('[data-testid="composer-seal-mark"]');
+    await expect(mark).toHaveAttribute("title", SEAL_MISMATCH_HINT);
+    await expect(mark).toHaveAttribute("data-seal-mismatch", "true");
+    await expect(composerShell(page)).not.toContainText(SEAL_MISMATCH_HINT);
 
     // And it GOES when the disagreement does, rather than sitting there for the rest of the run:
     // adding the colleague's own passphrase is what mends it.
@@ -427,9 +435,10 @@ test.describe("a sealed chat", () => {
     await expect(page.locator('[data-testid="seal-dialog"]')).toHaveCount(0);
     await expect(sealedRow(page, "locked")).toHaveCount(0);
 
-    await expect(composerShell(page)).not.toContainText(SEAL_MISMATCH_HINT);
-    // Still sealed, so the ordinary hint stays: the mismatch went, not the encryption.
-    await expect(composerShell(page)).toContainText(SEAL_COMPOSER_HINT);
+    // Still sealed, so the mark stays and goes back to what it ordinarily says: the mismatch
+    // went, not the encryption.
+    await expect(mark).toHaveAttribute("title", SEAL_COMPOSER_HINT);
+    await expect(mark).not.toHaveAttribute("data-seal-mismatch", "true");
   });
 
   test("a LOCKED row's own press opens the same dialog, and the passphrase opens the row", async ({
@@ -451,7 +460,7 @@ test.describe("a sealed chat", () => {
     await expect(sealedRow(page, "locked")).toHaveCount(0);
     const wasLocked = page.locator('[data-testid="message"]', { hasText: LOCKED_WORDS });
     await expect(wasLocked).toHaveAttribute("data-seal", "opened");
-    await expect(wasLocked.locator('[data-testid="seal-mark"]')).toBeVisible();
+    await expect(wasLocked).toHaveAttribute("title", /encrypted before it reached teams/i);
     await expect(page.locator('[data-testid="sealed-message"]')).toHaveCount(1); // the damaged one
     // Both passphrases are kept, oldest first, and the one just added is current.
     const again = await openSealDialog(page);
@@ -483,7 +492,7 @@ test.describe("a sealed chat", () => {
     // And the messages already in the thread open exactly as they did. What stopped is the
     // sealing of NEW ones, which is why the composer says nothing any more.
     await expect(sealedRow(page, "opened")).toContainText(OPENED_WORDS);
-    await expect(sealedRow(page, "opened").locator('[data-testid="seal-mark"]')).toBeVisible();
+    await expect(sealedRow(page, "opened")).toHaveAttribute("title", /encrypted/i);
     await expect(composerShell(page)).not.toContainText(SEAL_COMPOSER_HINT);
     // The menu says which of the three states this is, so it is not mistaken for a chat that
     // was never sealed at all.
@@ -571,7 +580,7 @@ test.describe("a sealed chat", () => {
     expect(sent?.content_html).not.toMatch(/encrypt|sealed|passphrase|teams-lite/i);
     // And the row it came back as wears the mark, because it really went through the seal.
     await expect(messages(page).last()).toHaveAttribute("data-seal", "opened");
-    await expect(messages(page).last().locator('[data-testid="seal-mark"]')).toBeVisible();
+    await expect(messages(page).last()).toHaveAttribute("title", /encrypted/i);
   });
 
   test("SETTINGS lists the sealed chat, and the push preview hides the words by default", async ({
@@ -615,7 +624,7 @@ test.describe("a sealed chat", () => {
     await openConversationNamed(page, "Plain Text");
     await expect(composerShell(page)).not.toContainText(SEAL_COMPOSER_HINT);
     await expect(composerShell(page)).not.toContainText(SEAL_MISMATCH_HINT);
-    await expect(page.locator('[data-testid="seal-mark"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="composer-seal-mark"]')).toHaveCount(0);
 
     await page.locator('[data-testid="conversation-menu"]').click();
     await expect(page.locator('[data-testid="conversation-seal"]')).toContainText(

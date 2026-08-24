@@ -391,18 +391,29 @@ Fourteen rules hold it, and each is pinned by a test:
 - **FOUR outcomes, not a boolean** (`MessageSeal`): an ordinary message, one this machine OPENED, one
   sealed under a passphrase it does not hold, one from a newer build, and one whose bytes fail their
   own authentication. Each is a different sentence and a different next move, and collapsing them
-  into "this message cannot be read" is what makes an encrypted chat feel broken. `opened` is said
-  out loud on purpose: a padlock beside a message the reader CAN read is how they learn the
-  conversation is sealed at all.
+  into "this message cannot be read" is what makes an encrypted chat feel broken.
+- **NOTHING IS DRAWN ON A MESSAGE, and nothing is WRITTEN in the composer.** Both were tried
+  louder and both were cut back on one argument: a padlock on every row of a sealed chat repeats
+  one fact as many times as there are messages — which is what a stamp per bubble was already
+  fixed for (§ When a message was sent) — and a line above the field is furniture on every message
+  of every sealed chat, which also pushed the field down. What is left is the smallest thing that
+  still answers: the message carries `SEAL_MARK_LABEL` as a plain `title`, and the composer carries
+  ONE low-contrast mark in the corner of its box (`composer-seal-mark`) whose own title says which
+  state it is in. The WORDS live where they are acted on, which is the dialog. A DISAGREEMENT is
+  the same quiet mark and never a red line, because a red line in the box the reader is typing in
+  is the interruption the mark exists to avoid. The cost is stated: there is no hover on a phone,
+  so a phone reader meets both facts in the dialog behind the header's menu — which is where the
+  passphrase is, and the level a per-CONVERSATION fact really lives at.
 - **THE SHARPEST FAILURE IS TWO PEOPLE WITH TWO PASSPHRASES**, and it is the one thing that would
   otherwise be silent: each posts messages the other cannot read, both see locked rows, and each
   believes the other's app is broken. `Store::seal_key_ids_in_use` reads the key ids off the messages
   the thread ALREADY holds, `seal_set` answers whether the new passphrase opens them, and the
-  composer carries `SEAL_MISMATCH_HINT` while it does not.
+  composer's own mark carries `SEAL_MISMATCH_HINT` in its title while it does not.
 - **A PICTURE is not sealed, and the composer says so.** Its bytes are uploaded to Microsoft's own
   object store, so nothing in this module can cover them. It is allowed rather than refused — the
   user's own decision — and a message that looked sealed while carrying a readable screenshot would
-  be a lie, so `SEAL_COMPOSER_HINT` names it before the send.
+  be a lie, so `SEAL_COMPOSER_HINT` names it — in the dialog that seals the chat, and in the title
+  of the composer's mark.
 - **A @MENTION is allowed, and its span travels SEALED.** `properties.mentions` stays in the clear,
   which is what makes the notification happen, so Teams learns WHO was mentioned and not what was
   said. The person is notified and sees a locked message until they have the passphrase.
@@ -450,7 +461,7 @@ to share a passphrase with.
 `web/mock/server.ts` reproduces the whole flow with no tenant and no crypto, with a sealed fixture
 carrying all four message states at once and a `{kind:"seal"}` hook a spec MUST reset. `cd web && bun
 run preview -- --out /tmp/seal --seal` captures the menu row, the dialog in both themes, a generated
-passphrase, the four states, the composer's hint, the mismatch warning, the armed forget and the
+passphrase, the four states, the composer's mark, the mismatch warning, the armed forget and the
 dialog at a phone's width; `web/e2e/seal.spec.ts` pins every rule the page owns and
 `web/src/lib/seal.test.ts` the pure ones.
 
