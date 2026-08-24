@@ -42,7 +42,7 @@ export function hasModifier(event: Pick<KeyboardEvent, "ctrlKey" | "metaKey">): 
 }
 
 /**
- * Whether a modal DIALOG is open right now — the one thing the app's own global shortcuts
+ * Whether a DIALOG or a MENU is open right now — the layers the app's own global shortcuts
  * have to stand aside for.
  *
  * A dialog dismisses itself on Escape, and the primitive behind it (`@radix-ui/react-dialog`)
@@ -61,10 +61,19 @@ export function hasModifier(event: Pick<KeyboardEvent, "ctrlKey" | "metaKey">): 
  * element is still mounted (it has an exit animation) but the state has moved. Matching a
  * dialog in EITHER state is also the right rule rather than a workaround: while one is
  * animating away it is still what the reader's Escape was aimed at.
+ *
+ * **A MENU counts, for the same reason and by the same argument.** It was a dialog alone until
+ * a conversation's three header controls became one dropdown (§ ONE MENU in a conversation's
+ * header): the chess challenge used to be a POPOVER, which carries `role="dialog"` and was
+ * therefore absorbed, and folding it into a menu made Escape close the menu AND leave the
+ * conversation — the reader's place gone, from the one key that means "put that away". That is
+ * the identical defect this function was written for, arriving through a second primitive, and
+ * every other dropdown in the app (a message's actions, a chat row's "…") had it all along.
+ * `role="menu"` is that primitive's own contract, exactly as `role="dialog"` is the other's.
  */
 export function aModalIsOpen(): boolean {
   if (typeof document === "undefined") return false;
-  return document.querySelector('[role="dialog"]') !== null;
+  return document.querySelector('[role="dialog"], [role="menu"]') !== null;
 }
 
 /**

@@ -4,10 +4,12 @@ import {
   test,
   expect,
   clearScheduledMessages,
+  closeConversationMenu,
   composerField,
   emitUpdate,
   fillComposer,
   gotoApp,
+  joinMeetingFromMenu,
   openConversationAt,
   openConversationNamed,
   resetCall,
@@ -287,6 +289,78 @@ test.describe("mobile single-pane layout", () => {
     await expect(page.getByTestId("action-more-reactions")).toBeVisible();
   });
 
+  /**
+   * And the same floor for the CONVERSATION's own menu, which is where the header's three
+   * controls went (components/conversation-menu.tsx).
+   *
+   * It is worth its own test rather than riding the one above, because the trade the menu made
+   * is paid for HERE: a call, a game and the agent switch used to be 36px glyphs a reader had
+   * to recognise, and every one of them is now a row with WORDS — which is only an improvement
+   * if a thumb can hit it. Two things are pinned:
+   *
+   *   * a real FINGER opens it. This app is read from a phone, so a trigger that answered only
+   *     a mouse would be a feature that does not exist there — and the menu has to SURVIVE the
+   *     browser's own echo of that touch, which is what dismissed a held message's menu on a
+   *     real iPhone (src/lib/press-echo.ts);
+   *   * every row it draws clears 44px, the floor a dialog's close, a slider's thumb and the
+   *     schedule menu's rows already hold. Most of them ride the shared primitive, and the
+   *     three colour buttons of the challenge are drawn by hand and carry it themselves —
+   *     which is exactly why they are measured rather than trusted.
+   */
+  test("the conversation's own menu opens with a finger and is drawn at the touch floor", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    // A 1:1, which is the conversation that offers the most: a call, a game, the seal, the
+    // agent switch and the tool groups under it — so one measurement covers every row shape.
+    await openConversationNamed(page, "Ava Thompson");
+
+    const trigger = page.getByTestId("conversation-menu");
+    await expect(trigger).toBeVisible();
+    await trigger.tap();
+    const content = page.getByTestId("conversation-menu-content");
+    await expect(content).toBeVisible();
+    // Still there after the compatibility events the browser sends once the finger lifts. A
+    // menu that opened and vanished in the same breath is the failure this app has already had.
+    await page.waitForTimeout(PRESS_ECHO_GRACE_MS + 100);
+    await expect(content).toBeVisible();
+
+    // The challenge disclosed, so the hand-drawn colour row is on screen to be measured. It is
+    // clicked rather than tapped: what a finger has to prove here is the TRIGGER, and a
+    // Playwright click still lands as a click on a coarse pointer.
+    await page.getByTestId("chess-button").click();
+    await expect(page.getByTestId("chess-challenge")).toBeVisible();
+
+    const targets = await content.evaluate((node) => {
+      const boxes = (selector: string) =>
+        Array.from(node.querySelectorAll(selector))
+          // What a phone never draws is not a target.
+          .filter((el) => (el as HTMLElement).offsetParent !== null)
+          .map((el) => {
+            const box = el.getBoundingClientRect();
+            return { name: el.getAttribute("data-testid") ?? "", h: box.height };
+          });
+      return {
+        rows: boxes('[role="menuitem"], [role="menuitemcheckbox"]'),
+        colours: boxes('[data-testid^="chess-color-"]'),
+        width: node.getBoundingClientRect().width,
+      };
+    });
+
+    // Enough rows to be the real menu rather than an empty panel: the call, the game, the
+    // seal and the agent switch at the very least.
+    expect(targets.rows.length).toBeGreaterThan(3);
+    expect(targets.colours.length).toBe(3);
+    for (const target of [...targets.rows, ...targets.colours]) {
+      expect(target.h, `${target.name} is ${target.h}px tall`).toBeGreaterThanOrEqual(44);
+    }
+    // And it fits the phone it is read on: a menu wider than the screen puts its own words
+    // off the edge.
+    expect(targets.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+
+    await closeConversationMenu(page);
+  });
+
   test("a long press on a chat row opens its Teams settings menu", async ({ page }) => {
     await gotoApp(page);
 
@@ -408,7 +482,7 @@ test.describe("mobile single-pane layout", () => {
   test("a folded call leaves most of a phone's screen to the conversation", async ({ page }) => {
     await gotoApp(page);
     await openConversationNamed(page, "Design Sync");
-    await page.locator('[data-testid="meeting-join-here"]').click();
+    await joinMeetingFromMenu(page);
     const stage = page.locator('[data-testid="call-stage"]');
     await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
 

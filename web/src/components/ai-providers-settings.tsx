@@ -43,7 +43,7 @@ import { useAppState, useController } from "./controller-context";
  * recognises before reading a word.
  *
  * Where a conversation is armed stays in that conversation's own header
- * (components/agent-menu.tsx) — that consent belongs where the user can see who reads
+ * (components/conversation-menu.tsx) — that consent belongs where the user can see who reads
  * the thread. This pane is only about the machine's own tools.
  */
 export function AiProvidersSettings() {

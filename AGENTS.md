@@ -1006,8 +1006,8 @@ Five rules hold it together. Each one is load-bearing, and each is pinned by a t
   it. Anything else needs `agent_set_mode`, a write-token-gated `MACHINE_METHODS`
   entry — which is the consent gate for this whole feature, and the reason it is not a
   standing licence to post. The user turns one thread on from that thread's own MENU
-  (`web/src/components/conversation-menu.tsx`, over `web/src/lib/agent.ts` and
-  `agent-menu.tsx`'s own rules), never from a global list of ids: the consent belongs where they can see who reads the thread. The
+  (`web/src/components/conversation-menu.tsx`, over `web/src/lib/agent.ts`), never from a
+  global list of ids: the consent belongs where they can see who reads the thread. The
   switch stays off and disabled until `agent_status` answers, because `off` is what the
   backend defaults to and a hopeful switch would misstate where a machine posts.
 - **The tool allowlist is read-only until the user widens it.** `Read`, `Glob`, `Grep`
@@ -3212,8 +3212,11 @@ Five rules hold it, and each is pinned by a test:
 
 - **No gate moved with the controls.** Each row is drawn under exactly the condition its button was
   drawn under, carries the same `aria-label`, and states the same reason where it cannot act. The
-  arguments for each live where they always did — `call-button.tsx`, `chess-button.tsx` and
-  `agent-menu.tsx` — and this file draws them rather than re-deciding them.
+  arguments each came with are KEPT in that file's own header, because `call-button.tsx` and
+  `agent-menu.tsx` drew nothing once the menu existed and were removed rather than left as dead
+  files with living comments in them. `chess-button.tsx` survives (the menu reads its pure
+  helpers) and so does `meeting-join-button.tsx` (the calendar and the incoming-call banner still
+  draw the real button).
 - **The old testids are KEPT on the rows** (`call-button`, `meeting-join-here`, `chess-button`,
   `chess-challenge`, `agent-mode-toggle`, `agent-hint`, `agent-unrestricted-toggle`). A spec that
   drove a control now opens the menu and finds the same row, so what every existing assertion MEANS
@@ -3294,7 +3297,7 @@ call does — this side never handles RTP, and the page never learns a Teams URL
   that can hold two. An invite that arrives while a call is up is left for the user's
   other devices to ring, which is what Teams does with a client that does not answer.
 - **A CHAT is called; a MEETING is joined, and the conversation decides which**
-  (`conversationCallAction` in `web/src/lib/call.ts`, drawn by `call-button.tsx`). One
+  (`conversationCallAction` in `web/src/lib/call.ts`, drawn by `conversation-menu.tsx`). One
   control per conversation, in its header:
   - a **1:1** rings the person, and a **GROUP CHAT** rings every member at once. That is
     the same POST — `calling::invitation_payload` takes a list, `participants.to` carries

@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import {
+  callFromMenu,
   disableCalling,
   emitCallInvite,
   fetchCapturedSends,
@@ -37,11 +38,12 @@ import {
 /** Get into a connected call in a named conversation, which is the state a recording needs.
  *
  *  Calling itself needs no step: this app registers as a device the user's calls ring on at
- *  startup, so the button is live the moment the app is. */
+ *  startup, so the row is live the moment the app is — it is a row of the conversation's own
+ *  menu now rather than a glyph in its header, which is the one press this adds. */
 async function callIsUp(page: Page, conversation = "Ava Thompson"): Promise<void> {
   await gotoApp(page);
   await openConversationNamed(page, conversation);
-  await page.locator('[data-testid="call-button"]').click();
+  await callFromMenu(page);
   const stage = page.locator('[data-testid="call-stage"]');
   await expect(stage).toBeVisible();
   await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 15_000 });

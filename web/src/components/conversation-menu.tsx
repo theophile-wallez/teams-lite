@@ -69,8 +69,48 @@ const ITEM_ICON = "size-4 shrink-0 text-text-dim";
  *
  * Nothing about the gates moved with the controls. Each row is drawn under exactly the
  * condition its button was drawn under, carries the same `aria-label`, and states the same
- * reason where it cannot act (see components/call-button.tsx, chess-button.tsx and
- * agent-menu.tsx, which is where each of these rules is argued).
+ * reason where it cannot act. The rules those two of them came with are kept here, because the
+ * components that used to argue them (`call-button.tsx`, `agent-menu.tsx`) drew nothing once
+ * this file existed and were removed rather than left as dead files with living comments in
+ * them. `chess-button.tsx` survives — its pure helpers are read below — and
+ * `meeting-join-button.tsx` survives too, since the calendar and the incoming-call banner
+ * still draw the real button.
+ *
+ * THE CALL, from `call-button.tsx`:
+ *
+ * - A chat with people in it is CALLED — one person in a 1:1, everybody at once in a group,
+ *   which is the same POST and the same call. A thread Teams minted FOR a meeting is JOINED
+ *   instead, addressed by that thread, so a meeting the user was invited to is reachable from
+ *   the chat list without going to the calendar for its link.
+ * - The row is drawn only where it would really work: the calling connection up, and no call
+ *   already in flight. Everywhere else it is ABSENT rather than dead — a control that cannot do
+ *   the thing it names is worse than no control.
+ * - The one exception is a window whose backend does not take calls at all: a read-only one, or
+ *   the second install that runs beside the user's app. There the row stays, disabled, with the
+ *   reason beside it — the feature exists, this window is not where it happens, and a missing
+ *   row would leave them looking for it.
+ * - A group call's label says what the click REACHES ("Call everybody in Design crew"), because
+ *   that is the fact the user needs before it and the one thing they cannot undo after.
+ *
+ * THE AGENT, from `agent-menu.tsx`:
+ *
+ * - The switch is per CONVERSATION, and it is here rather than in Settings because that is what
+ *   is being decided: "this machine may post an answer under my name, in THIS thread". A global
+ *   list of thread ids would be the same data with the consent taken out of the place the user
+ *   can see who reads it.
+ * - **It never claims a state it has not been told.** Until `agent_status` answers, the switch
+ *   is off and disabled: "off" is what the backend defaults to, and a hopeful switch would be a
+ *   lie about where a machine posts.
+ * - **It says why, when it cannot.** A backend with no CLI on its PATH, or a read-only one, can
+ *   never answer — so it states that instead of offering a switch whose only effect would be a
+ *   silent thread. And it waits for the backend before it looks on, because the write can be
+ *   refused and the answer that lands in state is the backend's own.
+ * - Under it sits the second half of the same consent: what the agent may DO. The wider setting
+ *   comes first because it overrides the other — **my own Claude Code config** hands the child
+ *   the user's own configuration, every MCP server and tool and their own permission mode, and
+ *   the rows say plainly that everything written in the thread then reaches a program that can
+ *   write. The **read-only groups** are what applies otherwise, and the backend pins that every
+ *   group reads, so no group here can post to Grafana, Sentry or Linear.
  *
  * Two things stay OUTSIDE the closed menu, because a signal inside one says nothing:
  *

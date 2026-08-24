@@ -2,6 +2,9 @@ import { expect } from "@playwright/test";
 import { CALL_END_UNREACHABLE } from "../src/lib/call";
 import {
   calendarEvent,
+  callFromMenu,
+  closeConversationMenu,
+  conversationMenuTrigger,
   disableCalling,
   answerCallMediaUnreadably,
   callSharingOrder,
@@ -10,8 +13,10 @@ import {
   endCallWithReason,
   gotoApp,
   holdCallStart,
+  joinMeetingFromMenu,
   openCalendarTab,
   openCalendarView,
+  openConversationMenu,
   openConversationNamed,
   refuseNextCallMedia,
   rejectCallCapture,
@@ -19,11 +24,16 @@ import {
   test,
 } from "./helpers";
 
-// Audio calling: the button that places a call, the
+// Audio calling: the row that places a call, the
 // ringing card with a working Answer, and the PAGE the call becomes once it is up
-// (web/src/components/call-bar.tsx, call-stage.tsx and call-button.tsx, over
+// (web/src/components/call-bar.tsx, call-stage.tsx and conversation-menu.tsx, over
 // web/src/lib/call.ts, call-stage.ts and call-media.ts — and src/calling.rs for the
 // protocol).
+//
+// A CHAT's call is a ROW of the conversation's own menu rather than a control in its header,
+// so every test that places one opens that menu first (`callFromMenu` / `joinMeetingFromMenu`
+// in ./helpers). A CALENDAR event is untouched: it keeps its own labelled "Join here" beside
+// its way out to real Teams, and the specs on that surface press it directly.
 //
 // Nothing here registers anything with Teams, rings anybody, or opens a microphone. The
 // mock reproduces the SIGNALING and the page pairs it with `simulatedCallMedia`, which it
@@ -51,13 +61,15 @@ test.describe("Audio calling", () => {
     await gotoApp(page);
     await openConversationNamed(page, "Ava Thompson");
 
-    // No step in between: the backend registered as a device the user's calls ring on at
-    // startup, the way every other Teams client they are signed in on does.
+    // No step in between but the menu the header's controls became: the backend registered as
+    // a device the user's calls ring on at startup, the way every other Teams client they are
+    // signed in on does, so the row is live the moment the app is.
+    await openConversationMenu(page);
     const button = page.locator('[data-testid="call-button"]');
     await expect(button).toBeEnabled();
     await expect(button).toHaveAttribute("aria-label", /Call Ava Thompson/);
     // And it states WHOM it rings, out of the app's own state — the same promise the Join
-    // button makes about its meeting and the composer about its conversation. It is what
+    // row makes about its meeting and the composer about its conversation. It is what
     // lets `scripts/call-live.ts` prove its target before an outward click, so it is
     // measured against the composer's own answer rather than against a fixture's id.
     const open = await page
@@ -65,6 +77,11 @@ test.describe("Audio calling", () => {
       .getAttribute("data-conversation-id");
     expect(open).toBeTruthy();
     await expect(button).toHaveAttribute("data-conversation-id", open!);
+    // Nothing says the call cannot be placed, which is the other half of "no switch to find".
+    await expect(page.locator('[data-testid="conversation-call-reason"]')).toHaveCount(0);
+    // Closed with its own trigger before the pane behind it is used: a press elsewhere would
+    // be spent dismissing the menu instead of reaching what it landed on.
+    await closeConversationMenu(page);
 
     // And Settings offers nothing about it, because there is nothing to offer.
     await page.locator('[data-testid="open-settings"]').click();
@@ -80,16 +97,30 @@ test.describe("Audio calling", () => {
     await disableCalling(page);
     await openConversationNamed(page, "Ava Thompson");
 
+    await openConversationMenu(page);
     const button = page.locator('[data-testid="call-button"]');
     await expect(button).toBeVisible();
     await expect(button).toBeDisabled();
     await expect(button).toHaveAttribute("aria-label", /cannot take calls/);
     await expect(button).not.toHaveAttribute("aria-label", /Settings/);
+    // And the sentence is drawn as a ROW under the one it explains, which is what the menu
+    // bought: it used to be a tooltip, and a disabled control fires no pointer events — so on
+    // a phone the whole explanation was a sentence that did not exist.
+    const reason = page.locator('[data-testid="conversation-call-reason"]');
+    await expect(reason).toBeVisible();
+    await expect(reason).toContainText(/cannot take calls/);
+    await expect(reason).not.toContainText(/Settings/);
+    await closeConversationMenu(page);
 
     // A meeting is the other half of the same sentence.
     await openConversationNamed(page, "Design Sync");
+    await openConversationMenu(page);
     const join = page.locator('[data-testid="meeting-join-here"]');
     await expect(join).toBeDisabled();
+    await expect(page.locator('[data-testid="conversation-call-reason"]')).toContainText(
+      /cannot take calls/,
+    );
+    await closeConversationMenu(page);
   });
 
   /** A group chat is CALLED, and the label says what that reaches: every member at once,
@@ -97,9 +128,13 @@ test.describe("Audio calling", () => {
   test("rings the whole group from a group chat", async ({ page }) => {
     await gotoApp(page);
     await openConversationNamed(page, "Platform Team");
+    await openConversationMenu(page);
     const button = page.locator('[data-testid="call-button"]');
     await expect(button).toBeEnabled();
     await expect(button).toHaveAttribute("aria-label", /everybody in Platform Team/);
+    // The WORDS say it too, which is the one thing a menu has and a row of glyphs did not: both
+    // actions wear the handset, so the label is what tells a ring from a join.
+    await expect(button).toContainText(/everybody/i);
 
     await button.click();
     const stage = page.locator('[data-testid="call-stage"]');
@@ -120,26 +155,36 @@ test.describe("Audio calling", () => {
    *  invited answer the same question, and only one of them is what the thread is for. */
   test("joins the meeting a meeting chat was opened for", async ({ page }) => {
     await gotoApp(page);
-    // The header control of an ordinary chat first, so the box the meeting's own must match
-    // is measured rather than assumed.
+    // The header's own control in an ordinary chat first, so what the meeting's must match is
+    // measured rather than assumed.
+    //
+    // WHAT IS MEASURED CHANGED WITH THE MENU, and the premise is what changed rather than the
+    // point. This used to compare the CALL button's box with the JOIN button's, because the
+    // header held a row of controls and walking into a meeting chat must not move the thing
+    // the reader aims at — two components, one slot, so the pixels were the only proof. There
+    // is one control in that slot now and it is the same element in every conversation, so the
+    // comparison to make is the TRIGGER against itself across the two threads: that is the
+    // promise the menu was built to keep, and the reason a call costs a second press.
     await openConversationNamed(page, "Platform Team");
-    const callBox = await page.locator('[data-testid="call-button"]').boundingBox();
+    const chatTrigger = await conversationMenuTrigger(page).boundingBox();
 
     await openConversationNamed(page, "Design Sync");
-    // No ring here, and the Join button states WHICH meeting it joins — the thread — so a
+    const meetingTrigger = await conversationMenuTrigger(page).boundingBox();
+    expect(meetingTrigger?.width).toBe(chatTrigger?.width);
+    expect(meetingTrigger?.height).toBe(chatTrigger?.height);
+    expect(meetingTrigger?.x).toBe(chatTrigger?.x);
+    expect(meetingTrigger?.y).toBe(chatTrigger?.y);
+
+    await openConversationMenu(page);
+    // No ring here, and the Join row states WHICH meeting it joins — the thread — so a
     // driver can prove its target before an outward click.
     await expect(page.locator('[data-testid="call-button"]')).toHaveCount(0);
     const join = page.locator('[data-testid="meeting-join-here"]');
     await expect(join).toBeEnabled();
-    // It is the SAME control other chats have, to the pixel: this is one row of header
-    // controls, and walking into a meeting chat must not move the thing the user is aiming
-    // at. The words live in the tooltip and in the label a screen reader gets.
-    await expect(join).toHaveAttribute("data-shape", "icon");
     await expect(join).toHaveAttribute("aria-label", /Join this meeting/);
-    const joinBox = await join.boundingBox();
-    expect(joinBox?.width).toBe(callBox?.width);
-    expect(joinBox?.height).toBe(callBox?.height);
-    expect(joinBox?.x).toBe(callBox?.x);
+    // Inside the menu the WORDS are what tell a join from a ring, which is what a row buys and
+    // what two 20px handsets side by side could not say at all.
+    await expect(join).toContainText(/join the meeting/i);
     const conversationId = await page
       .locator('[data-testid="composer-shell"]')
       .getAttribute("data-conversation-id");
@@ -164,15 +209,24 @@ test.describe("Audio calling", () => {
   test("offers nothing in the chat with oneself", async ({ page }) => {
     await gotoApp(page);
     await openConversationNamed(page, "Notes");
+    // OPENED, which is what makes this an assertion at all: with the menu shut every row is out
+    // of the DOM, so a bare count of zero would pass just as happily in the 1:1 that DOES ring
+    // somebody. The menu being open is asserted with it, for the same reason.
+    await openConversationMenu(page);
     await expect(page.locator('[data-testid="call-button"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="meeting-join-here"]')).toHaveCount(0);
+    // Absent, not disabled-with-a-reason: there is nobody to ring, which is a fact about the
+    // conversation rather than about this window.
+    await expect(page.locator('[data-testid="conversation-call-reason"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="agent-mode-toggle"]')).toBeVisible();
+    await closeConversationMenu(page);
   });
 
   test("places a call, shows it connect, and hangs up", async ({ page }) => {
     await gotoApp(page);
     await openConversationNamed(page, "Ava Thompson");
 
-    await page.locator('[data-testid="call-button"]').click();
+    await callFromMenu(page);
 
     // Dialling first: the user has to see that the call is going out before it is
     // answered, because the microphone opens at that moment. It is already the page —
@@ -186,15 +240,28 @@ test.describe("Audio calling", () => {
     await expect(stage).toHaveAttribute("data-phase", "connected", { timeout: 10_000 });
     await expect(page.locator('[data-testid="call-duration"]')).toContainText(/^\d+:\d\d$/);
 
-    // While a call is up the button is refused rather than starting a second one. It is
-    // behind the stage, so the assertion is about the control rather than about a click.
+    // While a call is up the row is refused rather than starting a second one, and it SAYS why.
+    // The call has to be FOLDED to read it: a live call is a page over the whole app, so the
+    // header behind it is not something a reader — or a driver — can press. That is the honest
+    // way to this state and the reader's own way to it, and it is what the fold exists for.
+    await page.locator('[data-testid="call-stage-minimize"]').click();
+    await expect(stage).toHaveAttribute("data-mode", "mini");
+    await openConversationMenu(page);
     await expect(page.locator('[data-testid="call-button"]')).toBeDisabled();
+    await expect(page.locator('[data-testid="conversation-call-reason"]')).toContainText(
+      "one call at a time",
+    );
+    await closeConversationMenu(page);
 
     await page.locator('[data-testid="call-hangup"]').first().click();
     await expect(stage).toHaveCount(0);
     // An ending the user caused says nothing back at them: they were there.
     await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
+    // And the slot is free again, which is a row that can be pressed and no reason under it.
+    await openConversationMenu(page);
     await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
+    await expect(page.locator('[data-testid="conversation-call-reason"]')).toHaveCount(0);
+    await closeConversationMenu(page);
   });
 
   /**
@@ -208,7 +275,7 @@ test.describe("Audio calling", () => {
   test("says a call rang nothing, and whose devices were not there", async ({ page }) => {
     await gotoApp(page);
     await openConversationNamed(page, "Ava Thompson");
-    await page.locator('[data-testid="call-button"]').click();
+    await callFromMenu(page);
     const stage = page.locator('[data-testid="call-stage"]');
     await expect(stage).toBeVisible();
     // Wait for the call to be UP before the service ends it, like every other test here.
@@ -230,7 +297,7 @@ test.describe("Audio calling", () => {
     await expect(notice).not.toContainText(/addParticipant|subCode|endpoint/);
     // And the call is gone, so the next one can be placed.
     await expect(stage).toHaveCount(0);
-    await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
+    await expectCallCanBePlaced(page);
   });
 
   /** A call stopped a second after it was placed. The user is inside one of the waits a
@@ -247,7 +314,7 @@ test.describe("Audio calling", () => {
     // The reservation answers late: the stage is up and dialling, and the offer has not
     // gone out yet — the window a microphone and an ICE gather really take.
     await holdCallStart(page, "prepare", 900);
-    await page.locator('[data-testid="call-button"]').click();
+    await callFromMenu(page);
 
     const stage = page.locator('[data-testid="call-stage"]');
     await expect(stage).toBeVisible();
@@ -262,7 +329,7 @@ test.describe("Audio calling", () => {
     await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
     await expect(stage).toHaveCount(0);
     // And the slot is free: a machine still holding a reservation refuses the next call.
-    await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
+    await expectCallCanBePlaced(page);
   });
 
   /** The other half of the same click, one step later: the invite is already on the wire.
@@ -274,7 +341,7 @@ test.describe("Audio calling", () => {
     await openConversationNamed(page, "Ava Thompson");
 
     await holdCallStart(page, "place", 900);
-    await page.locator('[data-testid="call-button"]').click();
+    await callFromMenu(page);
 
     const stage = page.locator('[data-testid="call-stage"]');
     await expect(stage).toHaveAttribute("data-phase", "dialing");
@@ -284,7 +351,7 @@ test.describe("Audio calling", () => {
     await page.waitForTimeout(1_600);
     await expect(stage).toHaveCount(0);
     await expect(page.locator('[data-testid="call-notice"]')).toHaveCount(0);
-    await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
+    await expectCallCanBePlaced(page);
   });
 
   test("answers a ringing call, mutes, and hangs up", async ({ page }) => {
@@ -1047,12 +1114,26 @@ test.describe("The call's own page", () => {
 async function joinTheMeetingChat(page: import("@playwright/test").Page): Promise<void> {
   await gotoApp(page);
   await openConversationNamed(page, "Design Sync");
-  await page.locator('[data-testid="meeting-join-here"]').click();
+  await joinMeetingFromMenu(page);
   await expect(page.locator('[data-testid="call-stage"]')).toHaveAttribute(
     "data-phase",
     "connected",
     { timeout: 10_000 },
   );
+}
+
+/**
+ * That the app is ready to place the NEXT call — the state four of these tests end on, because
+ * a machine still holding a reservation refuses one and says nothing about why.
+ *
+ * It opens the menu, reads the row, and closes it again: the row exists only while the menu
+ * does, so "the control is enabled" is now two presses' worth of work and belongs in one place.
+ */
+async function expectCallCanBePlaced(page: import("@playwright/test").Page): Promise<void> {
+  await openConversationMenu(page);
+  await expect(page.locator('[data-testid="call-button"]')).toBeEnabled();
+  await expect(page.locator('[data-testid="conversation-call-reason"]')).toHaveCount(0);
+  await closeConversationMenu(page);
 }
 
 /** Drag the folded window by its picture — never by its bar, where the controls are. */

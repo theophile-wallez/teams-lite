@@ -139,6 +139,80 @@ export async function openConversationNamed(page: Page, name: string): Promise<v
     .toBeGreaterThan(0);
 }
 
+// ---- the conversation's own menu ---------------------------------------------
+//
+// The header carries ONE control, and everything the conversation offers is a ROW inside it:
+// the call it places or the meeting it joins, a game of chess, whether the chat is encrypted,
+// and whether this thread answers an `@claude` message
+// (web/src/components/conversation-menu.tsx). It used to be three separate controls in that
+// slot, each drawn only where it applied — so the second control from the right was a
+// different action in every thread.
+//
+// Every row kept the testid its button had, so the ONE thing that changed for a spec is that
+// it has to OPEN the menu before it can reach any of them. That is spelled once here rather
+// than at each of the forty presses.
+
+/** The trigger — readable WITHOUT opening anything, which is the point of what it carries:
+ *  the agent mode, the live game, and whether that game wants something from the reader. */
+export function conversationMenuTrigger(page: Page): Locator {
+  return page.locator('[data-testid="conversation-menu"]');
+}
+
+/**
+ * Open it, and wait for the one row EVERY conversation has.
+ *
+ * IDEMPOTENT, because the mock's live feed re-renders the pane every few seconds and a
+ * non-modal Radix menu can be unmounted in that window — so a spec that reaches for a second
+ * row after a round trip may find the menu gone. A bare click would toggle an open one shut.
+ */
+export async function openConversationMenu(page: Page): Promise<void> {
+  if (!(await page.locator('[data-testid="conversation-menu-content"]').count())) {
+    await conversationMenuTrigger(page).click();
+  }
+  // The agent switch, and not the call: a channel offers no call, Notes offers no game, and
+  // neither can be waited on as proof that the menu is open.
+  await expect(page.locator('[data-testid="agent-mode-toggle"]')).toBeVisible();
+}
+
+/**
+ * Close it again by pressing its own trigger — NEVER with Escape.
+ *
+ * The app shell keeps a window-level Escape that leaves the open conversation, and it stands
+ * aside for a `[role="dialog"]` only (`aModalIsOpen` in web/src/lib/platform.ts). A menu is
+ * `role="menu"`, so Escape here closes the menu AND walks out of the thread behind it —
+ * which is how a spec that pressed it lost the composer it was about to assert on.
+ */
+export async function closeConversationMenu(page: Page): Promise<void> {
+  const content = page.locator('[data-testid="conversation-menu-content"]');
+  if (!(await content.count())) return;
+  await conversationMenuTrigger(page).click();
+  await content.waitFor({ state: "detached" });
+}
+
+/** Open the menu and press one of its rows, then wait for the menu to go. For the rows that
+ *  ACT — the call, the join, the challenge — as against the switches, which deliberately hold
+ *  the menu open so the user watches them settle. */
+export async function pressConversationMenuRow(page: Page, testId: string): Promise<void> {
+  await openConversationMenu(page);
+  await page.locator(`[data-testid="${testId}"]`).click();
+  await page
+    .locator('[data-testid="conversation-menu-content"]')
+    .waitFor({ state: "detached" });
+}
+
+/** Place the call the open conversation offers — one person in a 1:1, everybody at once in a
+ *  group chat. Two presses now, which is what the one-trigger header costs. */
+export async function callFromMenu(page: Page): Promise<void> {
+  await pressConversationMenuRow(page, "call-button");
+}
+
+/** JOIN the meeting the open thread was minted for. A calendar event keeps its own labelled
+ *  "Join here" beside its way out to Teams, so a spec on that surface clicks the button
+ *  directly and never comes through here. */
+export async function joinMeetingFromMenu(page: Page): Promise<void> {
+  await pressConversationMenuRow(page, "meeting-join-here");
+}
+
 export type CapturedSend = {
   conversation: string;
   text: string;
@@ -984,15 +1058,34 @@ export async function resetChess(page: Page): Promise<void> {
 }
 
 /**
+ * Open the conversation's menu and DISCLOSE the challenge form inside it — the colour row and
+ * the sentence saying what the press costs.
+ *
+ * Two presses, exactly as the popover this replaced took: the menu, then the row. The fold is
+ * deliberate (a reader who opened the menu to flip the agent switch must not be handed a chess
+ * setup form), so the disclosure is asked for rather than assumed — and it is asked for
+ * IDEMPOTENTLY, because pressing the row again folds it back up.
+ */
+export async function openChessChallenge(page: Page): Promise<void> {
+  await openConversationMenu(page);
+  if (!(await page.locator('[data-testid="chess-challenge"]').count())) {
+    await page.locator('[data-testid="chess-button"]').click();
+  }
+  await expect(page.locator('[data-testid="chess-challenge"]')).toBeVisible();
+}
+
+/**
  * Challenge from the open conversation's header and wait for the mock to accept.
  *
  * The colour is asked for explicitly rather than left random: a spec that did not know which
  * side it was on could not know whose move it is, and would have to branch on the answer.
  */
 export async function startChessGame(page: Page, color: "w" | "b" = "w"): Promise<void> {
-  await page.locator('[data-testid="chess-button"]').click();
+  await openChessChallenge(page);
   await page.locator(`[data-testid="chess-color-${color}"]`).click();
   await page.locator('[data-testid="chess-challenge"]').click();
+  // The challenge closes the menu only when it really went out, which is what makes the
+  // board's arrival the thing to wait on rather than the menu's disappearance.
   await page.locator('[data-testid="chess-game"]').waitFor();
   // The board is playable only once somebody is opposite.
   await expect(page.locator('[data-testid="chess-status"]')).not.toContainText(

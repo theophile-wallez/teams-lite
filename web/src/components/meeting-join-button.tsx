@@ -33,7 +33,8 @@ export function MeetingJoinButton(props: {
   /** How it is drawn. `pill` is the labelled primary button a calendar event's details
    *  panel puts beside its link out, where words are what tell the two apart. `icon` is the
    *  bare glyph a CHAT HEADER takes, because that header already holds one control of that
-   *  exact shape in every other conversation — see {@link ./call-button}. */
+   *  exact shape in every other conversation. It is still what the CALENDAR and the incoming-call
+   *  banner draw; a conversation's own join is a row of its menu (components/conversation-menu.tsx). */
   shape?: "pill" | "icon";
 }) {
   const controller = useController();

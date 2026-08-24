@@ -1,17 +1,25 @@
 import { expect } from "@playwright/test";
 import {
   test,
+  closeConversationMenu,
+  conversationMenuTrigger,
   emitLive,
   fetchAgentModes,
   fillComposer,
   gotoApp,
   openConversationAt,
+  openConversationMenu,
   openConversationNamed,
 } from "./helpers";
 
 // The per-conversation switch that lets the local agent answer an `@claude` message
-// (see web/src/components/agent-menu.tsx, src/agent_policy.rs), and how the answer is
+// (see web/src/components/conversation-menu.tsx, src/agent_policy.rs), and how the answer is
 // drawn as it is written (web/src/components/agent-reply.tsx).
+//
+// The switch used to have a trigger of its own in the header, beside the call and chess. All
+// three are rows of ONE menu now, so every test here opens that menu first — and the MODE is
+// still stated on the trigger, which is what lets a wrong state be read without opening
+// anything.
 //
 // The switch IS the consent gate of the feature: turning it on tells the machine it may
 // post an answer under the user's name in that thread. So what this spec pins is the
@@ -33,13 +41,13 @@ test.describe("The local agent switch", () => {
     // sidebar's order belongs to whatever the rest of the run has already sent.
     await openConversationNamed(page, "Plain Text");
 
-    const trigger = page.locator('[data-testid="agent-menu"]');
+    const trigger = conversationMenuTrigger(page);
     await expect(trigger).toBeVisible();
     // Off is the backend's own default for every conversation but the sandbox, and the
     // trigger publishes the mode so a wrong state is visible without opening anything.
     await expect(trigger).toHaveAttribute("data-agent-mode", "off");
 
-    await trigger.click();
+    await openConversationMenu(page);
     const toggle = page.locator('[data-testid="agent-mode-toggle"]');
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveAttribute("aria-checked", "false");
@@ -62,16 +70,13 @@ test.describe("The local agent switch", () => {
         .locator('[data-testid="composer-shell"]')
         .getAttribute("data-conversation-id")) ?? "";
 
-    await page.locator('[data-testid="agent-menu"]').click();
+    await openConversationMenu(page);
     const toggle = page.locator('[data-testid="agent-mode-toggle"]');
     await toggle.click();
 
     // The menu stays open through the round-trip, so the user sees the switch settle.
     await expect(toggle).toHaveAttribute("aria-checked", "true");
-    await expect(page.locator('[data-testid="agent-menu"]')).toHaveAttribute(
-      "data-agent-mode",
-      "reply",
-    );
+    await expect(conversationMenuTrigger(page)).toHaveAttribute("data-agent-mode", "reply");
 
     // What the BACKEND stored, not what the page remembers clicking.
     const stored = await fetchAgentModes(page);
@@ -99,7 +104,7 @@ test.describe("The local agent switch", () => {
     // the click, and the header menu detaches with it.
     await openConversationNamed(page, "Thread Activity");
 
-    await page.locator('[data-testid="agent-menu"]').click();
+    await openConversationMenu(page);
     const files = page.locator('[data-testid="agent-tool-grant-files"]');
     const grafana = page.locator('[data-testid="agent-tool-grant-grafana"]');
     // The read-only default is what the backend starts at, and the only group on.
@@ -137,7 +142,7 @@ test.describe("The local agent switch", () => {
     // Per machine too, and named for the same reason.
     await openConversationNamed(page, "Thread Activity");
 
-    await page.locator('[data-testid="agent-menu"]').click();
+    await openConversationMenu(page);
     const own = page.locator('[data-testid="agent-unrestricted-toggle"]');
     await expect(own).toHaveAttribute("aria-checked", "false");
     expect((await fetchAgentModes(page)).unrestricted).toBe(false);
@@ -168,13 +173,13 @@ test.describe("The local agent's answer", () => {
    *  rest of the run owns, so a blind click could land on a thread that is already opted
    *  in and take that consent away from every spec after this one. */
   async function optIn(page: import("@playwright/test").Page): Promise<void> {
-    const menu = page.locator('[data-testid="agent-menu"]');
-    await menu.click();
+    await openConversationMenu(page);
     const toggle = page.locator('[data-testid="agent-mode-toggle"]');
     if ((await toggle.getAttribute("aria-checked")) !== "true") await toggle.click();
-    await expect(menu).toHaveAttribute("data-agent-mode", "reply");
-    // Closed with a click, not Escape: the app reads Escape as "close the conversation".
-    await menu.click();
+    await expect(conversationMenuTrigger(page)).toHaveAttribute("data-agent-mode", "reply");
+    // Closed with its own trigger, not Escape: the app reads Escape as "close the
+    // conversation", and it stands aside for a dialog only — never for a menu.
+    await closeConversationMenu(page);
   }
 
   test("is written into the thread, on the side of what arrives", async ({ page }) => {
@@ -496,11 +501,10 @@ test.describe("The local agent's answer", () => {
 
     // Leave the thread as this describe found it: OFF, so the specs that read it after do
     // not inherit a consent this test granted.
-    const menu = page.locator('[data-testid="agent-menu"]');
-    await menu.click();
+    await openConversationMenu(page);
     const toggle = page.locator('[data-testid="agent-mode-toggle"]');
     if ((await toggle.getAttribute("aria-checked")) === "true") await toggle.click();
-    await expect(menu).toHaveAttribute("data-agent-mode", "off");
-    await menu.click();
+    await expect(conversationMenuTrigger(page)).toHaveAttribute("data-agent-mode", "off");
+    await closeConversationMenu(page);
   });
 });

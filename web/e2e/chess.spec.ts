@@ -3,8 +3,12 @@ import {
   expect,
   chessChallengeFromOpponent,
   chessSquareHasPiece,
+  closeConversationMenu,
+  conversationMenuTrigger,
   fetchCapturedSends,
   gotoApp,
+  openChessChallenge,
+  openConversationMenu,
   openConversationNamed,
   playChessMove,
   resetChess,
@@ -74,15 +78,14 @@ test.describe("chess in a conversation", () => {
     await expect(page.locator(status)).toContainText("black");
     await expect(page.locator('[data-testid="chess-accept"]')).toBeVisible();
     await expect(page.locator('[data-testid="chess-decline"]')).toBeVisible();
-    // The header says something is waiting for them, which is not the same as their move.
-    await expect(page.locator('[data-testid="chess-button"]')).toHaveAttribute(
-      "data-awaiting-answer",
-      "true",
-    );
-    await expect(page.locator('[data-testid="chess-button"]')).not.toHaveAttribute(
-      "data-your-turn",
-      "true",
-    );
+    // The header says something is waiting for them, which is not the same as their move. It
+    // is read off the TRIGGER, which is where the game's state moved when the header's three
+    // controls became one menu — and that is the whole reason it is stated there: a signal
+    // inside a closed menu says nothing, so a fact about a game a screen away has to be
+    // readable without opening anything.
+    const header = conversationMenuTrigger(page);
+    await expect(header).toHaveAttribute("data-awaiting-answer", "true");
+    await expect(header).not.toHaveAttribute("data-your-turn", "true");
 
     // Accepting starts the game — and the opponent took white, so they open.
     await page.locator('[data-testid="chess-accept"]').click();
@@ -102,15 +105,14 @@ test.describe("chess in a conversation", () => {
     // Nothing is waiting for the reader any more…
     await expect(page.locator('[data-testid="chess-your-turn"]')).toHaveCount(0);
     // …and the header offers a challenge again rather than pointing at a dead game.
-    await page.locator('[data-testid="chess-button"]').click();
-    await expect(page.locator('[data-testid="chess-challenge"]')).toBeVisible();
-    await page.keyboard.press("Escape");
+    await openChessChallenge(page);
+    await closeConversationMenu(page);
   });
 
   test("WITHDRAWING our own unanswered challenge is not a loss", async ({ page }) => {
     await openChessThread(page);
     await setChessOpponent(page, { silent: true });
-    await page.locator('[data-testid="chess-button"]').click();
+    await openChessChallenge(page);
     await page.locator('[data-testid="chess-color-w"]').click();
     await page.locator('[data-testid="chess-challenge"]').click();
     await expect(page.locator(board)).toBeVisible();
@@ -121,9 +123,8 @@ test.describe("chess in a conversation", () => {
     // A game nobody played is not a game anybody lost.
     await expect(page.locator(status)).not.toContainText(/resigned/i);
     // And the next challenge may go out.
-    await page.locator('[data-testid="chess-button"]').click();
-    await expect(page.locator('[data-testid="chess-challenge"]')).toBeVisible();
-    await page.keyboard.press("Escape");
+    await openChessChallenge(page);
+    await closeConversationMenu(page);
   });
 
   test("the board is a reading of the messages: what leaves is the wire, not markup", async ({
@@ -223,11 +224,24 @@ test.describe("chess in a conversation", () => {
     // Silenced after the accept, so the turn stays ours long enough to read the dot.
     await setChessOpponent(page, { silent: true });
 
-    const button = page.locator('[data-testid="chess-button"]');
-    await expect(button).toHaveAttribute("data-chess-game", /^[0-9a-f]{6}$/);
+    // The TRIGGER, closed: which game is live and whether it wants a move are the two facts
+    // the header owes a reader whose board is a screen away, so they are stated on the thing
+    // that opens the menu rather than on a row inside it.
+    const header = conversationMenuTrigger(page);
+    await expect(header).toHaveAttribute("data-chess-game", /^[0-9a-f]{6}$/);
     // It is ours to move, and the board may be a screen away.
     await expect(page.locator('[data-testid="chess-your-turn"]')).toBeVisible();
-    await expect(button).toHaveAttribute("data-your-turn", "true");
+    await expect(header).toHaveAttribute("data-your-turn", "true");
+
+    // And the ROW inside says it in words, and points at the board rather than at a challenge:
+    // one game in flight per conversation, so there is nothing else for it to offer.
+    const game = await header.getAttribute("data-chess-game");
+    await openConversationMenu(page);
+    const row = page.locator('[data-testid="chess-button"]');
+    await expect(row).toHaveAttribute("data-chess-game", game!);
+    await expect(row).toContainText(/your move/i);
+    await expect(page.locator('[data-testid="chess-challenge"]')).toHaveCount(0);
+    await closeConversationMenu(page);
 
     // Once the move is out it is not our turn, and the dot goes.
     await setSendControl(page, { clear: true });
@@ -244,9 +258,8 @@ test.describe("chess in a conversation", () => {
     await expect(page.locator(status)).toContainText(/resigned/i);
 
     // The control offers a challenge again rather than pointing at the finished game.
-    await page.locator('[data-testid="chess-button"]').click();
-    await expect(page.locator('[data-testid="chess-challenge"]')).toBeVisible();
-    await page.keyboard.press("Escape");
+    await openChessChallenge(page);
+    await closeConversationMenu(page);
   });
 
   test("the marker a chess message carries is drawn NOWHERE", async ({ page }) => {
@@ -270,7 +283,15 @@ test.describe("chess in a conversation", () => {
   test("Notes offers no game, because there is nobody to play", async ({ page }) => {
     await gotoApp(page);
     await openConversationNamed(page, "Notes");
+    // OPENED, which is the whole of this assertion now: with the menu shut every row of it is
+    // out of the DOM, so a bare count of zero would pass in a thread that offers the game as
+    // happily as in the one that must not.
+    await openConversationMenu(page);
     await expect(page.locator('[data-testid="chess-button"]')).toHaveCount(0);
+    // Absent rather than disabled — a row that cannot do the thing it names is worse than no
+    // row — and the menu really is open, which is what stops the line above passing on nothing.
+    await expect(page.locator('[data-testid="agent-mode-toggle"]')).toBeVisible();
+    await closeConversationMenu(page);
   });
 
   test("the board fits a phone's column and does not widen the pane", async ({ page }) => {
