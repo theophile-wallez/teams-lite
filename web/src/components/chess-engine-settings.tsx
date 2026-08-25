@@ -76,6 +76,68 @@ export function ChessEngineSettings() {
           {engine.error}
         </p>
       )}
+
+      <ChessSoundsRow />
     </section>
   );
+}
+
+/**
+ * The board's own SOUNDS, in the same inventory and for the same reason.
+ *
+ * They are 64 KB rather than 7.3 MB, so there is no press that FETCHES them — a board asks for them
+ * itself the first time one is opened with the app's sounds on (§ Chess in a conversation). What
+ * belongs here is the other half: that they are on the machine at all, whose they are, and one press
+ * to take them back. It is a row rather than a section of its own because a reader looking for what
+ * a chess board keeps on this machine is looking in one place.
+ */
+function ChessSoundsRow() {
+  const controller = useController();
+  const sounds = useAppState((s) => s.chessSounds);
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <div
+      className="flex items-center gap-3 rounded-lg border border-border-subtle bg-panel px-3 py-2.5"
+      data-testid="chess-sounds-settings"
+    >
+      <div className="flex min-w-0 flex-col">
+        <span data-testid="chess-sounds-state" className="text-[13px] text-foreground">
+          {sounds.present ? "Board sounds are on this machine" : "Board sounds are not stored yet"}
+        </span>
+        <span className="text-[12px] text-text-faint">
+          {sounds.present
+            ? `${kilobytes(sounds.bytes)} in this machine's cache · ${sounds.label}`
+            : `Until they are, a board uses this app's own synthesized sounds. ${sounds.label} are fetched the first time you open a board.`}
+        </span>
+      </div>
+      {sounds.present && (
+        <Button
+          data-testid="chess-sounds-remove"
+          variant="outline"
+          size="sm"
+          className="ml-auto shrink-0"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            await controller.forgetChessSounds();
+            setBusy(false);
+          }}
+        >
+          {busy ? (
+            <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.8} />
+          ) : (
+            "Remove"
+          )}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** A size a reader can read, for the one thing in this app measured in kilobytes rather than
+ *  megabytes — `megabytes` would draw all twelve recordings as "0.1 MB". */
+function kilobytes(bytes: number): string {
+  if (bytes <= 0) return "0 KB";
+  return `${Math.round(bytes / 1000)} KB`;
 }

@@ -1231,6 +1231,26 @@ function engineStubDir(): string {
   return dir;
 }
 
+/**
+ * THE BOARD'S SOUNDS, deliberately ABSENT — and the one way to hear them.
+ *
+ * They are chess.com's recordings, so they are not in this repository and there is nothing to write a
+ * stand-in with (see src/chess_sound.rs). An EMPTY directory is therefore the default, which pins a
+ * capture to one behaviour on every machine: the page falls back to its synthesized palette, exactly
+ * as it does on a machine nobody has played on. Point the variable at a directory really holding them
+ * to check the other half — that a browser decodes and plays them over this app's own route:
+ *
+ *   TEAMS_LITE_CHESS_SOUND_DIR=/path/to/chess-sounds bun run preview -- --out /tmp/chess --chess
+ *
+ * with `{kind:"chess_sound", present:true}` armed, since it is the mock that decides whether the page
+ * asks at all.
+ */
+function chessSoundDirForCapture(): string {
+  const dir = join(tmpdir(), `teams-lite-preview-chess-sound-${MOCK_PORT}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 function startWebServer(): ReturnType<typeof Bun.spawn> {
   return Bun.spawn(["bun", "run", "vite", "dev", "--port", String(WEB_PORT), "--host", "127.0.0.1"], {
     cwd: WEB_DIR,
@@ -1243,6 +1263,10 @@ function startWebServer(): ReturnType<typeof Bun.spawn> {
       //   TEAMS_LITE_ENGINE_DIR=/path/to/engine bun run preview -- --out /tmp/chess --chess
       // which is how one checks that 7.3 MB of WebAssembly really plays a move in a browser.
       TEAMS_LITE_ENGINE_DIR: process.env.TEAMS_LITE_ENGINE_DIR ?? engineStubDir(),
+      // Empty by default, and the REAL recordings when the caller names a directory holding them (see
+      // `chessSoundDirForCapture`).
+      TEAMS_LITE_CHESS_SOUND_DIR:
+        process.env.TEAMS_LITE_CHESS_SOUND_DIR ?? chessSoundDirForCapture(),
     },
     stdout: "inherit",
     stderr: "inherit",

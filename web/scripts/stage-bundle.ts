@@ -55,6 +55,11 @@ export const RUNTIME_ENTRIES: readonly string[] = [
   // those two files to the page (see engine-file.ts); without it the staged app answers 404 for the
   // engine and every board against the computer says it could not start.
   "engine-file.ts",
+  // The chess BOARD's own sound route, the same shape one directory over: it reads the cache the
+  // backend fetched chess.com's recordings into and serves them to the page (see
+  // chess-sound-file.ts). Without it the staged app answers 404 for every one of them and a board
+  // falls back to synthesis for ever — which is quiet rather than broken, so nothing would report it.
+  "chess-sound-file.ts",
   "dist/server",
   "dist/client",
   `dist/${BUILD_INFO_FILE}`,

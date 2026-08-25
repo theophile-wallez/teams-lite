@@ -442,6 +442,20 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'chess_engine_status' }));\n"
     ),
+    # The board's own SOUNDS, on the same terms: DELETING what the user's machine fetched is a side
+    # effect nobody asked for (MACHINE_METHODS in src/bin/server.rs).
+    "board-sound-remover.ts": (
+        "// Deletes the chess board's sounds from the user's machine.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'chess_sound_forget' }));\n"
+    ),
+    # Their STATUS is an open read — and it is what fetches them, which is 64 KB a board asks for by
+    # being opened. Blocking it would block reading whether a board can sound right at all.
+    "board-sound-reader.ts": (
+        "// Asks where the board's sounds stand, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'chess_sound_status' }));\n"
+    ),
     # Asking whether a newer build exists changes nothing on the machine and is the same
     # request the backend already makes every two minutes: a read, and allowed.
     "update-checker.ts": (
@@ -688,6 +702,7 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/backend-restarter.ts"),
         # Fetching the chess engine spends the user's bandwidth and writes to their disk.
         ("BLOCK", PROJECT, f"bun run {tmp}/engine-fetcher.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/board-sound-remover.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-backend-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-relay-writer.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/released-backend-reader.ts"),
@@ -954,6 +969,7 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/update-checker.ts"),
         # Asking whether the engine is there names no path and changes nothing.
         ("ALLOW", PROJECT, f"bun run {tmp}/engine-reader.ts"),
+        ("ALLOW", PROJECT, f"bun run {tmp}/board-sound-reader.ts"),
         # Reading the call state names no write and reaches nobody.
         ("ALLOW", PROJECT, f"bun run {tmp}/call-status-reader.ts"),
         # An example pinned to the pre-authorized channel is the sanctioned shape,

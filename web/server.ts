@@ -16,6 +16,7 @@
 import { existsSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
+import { CHESS_SOUND_ROUTE, chessSoundFileResponse } from "./chess-sound-file";
 import { ENGINE_ROUTE, engineFileResponse } from "./engine-file";
 import { bundleWasReplaced, readBuildInfo, refuseToServeReason } from "./build-info";
 
@@ -252,6 +253,13 @@ export const server = Bun.serve<Relay>({
     if (url.pathname.startsWith(ENGINE_ROUTE)) {
       const engine = engineFileResponse(url.pathname);
       if (engine) return engine;
+    }
+    // The chess BOARD's own sounds, from the same kind of cache and under the same rule: the twelve
+    // PINNED names and nothing else (see chess-sound-file.ts). They are served from here rather than
+    // fetched by the page so that drawing a board tells chess.com nothing.
+    if (url.pathname.startsWith(CHESS_SOUND_ROUTE)) {
+      const sound = chessSoundFileResponse(url.pathname);
+      if (sound) return sound;
     }
     // Browsers request /favicon.ico unconditionally; map it to our SVG so it
     // never falls through to the SSR handler as a 404.

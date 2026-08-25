@@ -1167,6 +1167,27 @@ export async function setChessEngine(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Say whether this "machine" holds chess.com's board recordings. Nothing is fetched or served
+ *  either way (they are not in this repository, and the suite's own sound directory stays empty) —
+ *  what this decides is whether the page tries to LOAD them or falls back to synthesis. */
+export async function setChessSounds(
+  page: Page,
+  body: { present?: boolean } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "chess_sound", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Put the board's sounds back the way the mock declares them: absent. */
+export async function resetChessSounds(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "chess_sound", reset: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Put the engine back the way the mock declares it: absent, and armed to fail at nothing. */
 export async function resetChessEngine(page: Page): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {

@@ -31,6 +31,7 @@ pub mod changelog;
 /// (see AGENTS.md § Playing STOCKFISH). It is in the backend because the engine has to be
 /// DOWNLOADED, and a browser in this app never fetches from a stranger's server.
 pub mod chess_engine;
+pub mod chess_sound;
 pub mod custom_emoji;
 pub mod gitlab;
 pub mod gitlab_approval;
@@ -42,6 +43,7 @@ pub mod linear;
 pub mod link_preview;
 pub mod mail;
 pub mod mail_html;
+pub mod pinned_download;
 pub mod png;
 pub mod push;
 pub mod push_policy;

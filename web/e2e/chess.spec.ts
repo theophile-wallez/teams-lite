@@ -4,7 +4,9 @@ import {
   chessChallengeFromOpponent,
   openChessEngineRow,
   resetChessEngine,
+  resetChessSounds,
   setChessEngine,
+  setChessSounds,
   chessOpponentMoves,
   fetchCapturedEdits,
   openChessPage,
@@ -893,6 +895,47 @@ test.describe("chess in a conversation", () => {
     await expect(page.locator('[data-testid="chess-engine-row"]')).toBeVisible();
     await expect(page.locator('[data-testid="chess-button"]')).toHaveCount(0);
     await closeConversationMenu(page);
+  });
+
+  test("the board's sounds NEVER come from chess.com, and a machine without them still plays", async ({
+    page,
+  }) => {
+    // THE RULE THIS FEATURE RESTS ON. The recordings are chess.com's, and they reach the page from
+    // THIS app's own origin because the backend fetched them (see src/chess_sound.rs): a page that
+    // asked chess.com itself would tell their CDN the reader's address every time it drew a board —
+    // the read receipt § Mail strips out of every message body, in another costume.
+    const offMachine: string[] = [];
+    const ours: string[] = [];
+    page.on("request", (request) => {
+      const url = request.url();
+      if (/chesscomfiles\.com|chess\.com/.test(url)) offMachine.push(url);
+      if (url.includes("/__chess-sound/")) ours.push(url);
+    });
+
+    // `present: true` is the state in which the page really tries to load them — the one that could
+    // reach off this machine if the address were built from the wrong end.
+    await setChessSounds(page, { present: true });
+    await openChessThread(page);
+    await startChessGame(page);
+    await playChessMove(page, "e2", "e4");
+    await expect(page.locator(board)).toBeVisible();
+    await chessOpponentMoves(page);
+
+    expect(offMachine, "the page must never request chess.com").toEqual([]);
+    // And what it DID ask for is this app's own route, under the version the backend named.
+    for (const url of ours) {
+      expect(new URL(url).origin).toBe(new URL(page.url()).origin);
+      expect(url).toContain("/__chess-sound/chesscom-default-");
+    }
+
+    // The suite's sound directory is empty on purpose, so every one of those 404s and the board
+    // falls back to its synthesized palette. The game must be entirely unaffected: this assertion
+    // is the whole reason the fallback exists.
+    await expect(page.locator(status)).toBeVisible();
+    await playChessMove(page, "d2", "d4");
+    await expect(page.locator(board)).toBeVisible();
+
+    await resetChessSounds(page);
   });
 
   test("Settings says what the engine costs, and takes it back", async ({ page }) => {

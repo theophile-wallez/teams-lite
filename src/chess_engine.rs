@@ -11,24 +11,14 @@
 //! a feature most of them will never open. It is fetched on the user's own press, once per machine,
 //! and it can be given back (see [`forget`]).
 //!
-//! **THE BROWSER NEVER TOUCHES THE HOST.** The rails are the ones `update.rs` and `sender_icon.rs`
-//! already hold, and each is here for its own reason:
-//!
-//!   - **the URL is a CONSTANT** — one host, one release tag, one filename per entry, and no client
-//!     supplies any part of it. A client that could name the URL could make this machine fetch
-//!     anything and then run it in the reader's browser;
-//!   - **the response's own stated length must match** the pinned one, checked before the bytes, so
-//!     a captive portal's login page costs nothing;
-//!   - **the SHA-256 must match**, computed over the bytes as they stream and checked BEFORE
-//!     anything is installed. This is stronger than the ELF sniff the app's own update does, and it
-//!     has to be: what is being fetched is CODE that will run in the reader's browser, so its
-//!     identity is the only thing standing between the reader and whatever the host answered;
-//!   - **the read is BOUNDED** at [`MAX_ENGINE_BYTES`] whatever the server claims, because a length
-//!     header is a claim and a disk is not;
-//!   - **the install is a RENAME** of a `.part` sibling, so a file is complete or absent — never
-//!     half an engine that the page would try to run;
-//!   - **a file that fails verification is DELETED**, for the reason the update's own is: a half
-//!     file that looks like an engine is worse than no file, because the next press would load it.
+//! **THE BROWSER NEVER TOUCHES THE HOST**, and the rails that make that safe live in
+//! [`crate::pinned_download`] — one constant URL, the stated length checked before the bytes, the
+//! SHA-256 checked as they stream, the read bounded by the pinned size, the install a rename, and a
+//! file that fails deleted. They are spelled there rather than here because the board's own SOUNDS
+//! (see [`crate::chess_sound`]) are fetched under exactly the same rules, and two copies of that
+//! policy would be two chances to get it wrong. What this module keeps is what is the ENGINE's own:
+//! the pinned table, the version, the Elo range, and one thing the sounds have no need of — the
+//! per-process cache below, because re-hashing 7.3 MB on every status read would be work nobody sees.
 //!
 //! **THE VERSION IS PART OF THE PATH.** `~/.cache/teams-lite/engine/<version>/` — so a later build
 //! that pins a different engine fetches into a directory of its own and can never load the bytes
@@ -36,20 +26,17 @@
 //! it lives there rather than in the store.
 
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// One file the engine is made of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EngineFile {
-    /// Its name on disk and in the URL — and the ONLY thing a path is ever built from.
-    pub name: &'static str,
-    pub url: &'static str,
-    pub size: u64,
-    /// Lowercase hex, 64 characters.
-    pub sha256: &'static str,
-}
+use crate::pinned_download::{self, PinnedFile};
+
+/// One file the engine is made of: its name on disk and in the URL — the ONLY thing a path is ever
+/// built from — beside the length and digest this build pins.
+///
+/// It is [`PinnedFile`], because "a file fetched from the internet and verified before anything uses
+/// it" is one idea in this app and not two (see [`crate::pinned_download`]).
+pub type EngineFile = PinnedFile;
 
 /// What this engine is called where a reader can see it.
 pub const ENGINE_LABEL: &str = "Stockfish 18 Lite";
@@ -116,23 +103,6 @@ pub const MAX_ENGINE_BYTES: u64 = 16 * 1024 * 1024;
 /// How long one file may take. A 7.3 MB read on a slow phone tether is minutes, not seconds.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// This machine's cache root, XDG first — the same rule `update::cache_base` follows, for the same
-/// reason: the cache is the one place a machine may clean up behind us.
-fn cache_base() -> Result<PathBuf> {
-    match std::env::var_os("XDG_CACHE_HOME") {
-        // ABSOLUTE only, which is `update::cache_base`'s own rule and what the route that serves
-        // these files already assumes (`web/engine-file.ts` takes a path starting with `/`). A
-        // relative value accepted here and refused there is one machine with two answers to "where
-        // is the engine".
-        Some(dir) if !dir.is_empty() && Path::new(&dir).is_absolute() => Ok(PathBuf::from(dir)),
-        _ => {
-            let home = std::env::var_os("HOME")
-                .context("no XDG_CACHE_HOME and no HOME — nowhere to put the engine")?;
-            Ok(PathBuf::from(home).join(".cache"))
-        }
-    }
-}
-
 /// Where the engine's files live. `TEAMS_LITE_ENGINE_DIR` overrides it, which is what lets a test
 /// point the whole feature at a temporary directory — it is read here and nowhere else, so there is
 /// one answer to "where is the engine" on this machine.
@@ -142,14 +112,17 @@ pub fn engine_dir() -> Result<PathBuf> {
     {
         return Ok(PathBuf::from(dir));
     }
-    Ok(cache_base()?.join("teams-lite").join("engine").join(ENGINE_VERSION))
+    Ok(pinned_download::cache_base()?
+        .join("teams-lite")
+        .join("engine")
+        .join(ENGINE_VERSION))
 }
 
 /// The path of ONE PINNED file. A name that is not in the table answers `None`, which is what makes
 /// a path traversal impossible: nothing here ever joins a caller's string to a directory.
 pub fn engine_path(name: &str) -> Option<PathBuf> {
-    let file = ENGINE_FILES.iter().find(|f| f.name == name)?;
-    engine_dir().ok().map(|dir| dir.join(file.name))
+    let dir = engine_dir().ok()?;
+    pinned_download::path_of(&dir, &ENGINE_FILES, name)
 }
 
 /// Whether one file is there, the right length AND the right bytes.
@@ -181,8 +154,8 @@ fn file_is_present(file: &EngineFile) -> bool {
             return true;
         }
     }
-    let Ok(bytes) = std::fs::read(&path) else { return false };
-    let ok = hex(&Sha256::digest(&bytes)).eq_ignore_ascii_case(file.sha256);
+    let ok = pinned_download::digest_of(&path)
+        .is_some_and(|digest| digest.eq_ignore_ascii_case(file.sha256));
     if let Ok(mut seen) = VERIFIED.lock() {
         // Only a PASS is remembered: a file that failed may be replaced by the right one a moment
         // later (a download finishing), and a cached "no" would keep the engine absent until the
@@ -261,99 +234,24 @@ where
             on_progress(done, total);
             continue;
         }
-        fetch_one(http, file, &dir, &mut |received| on_progress(done + received, total)).await?;
+        pinned_download::fetch_one(
+            http,
+            file,
+            &dir,
+            DOWNLOAD_TIMEOUT,
+            ENGINE_RISK,
+            &mut |received| on_progress(done + received, total),
+        )
+        .await?;
         done += file.size;
         on_progress(done, total);
     }
     Ok(())
 }
 
-/// One file: streamed to a `.part`, hashed as it goes, installed by rename only once both the
-/// length and the digest are what this build pinned.
-async fn fetch_one<F>(
-    http: &reqwest::Client,
-    file: &EngineFile,
-    dir: &Path,
-    on_progress: &mut F,
-) -> Result<()>
-where
-    F: FnMut(u64),
-{
-    let dest = dir.join(file.name);
-    // `with_extension("part")` REPLACES the suffix, so the glue and its wasm would both stream into
-    // `stockfish-18-lite-single.part` — one temporary file for two downloads. The pid is the other
-    // half: two backends share this machine (§ Running the released build beside the staged one),
-    // and two transfers into one temporary file corrupt both.
-    let part = dir.join(format!("{}.part.{}", file.name, std::process::id()));
-    let resp = http
-        .get(file.url)
-        .timeout(DOWNLOAD_TIMEOUT)
-        .send()
-        .await
-        .with_context(|| format!("download {}", file.name))?;
-    anyhow::ensure!(
-        resp.status().is_success(),
-        "download {} -> {}",
-        file.name,
-        resp.status()
-    );
-    // The transfer's own statement of its length, checked BEFORE the bytes: it costs nothing and it
-    // catches a host answering with something else entirely. It is never taken AS the expected
-    // length — the pinned numbers stay the authority.
-    if let Some(stated) = resp.content_length() {
-        anyhow::ensure!(
-            stated == file.size,
-            "{} is {} bytes here and {} bytes in this build — the engine release may have been \
-             replaced, so this build cannot verify it",
-            file.name,
-            stated,
-            file.size
-        );
-    }
-
-    let mut out = std::fs::File::create(&part)
-        .with_context(|| format!("create {}", part.display()))?;
-    let mut hasher = Sha256::new();
-    let mut received: u64 = 0;
-    let mut resp = resp;
-    on_progress(0);
-    let outcome: Result<()> = loop {
-        match resp.chunk().await {
-            Ok(Some(chunk)) => {
-                received += chunk.len() as u64;
-                // Bounded by what this build PINNED rather than by the table's own ceiling: a
-                // response longer than the file it claims to be is refused at the first byte over,
-                // so nothing is written that could not possibly verify.
-                if received > file.size {
-                    break Err(anyhow::anyhow!(
-                        "{} is longer than the {} bytes this build pinned — refused",
-                        file.name,
-                        file.size
-                    ));
-                }
-                hasher.update(&chunk);
-                if let Err(e) = std::io::Write::write_all(&mut out, &chunk) {
-                    break Err(anyhow::Error::new(e).context(format!("write {}", part.display())));
-                }
-                on_progress(received);
-            }
-            Ok(None) => break Ok(()),
-            Err(e) => break Err(anyhow::Error::new(e).context(format!("read {}", file.name))),
-        }
-    };
-    drop(out);
-
-    let verified = outcome.and_then(|()| verify(file, received, &hex(&hasher.finalize())));
-    if let Err(e) = verified {
-        // Leave nothing loadable behind: half an engine, or somebody else's, is worse than none —
-        // the next press would hand it to the reader's browser.
-        let _ = std::fs::remove_file(&part);
-        return Err(e);
-    }
-    std::fs::rename(&part, &dest)
-        .with_context(|| format!("rename {} -> {}", part.display(), dest.display()))?;
-    Ok(())
-}
+/// What these bytes go on to do, stated in every refusal. It is the sharpest risk any download in
+/// this app carries, which is why the digest — and not the length — is what decides.
+const ENGINE_RISK: &str = "what it holds would run in the browser";
 
 /// Is what arrived the file this build pinned? Length AND digest, and the digest is the one that
 /// matters: it is what says these bytes are the engine that was measured rather than whatever the
@@ -361,61 +259,20 @@ where
 ///
 /// Pure, so both halves are tested with no network.
 pub fn verify(file: &EngineFile, received: u64, digest: &str) -> Result<()> {
-    anyhow::ensure!(
-        received == file.size,
-        "{} arrived as {} bytes and this build expects {} — the transfer stopped, or the release \
-         moved",
-        file.name,
-        received,
-        file.size
-    );
-    anyhow::ensure!(
-        digest.eq_ignore_ascii_case(file.sha256),
-        "{} is not the file this build pinned (its checksum differs) — refused, because what it \
-         holds would run in the browser",
-        file.name
-    );
-    Ok(())
+    pinned_download::verify(file, received, digest, ENGINE_RISK)
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Give the disk back. Answers how many bytes went, so the row can say it.
+/// Give the disk back — the files, and every temporary a failed transfer left behind. Answers how
+/// many bytes went, so the row can say it.
 pub fn forget() -> Result<u64> {
-    let mut freed = 0;
-    for file in ENGINE_FILES.iter() {
-        let Some(path) = engine_path(file.name) else { continue };
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if std::fs::remove_file(&path).is_ok() {
-                freed += meta.len();
-            }
-        }
-    }
-    // Every temporary a failed transfer left behind, whichever process wrote it: they are named
-    // `<file>.part.<pid>`, and a pid that is gone is not coming back for its half a download.
-    if let Ok(dir) = engine_dir() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !ENGINE_FILES.iter().any(|f| name.starts_with(&format!("{}.part.", f.name))) {
-                    continue;
-                }
-                if let Ok(meta) = entry.metadata() {
-                    if std::fs::remove_file(entry.path()).is_ok() {
-                        freed += meta.len();
-                    }
-                }
-            }
-        }
-    }
-    Ok(freed)
+    let dir = engine_dir()?;
+    pinned_download::forget_in(&dir, &ENGINE_FILES)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     /// The pinned table is the MEASURED one, and the numbers are the whole of its safety.
     ///
@@ -603,7 +460,12 @@ mod tests {
             let path = engine_path(file.name).expect("a pinned path");
             let bytes = std::fs::read(&path).expect("read it back");
             assert_eq!(bytes.len() as u64, file.size);
-            assert_eq!(hex(&Sha256::digest(&bytes)), file.sha256, "{}", file.name);
+            assert_eq!(
+                pinned_download::hex(&Sha256::digest(&bytes)),
+                file.sha256,
+                "{}",
+                file.name
+            );
             println!("[engine] {} verified: {} bytes", file.name, bytes.len());
         }
         // And a SECOND download is a no-op rather than a second 7.3 MB.

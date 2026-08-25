@@ -12,6 +12,7 @@ import type { AgentPersonaPatch } from "./agent-persona";
 import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { CallPreparation, CallStatus, MeetingAddress } from "./call";
 import type { ChessEngineState } from "./chess-engine";
+import type { ChessSoundsState } from "./chess-sound";
 import type { SendImage } from "./composer-image";
 import type { DiffDepth, GitLabDiff } from "./gitlab-diff";
 import type { WireDiffPosition } from "./gitlab-diff-comment";
@@ -775,6 +776,22 @@ export class Backend {
    *  freed. */
   engineForget(): Promise<ChessEngineState & { freed?: number }> {
     return this.writeRequest<ChessEngineState & { freed?: number }>("chess_engine_forget", {});
+  }
+
+  // ---- the board's own SOUNDS -----------------------------------------------------------
+  //
+  // chess.com's twelve recordings, which the BACKEND fetches once and serves from this app's own
+  // origin (see src/chess_sound.rs): this page never asks chess.com for anything.
+
+  /** Where the recordings stand, and what STARTS the one fetch this feature makes. A READ: it names
+   *  no path and publishes nothing about the user. The fetch rides on it because 64 KB is not a
+   *  decision to put to a reader — see `Ctx::chess_sound_status` for what bounds it. */
+  chessSoundStatus(): Promise<ChessSoundsState> {
+    return this.request<ChessSoundsState>("chess_sound_status", {});
+  }
+  /** Delete them. A WRITE, and it answers with what it freed. */
+  chessSoundForget(): Promise<ChessSoundsState & { freed?: number }> {
+    return this.writeRequest<ChessSoundsState & { freed?: number }>("chess_sound_forget", {});
   }
 
   /** What the backend can do about push notifications, and which devices it already

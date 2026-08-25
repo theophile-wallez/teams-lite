@@ -465,7 +465,7 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// authenticates as the user, `signin_frame` answers with a picture of a sign-in page, and
 /// `signin_input` presses keys into it. `signin_frame` is gated as hard as the rest for that
 /// reason: a read whose answer is the pixels of somebody's password field is not a read.
-const MACHINE_METHODS: [&str; 32] = [
+const MACHINE_METHODS: [&str; 33] = [
     "repair_broker",
     "signin_start",
     "signin_frame",
@@ -479,6 +479,12 @@ const MACHINE_METHODS: [&str; 32] = [
     // open — a page has to know whether it can offer a game at all, and the answer names no path.
     "chess_engine_download",
     "chess_engine_forget",
+    // The board's own SOUNDS. Dropping them writes to this machine's disk on the user's behalf, so
+    // it is gated exactly as the engine's own removal is. FETCHING them is NOT here, because it is
+    // not a decision: they are 64 KB, they are asked for by a reader opening a board with the app's
+    // sounds on, and `chess_sound_status` is the read that answers where they are (see
+    // `chess_sound`).
+    "chess_sound_forget",
     "call_prepare",
     "call_subscribe",
     "push_subscribe",
@@ -561,6 +567,7 @@ fn machine_effect(method: &str) -> &'static str {
              runs in the reader's own browser"
         }
         "chess_engine_forget" => "deletes the chess engine from this machine",
+        "chess_sound_forget" => "deletes the chess board's own sounds from this machine",
         "update_apply" => {
             "replaces this app's own binary on this machine, and restarts everything the \
              user's Teams account runs through"
@@ -1425,6 +1432,12 @@ struct Ctx {
     /// tethered phone, so a page that pressed "download" needs something to draw — and every open
     /// page needs it, not just the one that pressed (see `chess_engine`).
     engine: Arc<std::sync::Mutex<EngineSlot>>,
+    /// Whether the board's own SOUNDS are being fetched right now (see `chess_sound`). A flag rather
+    /// than a slot, because there is no progress worth drawing for 64 KB and nothing for a reader to
+    /// do if it fails — what it buys is single-flight: every board that mounts asks
+    /// `chess_sound_status`, and two open pages must not start twelve transfers each and race over
+    /// one `.part` file.
+    chess_sounds_fetching: Arc<std::sync::atomic::AtomicBool>,
     /// Mail folders the live poll watches (see `spawn_mail_sync`). Seeded with the
     /// inbox and extended whenever a UI opens a folder, so the poll costs one
     /// request per folder the user actually looks at rather than one per folder the
@@ -2325,6 +2338,75 @@ impl Ctx {
         Ok(payload)
     }
 
+    // ---- the board's own SOUNDS -----------------------------------------------------------
+    //
+    // chess.com's twelve recordings, fetched once per machine, verified against digests this build
+    // pins, and served to the page from this app's own origin (see `chess_sound`, and the
+    // `/__chess-sound/` route in web/chess-sound-file.ts). The page keeps its synthesized palette as
+    // the fallback, so none of this can cost a board its sound.
+
+    /// Where the recordings stand, and — if they are missing — start fetching them.
+    ///
+    /// **AN OPEN READ, and the fetch inside it is the deliberate part.** It names no path, publishes
+    /// nothing about the user, and answers what a page must know to draw a board that sounds right.
+    /// The FETCH rides on it rather than sitting behind a press because 64 KB is not a decision worth
+    /// asking a reader to make — it is the shape `sender_icon` already has, where the request happens
+    /// because a surface was drawn. What bounds it is that it happens ONCE per machine (an intact set
+    /// is left alone), and that a reader who never opens a board with sounds on never asks at all.
+    fn chess_sound_status(&self) -> Result<Value> {
+        let status = teams_lite::chess_sound::status_json();
+        if status["present"].as_bool() == Some(true) || read_only() {
+            // A read-only backend answers where things stand and fetches nothing: a screenshot
+            // backend must not reach a stranger's server on the user's behalf.
+            return Ok(status);
+        }
+        let already = self
+            .chess_sounds_fetching
+            .swap(true, std::sync::atomic::Ordering::SeqCst);
+        if already {
+            return Ok(status);
+        }
+        let ctx = self.clone();
+        let http = self.http.clone();
+        tokio::spawn(async move {
+            let outcome = teams_lite::chess_sound::download(&http).await;
+            ctx.chess_sounds_fetching
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            match outcome {
+                Ok(()) => {
+                    eprintln!(
+                        "[chess-sound] {} are on this machine ({} bytes)",
+                        teams_lite::chess_sound::SOUND_LABEL,
+                        teams_lite::chess_sound::total_bytes()
+                    );
+                    // Every page, not only the one that asked: a second window draws the same board.
+                    ctx.emit(
+                        "chess_sound_changed",
+                        teams_lite::chess_sound::status_json(),
+                    );
+                }
+                // One journal line and nothing else. The page falls back to its own synthesized
+                // palette, so there is nothing for a reader to do and nothing to interrupt them with.
+                Err(e) => eprintln!("[chess-sound] could not fetch the board's sounds: {e:#}"),
+            }
+        });
+        Ok(status)
+    }
+
+    /// Give the disk back. The one action here that takes something away, so it says how much.
+    fn forget_chess_sounds(&self) -> Result<Value> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never deletes anything"
+        );
+        let freed = teams_lite::chess_sound::forget()?;
+        eprintln!("[chess-sound] removed, freeing {freed} bytes");
+        let mut payload = teams_lite::chess_sound::status_json();
+        payload["freed"] = json!(freed);
+        self.emit("chess_sound_changed", teams_lite::chess_sound::status_json());
+        Ok(payload)
+    }
+
     async fn start_update_download(&self) -> Result<Value> {
         anyhow::ensure!(
             !read_only(),
@@ -3164,6 +3246,7 @@ async fn main() -> Result<()> {
         events: events_tx,
         update: Arc::new(std::sync::Mutex::new(UpdateSlot::default())),
         engine: Arc::new(std::sync::Mutex::new(EngineSlot::default())),
+        chess_sounds_fetching: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         calendar_watch: Arc::new(Mutex::new(None)),
         last_repair: Arc::new(Mutex::new(None)),
@@ -3509,6 +3592,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         "chess_engine_status" => ctx.chess_engine_status(),
         "chess_engine_download" => ctx.start_engine_download().await,
         "chess_engine_forget" => ctx.forget_engine(),
+
+        // THE BOARD'S OWN SOUNDS (see `chess_sound`). The status is OPEN and it is what starts the
+        // one fetch this feature ever makes — 64 KB of chess.com's recordings, once per machine,
+        // asked for because a reader opened a board with the app's sounds on. Dropping them is a
+        // MACHINE method, exactly as the engine's own removal is.
+        "chess_sound_status" => ctx.chess_sound_status(),
+        "chess_sound_forget" => ctx.forget_chess_sounds(),
 
         // Restart this backend, through whatever runs it. A MACHINE method: it takes the
         // process every open page is talking to down, so it is the user's own click and

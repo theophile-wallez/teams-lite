@@ -16,7 +16,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ENGINE_SERVED } from "../engine-file";
-import { ENGINE_DIR } from "../playwright.config";
+import { CHESS_SOUND_DIR, ENGINE_DIR } from "../playwright.config";
 
 const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "19457";
 const MOCK_URL = `http://127.0.0.1:${MOCK_PORT}/`;
@@ -45,8 +45,22 @@ function installEngineStub(): void {
   );
 }
 
+/**
+ * THE BOARD'S SOUNDS, deliberately absent.
+ *
+ * They are chess.com's recordings and are not in this repository, so there is nothing to stand in
+ * with — and nothing to stand in FOR: what every spec must exercise is the state of a machine that
+ * has not fetched them, where the page falls back to its own synthesized palette. This makes the
+ * directory exist and leaves it empty, so the route answers its 404 and no spec can read whatever
+ * this machine happens to hold in the real cache.
+ */
+function leaveTheBoardSoundsAbsent(): void {
+  mkdirSync(CHESS_SOUND_DIR, { recursive: true });
+}
+
 export default async function globalSetup(): Promise<void> {
   installEngineStub();
+  leaveTheBoardSoundsAbsent();
   let body: string;
   try {
     body = await (await fetch(MOCK_URL)).text();

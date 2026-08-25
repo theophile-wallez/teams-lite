@@ -5094,17 +5094,131 @@ closed for an hour all reach the same two numbers.
   never meets. It is dismissed by a press anywhere else and by Escape (on CAPTURE, so the shell's
   own Escape does not also leave the conversation), and the four `chess-promote-*` ids are kept so
   what every existing assertion means survived the change of shape.
-- **THE SOUNDS ARE SYNTHESIZED AND ONLY THE PAGE MAKES THEM** (`chess-sound.ts`). Twelve of them,
-  each with its own SHAPE rather than the same click at another volume — a knock for a move, two for
-  a capture, an alert over the knock for check, a rising arpeggio for a promotion, three notes for a
-  result — because a reader should hear which it was without looking. Nothing is downloaded: they
-  are oscillators and one noise burst, the way `cuelume` builds the app's own cues, and a dozen
-  small files would be a dozen requests on a page whose promise is that displaying it makes none.
-  The AudioContext is created on the first sound a PRESS asks for and resumed on every play (iOS
-  suspends it whenever the app goes away), a HIDDEN document plays nothing, and the whole palette
-  answers to the app's own `soundsEnabled` — a reader who turned the app's cues off did not ask for
-  a board to be the exception. The CARD in the history makes no sound at all: a conversation that
-  clicked at every move of every game in it is one nobody can read in an open-plan office.
+- **THE SOUNDS ARE CHESS.COM'S, AND ONLY THE PAGE MAKES THEM** (`chess-sound.ts`, over
+  `src/chess_sound.rs`). They were synthesized first — oscillators and a noise burst, the way
+  `cuelume` builds the app's own cues — and the argument for that was that a dozen small files would
+  be a dozen requests on a page whose promise is that displaying it makes none. What it bought was a
+  knock rather than a recording of oak, and the sounds every chess player already knows are
+  chess.com's own. So the palette is theirs, and the synthesis is what plays UNDER it (see the
+  section below). The AudioContext is created on the first sound a PRESS asks for and resumed on
+  every play (iOS suspends it whenever the app goes away), a HIDDEN document plays nothing, and the
+  whole palette answers to the app's own `soundsEnabled` — a reader who turned the app's cues off did
+  not ask for a board to be the exception. The CARD in the history makes no sound at all: a
+  conversation that clicked at every move of every game in it is one nobody can read in an open-plan
+  office.
+
+### THE SOUNDS come from chess.com, and the BACKEND is what fetches them
+
+Twelve MP3 files, 64 KB in all, at one address:
+`https://images.chesscomfiles.com/chess-themes/sounds/_MP3_/default/<name>.mp3`. `src/chess_sound.rs`
+pins them, `web/chess-sound-file.ts` serves them, `web/src/lib/chess-sound.ts` decides which sound an
+event earns and plays it, and `src/pinned_download.rs` holds the policy this shares with the engine.
+
+**THEY ARE NOT IN THIS APP, and that is deliberate twice over.**
+
+- **They are chess.com's recordings, not ours.** This app does not redistribute somebody else's
+  assets: committing them and shipping them inside the 134 MB release asset would be publishing their
+  audio under our name. Fetching them per machine, from the address they publish them at, is what any
+  browser does when it opens chess.com. **It is the LICENSING argument and not a size one** — 64 KB
+  in that asset would cost nothing, which is exactly why the engine's own reason (7.3 MB nobody who
+  never opens a board should pay for) does not apply here and must not be borrowed as a
+  justification. It is also why there is no PRESS: a reader is not asked to decide about 64 KB.
+- **The BROWSER never touches their server.** A page that fetched these itself would tell chess.com's
+  CDN the reader's address every time it drew a board — the read receipt § Mail strips out of every
+  message body, in another costume. The backend fetches ONCE per machine, verifies each file against
+  a digest this build pins, caches them under `~/.cache/teams-lite/chess-sounds/<version>/`, and this
+  app serves the bytes from its own origin. So the number of requests chess.com ever sees is the
+  number of machines that opened a board — not the number of boards, and not the number of moves.
+  `web/e2e/chess.spec.ts` watches every request a real game makes and holds that list to empty.
+
+**EVERY NUMBER IS MEASURED**, on 2026-08-25, by fetching all twelve and hashing them — and the whole
+chain is verified through the code that ships (`chess_sound::tests::the_real_sounds_download_and_verify`,
+`#[ignore]`d because it reaches the network; run on 2026-08-25, all twelve verified against their
+pinned digests). The digests are the whole of the safety: **three of the files are exactly 5 353 bytes
+long**, so a length alone is met by any of the other two.
+
+Eleven rules hold it, and each is pinned by a test:
+
+- **SYNTHESIS IS THE FALLBACK, so this can never cost a board its sound.** `CHESS_SOUNDS` is still
+  the whole table of oscillators, and it is what plays until the recordings are on the machine — the
+  first game on a fresh machine, a machine that is offline, one that cannot reach chess.com. It is
+  the rule § A picture somebody SENT holds for a reduced view: the better thing is the ADDITION. The
+  suite's own sound directory is deliberately left EMPTY for that reason, so every spec exercises the
+  fallback rather than whatever the developer's machine happens to hold.
+- **THE READ IS WHAT FETCHES THEM.** `chess_sound_status` is OPEN — it names no path and publishes
+  nothing about the user — and the backend starts the one download on it. What bounds it is that it
+  happens once per machine and that the PAGE only asks when a board mounts with the app's sounds ON:
+  a reader who never plays chess, or who turned the cues off, never makes this app reach that CDN.
+  A read-only backend answers where things stand and fetches nothing.
+- **`chess_sound_forget` is a `MACHINE_METHODS` entry**, exactly as the engine's own removal is, and
+  the automation hook blocks it against a live port. Settings › Chess engine carries the row that
+  says what they weigh and takes them back — the INVENTORY split § Renamed people already makes.
+- **THE VERSION CARRIES A DIGEST OVER THE WHOLE TABLE** (`chesscom-default-94997488`), and it is both
+  the cache directory and the middle segment of the route. The file NAMES are upstream's and would
+  not change if chess.com replaced the recordings behind them, so a plain theme name would let a
+  later build read the bytes this one verified out of the cache and serve them from a URL this app
+  tells the browser to keep for a year. A test RECOMPUTES it from the table, so it cannot drift.
+- **THREE TABLES NAME THESE FILES and two process boundaries run between them** — the Rust pin, the
+  route, and the page's event → file map. Each is scanned against the others, which is the discipline
+  the unit files, the PATH and the ports table already hold: a name that drifted is an event whose
+  sound 404s for ever while the page quietly falls back to synthesis, and nothing would report it.
+- **THE ROUTE SERVES THE TWELVE PINNED NAMES AND NOTHING ELSE**, with the path built from the MATCH
+  rather than from the request — the rail `engine-file.ts` and `gitlab_mr::UploadRef::parse` already
+  hold. It names nothing from Bun, because `vite.config.ts` evaluates it under Node (the mistake
+  `engine-file.ts` states and paid for), and it answers `null` for another route so the caller falls
+  through. A missing file is a 404 with a SENTENCE, because it is the ordinary state of a machine
+  nobody has played on rather than a fault.
+- **THE READER'S OWN MOVE AND THEIR OPPONENT'S ARE TWO SOUNDS**, which is chess.com's own split and
+  the one worth having: it says a move ARRIVED without the reader looking at the board. Everything
+  else is the same sound whoever did it — a capture is a capture, a check is a check. The ply's own
+  parity says which, and a board somebody is only WATCHING has no opponent, so it sounds the way it
+  always did.
+- **WIN, LOSE AND DRAW ARE ONE FILE.** chess.com plays `game-end` however a game finished, and the
+  result is on screen the moment it does. The three names stay — they are real distinctions this app
+  knows, and the synthesized fallback still tells them apart by pitch — and all three resolve to it.
+  chess.com does publish `game-win-long`, `game-lose-long` and `game-draw`; they are not pinned, so
+  this is a stated trade rather than an oversight. **A CHECKMATE is two sounds**, `move-check` then
+  `game-end`, which falls out of the two effects that already existed rather than being arranged.
+- **ALL TWELVE ARE REALLY PLAYED**, and three of them had no trigger at all before this: `notify` is
+  a DRAW THE OPPONENT OFFERS — the one thing in a game that asks the reader for something while their
+  own clock runs, and it used to happen in silence; `illegal` is a move the rules REFUSE, played where
+  a real from→to was attempted rather than in `press`, because a press on an empty square with nothing
+  picked up means nothing and must not be answered as a mistake; and `tenseconds` is the reader's OWN
+  clock crossing `LOW_TIME_MS`. A file in the table that nothing plays is a recording fetched for
+  nobody, so the set and the triggers are checked against each other.
+- **THE CLOCK WARNING IS THE ONE SOUND ABOUT A STATE RATHER THAN AN EVENT**, so it is the one that DOES
+  fire on a first pass: a board opened with eight seconds on it is a board about to be lost, and the
+  warning is the whole point. Ten seconds rather than the thirty the clock starts turning at or the
+  twenty it begins counting tenths at — those two are things a reader can SEE, and a sound arriving
+  with them would fire in most games of blitz ever played. It re-arms if an increment lifts the clock
+  back over the line, and it says nothing on the opponent's turn or in a game with no clock.
+- **A RECORDING PLAYS AT 0.8** (`RECORDING_GAIN`). chess.com's files are mastered close to full scale
+  while the synthesized palette peaks at 0.16, and this app has no volume control of its own to
+  correct with — so one number, backed off, keeps the two palettes at roughly one level.
+- **THE PAGE GUARDS THE ROUTE IT IS HANDED** (`chessSoundUrl`): the backend names it, and a page that
+  trusted any string a backend answered with would fetch whatever it was given — the rule
+  `chessEngineWorkerUrl` holds for the Worker's own path.
+
+`web/mock/server.ts` answers the status with `present: false` out of the box, which is the state that
+matters: a mock that pretended the files were always here would let a silent board pass every test.
+Its `{kind:"chess_sound"}` hook arms the other half and **a spec MUST reset it**, since one mock
+process serves the whole run.
+
+**THE WHOLE CHAIN IS VERIFIED, and the last link needed a probe of its own.** The suite runs with an
+empty sound directory on purpose, so nothing in it can prove that a BROWSER decodes these files —
+`web/scripts/chess-sound-probe.ts` is what does, and it is the shape `scroll-probe.ts` already has: a
+tracked diagnostic driven THROUGH `withPreview`, so the mock sentinel is asserted before anything
+happens. It types nothing, sends nothing, and prints byte counts and durations rather than audio.
+
+    cd web && TEAMS_LITE_CHESS_SOUND_DIR=~/.cache/teams-lite/chess-sounds/<version> \
+      bun run scripts/chess-sound-probe.ts
+
+Measured 2026-08-25: **12 of 12 decoded**, stereo at 44 100 Hz, from 0.153 s (`move-self`) to 0.620 s
+(`tenseconds`) — so the whole palette is well inside the "nothing rings for a second" rule the
+synthesized one is held to, with the ten-second warning the longest by a wide margin. All 14 sounds
+resolve to a recording, and **0 requests reached chess.com**. What is left UNVERIFIED is only that
+somebody has heard them come out of a speaker in the real app, which is the user's own click on their
+own board.
 
 ### THE CARD IN THE HISTORY, AND THE SCROLL IT USED TO EAT
 
@@ -5150,9 +5264,12 @@ may go now — and the premove those dots set, in both themes. `web/e2e/chess.sp
 the page owns, and `chess-wire.test.ts`, `chess-thread.test.ts`, `chess-clock.test.ts`,
 `chess-act.test.ts`, `chess-premove.test.ts`,
 `chess-menu.test.ts` and `chess-sound.test.ts` the pure ones — the last of which pins the palette
-without an AudioContext anywhere: which sound a move earns, that every sound has its own shape
-rather than being one click at another volume, and that each is short and quiet enough to happen
-every few seconds.
+without an AudioContext anywhere: which sound a move earns and whose move it was, which of
+chess.com's files each one is, that the synthesized FALLBACK still holds a recipe for every sound,
+that every one of those has its own shape rather than being one click at another volume, and that
+each is short and quiet enough to happen every few seconds. The route those recordings arrive over
+has a test of its own, `web/chess-sound-file.test.ts`, which needs no browser: the twelve pinned
+names and nothing else, a 404 that says which state it is, and the year of `immutable` behind it.
 
 **What is unverified against the tenant is the pairing, and one new thing.** The wire rides `send`
 and `edit`, both measured, and everything else is pinned in unit tests and against the mock — so
@@ -5544,11 +5661,15 @@ user's. What changes is only what is asked.
     that hugeicons set cannot tell two armies apart at board size — the reasoning, and the two
     hand-rolled boards tried first, are in § Chess in a conversation. No second icon package is
     installed, so the test above still holds.
-  - The game of CHESS is entirely the page's: `chess-wire.ts` reads the line a chess message
-    signs itself with, `chess-thread.ts` derives every game from the thread's own messages, and
-    `chess.js` plus `react-chessboard` are reached only through the board's lazy chunk (see
-    § Chess in a conversation). There is no backend half at all — a move rides the `send` that
-    is already gated.
+  - The game of CHESS is almost entirely the page's: `chess-wire.ts` reads the line a chess
+    message signs itself with, `chess-thread.ts` derives every game from the thread's own
+    messages, and `chess.js` plus `react-chessboard` are reached only through the board's lazy
+    chunk (see § Chess in a conversation). A MOVE has no backend half at all — it rides the
+    `send` that is already gated. The two things that do are both bytes from the internet that
+    this app refuses to let a browser fetch: the ENGINE (`src/chess_engine.rs`) and the board's
+    own SOUNDS (`src/chess_sound.rs`), which share their whole verify-before-use policy through
+    `src/pinned_download.rs` and reach the page over one route each (`web/engine-file.ts`,
+    `web/chess-sound-file.ts`).
   - There was a terminal UI (OpenTUI + Solid, in `ui/`) until 2026-08-03. It is gone,
     and the web app is the only client: do not re-add a second front-end, and read a
     comment that names one as history rather than as a place to keep in sync.

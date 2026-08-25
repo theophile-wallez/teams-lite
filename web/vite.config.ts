@@ -10,6 +10,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
+import { CHESS_SOUND_ROUTE, chessSoundFileResponse } from "./chess-sound-file";
 import { ENGINE_ROUTE, engineFileResponse } from "./engine-file";
 import { BUILD_INFO_FILE, type BuildInfo } from "./build-info";
 import { BACKEND_WS_ROUTE } from "./src/lib/backend-route";
@@ -65,6 +66,36 @@ function chessEnginePlugin(): Plugin {
         if (!response) {
           res.statusCode = 404;
           res.end("no such engine file\n");
+          return;
+        }
+        res.statusCode = response.status;
+        for (const [name, value] of response.headers) res.setHeader(name, value);
+        res.end(Buffer.from(await response.arrayBuffer()));
+      });
+    },
+  };
+}
+
+/**
+ * The chess BOARD's own SOUNDS, in dev.
+ *
+ * The same route the production server holds (see chess-sound-file.ts), for the reason the engine's
+ * own plugin exists: a board that sounded right in production and fell back to synthesis in dev
+ * would make the difference invisible to whoever was working on it.
+ */
+function chessSoundPlugin(): Plugin {
+  return {
+    name: "teams-lite-chess-sound",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use(CHESS_SOUND_ROUTE, async (req, res) => {
+        // The middleware is mounted AT the route, so `req.url` is what follows it.
+        const response = chessSoundFileResponse(
+          CHESS_SOUND_ROUTE + (req.url ?? "").replace(/^\/+/, ""),
+        );
+        if (!response) {
+          res.statusCode = 404;
+          res.end("no such board sound\n");
           return;
         }
         res.statusCode = response.status;
@@ -149,6 +180,7 @@ export default defineConfig(({ command }) => ({
   plugins: [
     writeTokenPlugin(),
     chessEnginePlugin(),
+    chessSoundPlugin(),
     buildInfoPlugin(),
     tsConfigPaths({ projects: ["./tsconfig.json"] }),
     tailwindcss(),

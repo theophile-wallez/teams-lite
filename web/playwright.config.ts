@@ -37,6 +37,12 @@ const MOCK_WS_URL = `ws://127.0.0.1:${MOCK_PORT}`;
 // really fetched Stockfish would otherwise load 7.3 MB of WebAssembly into every spec, and one
 // that has not would behave differently from one that has.
 export const ENGINE_DIR = join(tmpdir(), `teams-lite-e2e-engine-${MOCK_PORT}`);
+// WHERE THE BOARD'S SOUNDS ARE, for this run only: a directory that stays EMPTY. It must never be
+// the real cache, for the reason above and one more of its own — the recordings are chess.com's and
+// are not in this repository, so a machine that has really played chess would load them and one that
+// has not would fall back to synthesis, and the suite would behave differently on the two. Empty
+// means every spec exercises the fallback, which is the state that must never be silent.
+export const CHESS_SOUND_DIR = join(tmpdir(), `teams-lite-e2e-chess-sound-${MOCK_PORT}`);
 const executablePath = resolveChromium();
 
 export default defineConfig({
@@ -109,6 +115,8 @@ export default defineConfig({
         TEAMS_LITE_ALLOW_PINNED_BUILD: "1",
         // The engine's own files, for this run: the stub, never the real cache (see above).
         TEAMS_LITE_ENGINE_DIR: ENGINE_DIR,
+        // And the board's sounds: an empty directory, never the real cache (see above).
+        TEAMS_LITE_CHESS_SOUND_DIR: CHESS_SOUND_DIR,
       },
       stdout: "ignore",
       stderr: "pipe",

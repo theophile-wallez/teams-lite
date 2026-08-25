@@ -36,7 +36,13 @@ import { chessPublishFor, type ChessAct } from "~/lib/chess-act";
 import { type ChessClockReading } from "~/lib/chess-clock";
 import { NO_CHESS_ENGINE } from "~/lib/chess-engine";
 import { chessPremoveIsPromotion, chessPremoveTargets } from "~/lib/chess-premove";
-import { chessOutcomeSound, chessSoundFor, playChessSound } from "~/lib/chess-sound";
+import {
+  NO_CHESS_SOUNDS,
+  chessOutcomeSound,
+  chessSoundFor,
+  playChessSound,
+  primeChessSounds,
+} from "~/lib/chess-sound";
 import {
   chessGameIsSettled,
   chessGameWithPending,
@@ -50,6 +56,16 @@ import type { ChessPromotionPiece, ChessPromotionPrompt } from "./chess-board";
 import { useAppState, useOptionalAppState, useOptionalController } from "./controller-context";
 import { useChessClock } from "./use-chess-clock";
 import { useChessEngine } from "./use-chess-engine";
+
+/**
+ * When the clock is worth SAYING something about — chess.com's own `tenseconds`.
+ *
+ * Ten rather than the thirty the clock starts turning at, and rather than the twenty it begins
+ * counting tenths at: those two are things a reader can SEE, and a sound that arrived with them
+ * would fire in most games of blitz ever played. Ten seconds is the point at which somebody looking
+ * at their chat instead of the board still has time to act.
+ */
+const LOW_TIME_MS = 10_000;
 
 /** What the rules say about a move list. */
 export type ChessReplay = {
@@ -340,7 +356,14 @@ export function useChessGame(args: {
     (from: string, to: string): boolean => {
       if (ourMove) {
         const move = resolve(chess, from, to);
-        if (!move) return false;
+        // A move the rules refuse SAYS so — chess.com's own `illegal`, and the one sound in the
+        // palette that is deliberately unpleasant. It is played here rather than in `press` because
+        // this is where a real from→to was attempted: a press on an empty square with nothing picked
+        // up means nothing, and it must not be answered as a mistake.
+        if (!move) {
+          playChessSound("illegal", args.sounds && soundsEnabled);
+          return false;
+        }
         if (move === "promotion") {
           setPromotion({ from, to, color: ourColor as ChessColor });
           return true;
@@ -351,7 +374,10 @@ export function useChessGame(args: {
       // A PREMOVE is not judged by the rules: it is a move into the position their own move will
       // make, so what it is held to is where the piece could go at all (lib/chess-premove.ts).
       if (canPremove && ourColor && controller) {
-        if (!chessPremoveTargets(liveFen, from, ourColor).includes(to)) return false;
+        if (!chessPremoveTargets(liveFen, from, ourColor).includes(to)) {
+          playChessSound("illegal", args.sounds && soundsEnabled);
+          return false;
+        }
         if (chessPremoveIsPromotion(liveFen, from, to, ourColor)) {
           // A premoved promotion asks now and keeps the answer: asking the moment it fires would
           // be a dialog appearing while the reader is looking somewhere else.
@@ -512,6 +538,27 @@ export function useChessGame(args: {
   // rather than at the board needs.
   const heard = useRef<{ game: string; plies: number } | null>(null);
   const enabled = args.sounds && soundsEnabled;
+
+  // The RECORDINGS — chess.com's, which the backend fetches once and serves from this app's own
+  // origin (see lib/chess-sound.ts). Asked for here rather than on connect, because this is the one
+  // place that knows a board is being drawn AND that its reader wants to hear it: a reader who never
+  // opens a board, or who turned the app's cues off, never makes this app fetch anything. Until they
+  // arrive — and for ever on a machine that cannot reach them — the synthesized palette plays.
+  const soundFiles = useOptionalAppState((s) => s.chessSounds, NO_CHESS_SOUNDS);
+  const asked = useRef(false);
+  useEffect(() => {
+    if (!enabled || asked.current || !controller) return;
+    // Only while the backend has never answered: a conversation can hold three boards at once (the
+    // strip, the row and the page), and each of them mounting is not three reasons to ask.
+    if (soundFiles.version) return;
+    asked.current = true;
+    void controller.loadChessSounds();
+  }, [controller, enabled, soundFiles.version]);
+  useEffect(() => {
+    if (!enabled || !soundFiles.present) return;
+    primeChessSounds(soundFiles.route);
+  }, [enabled, soundFiles.present, soundFiles.route]);
+
   useEffect(() => {
     const last = heard.current;
     heard.current = { game: game.id, plies };
@@ -519,13 +566,54 @@ export function useChessGame(args: {
     if (plies <= last.plies) return;
     if (!enabled) return;
     const index = plies - 1;
+    // WHOSE move it was decides between chess.com's two move sounds, and the ply's own parity is
+    // what says: index 0 is white's. A game the reader is only WATCHING has no opponent, so `mine`
+    // stays true there and such a board sounds the way it always did.
+    const mover: ChessColor = index % 2 === 0 ? "w" : "b";
     playChessSound(
       chessSoundFor({
         flags: replay.flags[index],
         check: replay.checks[index] === true,
+        mine: ourColor ? mover === ourColor : true,
       }),
     );
-  }, [enabled, game.id, plies, replay.checks, replay.flags]);
+  }, [enabled, game.id, ourColor, plies, replay.checks, replay.flags]);
+
+  // TEN SECONDS LEFT, on the reader's OWN clock while it is running — chess.com's `tenseconds`, and
+  // the one sound here that is about a state rather than an event. So unlike every other effect in
+  // this file it DOES fire on a first pass: a board opened with eight seconds on it is a board about
+  // to be lost, and the warning is the whole point. It re-arms if an increment lifts the clock back
+  // over the line, and it says nothing at all on the opponent's turn or in a game with no clock.
+  const warned = useRef<string | null>(null);
+  useEffect(() => {
+    if (!ourColor || clock.running !== ourColor) return;
+    const ours = ourColor === "w" ? clock.white : clock.black;
+    if (ours === null) return;
+    if (ours > LOW_TIME_MS) {
+      if (warned.current === game.id) warned.current = null;
+      return;
+    }
+    if (warned.current === game.id) return;
+    warned.current = game.id;
+    if (enabled) playChessSound("lowTime");
+  }, [clock, enabled, game.id, ourColor]);
+
+  // A DRAW the opponent offers is the one thing in a game that asks the reader for something while
+  // their own clock runs, and it used to happen in silence.
+  const offered = useRef<{ game: string; offer: string | null } | null>(null);
+  useEffect(() => {
+    // An offer is anchored at a ply, so the pair identifies ONE of them: theirs, standing now.
+    const theirs = game.drawOfferedBy && ourColor && game.drawOfferedBy !== ourColor;
+    const offer = theirs ? `${game.drawOfferedBy}:${plies}` : null;
+    const last = offered.current;
+    offered.current = { game: game.id, offer };
+    // The first pass over a game is never news — the `heard` ref's own rule, and for its reason: a
+    // board that MOUNTS holding an offer was not somebody offering one, and switching from one game
+    // to another must not chime for a state that was already there.
+    if (!last || last.game !== game.id) return;
+    if (offer === null || offer === last.offer) return;
+    if (enabled) playChessSound("notify");
+  }, [enabled, game.drawOfferedBy, game.id, ourColor, plies]);
 
   // A game STARTING is worth one sound of its own: it is the moment the reader's own clock begins
   // and, for whoever was challenged, the moment a board they were offered becomes a game.

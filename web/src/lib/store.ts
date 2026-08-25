@@ -90,6 +90,7 @@ import {
   type ChessWire,
 } from "./chess-wire";
 import { NO_CHESS_ENGINE, type ChessEngineState } from "./chess-engine";
+import { NO_CHESS_SOUNDS, type ChessSoundsState } from "./chess-sound";
 import { chessSlotKey } from "./chess-thread";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import type { AgentPersonaPatch } from "./agent-persona";
@@ -447,6 +448,15 @@ export type AppState = {
    * see one truth, and a page that reloads mid-download picks the bar back up.
    */
   chessEngine: ChessEngineState;
+  /**
+   * What this machine holds of the board's own SOUNDS — chess.com's twelve recordings.
+   *
+   * It is the BACKEND's answer (`chess_sound_status`, refreshed by `chess_sound_changed`), because
+   * they are 64 KB on this machine's disk served from this app's own origin rather than anything a
+   * page fetched. `present: false` is the safe reading as well as the honest one: it means the
+   * synthesized palette plays, so a board never goes silent waiting for this.
+   */
+  chessSounds: ChessSoundsState;
   /** Every message Teams is HOLDING for this account, soonest first — what "see all
    *  scheduled messages" lists. Loaded on demand and after anything that changes it;
    *  empty until then, because a list nobody has opened is a read nobody asked for. */
@@ -933,6 +943,7 @@ function initialState(): AppState {
     chessPending: {},
     chessPremove: {},
     chessEngine: NO_CHESS_ENGINE,
+    chessSounds: NO_CHESS_SOUNDS,
     scheduledMessages: [],
     composerRestore: null,
     replyingTo: null,
@@ -1843,6 +1854,16 @@ export class TeamsController {
       const next = raw as Partial<ChessEngineState> | null;
       if (next && typeof next.present === "boolean") {
         this.set({ chessEngine: { ...NO_CHESS_ENGINE, ...next } });
+      }
+    });
+    // The board's own SOUNDS arriving on this machine, or being given back. Sent to EVERY page
+    // rather than answered to the one that asked, because the fetch happens in the background: the
+    // board that started it has already drawn itself, and this is what tells it to stop
+    // synthesizing.
+    on("chess_sound_changed", (raw) => {
+      const next = raw as Partial<ChessSoundsState> | null;
+      if (next && typeof next.present === "boolean") {
+        this.set({ chessSounds: { ...NO_CHESS_SOUNDS, ...next } });
       }
     });
     // How sign-in is doing. The backend sends this on a change of state and in the
@@ -6568,6 +6589,39 @@ export class TeamsController {
       // A backend too old to know the method, or one that could not answer: the engine reads as
       // ABSENT, which is what stops a game being offered that nothing could play.
       this.set({ chessEngine: NO_CHESS_ENGINE });
+    }
+  }
+
+  /**
+   * Read what this machine holds of the board's SOUNDS, and remember it.
+   *
+   * **THIS READ IS ALSO WHAT FETCHES THEM.** The backend starts the one 64 KB download on it (see
+   * `Ctx::chess_sound_status`), so it is asked when a board mounts with the app's sounds ON and never
+   * on connect: a reader who never plays chess must not make this app reach chess.com's CDN, and a
+   * reader who turned the app's cues off has said they want no sound at all.
+   *
+   * A backend too old to know the method leaves the recordings ABSENT, which is exactly the state
+   * the synthesized palette exists for.
+   */
+  async loadChessSounds(): Promise<void> {
+    try {
+      const state = await this.backend.chessSoundStatus();
+      this.set({ chessSounds: { ...NO_CHESS_SOUNDS, ...state } });
+    } catch {
+      this.set({ chessSounds: NO_CHESS_SOUNDS });
+    }
+  }
+
+  /** Give the disk back. The one action here that takes something away, so the row says how much. */
+  async forgetChessSounds(): Promise<boolean> {
+    try {
+      const state = await this.backend.chessSoundForget();
+      this.set({ chessSounds: { ...NO_CHESS_SOUNDS, ...state } });
+      return true;
+    } catch (e) {
+      this.set({ status: `board sounds remove failed: ${errText(e)}` });
+      playCue("error");
+      return false;
     }
   }
 
