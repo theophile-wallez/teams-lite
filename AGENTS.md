@@ -1175,10 +1175,11 @@ Five more things worth knowing before touching it:
     dropped from the words — the label has just said it, and a line the model meets twenty
     times is one it may start writing itself, while the footer is the backend's to add on
     every edit.
-  - **ONE read of the signature answers both questions.** `agent_signature` returns the signer
-    and the line; `is_agent_answer` — the gate that stops a run summoning itself — is that
-    function with the name thrown away. Two spellings of those four body shapes would drift
-    from the bodies this module writes.
+  - **ONE read of the signature answers all THREE questions.** `agent_answer` returns the
+    signer, the line, the answer with that line removed and the agent behind it;
+    `is_agent_answer` — the gate that stops a run summoning itself — is that function with
+    everything thrown away, and the SIDEBAR's own row is the third caller (see the rule below).
+    Two spellings of those four body shapes would drift from the bodies this module writes.
   - **It is a STORE read, and network-free.** So it costs the trigger path nothing and works
     with the tenant unreachable. What it therefore cannot list is a member who has never
     written: nothing here names them, and no line of the transcript is theirs. Whoever can be
@@ -1193,6 +1194,36 @@ Five more things worth knowing before touching it:
 - **The reply signs itself.** The message is posted under the user's name, so the last
   line says a machine wrote it (`— claude, via teams-lite`). That is honesty about
   authorship, not decoration.
+- **AND THE SIDEBAR NAMES THE AGENT TOO, because a row is where most replies are met
+  first.** The bubble gets this right — the CLI's mark where a sender's name goes, the
+  signature stripped out of the body, the answer on the LEFT — and the chat row got both
+  halves wrong: `You: …ship it — claude, via teams-lite`, the account because the reply
+  really is posted through it, and the machinery because a preview is the body's own words.
+  A row now reads `Claude: ship it` (a custom agent's own label where this machine still
+  holds the record — `agentPreviewName`, which is the bubble's own rule spelled once). Five
+  things hold it, and each is pinned by a test:
+  - **The BACKEND decides, because only it can.** A preview is the body's first 120
+    characters and the signature is at its END, so a page cannot see one at all on an answer
+    of any length. `agent_policy::agent_answer` is the ONE reader of that line — the loop
+    guard, the sidebar and a bubble now share it — and `teams_read::preview_of_message` uses
+    it to preview the ANSWER and name the agent beside it.
+  - **The words and WHO wrote them come from ONE message.** `Store::derived_preview` answers
+    both together; resolved apart, a name read off one message would stand over another
+    message's words.
+  - **So the CSA snapshot previews an agent's answer as NOTHING**, which is exactly the rule
+    a SEALED body already follows and for the same mechanical reason: a non-empty stored
+    preview is what stops that derived read from running. Teams' own copy of the newest
+    message has nowhere to put the second half.
+  - **A run with no words yet is STATED, never blank**: `Writing an answer…`, and
+    `Could not answer — <reason>` for one that failed. Empty, the derived read would fall
+    back to the message BEFORE it and the row would show the request while its answer was
+    arriving.
+  - **A message that merely ends in italics is nobody's answer.** The whole rule rests on
+    that trailing line, so a colleague's own emphasis must not hand their words to a
+    machine's name — and a preview from a backend too old to strip one is shown verbatim
+    rather than guessed at. The mock states both halves itself (`mockAgentPreview`), because
+    a mock that previewed a reply the way the page wishes it were previewed would let a
+    broken row pass every test; `--agent-reply` captures the row in both themes.
 - **The answer can @mention the people of ITS OWN thread, and it is the one part of a
   reply that acts on somebody.** A mention notifies the person it names, so the
   capability is bounded by code and not by the prompt. The candidates are resolved once
@@ -4897,9 +4928,24 @@ which is the right place to play A MOVE and the wrong place to play a GAME.
   page asks (`useCallOwnsComposer`) rather than drawing a second.
 - **Each column scrolls itself and the page never scrolls.** Below `md` it is one column — board,
   the score sheet as a single line, then the chat — because a table of pairs and a chat cannot both
-  have room at 390px, and the chat is what a game in a conversation is for.
-- **The board is bounded by the shorter of the room it has**, so it is never wider than the window
-  is tall.
+  have room at 390px, and the chat is what a game in a conversation is for. That narrow column DOES
+  scroll: the seats, the board, the four controls and the sentence do not fit in one screen there.
+- **THE BOARD COLUMN CARRIES NO SCROLLBAR ON A WIDE SCREEN, and the board is what gives way.** A
+  board somebody has to scroll to see is not a board, and a scrollbar beside one moves the squares
+  under the pointer. It is the shorter of the room it has — and the room is MEASURED
+  (`useBoardFit`), which is the whole of the fix. The page used to cap the board at
+  `calc(100vh - 15rem)`: 240px for the header, the padding, two seats, the controls and the
+  sentence, which really measure 252 — so every full-screen game overflowed by twelve pixels and
+  carried a scrollbar. A constant cannot be right anyway, because the chrome GROWS: a premove hint,
+  a refusal, the two buttons a challenge is answered with, and a sentence that wraps at a narrow
+  width each add a line nobody can put in a `calc`. Flexbox already measures what is left (`flex-1`
+  over `min-h-0`); the hook reads that number and hands it back as the stack's WIDTH, so the two
+  seats and the controls line up with the board's own edges rather than with the column's. Three
+  details are load-bearing: the width comes from the COLUMN and never from the stack (whose width
+  is the answer, so measuring it would be reading it back), a phone measures nothing (`side` stays
+  null and the CSS estimate stands), and the pure-CSS shortcut is measured to be WRONG —
+  `aspect-square` with `max-h-full` gives 700x296 rather than a square, because a min/max clamp on
+  one axis does not travel back through the ratio.
 - **ESCAPE LEAVES THE BOARD FOR THE CONVERSATION**, never the conversation for the chat list: the
   reader is two surfaces deep, and one Escape does one thing. It is decided in the shell, where
   every other Escape already is.

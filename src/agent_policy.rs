@@ -735,46 +735,117 @@ fn prompt_without(text: &str, start: usize, end: usize) -> String {
 /// read `agentAuthorship` in web/src/lib/agent-message.ts already does, where this rule has
 /// always kept the chip off an answer.
 fn is_agent_answer(content: &str) -> bool {
-    agent_signature(content).is_some()
+    agent_answer(content).is_some()
 }
 
-/// WHO signed this body as an agent's answer, and the line they signed it on — or `None`
-/// when it is somebody's own words.
+/// How far a run got, as the line it signed itself with says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerState {
+    /// A finished answer: `— claude, via teams-lite`.
+    Written,
+    /// Still being written — the placeholder, or a streamed body signed `is writing…`.
+    Writing,
+    /// The run produced no answer.
+    Failed,
+}
+
+/// What the line an ANSWER signs itself with says about the message it ends.
 ///
-/// One read of the signature with two callers, because they ask the same question and a
+/// Every field borrows from the body, because every one of them is already IN it: this reads
+/// a message rather than resolving anything, which is what lets a reply posted from a phone
+/// months ago still be recognised (see [`Signature`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAnswer<'a> {
+    /// The provider whose CLI wrote it — always one of [`BACKENDS`].
+    pub backend: &'static str,
+    /// The custom agent it answered as, by address (`bebou`), or `""` for a plain provider
+    /// run.
+    pub persona: &'a str,
+    pub state: AnswerState,
+    /// The body with the signature line removed: the answer itself. Empty for a placeholder
+    /// and for a failure, both of which are that line and nothing else.
+    pub body: &'a str,
+    /// The signature line's own text, for a caller working on the FLATTENED body, where the
+    /// split above cannot be applied (see [`transcript`]).
+    pub line: &'a str,
+    /// Why the run failed, for [`AnswerState::Failed`] — still HTML-escaped, as the body
+    /// carries it.
+    pub failure: &'a str,
+}
+
+impl AgentAnswer<'_> {
+    /// The name the run signed itself with: `claude`, or `bebou (claude)`. Rebuilt from the
+    /// two halves rather than kept as a third copy of them — [`Signature`] is the one
+    /// spelling.
+    pub fn signer(&self) -> String {
+        Signature::stored(self.persona, self.backend).0
+    }
+}
+
+/// Read an agent's own signature off a message body, or `None` when it is somebody's own
+/// words.
+///
+/// ONE read of the signature with three callers, because they ask the same question and a
 /// second spelling of these four shapes would drift from the bodies this module writes:
-/// [`is_agent_answer`] wants the yes-or-no (a run must not summon itself), and
-/// [`transcript`] wants the NAME (an answer is the agent's, not the account's).
+/// [`is_agent_answer`] wants the yes-or-no (a run must not summon itself), [`transcript`]
+/// wants the NAME (an answer is the agent's, not the account's), and
+/// `teams_read::preview_of_message` wants the ANSWER and the agent behind it (a chat row
+/// names the machine rather than the account it posted through).
 ///
 /// The signer is `claude`, or `bebou (claude)` for one of the user's own agents — the
 /// [`Signature`] the run wrote, rebuilt here rather than parsed out, which is what makes the
 /// comparison exact.
-fn agent_signature(content: &str) -> Option<(String, &str)> {
-    let line = signature_line(content)?;
+pub fn agent_answer(content: &str) -> Option<AgentAnswer<'_>> {
+    let (body, line) = signature_line(content)?;
     // The persona form is recognised by its SHAPE — `<word> (<a backend we know>)` — and
     // never by looking the persona up. A run whose persona the user renamed or deleted
     // while it was writing still signed itself, and reading that answer as a request is
     // exactly the loop this gate exists to prevent: the guard must outlive the row.
     let signed = signer_in(line);
     for backend in BACKENDS.iter() {
-        for signer in [Signature::of(backend).0, Signature::stored(signed, backend.name).0] {
-            if line_signs(line, &signer) {
-                return Some((signer, line));
+        // Two candidates per provider, REBUILT and compared: the plain signature, and the
+        // persona form made from the first word of the line. `signed` is `""` when the line
+        // opens with no valid name, and both candidates are then the same string.
+        for (persona, signer) in
+            [("", Signature::of(backend).0), (signed, Signature::stored(signed, backend.name).0)]
+        {
+            if let Some((state, failure)) = line_signs(line, &signer) {
+                return Some(AgentAnswer {
+                    backend: backend.name,
+                    persona,
+                    state,
+                    body,
+                    line,
+                    failure,
+                });
             }
         }
     }
     None
 }
 
-/// Whether `line` is one of the four lines this module signs a body with, under `signer`:
-/// a finished reply, one still streaming, the placeholder, and a failure.
-fn line_signs(line: &str, signer: &str) -> bool {
-    line.eq_ignore_ascii_case(&format!("— {signer}, via teams-lite"))
-        || line.eq_ignore_ascii_case(&format!("{signer} is writing…"))
+/// WHICH of the four lines this module signs a body with `line` is, under `signer`: a
+/// finished reply, one still streaming, the placeholder, and a failure — with the failure's
+/// own reason, which is the only one of them that carries words.
+///
+/// The failure is sliced with [`str::get`] rather than by index: `line` is whatever a
+/// colleague's message ended in italics with, and a byte offset that lands inside a
+/// multi-byte character would panic the loop this is read from.
+fn line_signs<'a>(line: &'a str, signer: &str) -> Option<(AnswerState, &'a str)> {
+    if line.eq_ignore_ascii_case(&format!("— {signer}, via teams-lite")) {
+        return Some((AnswerState::Written, ""));
+    }
+    if line.eq_ignore_ascii_case(&format!("{signer} is writing…"))
         || line.eq_ignore_ascii_case(&format!("{signer} is thinking…"))
-        || line.len() > signer.len()
-            && line[..signer.len()].eq_ignore_ascii_case(signer)
-            && line[signer.len()..].starts_with(" could not answer:")
+    {
+        return Some((AnswerState::Writing, ""));
+    }
+    let head = line.get(..signer.len())?;
+    if !head.eq_ignore_ascii_case(signer) {
+        return None;
+    }
+    let reason = line.get(signer.len()..)?.strip_prefix(" could not answer:")?;
+    Some((AnswerState::Failed, reason.trim()))
 }
 
 /// The persona name a signature line opens with, or `""` when it names none.
@@ -793,20 +864,23 @@ fn signer_in(line: &str) -> &str {
     }
 }
 
-/// The text of a body's trailing `<p><em>…</em></p>`, which is where every one of this
-/// module's own bodies says who wrote it.
+/// A body split at its trailing `<p><em>…</em></p>`: everything before it, and the text of
+/// that line — which is where every one of this module's own bodies says who wrote it.
 ///
 /// Tolerates the whitespace Teams inserts when it stores a body (it returns `</p>\r\n<p>`
 /// for our `</p><p>`), and nothing else: a line carrying markup of its own is not a
 /// signature this module wrote.
-fn signature_line(content: &str) -> Option<&str> {
+///
+/// The half BEFORE the line is the answer, which is what a reader is shown in place of the
+/// signature — the bubble draws the CLI's mark there (`agentAuthorship`) and a sidebar row
+/// draws the words (`teams_read::preview_of_message`).
+fn signature_line(content: &str) -> Option<(&str, &str)> {
     let body = content.trim_end().strip_suffix("</p>")?.trim_end().strip_suffix("</em>")?;
     let at = body.rfind("<em>")?;
-    if !body[..at].trim_end().ends_with("<p>") {
-        return None;
-    }
+    let head = body[..at].trim_end();
+    let answer = head.strip_suffix("<p>")?.trim_end();
     let line = body[at + "<em>".len()..].trim();
-    (!line.contains('<')).then_some(line)
+    (!line.contains('<')).then_some((answer, line))
 }
 
 /// The message a trigger replies to, as one `Sender: text` line — the same shape the
@@ -896,15 +970,18 @@ pub fn transcript(messages: &[Message], trigger_id: &str) -> String {
             continue;
         }
         let sender = message.sender.trim();
-        let (who, said) = match agent_signature(&message.content) {
+        let (who, said) = match agent_answer(&message.content) {
             // The words minus the signature — unless they were the whole message (a run
-            // that failed, or one still writing), where the line IS what was said.
-            Some((signer, line)) => {
+            // that failed, or one still writing), where the line IS what was said. It is
+            // stripped off the FLATTENED text rather than taken from `answer.body`, because
+            // this line is one line of prose and the body is HTML.
+            Some(answer) => {
                 let said = text
-                    .strip_suffix(&collapsed(line))
+                    .strip_suffix(&collapsed(answer.line))
                     .map(str::trim_end)
                     .filter(|rest| !rest.is_empty())
                     .unwrap_or(&text);
+                let signer = answer.signer();
                 let who =
                     if sender.is_empty() { signer } else { format!("{signer} via {sender}") };
                 (who, said)

@@ -35,6 +35,7 @@ import {
   type ChatSectionId,
   type Conversation,
 } from "~/lib/protocol";
+import { agentPreviewName } from "~/lib/agent-persona";
 import { formatShortcut, useModifierLabel } from "~/lib/platform";
 import type { SidebarTab } from "~/lib/store";
 import { cn } from "~/lib/utils";
@@ -747,7 +748,12 @@ function ConversationRow(props: {
 }) {
   const c = props.conversation;
   const unread = !c.is_read && !props.muted;
-  const preview = previewLine(c);
+  // WHO wrote the newest message, when it was an agent rather than the account it went out
+  // under. It is read from the store because a custom agent's LABEL lives there — the same
+  // resolution the bubble's own mark makes, so the row and the thread name one reply one way.
+  const agent = useAppState((s) => s.agent);
+  const agentName = agentPreviewName(agent, c.last_message_agent, c.last_message_agent_persona);
+  const preview = previewLine(c, agentName);
   const label = convLabel(c);
   const time = useMemo(() => formatTime(c.last_message_time), [c.last_message_time]);
   // Live typing wins over the last-message preview, exactly like Teams' sidebar.
@@ -852,6 +858,11 @@ function ConversationRow(props: {
               </span>
             ) : (
               <span
+                // Named, because WHAT this line says is a rule of its own: whose message it is
+                // (an agent's own name where a machine wrote it) and what is kept out of it
+                // (a chess ledger, an agent's signature). The typing hint beside it is named
+                // for the same reason.
+                data-testid="conversation-preview"
                 className={cn(
                   "flex-1 truncate text-xs",
                   props.open ? "text-text-dim" : unread ? "text-text-dim" : "text-text-faint",

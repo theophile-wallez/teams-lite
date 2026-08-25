@@ -466,6 +466,47 @@ test.describe("chess in a conversation", () => {
     await expect(page.locator('[data-testid="conversation-title"]')).toContainText("Chess Club");
   });
 
+  test("THE BOARD COLUMN DOES NOT SCROLL: the board gives way instead", async ({ page }) => {
+    // The whole page is a screen the reader plays on, so the column holding the board must not
+    // carry a scrollbar — it moves the squares under the pointer, and a board somebody has to
+    // scroll to see is not a board. The board is sized to the room the seats, the four controls
+    // and the sentence leave it (`useBoardFit`), so it is the board that gives way.
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5", "Nf3", "Nc6"] });
+    await openChessPage(page);
+
+    const column = page.locator('[data-testid="chess-board-column"]');
+    const overflow = async () =>
+      column.evaluate((el) => el.scrollHeight - el.clientHeight);
+    // It is MEASURED after the fit has settled: the first paint carries the CSS estimate and the
+    // measurement corrects it, which is one frame the reader never sees.
+    await expect.poll(overflow).toBeLessThanOrEqual(0);
+
+    // And the board is still a board: square, and inside the column that holds it.
+    const squares = (await page.locator('[data-testid="chess-board"]').boundingBox())!;
+    const columnBox = (await column.boundingBox())!;
+    expect(Math.abs(squares.width - squares.height)).toBeLessThanOrEqual(2);
+    expect(squares.height).toBeLessThanOrEqual(columnBox.height + 1);
+    expect(squares.width).toBeLessThanOrEqual(columnBox.width + 1);
+    // The seats line up with the board's own edges rather than with the column's, which is what
+    // the measured width is for: a clock floating a hand's width right of the board reads as a
+    // layout nobody finished.
+    const seat = (await page.locator('[data-testid="chess-clock-w"]').boundingBox())!;
+    expect(seat.x + seat.width).toBeLessThanOrEqual(squares.x + squares.width + 2);
+
+    // A window this page is really read in stays scroll-free too — including the short one that
+    // leaves the board less room than the column is wide.
+    for (const size of [
+      { width: 1440, height: 900 },
+      { width: 1024, height: 620 },
+      { width: 820, height: 1180 },
+    ]) {
+      await page.setViewportSize(size);
+      await expect.poll(overflow).toBeLessThanOrEqual(0);
+    }
+  });
+
   test("the reader can WALK BACK through the game, and the board says it is not live", async ({
     page,
   }) => {

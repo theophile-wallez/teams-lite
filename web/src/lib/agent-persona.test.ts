@@ -12,6 +12,7 @@ import type { AgentStatus } from "./agent";
 import {
   agentPersonaNamed,
   agentPersonas,
+  agentPreviewName,
   isValidPersonaName,
   personaBackend,
   personaNameFrom,
@@ -55,6 +56,33 @@ function status(personas: AgentPersona[] = []): AgentStatus {
     sandbox_conversation: "19:sandbox@thread.v2",
   };
 }
+
+// WHAT A LIST CALLS AN AGENT'S OWN MESSAGE. It is the bubble's own rule
+// (`usePersonaSignatureLabel`) spelled once, so a sidebar row and a bubble never name one
+// reply two ways.
+describe("agentPreviewName", () => {
+  it("names the provider for a plain run", () => {
+    expect(agentPreviewName(status(), "claude")).toBe("Claude");
+    expect(agentPreviewName(status(), "opencode")).toBe("opencode");
+  });
+
+  it("names a custom agent by the label this machine holds", () => {
+    expect(agentPreviewName(status([persona()]), "claude", "bebou")).toBe("Bebou");
+  });
+
+  it("falls back to the address a reply signed itself with", () => {
+    // A persona the user has since renamed or deleted. The reply really was answered under
+    // that name, and this app must not rewrite it to the provider's.
+    expect(agentPreviewName(status(), "claude", "natacha")).toBe("natacha");
+  });
+
+  it("names nobody without a provider", () => {
+    // What every message a person wrote carries, and what a backend too old to state one
+    // reports.
+    expect(agentPreviewName(status(), "")).toBeNull();
+    expect(agentPreviewName(status(), undefined)).toBeNull();
+  });
+});
 
 describe("isValidPersonaName", () => {
   it("takes one lowercase word", () => {

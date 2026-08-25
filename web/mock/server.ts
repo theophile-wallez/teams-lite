@@ -92,6 +92,12 @@ type Conversation = {
    *  src/store.rs). Absent when the frame carried no person `from`. */
   last_message_sender_mri?: string;
   last_message_from_me: boolean;
+  /** The AGENT that wrote that preview, when one did: the provider (`claude`) and the custom
+   *  agent it answered as. Both empty for anything a person wrote. It is what stops a row
+   *  saying "You:" over an answer a machine wrote — the reply goes out through the user's own
+   *  account (see `mockAgentPreview`). */
+  last_message_agent?: string;
+  last_message_agent_persona?: string;
   is_read: boolean;
   /** Read HERE ONLY (Ghost mode): the marker is clear, Teams still holds it unread. */
   is_ghost_read: boolean;
@@ -142,6 +148,9 @@ type Channel = {
   /** The identity behind that name. Same job as on `Conversation`. */
   last_message_sender_mri?: string;
   last_message_from_me: boolean;
+  /** The agent that wrote that preview — see `Conversation.last_message_agent`. */
+  last_message_agent?: string;
+  last_message_agent_persona?: string;
   is_read: boolean;
   /** Read HERE ONLY (Ghost mode) — see `Conversation.is_ghost_read`. */
   is_ghost_read: boolean;
@@ -861,9 +870,14 @@ function recomputeSummary(cs: ConvState): void {
   // what that protects. Everything else about the summary still follows the newest message:
   // what breaks other specs is the ORDER, not the words in the row.
   if (!frozenSidebarTime.has(cs.conv.id)) cs.conv.last_message_time = last.compose_time;
+  // An AGENT's reply is previewed as its answer and attributed to the agent, whatever account
+  // posted it (see `mockAgentPreview`).
+  const agent = last.system_event ? null : mockAgentPreview(last.content);
   cs.conv.last_message_preview = last.system_event
     ? systemEventSidebarLabel(last.system_event)
-    : previewOf(last.content);
+    : (agent?.text ?? previewOf(last.content));
+  cs.conv.last_message_agent = agent?.agent ?? "";
+  cs.conv.last_message_agent_persona = agent?.persona ?? "";
   cs.conv.last_message_sender = last.system_event ? "" : last.sender;
   // The identity too, so the attribution follows a nickname like every other name.
   cs.conv.last_message_sender_mri = last.system_event ? "" : (last.sender_mri ?? "");
@@ -875,9 +889,14 @@ function recomputeChannelSummary(chs: ChannelState): void {
   const last = chs.messages.at(-1);
   if (!last) return;
   chs.channel.last_message_time = last.compose_time;
+  // The sandbox CHANNEL is where the agent answers out of the box, so a channel's own summary
+  // reads its reply exactly as a chat's does.
+  const agent = last.system_event ? null : mockAgentPreview(last.content);
   chs.channel.last_message_preview = last.system_event
     ? systemEventSidebarLabel(last.system_event)
-    : previewOf(last.content);
+    : (agent?.text ?? previewOf(last.content));
+  chs.channel.last_message_agent = agent?.agent ?? "";
+  chs.channel.last_message_agent_persona = agent?.persona ?? "";
   chs.channel.last_message_sender = last.system_event ? "" : last.sender;
   chs.channel.last_message_sender_mri = last.system_event ? "" : (last.sender_mri ?? "");
   chs.channel.last_message_from_me = Boolean(last.is_self) && !last.system_event;
@@ -10478,6 +10497,49 @@ function burstsOf(text: string): string[] {
     size = (size % 4) + 1;
   }
   return bursts;
+}
+
+/**
+ * WHAT A SIDEBAR ROW SAYS ABOUT AN AGENT'S REPLY: the answer's own words, and the agent that
+ * wrote them.
+ *
+ * The backend's half is `teams_read::preview_of_message` over `agent_policy::agent_answer`,
+ * and this stands for it rather than importing it — this file's own rule, because a mock that
+ * previewed a reply the way the page WISHES it were previewed would let a broken row pass every
+ * test. Both halves matter and each was wrong before: the words ended in `— claude, via
+ * teams-lite` (machinery, in a row two lines tall), and the row named the account the reply went
+ * out under, which for the user's own agent is "You".
+ *
+ * It reads the trailing `<p><em>…</em></p>` exactly as the backend does — the persona form
+ * (`bebou (claude)`) included — and it is deliberately not a lookup: whichever agent signed the
+ * message is the one named.
+ */
+function mockAgentPreview(
+  content: string,
+): { text: string; agent: string; persona: string } | null {
+  const signature = /<p>\s*<em>\s*([^<]*?)\s*<\/em>\s*<\/p>\s*$/i.exec(content);
+  if (!signature) return null;
+  const line = signature[1] ?? "";
+  const signer = "([a-z0-9][a-z0-9._-]{0,23})";
+  const who = new RegExp(`^(?:—\\s*)?(?:${signer} \\(${signer}\\)|${signer})\\b`, "i").exec(line);
+  if (!who) return null;
+  const persona = (who[1] ?? "").toLowerCase();
+  const backend = (persona ? who[2] : who[3])?.toLowerCase() ?? "";
+  if (backend !== "claude" && backend !== "opencode") return null;
+  const rest = line.slice(who[0].length);
+  const words = previewOf(content.slice(0, signature.index));
+  let text = words;
+  if (!text) {
+    if (/^ is (writing|thinking)/i.test(rest)) text = "Writing an answer…";
+    else if (/^ could not answer:/i.test(rest)) {
+      const reason = rest.replace(/^ could not answer:\s*/i, "").trim();
+      text = reason ? `Could not answer — ${reason}` : "Could not answer";
+    }
+  }
+  // A line that is neither the finished signature nor one of those states is a message that
+  // merely ends in italics.
+  if (!text && !/,\s*via teams-lite$/i.test(rest)) return null;
+  return { text, agent: backend, persona };
 }
 
 /** The reply's body as `agent_policy::reply_html` / `thinking_html` build it: the answer

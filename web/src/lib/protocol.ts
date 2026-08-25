@@ -210,6 +210,18 @@ export type Conversation = {
    *  caller has to (see `person_overrides` in src/store.rs). */
   last_message_sender: string;
   last_message_from_me: boolean;
+  /** The AGENT that wrote the previewed message, when one did: the provider whose CLI ran
+   *  (`claude`), read by the backend off the line the answer signs itself with.
+   *
+   *  It exists because `last_message_from_me` is TRUE for an agent's reply — it goes out
+   *  through the user's own account — so a row built from that alone puts "You:" in front of
+   *  words the user never wrote. Absent from a backend older than the field, which then
+   *  behaves exactly as before. See {@link agentPreviewName}. */
+  last_message_agent?: string;
+  /** The custom agent it answered as, by address (`bebou`), or empty for a plain provider
+   *  run. Resolved to its label where this machine still holds the record, exactly as a
+   *  bubble's own mark resolves one. */
+  last_message_agent_persona?: string;
   /** False when the chat has unread messages. Teams' own flag OR our local read
    *  position, so opening a chat clears the marker for good (see `mark_read`). */
   is_read: boolean;
@@ -284,6 +296,11 @@ export type Channel = {
   last_message_preview: string;
   last_message_sender: string;
   last_message_from_me: boolean;
+  /** The agent that wrote the previewed post — see {@link Conversation.last_message_agent}.
+   *  A channel needs it as much as a chat does: the sandbox channel is the one conversation
+   *  the local agent answers in out of the box. */
+  last_message_agent?: string;
+  last_message_agent_persona?: string;
   is_read: boolean;
   /** Read HERE ONLY (Ghost mode) — see {@link Conversation.is_ghost_read}. */
   is_ghost_read?: boolean;
@@ -1881,13 +1898,22 @@ function firstName(full: string): string {
 /**
  * Sidebar preview line: "You:" when we sent it, "FirstName:" in a group, and the
  * bare snippet in a 1:1 / Notes where the sender is implicit.
+ *
+ * `agent` is the name of the AGENT that wrote the previewed message, when one did
+ * ({@link agentPreviewName}). It wins over both of the rules above, because it answers the
+ * same question better: an agent's reply is posted through the user's own account, so
+ * `last_message_from_me` is true and the row said "You:" over words a machine wrote — which
+ * is exactly what the bubble in the thread refuses to do (it draws the CLI's mark where a
+ * sender's name goes, and puts the answer on the LEFT). One answer about who wrote a message,
+ * in the list and in the thread alike.
  */
-export function previewLine(c: Conversation): string {
+export function previewLine(c: Conversation, agent?: string | null): string {
   // A chess message's trailing marker is the machine-readable half and nothing a reader of
   // the chat list wants: left in, a row would read "♟ 1. e4 — chess 7f3a1c 1 e4, via
   // teams-lite".
   const body = chessPreviewText(c.last_message_preview ?? "");
   if (!body) return "";
+  if (agent) return `${agent}: ${body}`;
   if (c.last_message_from_me) return `You: ${body}`;
   if (isGroupChat(c) && c.last_message_sender) {
     return `${firstName(c.last_message_sender)}: ${body}`;
@@ -2066,12 +2092,17 @@ export function channelLabel(c: Channel): string {
  * Sidebar preview line for a channel. A channel is always multi-party, so we
  * show the sender's first name ("Alice: ...") — or "You: ..." when we posted it.
  * Empty when the channel has no displayable last message.
+ *
+ * `agent` names the machine when one wrote the post, and wins over both — see
+ * {@link previewLine}. It matters MORE here than in a chat: the sandbox channel is the one
+ * conversation the local agent answers in out of the box.
  */
-export function channelPreviewLine(c: Channel): string {
+export function channelPreviewLine(c: Channel, agent?: string | null): string {
   // A channel holds no board, but a colleague running teams-lite may still have posted a
   // chess message into one — and the marker is no more readable here than in a chat.
   const body = chessPreviewText(c.last_message_preview ?? "");
   if (!body) return "";
+  if (agent) return `${agent}: ${body}`;
   if (c.last_message_from_me) return `You: ${body}`;
   if (c.last_message_sender) return `${firstName(c.last_message_sender)}: ${body}`;
   return body;

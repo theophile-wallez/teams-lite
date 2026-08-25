@@ -931,7 +931,35 @@ describe("previewLine", () => {
     expect(previewLine(c)).toBe("You: ♟ 1. e4");
   });
 
-  it("leaves an agent's own signature alone: it is not ours to strip", () => {
+  // AN AGENT'S REPLY IS NAMED AFTER THE AGENT. It goes out through the user's own account, so
+  // the wire calls it theirs — and "You:" over words a machine wrote is the one thing the
+  // thread's own bubble refuses to say (it draws the CLI's mark where a sender's name goes).
+  // WHO wrote it comes from the backend, which is the only side that can read the signature: a
+  // preview is the body's first 120 characters and the line is at its END.
+  it("names the agent instead of the account the reply went out under", () => {
+    const c = conversation({
+      last_message_preview: "The backend listens on 19420.",
+      last_message_from_me: true,
+    });
+    expect(previewLine(c, "Claude")).toBe("Claude: The backend listens on 19420.");
+  });
+
+  it("names a custom agent over the colleague whose machine ran it", () => {
+    const c = conversation({
+      kind: "group",
+      last_message_preview: "Voilà.",
+      last_message_sender: "Lucas Silva",
+    });
+    expect(previewLine(c, "Natacha")).toBe("Natacha: Voilà.");
+    // With no agent named it is that colleague's own message again.
+    expect(previewLine(c)).toBe("Lucas: Voilà.");
+  });
+
+  it("leaves an agent's own signature in a preview that still carries one", () => {
+    // The backend previews an answer WITHOUT the line it signs itself with, and states the
+    // agent beside it. A preview that still holds one comes from a backend too old to do
+    // either, and the page shows what it was given rather than guessing at a shape — the rule
+    // it holds for every other body.
     const c = conversation({
       last_message_preview: "done — claude, via teams-lite",
       last_message_from_me: true,
@@ -1029,6 +1057,13 @@ describe("channelPreviewLine", () => {
 
   it("is empty when there is no preview", () => {
     expect(channelPreviewLine(channel({ last_message_preview: "" }))).toBe("");
+  });
+
+  // The sandbox CHANNEL is the one conversation the local agent answers in out of the box, so
+  // this line meets an agent's reply more often than a chat's does.
+  it("names the agent instead of the account the reply went out under", () => {
+    const c = channel({ last_message_preview: "Rebased and green.", last_message_from_me: true });
+    expect(channelPreviewLine(c, "Claude")).toBe("Claude: Rebased and green.");
   });
 });
 

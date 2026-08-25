@@ -8658,6 +8658,11 @@ fn conversations_json(rows: &[teams_lite::store::ConversationRow]) -> Value {
             "last_message_preview": c.last_message_preview,
             "last_message_sender": c.last_message_sender,
             "last_message_from_me": c.last_message_from_me,
+            // WHO wrote the previewed message when it was not the account that posted it: the
+            // local agent's reply goes out as the user, so a row built from `from_me` alone says
+            // "You:" over words a machine wrote (see `ConversationRow::last_message_agent`).
+            "last_message_agent": c.last_message_agent,
+            "last_message_agent_persona": c.last_message_agent_persona,
             "is_read": c.is_read,
             "is_ghost_read": c.is_ghost_read,
             "is_muted": c.is_muted,
@@ -8692,6 +8697,10 @@ fn channels_json(rows: &[teams_lite::store::ChannelRow]) -> Value {
             "last_message_preview": c.last_message_preview,
             "last_message_sender": c.last_message_sender,
             "last_message_from_me": c.last_message_from_me,
+            // The sandbox CHANNEL is the one conversation the agent answers in out of the box, so
+            // this row needs the agent as much as a chat's does.
+            "last_message_agent": c.last_message_agent,
+            "last_message_agent_persona": c.last_message_agent_persona,
             "is_read": c.is_read,
             "alerts": c.alerts.as_str(),
             "is_ghost_read": c.is_ghost_read,

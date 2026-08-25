@@ -862,6 +862,17 @@ pub struct ConversationRow {
     pub last_message_sender: String,
     /// True when we sent the last message (UI renders "You:").
     pub last_message_from_me: bool,
+    /// The AGENT that wrote the previewed message, when one did — the provider whose CLI ran
+    /// (`claude`), and the custom agent it answered as, by address (`bebou`). Both empty for
+    /// anything a person wrote.
+    ///
+    /// A local agent's reply goes out through the user's own account, so `last_message_from_me`
+    /// is true and a row built from it alone says "You:" over words the user never wrote. This
+    /// is what lets the sidebar name the machine, exactly as the bubble does — and it is read
+    /// off the message the preview came from (see [`Store::derived_preview`]), never resolved
+    /// separately.
+    pub last_message_agent: String,
+    pub last_message_agent_persona: String,
     /// False when the conversation has unread messages. Teams' own flag OR our local
     /// read position (see `local_read_time` in the schema), so opening a thread
     /// clears the marker immediately and keeps it clear in Ghost mode.
@@ -971,6 +982,11 @@ pub struct ChannelRow {
     pub last_message_preview: String,
     pub last_message_sender: String,
     pub last_message_from_me: bool,
+    /// The agent that wrote the previewed post, when one did. See
+    /// [`ConversationRow::last_message_agent`] — the sandbox channel is the one conversation
+    /// the agent answers in out of the box, so a channel row needs it as much as a chat's.
+    pub last_message_agent: String,
+    pub last_message_agent_persona: String,
     /// False when the channel has unread messages — Teams' own flag OR our local read
     /// position, exactly as on [`ConversationRow::is_read`].
     pub is_read: bool,
@@ -2727,6 +2743,8 @@ impl Store {
                 last_message_preview: r.get(7)?,
                 last_message_sender: r.get(8)?,
                 last_message_from_me: r.get::<_, i64>(9)? != 0,
+                last_message_agent: String::new(),
+                last_message_agent_persona: String::new(),
                 is_read,
                 is_ghost_read,
                 draft: r.get(11)?,
@@ -2737,7 +2755,10 @@ impl Store {
         let mut channels: Vec<ChannelRow> = rows.collect::<rusqlite::Result<_>>()?;
         for channel in &mut channels {
             if channel.last_message_preview.is_empty() {
-                channel.last_message_preview = self.derived_preview(&channel.id)?;
+                let derived = self.derived_preview(&channel.id)?;
+                channel.last_message_preview = derived.text;
+                channel.last_message_agent = derived.agent;
+                channel.last_message_agent_persona = derived.agent_persona;
             }
         }
         Ok(channels)
@@ -2755,9 +2776,14 @@ impl Store {
     ///
     /// Scans a few newest rows rather than only the last one, so an undescribable
     /// frame at the top (a payload-less row) falls through to the last message that
-    /// *can* be described. [`crate::teams_read::preview_for_message`] does the
+    /// *can* be described. [`crate::teams_read::preview_of_message`] does the
     /// labelling (text, emoji, `📷 Image`, `📎 File`, a card title, a call line).
-    fn derived_preview(&self, thread_id: &str) -> Result<String> {
+    ///
+    /// It answers WHO wrote the line as well as the line itself, because one message decides
+    /// both: a local agent's reply is previewed as its answer and attributed to the agent
+    /// (see [`ConversationRow::last_message_agent`]), and reading the two off different
+    /// messages would put a machine's name over a colleague's words.
+    fn derived_preview(&self, thread_id: &str) -> Result<crate::teams_read::StoredPreview> {
         /// How far back to look for something describable. Small: this runs per
         /// container on a sidebar read, and a thread whose newest frames are all
         /// undescribable has nothing to say anyway.
@@ -2766,8 +2792,8 @@ impl Store {
             .newest_messages(thread_id, SCAN_DEPTH)?
             .iter()
             .rev()
-            .map(crate::teams_read::preview_for_message)
-            .find(|preview| !preview.is_empty())
+            .map(crate::teams_read::preview_of_message)
+            .find(|preview| !preview.text.is_empty())
             .unwrap_or_default();
         Ok(preview)
     }
@@ -4329,6 +4355,8 @@ impl Store {
                 last_message_preview: r.get(4)?,
                 last_message_sender: r.get(5)?,
                 last_message_from_me: r.get::<_, i64>(6)? != 0,
+                last_message_agent: String::new(),
+                last_message_agent_persona: String::new(),
                 is_read,
                 is_ghost_read,
                 is_muted: r.get::<_, i64>(8)? != 0,
@@ -4351,12 +4379,16 @@ impl Store {
                     .unwrap_or(true)
             })
             .collect::<rusqlite::Result<_>>()?;
-        // A synced preview can be empty (the newest frame was a system event, or an
-        // emoji/image-only body an older build previewed as nothing); derive one from
-        // what we hold rather than showing a blank row.
+        // A synced preview can be empty (the newest frame was a system event, an
+        // emoji/image-only body an older build previewed as nothing, a sealed body, or an
+        // AGENT's answer — see `parse_last_message`); derive one from what we hold rather than
+        // showing a blank row.
         for conversation in &mut conversations {
             if conversation.last_message_preview.is_empty() {
-                conversation.last_message_preview = self.derived_preview(&conversation.id)?;
+                let derived = self.derived_preview(&conversation.id)?;
+                conversation.last_message_preview = derived.text;
+                conversation.last_message_agent = derived.agent;
+                conversation.last_message_agent_persona = derived.agent_persona;
             }
         }
         Ok(conversations)

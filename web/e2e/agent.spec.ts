@@ -393,6 +393,43 @@ test.describe("The local agent's answer", () => {
     await expect(transcript).toHaveAttribute("data-open", "true");
   });
 
+  // THE SIDEBAR NAMES THE AGENT, not the account the reply went out under.
+  //
+  // The row used to read "You: …ship it — claude, via teams-lite": the account, because the
+  // reply really is posted through it, and the signature line, because a preview is the body's
+  // own words. Both are wrong in a list — the thread's own bubble refuses the first (it draws
+  // the CLI's mark where a sender's name goes) and strips the second — so the row says what the
+  // bubble says, in the space a row has.
+  test("names the AGENT in the sidebar, and keeps its machinery out of the row", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    // The FIRST row, and read by ID from then on. It is the row rather than a named thread
+    // because the sidebar is VIRTUALIZED: a fixture whose place in the list another spec
+    // decides may not be in the DOM at all, and this test is about what one row SAYS.
+    const id = await openConversationAt(page, 0);
+    const row = page.locator(`[data-testid="conversation-row"][data-conversation-id="${id}"]`);
+    const preview = row.locator('[data-testid="conversation-preview"]');
+    await optIn(page);
+
+    // A message of the user's OWN first, so the row's "You:" is proved to be what this thread
+    // shows for something they really wrote — otherwise the assertion below could pass on a
+    // row that never says it at all.
+    await fillComposer(page, "one moment");
+    await page.keyboard.press("Enter");
+    await expect(preview).toHaveText(/^You: one moment/);
+
+    await fillComposer(page, "@claude which port is it?");
+    await page.keyboard.press("Enter");
+    // The answer arrives over several edits; the row follows the last of them.
+    await expect(preview).toContainText("19420", { timeout: 20_000 });
+    // The agent is named, the account is not, and the line the message carries for a colleague
+    // reading the thread in a stock client stays out of the row.
+    await expect(preview).toHaveText(/^Claude: /);
+    await expect(preview).not.toContainText("You:");
+    await expect(preview).not.toContainText("via teams-lite");
+  });
+
   test("answers nothing in a conversation nobody opted in", async ({ page }) => {
     await gotoApp(page);
     // Named: the whole test is that THIS thread is off, so it cannot be a row whose

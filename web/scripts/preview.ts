@@ -3410,6 +3410,16 @@ if (import.meta.main) {
       await setTheme("light");
       await shot(`${out}-done-light.png`);
 
+      // THE SIDEBAR ROW, which is the other place this reply is read — and the place it used
+      // to be read wrongly: "You: …" over words a machine wrote, ending in the line the
+      // bubble deliberately strips. Cropped in both themes, because the whole subject is two
+      // lines of an eleven-pixel row.
+      const openRow = '[data-testid="conversation-row"][data-open="true"]';
+      await shot(`${out}-row-light.png`, openRow);
+      await setTheme("dark");
+      await shot(`${out}-row-dark.png`, openRow);
+      await setTheme("light");
+
       // The work survives the run: the finished reply keeps the folded row, and the same
       // rows are behind it. Captured open, on the bubble, because that is the state a
       // reader reaches for after the answer has landed.
@@ -3431,7 +3441,7 @@ if (import.meta.main) {
       await shot(`${out}-opencode-dark.png`);
       await shot(`${out}-opencode-coin-dark.png`, '[data-testid="agent-coin"][data-backend="opencode"]');
       console.log(
-        `[preview] wrote ${out}-{thinking,working,stop,transcript,writing,done,opencode}-*.png`,
+        `[preview] wrote ${out}-{thinking,working,stop,transcript,writing,done,row,opencode}-*.png`,
       );
     });
     process.exit(0);

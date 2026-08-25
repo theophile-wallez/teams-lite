@@ -24,6 +24,7 @@
  */
 
 import type { AgentStatus } from "./agent";
+import { agentDisplayName } from "./agent-message";
 
 /** One of the user's custom agents. Mirrors `agent_personas_json` in src/bin/server.rs. */
 export type AgentPersona = {
@@ -84,6 +85,29 @@ export function agentPersonaNamed(
   if (!name) return null;
   const wanted = name.trim().toLowerCase();
   return agentPersonas(status).find((persona) => persona.name.toLowerCase() === wanted) ?? null;
+}
+
+/**
+ * The name an AGENT'S OWN MESSAGE is listed under, or null when nobody's agent wrote it.
+ *
+ * It is the rule the bubble's own signature follows (`AgentSignature`, over
+ * `usePersonaSignatureLabel`), spelled once so a sidebar row and a bubble never name one
+ * reply two ways: a custom agent's LABEL where this machine still holds the record, else the
+ * address the reply signed itself with, else the provider's own name. Never the provider's
+ * name over a persona's — that would rewrite a reply the reader watched being written.
+ *
+ * The provider is what makes it an agent at all: with no `backend` there is no agent, which
+ * is what a backend too old to state one reports and what every message a person wrote
+ * carries.
+ */
+export function agentPreviewName(
+  status: AgentStatus | null,
+  backend: string | null | undefined,
+  persona?: string | null,
+): string | null {
+  if (!backend) return null;
+  if (persona) return agentPersonaNamed(status, persona)?.label ?? persona;
+  return agentDisplayName(backend);
 }
 
 /**

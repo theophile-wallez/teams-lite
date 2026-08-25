@@ -307,6 +307,17 @@ fn parse_last_message(container: &Value) -> LastMessage {
             CallRecording::Ready(_) => "Meeting recording".to_string(),
             CallRecording::Pending => String::new(),
         }
+    } else if crate::agent_policy::agent_answer(content).is_some() {
+        // AN AGENT'S ANSWER previews as NOTHING here, and that empty string is what makes the
+        // sidebar name the AGENT instead of the account the reply went out under.
+        //
+        // The row's words and WHO wrote them have to come from the same message, and this
+        // snapshot has nowhere to put the second half — only the store's own read states both
+        // (`Store::derived_preview`, over `preview_of_message`). A non-empty stored preview is
+        // exactly what stops that read from running, so an agent's reply leaves it empty: the
+        // sidebar falls through, on every read, with nothing to migrate. It is the SEALED body's
+        // rule above, applied to the other message this app writes rather than relays.
+        String::new()
     } else if let Some(SwiftCard::Card(card)) = crate::teams_cards::parse_swift_card(content) {
         // An adaptive/connector card previews as its TITLE. Its visible body is only
         // Skype's "Card - access it on … cards.unsupported" apology, which is what
@@ -2529,8 +2540,39 @@ pub(crate) fn attachment_value_label(attachment: &Value) -> String {
 /// mirrors the CSA path: a system event gets its label, then the body text, then a
 /// typed label for a body that previews as nothing (see [`typed_preview`]).
 pub fn preview_for_message(m: &crate::store::Message) -> String {
+    preview_of_message(m).text
+}
+
+/// What a stored message previews as: the line a sidebar row draws, and WHO wrote it when
+/// that is not the account it was posted under.
+///
+/// The second half exists for the local agent. Its reply is posted through the user's own
+/// account, so a row built from the message alone says "You: …" over words the user never
+/// wrote — and the words themselves ended in the machinery the bubble replaces with the CLI's
+/// mark. Both halves are read off ONE message here, which is what keeps them in step: a name
+/// resolved from one message and words from another would attribute a colleague's sentence to
+/// an agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredPreview {
+    pub text: String,
+    /// The provider whose CLI wrote it (`claude`), or `""` when the message is nobody's
+    /// answer.
+    pub agent: String,
+    /// The custom agent it answered as, by address (`bebou`), or `""`.
+    pub agent_persona: String,
+}
+
+impl StoredPreview {
+    /// A preview of somebody's own words: no agent behind them.
+    fn words(text: String) -> StoredPreview {
+        StoredPreview { text, ..Default::default() }
+    }
+}
+
+/// [`preview_for_message`], plus the agent that signed the body.
+pub fn preview_of_message(m: &crate::store::Message) -> StoredPreview {
     if !m.system_event.is_empty() {
-        return system_event_label(&m.system_event);
+        return StoredPreview::words(system_event_label(&m.system_event));
     }
     // A SEALED body previews as NOTHING, and that one line is what keeps a base64 token out of
     // the sidebar and out of a notification. The stored preview is written from the FRAME (see
@@ -2540,13 +2582,62 @@ pub fn preview_for_message(m: &crate::store::Message) -> String {
     // every sidebar read. That is also what makes a passphrase added today fix every preview
     // with nothing to migrate.
     if crate::seal::is_sealed(&m.content) {
-        return String::new();
+        return StoredPreview::default();
+    }
+    if let Some(answer) = agent_preview(&m.content) {
+        return answer;
     }
     let text = preview_from_html(&m.content);
     if !text.is_empty() {
-        return text;
+        return StoredPreview::words(text);
     }
-    typed_preview(&m.content, &m.attachments)
+    StoredPreview::words(typed_preview(&m.content, &m.attachments))
+}
+
+/// An AGENT's ANSWER, previewed as the ANSWER — or as what the run is doing when it has yet
+/// to write one.
+///
+/// Two things a row got wrong without this, and both were visible on every reply. The words
+/// ended in the signature the body carries for a colleague reading the thread in a stock
+/// client ("…ship it — claude, via teams-lite"), which in a two-line row is a third of the
+/// space spent on machinery the bubble deliberately strips. And a placeholder previewed as
+/// `claude is thinking…` under the user's own name, which reads as something they typed.
+///
+/// The states that carry no words of their own get a STATED label rather than nothing, for the
+/// reason [`typed_preview`] exists: an empty second line makes the newest message in the chat
+/// look like no message at all, and `Store::derived_preview` would fall back to the message
+/// BEFORE it — so a row would show the request while the answer to it was arriving.
+fn agent_preview(content: &str) -> Option<StoredPreview> {
+    use crate::agent_policy::AnswerState;
+    let answer = crate::agent_policy::agent_answer(content)?;
+    let words = preview_from_html(answer.body);
+    let text = if !words.is_empty() {
+        words
+    } else {
+        match answer.state {
+            AnswerState::Writing => "Writing an answer…".to_string(),
+            AnswerState::Failed => {
+                // The reason is escaped in the body, so it goes through the same reader as any
+                // other text. An empty one — a failure with nothing to say — leaves the phrase
+                // standing alone rather than trailing a dash.
+                let reason = preview_from_html(answer.failure);
+                if reason.is_empty() {
+                    "Could not answer".to_string()
+                } else {
+                    format!("Could not answer — {reason}")
+                }
+            }
+            // Unreachable: `reply_body` posts the placeholder rather than a done signature over
+            // an empty body. Answered as nothing rather than with a label that would lie about
+            // a run still going.
+            AnswerState::Written => String::new(),
+        }
+    };
+    Some(StoredPreview {
+        text,
+        agent: answer.backend.to_string(),
+        agent_persona: answer.persona.to_string(),
+    })
 }
 
 /// A short, English sidebar label for a stored `system_event` (see
@@ -3286,6 +3377,113 @@ mod tests {
         // Nothing describable stays empty (the caller looks further back).
         assert_eq!(preview_for_message(&row("", "[]", "")), "");
         assert_eq!(preview_for_message(&row("", "[]", "{\"kind\":\"mystery\"}")), "");
+    }
+
+    /// AN AGENT'S REPLY IS PREVIEWED AS ITS ANSWER, AND ATTRIBUTED TO THE AGENT.
+    ///
+    /// Both halves are what a sidebar row was getting wrong, and both are read off ONE
+    /// message: the words without the line the body signs itself with, and the name of the
+    /// machine that wrote them — because the reply is posted through the user's own account
+    /// and a row built from that alone says "You:" over words they never wrote.
+    #[test]
+    fn an_agents_reply_previews_as_its_answer_and_names_the_agent() {
+        let row = |content: &str| crate::store::Message {
+            id: "m1".into(),
+            conversation_id: "c1".into(),
+            seq: 1,
+            compose_time: 1,
+            sender: "Alice".into(),
+            sender_mri: String::new(),
+            message_type: String::new(),
+            content: content.into(),
+            attachments: "[]".into(),
+            reactions: "[]".into(),
+            seal: crate::store::MessageSeal::None,
+            system_event: String::new(),
+            thread_root_id: String::new(),
+            thread_subject: String::new(),
+            deleted: false,
+            scheduled_time: 0,
+            mentions: "[]".into(),
+        };
+        let signer = crate::agent_policy::Signature::stored("", "claude");
+
+        // A FINISHED answer: the words, and never the signature a colleague reads in a stock
+        // client.
+        let done = crate::agent_policy::reply_html(&signer, "The backend listens on 19420.", true);
+        let preview = preview_of_message(&row(&done));
+        assert_eq!(preview.text, "The backend listens on 19420.");
+        assert_eq!(preview.agent, "claude");
+        assert_eq!(preview.agent_persona, "");
+
+        // MID-RUN: the answer so far, so the row follows the reply as it is written.
+        let writing = crate::agent_policy::reply_html(&signer, "Reading the config", false);
+        assert_eq!(preview_of_message(&row(&writing)).text, "Reading the config");
+
+        // The PLACEHOLDER has no words of its own, and `claude is thinking…` under the user's
+        // own name reads as something they typed. A STATED label instead — and never an empty
+        // line, which would send `Store::derived_preview` to the message BEFORE it and show the
+        // request while its answer was arriving.
+        let thinking = crate::agent_policy::thinking_html(&signer);
+        let pending = preview_of_message(&row(&thinking));
+        assert_eq!(pending.text, "Writing an answer…");
+        assert_eq!(pending.agent, "claude");
+
+        // A FAILURE says so, with the reason the body carries.
+        let failed = crate::agent_policy::failure_html(&signer, "the CLI is not installed");
+        assert_eq!(
+            preview_of_message(&row(&failed)).text,
+            "Could not answer — the CLI is not installed"
+        );
+
+        // A CUSTOM AGENT is named by its own address, which is what the page resolves to the
+        // label the user gave it.
+        let persona = crate::agent_policy::Signature::stored("bebou", "claude");
+        let theirs = crate::agent_policy::reply_html(&persona, "Voilà.", true);
+        let named = preview_of_message(&row(&theirs));
+        assert_eq!(named.text, "Voilà.");
+        assert_eq!(named.agent, "claude");
+        assert_eq!(named.agent_persona, "bebou");
+
+        // AND A MESSAGE THAT MERELY ENDS IN ITALICS IS NOBODY'S ANSWER. The whole rule rests on
+        // the trailing line, so a colleague's own emphasis must not hand their words to a
+        // machine's name.
+        let human = preview_of_message(&row("<p>ship it</p><p><em>finally</em></p>"));
+        assert_eq!(human.text, "ship it finally");
+        assert_eq!(human.agent, "");
+    }
+
+    /// The CSA snapshot previews an agent's answer as NOTHING, which is what makes the sidebar
+    /// fall through to the store's own read — the only one that can state the words and the
+    /// agent together (see `Store::derived_preview`). It is the SEALED body's rule, applied to
+    /// the other message this app writes rather than relays.
+    #[test]
+    fn the_snapshot_leaves_an_agents_answer_to_the_store() {
+        let signer = crate::agent_policy::Signature::stored("", "claude");
+        let body = crate::agent_policy::reply_html(&signer, "The backend listens on 19420.", true);
+        let container = json!({
+            "id": "19:abc@thread.v2",
+            "lastMessage": {
+                "id": "1",
+                "composeTime": "2026-08-24T10:00:00.0000000Z",
+                "messageType": "RichText/Html",
+                "content": body,
+                "imDisplayName": "Théophile WALLEZ",
+            },
+        });
+        assert_eq!(parse_last_message(&container).preview, "");
+        // A message somebody wrote is previewed here exactly as before.
+        let ordinary = json!({
+            "id": "19:abc@thread.v2",
+            "lastMessage": {
+                "id": "1",
+                "composeTime": "2026-08-24T10:00:00.0000000Z",
+                "messageType": "RichText/Html",
+                "content": "<p>ship it</p>",
+                "imDisplayName": "Ada",
+            },
+        });
+        assert_eq!(parse_last_message(&ordinary).preview, "ship it");
     }
 
     #[test]
