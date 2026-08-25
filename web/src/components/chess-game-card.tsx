@@ -313,11 +313,13 @@ function other(color: ChessColor): ChessColor {
  * to `NY` is ink that names nothing. And it says WHOSE it is from the reader's own position — the
  * seat opposite a challenger is the reader's to take.
  *
- * **THE HAUL IS A SECOND LINE, and it is drawn only where there is one.** A seat is already a face,
- * a name, a side and a clock in one row that has to fit a phone, so a row of glyphs pushed into it
- * would be the thing that wraps. Under the name it is a line the reader's eye can skip until they
- * want it — and the room it takes is measured rather than reserved, because the page sizes the board
- * to whatever is left (see `useBoardFit`).
+ * **A SEAT IS ONE ROW, and the haul is ON IT.** It was a second line under the name, and the room
+ * that line took came out of the BOARD: the page sizes the board to whatever the seats leave it (see
+ * `useBoardFit`), so two lines per seat is four lines of chrome around the one thing the reader is
+ * looking at. On one row the haul also sits at the same vertical level as the name and the clock,
+ * which is where a board a reader has played on puts it. It is still drawn only where there is
+ * something to say, and it is what GIVES WAY when the row is narrow — the name and the clock are
+ * what a seat is for, so the glyphs truncate rather than wrapping the row in two.
  */
 export function ChessSeat(props: {
   game: ChessGame;
@@ -341,84 +343,85 @@ export function ChessSeat(props: {
   const running = props.clock.running === props.color;
   const flagged = props.clock.flagged === props.color;
   return (
-    <div className={cn(props.big && "space-y-0.5")}>
-      <header className={cn("flex items-center gap-2 py-1.5", props.big && "gap-3 py-2")}>
-        {props.engine && player ? (
-          // THE ENGINE IS NOT A PERSON, so it is not drawn as one: an avatar seeded from an empty MRI
-          // would be tinted initials for a colleague who does not exist, and this app never puts a
-          // face on something that has none.
-          <span
-            data-testid="chess-engine-seat"
-            aria-hidden
-            className={cn(
-              "grid shrink-0 place-items-center rounded-md border border-border-subtle bg-accent text-text-dim",
-              props.big ? "size-8" : "size-6",
-            )}
-          >
-            <HugeiconsIcon icon={CpuIcon} className={props.big ? "size-5" : "size-4"} strokeWidth={1.8} />
-          </span>
-        ) : player ? (
-          <Avatar
-            seed={player.mri}
-            label={player.name}
-            photo={{ kind: "user", id: player.mri }}
-            className={props.big ? "size-8" : "size-6"}
-          />
-        ) : (
-          <span
-            aria-hidden
-            className={cn(
-              "shrink-0 rounded-full border border-dashed border-border-subtle",
-              props.big ? "size-8" : "size-6",
-            )}
-          />
-        )}
+    <header className={cn("flex items-center gap-2 py-1.5", props.big && "gap-2.5 py-1.5")}>
+      {props.engine && player ? (
+        // THE ENGINE IS NOT A PERSON, so it is not drawn as one: an avatar seeded from an empty MRI
+        // would be tinted initials for a colleague who does not exist, and this app never puts a
+        // face on something that has none.
         <span
+          data-testid="chess-engine-seat"
+          aria-hidden
           className={cn(
-            "truncate font-medium",
-            props.big ? "text-sm" : "text-xs",
-            player ? "text-foreground" : "text-text-dim",
+            "grid shrink-0 place-items-center rounded-md border border-border-subtle bg-accent text-text-dim",
+            props.big ? "size-8" : "size-6",
           )}
         >
-          {player ? (player.isSelf ? "You" : player.name) : oursToTake ? "You, if you accept" : "Waiting for somebody"}
+          <HugeiconsIcon icon={CpuIcon} className={props.big ? "size-5" : "size-4"} strokeWidth={1.8} />
         </span>
-        {props.thinking && (
-          <span data-testid="chess-engine-thinking" className="shrink-0 text-[11px] text-text-dim">
-            thinking…
-          </span>
+      ) : player ? (
+        <Avatar
+          seed={player.mri}
+          label={player.name}
+          photo={{ kind: "user", id: player.mri }}
+          className={props.big ? "size-8" : "size-6"}
+        />
+      ) : (
+        <span
+          aria-hidden
+          className={cn(
+            "shrink-0 rounded-full border border-dashed border-border-subtle",
+            props.big ? "size-8" : "size-6",
+          )}
+        />
+      )}
+      <span
+        className={cn(
+          "truncate font-medium",
+          props.big ? "text-sm" : "text-xs",
+          player ? "text-foreground" : "text-text-dim",
         )}
-        <span className={cn("shrink-0 text-text-faint", props.big ? "text-xs" : "text-[11px]")}>
-          {props.color === "w" ? "White" : "Black"}
+      >
+        {player ? (player.isSelf ? "You" : player.name) : oursToTake ? "You, if you accept" : "Waiting for somebody"}
+      </span>
+      {props.thinking && (
+        <span data-testid="chess-engine-thinking" className="shrink-0 text-[11px] text-text-dim">
+          thinking…
         </span>
-        {/* THE CLOCK, on the side it belongs to — both of them on screen at once, which is how a
-            player reads a game. It is drawn only where there is one: a game with no time control
-            shows nothing rather than a dash nobody can act on. */}
-        {ms !== null && (
-          <span
-            data-testid={`chess-clock-${props.color}`}
-            data-running={running ? "true" : undefined}
-            data-flagged={flagged ? "true" : undefined}
-            className={cn(
-              "ml-auto shrink-0 rounded-md px-1.5 font-mono tabular-nums",
-              props.big ? "py-1 text-lg" : "text-xs",
-              // A running clock is the one the reader is watching, so it is the one with ink behind
-              // it; the other is quiet. Under thirty seconds it turns, because that is the moment
-              // the number starts to matter more than the position.
-              flagged
-                ? "bg-destructive/15 text-destructive"
-                : running
-                  ? ms < 30_000
-                    ? "bg-destructive/15 text-destructive"
-                    : "bg-accent text-foreground"
-                  : "text-text-dim",
-            )}
-          >
-            {formatChessClock(ms)}
-          </span>
-        )}
-      </header>
+      )}
+      <span className={cn("shrink-0 text-text-faint", props.big ? "text-xs" : "text-[11px]")}>
+        {props.color === "w" ? "White" : "Black"}
+      </span>
+      {/* THE HAUL, at the same vertical level as the name and the clock rather than on a line of
+          its own — the room that line took came out of the board. It is the one thing on this row
+          that may be cut short: a name and a clock are what a seat is for. */}
       {props.material && <ChessCaptured material={props.material} color={props.color} big={props.big} />}
-    </div>
+      {/* THE CLOCK, on the side it belongs to — both of them on screen at once, which is how a
+          player reads a game. It is drawn only where there is one: a game with no time control
+          shows nothing rather than a dash nobody can act on. */}
+      {ms !== null && (
+        <span
+          data-testid={`chess-clock-${props.color}`}
+          data-running={running ? "true" : undefined}
+          data-flagged={flagged ? "true" : undefined}
+          className={cn(
+            "ml-auto shrink-0 rounded-md px-1.5 font-mono tabular-nums",
+            props.big ? "py-1 text-lg" : "text-xs",
+            // A running clock is the one the reader is watching, so it is the one with ink behind
+            // it; the other is quiet. Under thirty seconds it turns, because that is the moment
+            // the number starts to matter more than the position.
+            flagged
+              ? "bg-destructive/15 text-destructive"
+              : running
+                ? ms < 30_000
+                  ? "bg-destructive/15 text-destructive"
+                  : "bg-accent text-foreground"
+                : "text-text-dim",
+          )}
+        >
+          {formatChessClock(ms)}
+        </span>
+      )}
+    </header>
   );
 }
 
@@ -459,8 +462,11 @@ function ChessCaptured(props: { material: ChessMaterial; color: ChessColor; big?
         // at all: a SOLID glyph drawn in the faintest ink is a grey blob, and beside it a HOLLOW one
         // is the same blob — so the one thing the two spellings carry, whose men these are, was lost
         // in the first capture of this row.
-        "flex items-center gap-1 leading-none text-text-dim",
-        props.big ? "text-lg" : "text-base",
+        // `min-w-0` and a truncating glyph run, because this is what gives way on a narrow seat:
+        // it shares one row with the name and the clock now, and a row that wrapped in two would
+        // take the room back off the board that merging the lines gave it.
+        "flex min-w-0 items-center gap-1 leading-none text-text-dim",
+        props.big ? "text-base" : "text-sm",
       )}
     >
       <span aria-hidden className="truncate">
@@ -537,10 +543,18 @@ export function useChessSeries(
  *     conversation and pressing again would open a second game nobody asked for. A reload offers it
  *     again — the button is one press and this app keeps no state about it, which is the honest cost
  *     of not writing anything down.
+ *   - **it NAMES the game it opened, and lets the caller decide what that is worth** ({@link
+ *     ChessRematchButton}'s `onSent`). The PAGE follows it, because a reader who pressed "play
+ *     again" on a full-screen board asked for the next board and not for a trip back through the
+ *     conversation to find it; the CARD does not, because there the reader is reading a thread and
+ *     never asked to leave it. The id travels rather than the navigation, so this component stays
+ *     the one that knows how a rematch is published and nothing about where either surface goes.
  */
 export function ChessRematchButton(props: {
   game: ChessGame;
   conversationId: string;
+  /** The new game's id, once its challenge has really left. */
+  onSent?: (gameId: string) => void;
   className?: string;
 }) {
   const controller = useOptionalController();
@@ -578,7 +592,11 @@ export function ChessRematchButton(props: {
     if (!ok) {
       setSent(false);
       setError("The rematch did not go out — nothing was posted. Try again.");
+      return;
     }
+    // Only once it really left: a caller that follows the new board must never be sent to a game
+    // this app failed to post.
+    props.onSent?.(gameId);
   };
 
   return (

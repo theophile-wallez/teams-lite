@@ -1,12 +1,12 @@
 // Serves the CHESS BOARD's own SOUNDS to the app's own page.
 //
-// They are chess.com's recordings, and they are not in this app: the BACKEND fetches the twelve of
+// They are chess.com's recordings, and they are not in this app: the BACKEND fetches the eleven of
 // them once per machine, verifies each against a digest it pins, and caches them under
 // `~/.cache/teams-lite/chess-sounds/<version>/` (see src/chess_sound.rs and AGENTS.md § Chess in a
 // conversation). This module is the last step of that chain — the bytes reaching the browser, from
 // THIS app's origin rather than from chess.com's, so drawing a board tells them nothing.
 //
-// **IT CAN SERVE NOTHING BUT THE TWELVE PINNED FILES.** The name in the URL is matched against a
+// **IT CAN SERVE NOTHING BUT THE ELEVEN PINNED FILES.** The name in the URL is matched against a
 // list spelled here, and the path is built from the MATCH rather than from the request — so no `..`,
 // no absolute path and no symlink game reaches a caller. It is the rail `engine-file.ts` holds for
 // the engine and `gitlab_mr::UploadRef::parse` holds for an upload: a route that joined a caller's
@@ -34,7 +34,7 @@ export const CHESS_SOUND_ROUTE = "/__chess-sound/";
  * so the two spellings cannot drift, because they are on opposite sides of a process boundary and a
  * mismatch here is a sound this backend fetched and the page cannot load.
  */
-export const CHESS_SOUND_VERSION = "chesscom-default-94997488";
+export const CHESS_SOUND_VERSION = "chesscom-default-eee1b887";
 export const CHESS_SOUNDS_SERVED: string[] = [
   "game-start.mp3",
   "game-end.mp3",
@@ -46,7 +46,6 @@ export const CHESS_SOUNDS_SERVED: string[] = [
   "move-check.mp3",
   "promote.mp3",
   "notify.mp3",
-  "illegal.mp3",
   "tenseconds.mp3",
 ];
 

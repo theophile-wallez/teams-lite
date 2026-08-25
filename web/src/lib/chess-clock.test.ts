@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   CHESS_DEFAULT_TIME,
+  CHESS_TIME_CONTROLS,
   chessClockCeilingMs,
   chessClockReading,
   chessClockTickMs,
   chessFlagIsFair,
   chessRemainingAfterMove,
   chessThinkStartedAt,
+  chessTimeControlsMatch,
   formatChessClock,
   PREMOVE_SPEND_MS,
   type ChessClockState,
@@ -235,5 +237,32 @@ describe("chessClockCeilingMs", () => {
       T0 + 5_000,
     );
     expect(reading.white).toBe(600_000);
+  });
+});
+
+describe("chessTimeControlsMatch", () => {
+  it("holds NO CLOCK to be an answer rather than the absence of one", () => {
+    // The engine's row opens on it, so a picker that could not light "No clock" would open on a
+    // state none of its presses claimed.
+    expect(chessTimeControlsMatch(null, null)).toBe(true);
+    expect(chessTimeControlsMatch(null, CHESS_DEFAULT_TIME)).toBe(false);
+    expect(chessTimeControlsMatch(CHESS_DEFAULT_TIME, null)).toBe(false);
+  });
+
+  it("lights exactly ONE row of the picker, whatever it is set to", () => {
+    // Two pickers read this — the human challenge's clock and the computer's own — and "which row
+    // is pressed" is not a question a menu may have two answers to.
+    for (const held of CHESS_TIME_CONTROLS) {
+      const lit = CHESS_TIME_CONTROLS.filter((option) =>
+        chessTimeControlsMatch(option.time, held.time),
+      );
+      expect(lit, held.label).toHaveLength(1);
+      expect(lit[0]!.label).toBe(held.label);
+    }
+  });
+
+  it("reads the INCREMENT, because 10 min and 10 | 5 are two different games", () => {
+    expect(chessTimeControlsMatch({ base: 600, increment: 0 }, { base: 600, increment: 5 })).toBe(false);
+    expect(chessTimeControlsMatch({ base: 600, increment: 5 }, { base: 600, increment: 5 })).toBe(true);
   });
 });

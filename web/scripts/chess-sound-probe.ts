@@ -2,7 +2,7 @@
  * Does a BROWSER really decode chess.com's board sounds, over this app's own route?
  *
  * Everything else about that chain is measured somewhere a test can reach: the backend fetching the
- * twelve files and verifying them against pinned digests
+ * eleven files and verifying them against pinned digests
  * (`chess_sound::tests::the_real_sounds_download_and_verify`), the route refusing anything but a
  * pinned name (`web/chess-sound-file.test.ts`), and the page never asking chess.com for them
  * (`web/e2e/chess.spec.ts`). The one link none of those can cover is the LAST one — `fetch` over the
@@ -121,7 +121,6 @@ async function main(): Promise<void> {
         "win",
         "lose",
         "draw",
-        "illegal",
         "premove",
         "lowTime",
         "notify",

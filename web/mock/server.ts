@@ -7666,7 +7666,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
 
     // ---- the board's own SOUNDS (see src/chess_sound.rs) ------------------------------------
     //
-    // The real backend fetches chess.com's twelve recordings once and serves them from the app's own
+    // The real backend fetches chess.com's eleven recordings once and serves them from the app's own
     // origin. This mock fetches NOTHING and answers `present: false` by default, which is deliberate:
     // the state a spec has to be able to reach is the one every fresh machine is in, where the page
     // falls back to its synthesized palette — a board that went silent there is the sharpest bug this
@@ -9580,16 +9580,16 @@ function resetMockEngine(): void {
 
 // ---- the board's own SOUNDS, as this mock answers for them ----------------------------
 //
-// chess.com's twelve recordings, which the real backend fetches once and serves from the app's own
+// chess.com's eleven recordings, which the real backend fetches once and serves from the app's own
 // origin (src/chess_sound.rs). Nothing is fetched here and nothing is served: what the mock owns is
 // the ANSWER, and the answer that matters is `present: false` — a fresh machine, where the page has
 // to fall back to its own synthesized palette rather than going quiet.
 
-/** What the twelve real files weigh together, so the row's sentence says a true number. */
-const MOCK_CHESS_SOUND_BYTES = 64_236;
+/** What the eleven real files weigh together, so the row's sentence says a true number. */
+const MOCK_CHESS_SOUND_BYTES = 59_651;
 /** The version, which is the middle segment of the route the page fetches from. It must be the one
  *  `web/chess-sound-file.ts` serves, or the page asks for an address nothing answers. */
-const MOCK_CHESS_SOUND_VERSION = "chesscom-default-94997488";
+const MOCK_CHESS_SOUND_VERSION = "chesscom-default-eee1b887";
 
 /** ABSENT out of the box, which is the state of every machine nobody has played on. A spec arms
  *  `{kind:"chess_sound", present:true}` when it wants the recordings to be "here". */
@@ -9606,7 +9606,7 @@ function mockChessSoundStatus(): Record<string, unknown> {
 }
 
 /** Put them back the way this file declares them: absent. One mock process serves the whole run, and
- *  a set a spec left "present" would have every later board trying to fetch twelve files. */
+ *  a set a spec left "present" would have every later board trying to fetch eleven files. */
 function resetMockChessSounds(): void {
   mockChessSoundsPresent = false;
   broadcast("chess_sound_changed", mockChessSoundStatus());
@@ -11250,7 +11250,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // The board's own SOUNDS: whether this "machine" holds chess.com's recordings. Nothing is
     // fetched and nothing is served either way — what this decides is whether the page tries to load
     // them or falls back to its synthesized palette. A spec MUST reset, because a set left present
-    // would have every later board asking for twelve files that are not there.
+    // would have every later board asking for eleven files that are not there.
     if (body.kind === "chess_sound") {
       if (body.reset === true) {
         resetMockChessSounds();

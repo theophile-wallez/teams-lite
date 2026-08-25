@@ -517,6 +517,51 @@ test.describe("chess in a conversation", () => {
     }
   });
 
+  test("the board column holds the BOARD AND TWO SEATS and nothing else, and the board fills it", async ({
+    page,
+  }) => {
+    // THE BOARD IS AS BIG AS THE COLUMN CAN HOLD, and that is what moving every other line into the
+    // sidebar bought: the four move controls, the sentence, the score, the rematch and the two
+    // answers a challenge takes each used to stand under the board, and the board is sized to
+    // whatever they left it (`useBoardFit`). So the column's own height is the two seats plus the
+    // board, and nothing between them.
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    await seedChessGame(page, {
+      mine: "w",
+      moves: ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Bxc6", "dxc6"],
+      ending: "theyResigned",
+    });
+    await openChessPage(page);
+    const column = page.locator('[data-testid="chess-board-column"]');
+
+    // Every one of them is on the page, in the SIDEBAR's own block rather than under the board.
+    const controls = page.locator('[data-testid="chess-page-controls"]');
+    for (const id of ["chess-move-nav", "chess-page-status", "chess-series", "chess-rematch"]) {
+      await expect(controls.locator(`[data-testid="${id}"]`)).toBeVisible();
+      await expect(column.locator(`[data-testid="${id}"]`)).toHaveCount(0);
+    }
+
+    // And what is left over is the board: the column's height is the board plus the two seats,
+    // within the padding it draws them in.
+    const squares = (await page.locator('[data-testid="chess-board"]').boundingBox())!;
+    const seats = page.locator('[data-testid="chess-board-column"] header');
+    await expect(seats).toHaveCount(2);
+    const heights = await seats.evaluateAll((els) =>
+      els.reduce((sum, el) => sum + el.getBoundingClientRect().height, 0),
+    );
+    const columnBox = (await column.boundingBox())!;
+    // 24px of padding, and a hair for the gaps: anything more is a line nobody asked for.
+    expect(columnBox.height - (squares.height + heights)).toBeLessThanOrEqual(32);
+
+    // A SEAT IS ONE ROW, so the haul sits at the same vertical level as the name and the clock
+    // rather than on a line of its own under them — which is where two of those lines came from.
+    const haul = (await page.locator('[data-testid="chess-captured-w"]').boundingBox())!;
+    const clock = (await page.locator('[data-testid="chess-clock-w"]').boundingBox())!;
+    const centre = (box: { y: number; height: number }) => box.y + box.height / 2;
+    expect(Math.abs(centre(haul) - centre(clock))).toBeLessThanOrEqual(4);
+  });
+
   test("the reader can WALK BACK through the game, and the board says it is not live", async ({
     page,
   }) => {
@@ -707,6 +752,16 @@ test.describe("chess in a conversation", () => {
     expect(sent?.content_html).toMatch(/— chess [0-9a-f]{6} v2 b open tc\.300\+0/);
     // And it goes quiet once it has left, because pressing again would open a second game.
     await expect(rematch).toBeDisabled();
+
+    // THE PAGE FOLLOWS IT. A reader who pressed "play again" on a full-screen board asked for the
+    // next board, not for a trip back through the conversation to find it — so this stays a page,
+    // and it is the NEW game's page: the address changes and the board is at move nought.
+    const next = /— chess ([0-9a-f]{6}) v2/.exec(sent?.content_html ?? "")?.[1];
+    expect(next).toBeTruthy();
+    await expect(page.locator('[data-testid="chess-page"]')).toBeVisible();
+    await expect.poll(() => page.url()).toContain(`/chess/${next}`);
+    // The board it landed on is the fresh one: nothing taken, and no rematch of its own to offer.
+    await expect(page.locator('[data-testid="chess-rematch"]')).toHaveCount(0);
   });
 
   test("a game still going, and one the reader watched, offer NO rematch", async ({ page }) => {
@@ -922,11 +977,38 @@ test.describe("chess in a conversation", () => {
     expect(Number(await page.locator(scroller).getAttribute("data-loaded-count"))).toBe(before + 1);
     await expect(engineBoard.locator(status)).toContainText(/your move/i);
 
-    // The wire says who the opponent is, and it never says it with a colon.
+    // The wire says who the opponent is, and it never says it with a colon. NO `tc.` token, because
+    // an engine game carries NO CLOCK unless the reader asked for one: a time control is an
+    // agreement between two people about how long each may think, and an engine's own clock is
+    // stated rather than counted down — so a countdown inherited from the human default was one the
+    // reader could only ever lose on.
     const sends = await fetchCapturedSends(page);
     const opened = sends.at(-1);
-    expect(opened?.content_html).toMatch(/— chess [0-9a-f]{6} v2 [wb] open tc\.600\+0 sf\.1320,/);
+    expect(opened?.content_html).toMatch(/— chess [0-9a-f]{6} v2 [wb] open sf\.1320,/);
+    expect(opened?.content_html).not.toContain("tc.");
     expect(opened?.content_html).toContain("I'm playing Stockfish 1320");
+    // And no clock is drawn on either seat, rather than a dash nobody can act on.
+    await expect(engineBoard.locator('[data-testid="chess-clock-w"]')).toHaveCount(0);
+    await expect(engineBoard.locator('[data-testid="chess-clock-b"]')).toHaveCount(0);
+  });
+
+  test("a clock against the computer is OFFERED, and the pick is its own", async ({ page }) => {
+    // The refusal above is a DEFAULT rather than a limit: a reader who wants to practise blitz
+    // against a machine is asking for exactly the clock it declines to assume. The engine's row has
+    // a picker of its own, so choosing one there can never move the human challenge's own.
+    await openChessThread(page);
+    await setChessEngine(page, { present: true });
+    await setChessOpponent(page, { silent: true });
+
+    await openChessEngineRow(page);
+    await page.locator('[data-testid="chess-engine-color-w"]').click();
+    await page.locator('[data-testid="chess-engine-time-300-0"]').click();
+    await page.locator('[data-testid="chess-engine-play"]').click();
+
+    const engineBoard = page.locator('[data-testid="chess-game"]').last();
+    await expect(engineBoard.locator('[data-testid="chess-clock-w"]')).toBeVisible();
+    const sends = await fetchCapturedSends(page);
+    expect(sends.at(-1)?.content_html).toContain("tc.300+0");
   });
 
   test("the computer OPENS the game when it has white, with nobody having moved", async ({
@@ -942,6 +1024,9 @@ test.describe("chess in a conversation", () => {
 
     await openChessEngineRow(page);
     await page.locator('[data-testid="chess-engine-color-b"]').click();
+    // A clock is asked for here, because the clocks are what this test is about — an engine game
+    // carries none by default.
+    await page.locator('[data-testid="chess-engine-time-600-0"]').click();
     await page.locator('[data-testid="chess-engine-play"]').click();
     const engineBoard = page.locator('[data-testid="chess-game"]').last();
     await expect(engineBoard.locator('[data-testid="chess-engine-seat"]')).toBeVisible();
@@ -964,9 +1049,10 @@ test.describe("chess in a conversation", () => {
   test("on a PHONE the press that starts the game is on screen, not below the fold", async ({
     page,
   }) => {
-    // The engine's disclosure is four rows tall and this menu lists every running game above it, so
-    // on a 390px screen the one row the reader came for opened off the bottom. It brings itself into
-    // view — the rule the merge-request page holds for its own actions.
+    // The engine's disclosure is FIVE rows tall — a sentence, seven strengths, three sides, nine
+    // clocks and the press — and this menu lists every running game above it, so on a 390px screen
+    // the one row the reader came for opens off the bottom. It brings itself into view — the rule
+    // the merge-request page holds for its own actions.
     await page.setViewportSize({ width: 390, height: 844 });
     await openChessThread(page);
     await setChessEngine(page, { present: true });
@@ -974,13 +1060,25 @@ test.describe("chess in a conversation", () => {
     await seedChessGame(page, { mine: "w", moves: ["e4", "e5"] });
     await seedChessGame(page, { mine: "b", moves: ["d4"] });
 
-    await openChessEngineRow(page);
     const play = page.locator('[data-testid="chess-engine-play"]');
-    await expect(play).toBeVisible();
-    const box = await play.boundingBox();
-    expect(box).not.toBeNull();
-    expect(box!.y).toBeGreaterThanOrEqual(0);
-    expect(box!.y + box!.height).toBeLessThanOrEqual(844);
+    const onScreen = async () => {
+      await expect(play).toBeVisible();
+      const box = await play.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.y).toBeGreaterThanOrEqual(0);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(844);
+    };
+
+    await openChessEngineRow(page);
+    await onScreen();
+    await closeConversationMenu(page);
+
+    // AND AGAIN ON THE NEXT OPEN. The disclosure is FOLDED when the menu closes, exactly as the
+    // human challenge's own form is: left standing it re-opened scrolled to the top with the press
+    // off the bottom, because nothing about it had changed for the scroll to react to.
+    await expect(play).toHaveCount(0);
+    await openChessEngineRow(page);
+    await onScreen();
     await closeConversationMenu(page);
   });
 

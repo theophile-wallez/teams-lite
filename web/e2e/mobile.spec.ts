@@ -279,10 +279,16 @@ test.describe("mobile single-pane layout", () => {
     expect(targets.rows.length).toBeGreaterThan(2);
     expect(targets.reactions.length).toBeGreaterThan(5);
     for (const target of [...targets.rows, ...targets.reactions]) {
-      expect(target.h, `${target.name} is ${target.h}px tall`).toBeGreaterThanOrEqual(44);
+      // The same SUB-PIXEL allowance the conversation menu's own measurement below carries, and for
+      // the identical reason: this menu is taller than a phone and therefore scrolls, so a row whose
+      // CSS height is exactly the floor measures 43.99997 at a fractional scroll offset and an exact
+      // comparison fails for a rounding. Anything really short — the 32px rows this rule was written
+      // for — is still caught, and two spellings of one floor is what taught the next reader to
+      // lower the number rather than to explain it.
+      expect(target.h, `${target.name} is ${target.h}px tall`).toBeGreaterThanOrEqual(43.5);
     }
     for (const reaction of targets.reactions) {
-      expect(reaction.w, `${reaction.name} is ${reaction.w}px wide`).toBeGreaterThanOrEqual(44);
+      expect(reaction.w, `${reaction.name} is ${reaction.w}px wide`).toBeGreaterThanOrEqual(43.5);
     }
     // The row fits: a menu narrow enough to wrap it would draw each circle under the floor.
     expect(targets.width).toBeLessThanOrEqual(page.viewportSize()!.width);

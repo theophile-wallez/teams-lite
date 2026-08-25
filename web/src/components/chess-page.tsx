@@ -17,29 +17,43 @@
  * it is up — the pane that usually holds it is not mounted at all, so the sentinel a sanctioned
  * driver proves its target with still has exactly one answer.
  *
- * Five rules hold the surface, and `web/e2e/chess.spec.ts` pins each:
+ * **THE BOARD COLUMN HOLDS THE BOARD AND THE TWO SEATS, and nothing else at all.** Everything a
+ * reader presses or reads ABOUT the game — the four move controls, the sentence saying what the
+ * board is doing, the head-to-head score, the rematch, the two answers a challenge is given — sits
+ * in the SIDEBAR beside the score sheet. The board is sized to the room its column leaves it
+ * ({@link useBoardFit}), so every one of those lines was a slice off the one thing the reader came
+ * to look at: five of them, on a page whose whole point is a big board. In the sidebar they cost the
+ * board nothing, they are beside the score sheet they belong with, and on a phone — where the page
+ * is one column — they land directly under the board exactly as they used to.
+ *
+ * Six rules hold the surface, and `web/e2e/chess.spec.ts` pins each:
  *   - **each column scrolls ITSELF and the page never scrolls.** The board stays where it is while
  *     the chat is read, and a move played after ten minutes of reading does not put the reader
  *     back at the top of anything. On a wide screen the BOARD column scrolls no more than the page
  *     does: it holds one board, and a board a reader has to scroll to see is not a board (see
  *     {@link useBoardFit}).
- *   - **a narrow screen is ONE column**: the board, then the score sheet as a single line, then
- *     the chat — the shape a phone gets from chess.com, and the reason the score sheet is a
- *     component that can be either. That column DOES scroll, because the seats, the board, the
- *     four move controls and the sentence under them do not fit in one screen at 390px.
+ *   - **a narrow screen is ONE column**: the board, then the controls, then the score sheet as a
+ *     single line, then the chat — the shape a phone gets from chess.com, and the reason the score
+ *     sheet is a component that can be either.
  *   - **the board is bounded by the SHORTER of the room it has**, so it is never a board wider
  *     than the window is tall.
  *   - **the keys are the score sheet's four controls**, and they are ignored while the reader is
  *     typing: this page holds the composer, so a left arrow inside a half-written message must
  *     move the caret rather than the board.
+ *   - **a REMATCH keeps the reader on this page.** It opens a game of its own, so the page follows
+ *     it the moment the thread really holds it — a reader who pressed "play again" from a
+ *     full-screen board asked for the next board, not for a trip back through the conversation to
+ *     find it (see {@link ChessPageBoard}'s `awaiting`).
  *   - **a game the URL names and the thread does not hold SAYS so**, rather than drawing an empty
  *     board: the history pages older, so a game may simply not be loaded yet.
  */
 
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ChevronLeftIcon, Loading02Icon } from "@hugeicons/core-free-icons";
+import { useNavigate } from "@tanstack/react-router";
 import { useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { chessPagePath } from "~/lib/chess-menu";
 import { chessSeriesWords } from "~/lib/chess-series";
 import { chessGameById, chessGamesInThread, chessGameIsSettled } from "~/lib/chess-thread";
 import { clockWords } from "~/lib/chess-wire";
@@ -140,9 +154,27 @@ function ChessPageBoard(props: {
 }) {
   const stated = chessGameById(props.games, props.gameId);
   const callOwnsComposer = useCallOwnsComposer();
+  const navigate = useNavigate();
   const reduceMotion = useReducedMotion();
   const fit = useBoardFit();
   const [armedResign, setArmedResign] = useState(false);
+  /**
+   * A REMATCH THE READER IS WAITING FOR, so this page can follow it.
+   *
+   * The rematch is an ordinary challenge and its board is a message in the thread, so it does not
+   * exist yet at the moment the press returns — which is why the page waits for the DERIVATION to
+   * hold it rather than navigating at once. Navigating on the press would land on this page's own
+   * "this conversation does not hold a game with that address" for a frame or two, which is a
+   * sentence about a game that is on its way. A rematch whose message never arrives simply leaves
+   * the reader where they are, with the button saying it was sent.
+   */
+  const [awaiting, setAwaiting] = useState<string | null>(null);
+  useEffect(() => {
+    if (!awaiting) return;
+    if (!chessGameById(props.games, awaiting)) return;
+    setAwaiting(null);
+    void navigate({ to: chessPagePath(props.conversationId, awaiting) });
+  }, [awaiting, navigate, props.conversationId, props.games]);
   // The page is where a reader is PLAYING rather than reading a chat, so this is the board that
   // makes a noise (see lib/chess-sound.ts).
   const board = useChessGame({
@@ -260,27 +292,26 @@ function ChessPageBoard(props: {
         </div>
       }
     >
-      {/* THE BOARD COLUMN. It scrolls itself on a phone, where the seats, the board, the nav and
-          the sentence do not fit in one screen at 390px — and on a WIDE screen it scrolls not at
-          all, because the board gives way instead (see `useBoardFit`). */}
+      {/* THE BOARD COLUMN — the board and the two seats, and nothing else. On a WIDE screen it
+          scrolls not at all, because the board gives way instead (see `useBoardFit`); on a phone it
+          keeps its content's height and the sidebar under it takes what is left. */}
       {/* `shrink-0` below `md` is load-bearing: two flex children with no basis share the height,
-          so the board column was squeezed and its own overflow hid the four move controls — the
-          one way to review a game on a phone. It keeps its content's height there and the chat
-          takes what is left; on a wide screen it is the flexible one instead. */}
+          so the board column was squeezed and its own overflow hid what stood under the board. It
+          keeps its content's height there and the chat takes what is left; on a wide screen it is
+          the flexible one instead. */}
       <div
         ref={fit.columnRef}
         data-testid="chess-board-column"
         className="flex min-h-0 shrink-0 flex-col items-center gap-1 overflow-y-auto p-3 md:flex-1 md:shrink md:overflow-y-hidden"
       >
-        {/* The stack is the BOARD'S OWN WIDTH, so the two seats, the four move controls and the
-            sentence line up with its edges rather than with the column's. Measured on a wide
-            screen; before the first measurement (and on a phone, where the column scrolls) it is
-            the viewport-derived ESTIMATE this page shipped with, which is close enough that the
-            correction is invisible. */}
+        {/* The stack is the BOARD'S OWN WIDTH, so the two seats line up with its edges rather than
+            with the column's. Measured on a wide screen; before the first measurement (and on a
+            phone, where the column scrolls) it is the viewport-derived ESTIMATE — now only the
+            header, the padding and the two seats, since everything else moved to the sidebar. */}
         <div
           className={cn(
             "flex w-full flex-col md:min-h-0 md:flex-1",
-            fit.side === null && "max-w-[min(100%,calc(100vh-15rem))]",
+            fit.side === null && "max-w-[min(100%,calc(100vh-12rem))]",
           )}
           style={fit.side === null ? undefined : { width: fit.side }}
         >
@@ -329,31 +360,43 @@ function ChessPageBoard(props: {
             material={board.material}
             big
           />
+        </div>
+      </div>
+
+      {/* THE RIGHT COLUMN: what the board is DOING and everything the reader presses, then the
+          score sheet, then the conversation. Below `md` it is under the board, with the sheet
+          reduced to the one line the card draws — a table of pairs and a chat cannot both have room
+          on a 390px screen, and the chat is what a game in a conversation is for. */}
+      <aside className="flex min-h-0 flex-1 flex-col border-t border-border-subtle md:w-80 md:flex-none md:shrink-0 md:border-l md:border-t-0 lg:w-96">
+        {/* EVERY WORD AND EVERY PRESS THAT IS NOT ON THE BOARD. It used to stand under the board,
+            where each line came straight off the board's own size — and on a phone this is still
+            directly under the board, which is where it always was. */}
+        <div
+          data-testid="chess-page-controls"
+          className="flex shrink-0 flex-col items-center gap-1 border-b border-border-subtle px-3 py-2"
+        >
           <ChessMoveNav
             viewPly={board.viewPly}
             plies={board.plies}
             atLive={board.atLive}
             onGoTo={board.goTo}
             onStep={board.step}
-            className="mt-1"
           />
-          {/* The sentence, under the board where the press was made. A game being REVIEWED says so
-              here rather than in the header: it is a fact about what the board is showing. */}
-          <p data-testid="chess-page-status" className="mt-1 text-center text-xs text-text-dim">
+          {/* What the board is showing. A game being REVIEWED says so here rather than in the
+              header: it is a fact about the position on screen. */}
+          <p data-testid="chess-page-status" className="text-center text-xs text-text-dim">
             {!board.atLive
               ? `Move ${board.viewPly} of ${board.plies} — the board is not live.`
               : board.engineThinking
                 ? `${game.opponent?.name ?? "The computer"} is thinking…`
                 : board.status}
           </p>
-          {/* A PREMOVE SAYS ITSELF ON THE BOARD and nothing is written under it. Both of its squares
-              are tinted in the premove's own colour — where the piece is going and where it came
-              from — which is the whole of what a reader needs, and it is what every board they have
-              played on does. The three sentences that used to stand here explained a gesture the
-              reader had just made, moved the status line under them, and pushed the board smaller to
-              make room (see `useBoardFit`): the chrome grows, and this was chrome. */}
+          {/* A PREMOVE SAYS ITSELF ON THE BOARD and nothing is written about it anywhere. Both of
+              its squares are tinted in the premove's own colour — where the piece is going and
+              where it came from — which is the whole of what a reader needs, and it is what every
+              board they have played on does. */}
           {board.error && (
-            <p data-testid="chess-error" className="mt-1 text-center text-[11px] text-destructive">
+            <p data-testid="chess-error" className="text-center text-[11px] text-destructive">
               {board.error}
             </p>
           )}
@@ -364,18 +407,24 @@ function ChessPageBoard(props: {
             <p
               data-testid="chess-series"
               data-series-played={series.played}
-              className="mt-1 text-center text-[11px] text-text-faint"
+              className="text-center text-[11px] text-text-faint"
             >
               {chessSeriesWords(series, themName)}
             </p>
           )}
-          {/* ANOTHER GAME. It sits under the sentence that says how the last one ended, which is
-              where the reader is already looking. */}
-          <ChessRematchButton game={game} conversationId={props.conversationId} className="mt-2" />
+          {/* ANOTHER GAME, under the sentence that says how the last one ended — and the page
+              FOLLOWS it, so the reader stays on a board rather than being sent back to the
+              conversation to find the one they just asked for. */}
+          <ChessRematchButton
+            game={game}
+            conversationId={props.conversationId}
+            onSent={setAwaiting}
+            className="mt-1"
+          />
           {/* A challenge the reader was offered is answered HERE too, so a page opened from a
               notification is not a board they can do nothing with. */}
           {!game.opponent && !game.challenger.isSelf && !settled && (
-            <div className="mt-2 flex items-center justify-center gap-2">
+            <div className="mt-1 flex items-center justify-center gap-2">
               <button
                 type="button"
                 data-testid="chess-accept"
@@ -395,13 +444,6 @@ function ChessPageBoard(props: {
             </div>
           )}
         </div>
-      </div>
-
-      {/* THE RIGHT COLUMN: the score sheet, then the conversation. Below `md` it is under the
-          board, with the sheet reduced to the one line the card draws — a table of pairs and a
-          chat cannot both have room on a 390px screen, and the chat is what a game in a
-          conversation is for. */}
-      <aside className="flex min-h-0 flex-1 flex-col border-t border-border-subtle md:w-80 md:flex-none md:shrink-0 md:border-l md:border-t-0 lg:w-96">
         <div className="hidden min-h-0 md:flex md:max-h-[45%] md:flex-col">
           <ChessScoreSheet
             moves={board.moves}
@@ -450,18 +492,18 @@ const TWO_COLUMN_QUERY = "(min-width: 768px)";
  * On a wide screen this column holds ONE board and must not scroll: a board a reader has to
  * scroll to see is not a board, and a scrollbar beside it moves the squares under the pointer.
  * So the board gives way instead — it is sized to the shorter of the room left over, and the
- * seats, the four move controls and the sentence under them are what the room is left over
- * FROM.
+ * TWO SEATS are the whole of what the room is left over FROM. That is the other half of moving
+ * everything else into the sidebar: five lines of chrome that used to stand under the board were
+ * five slices off it, and the board is now as large as the column can hold.
  *
  * It is measured rather than computed, and the guess it replaces is why. The page used to cap
  * the board at `calc(100vh - 15rem)`: 240px for the header, the padding, two seats, the
  * controls and the sentence, which really measure 252 — so every full-screen game overflowed
  * by twelve pixels and the column carried a scrollbar for all of them. And a constant cannot
- * be right anyway, because the chrome GROWS: a premove hint, a refusal, the two buttons a
- * challenge is answered with, and a sentence that wraps at a narrow width each add a line
- * nobody can put in a `calc`. Flexbox already measures what is left (`flex-1` over `min-h-0`,
- * which is the room's own height); this reads that number and hands it back as the stack's
- * width, so the board is exactly the square that fits and nothing is clipped.
+ * be right anyway, because the chrome still MOVES with what a seat has to say: a haul the width
+ * of the row, a name that wraps at a narrow width. Flexbox already measures what is left
+ * (`flex-1` over `min-h-0`, which is the room's own height); this reads that number and hands it
+ * back as the stack's width, so the board is exactly the square that fits and nothing is clipped.
  *
  * Three things it is careful about:
  *   - **The WIDTH comes from the column, never from the stack.** The stack's width is what this

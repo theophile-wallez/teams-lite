@@ -28,11 +28,11 @@ afterEach(() => {
 });
 
 describe("the route", () => {
-  it("serves ONE of the twelve pinned names and nothing else", () => {
+  it("serves ONE of the eleven pinned names and nothing else", () => {
     for (const name of CHESS_SOUNDS_SERVED) {
       expect(chessSoundFileFor(`${PREFIX}${name}`)?.path, name).toBe(join(DIR, name));
     }
-    expect(CHESS_SOUNDS_SERVED).toHaveLength(12);
+    expect(CHESS_SOUNDS_SERVED).toHaveLength(11);
   });
 
   it("refuses every shape of a path that is not a pinned name", () => {

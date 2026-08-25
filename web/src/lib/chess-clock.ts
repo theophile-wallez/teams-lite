@@ -59,6 +59,21 @@ export const CHESS_TIME_CONTROLS: { label: string; time: ChessTimeControl | null
   { label: "No clock", time: null },
 ];
 
+/**
+ * Whether two time controls are the same one — `null` being "no clock", which is a real answer
+ * rather than the absence of one.
+ *
+ * One spelling, because TWO pickers read it: the human challenge's clock and the computer's own (see
+ * conversation-menu.tsx). Two of them lit the wrong press the first time it was written twice, and
+ * "which row is pressed" is exactly the decision a menu must not have two answers to.
+ */
+export function chessTimeControlsMatch(
+  a: ChessTimeControl | null,
+  b: ChessTimeControl | null,
+): boolean {
+  return (a?.base ?? null) === (b?.base ?? null) && (a?.increment ?? null) === (b?.increment ?? null);
+}
+
 /** Everything the arithmetic needs, and no more — primitives, so this module never depends on
  *  the shape of a game and can be tested with three numbers. */
 export type ChessClockState = {

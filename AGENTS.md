@@ -2891,9 +2891,11 @@ user. Two independent mechanisms enforce that split:
   sheet, the armed resignation, the board at a phone's width, the card a colleague's challenge
   leaves for the reader to answer, the STRIP of running games, the full-screen PAGE, the promotion
   picker, the PREMOVE and the dots that set it, each side's HAUL with the material delta beside it,
-  the head-to-head score and the REMATCH a finished game earns — and the COMPUTER: the row that says
-  the engine is 7.3 MB, the Elo picker, a game against
-  it and what it costs in Settings: `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`:
+  the head-to-head score and the REMATCH a finished game earns (both off the SIDEBAR's own controls
+  block, which is where every word and every press that is not on the board now lives) — and the
+  COMPUTER: the row that says the engine is 7.3 MB, the Elo picker with its own clock row, a game
+  against it — carrying no clock, which is what an engine game opens on — and what it costs in
+  Settings: `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`:
   the pawn in the header is 20px). That run needs no engine on the machine: it writes the same STUB
   worker the E2E suite does into a temporary directory and points `TEAMS_LITE_ENGINE_DIR` at it, so
   the route and the whole UCI exchange are real and only the 7.3 MB of WebAssembly is missing. For a tracker REFERENCE drawn as a
@@ -4947,27 +4949,35 @@ which is the right place to play A MOVE and the wrong place to play a GAME.
   usually holds it is not mounted, so the sentinel a sanctioned driver proves its target with still
   has exactly one answer. A live call's chat panel is the one thing that can also hold it, so the
   page asks (`useCallOwnsComposer`) rather than drawing a second.
+- **THE BOARD COLUMN HOLDS THE BOARD AND THE TWO SEATS, AND NOTHING ELSE AT ALL.** Everything a
+  reader presses or reads ABOUT the game — the four move controls, the sentence saying what the board
+  is doing, the head-to-head score, the rematch, the two answers a challenge takes — stands in the
+  SIDEBAR, in one block above the score sheet (`chess-page-controls`). The board is sized to the room
+  its column leaves it, so every one of those lines was a slice off the one thing the reader came to
+  look at: five of them, on a page whose whole point is a big board. In the sidebar they cost the
+  board nothing, they sit beside the score sheet they belong with, and on a phone — where the page is
+  one column — they land directly under the board exactly as they always did. **A SEAT IS ONE ROW**
+  for the same reason: the haul was a second line under the name and is now at the same vertical
+  level as the name and the clock, which is where every board a reader has played on puts it and
+  which gives the board two more lines. What gives way on a narrow seat is the haul, never the name
+  or the clock.
 - **Each column scrolls itself and the page never scrolls.** Below `md` it is one column — board,
-  the score sheet as a single line, then the chat — because a table of pairs and a chat cannot both
-  have room at 390px, and the chat is what a game in a conversation is for. That narrow column DOES
-  scroll: the seats, the board, the four controls and the sentence do not fit in one screen there.
+  the controls, the score sheet as a single line, then the chat — because a table of pairs and a chat
+  cannot both have room at 390px, and the chat is what a game in a conversation is for.
 - **THE BOARD COLUMN CARRIES NO SCROLLBAR ON A WIDE SCREEN, and the board is what gives way.** A
   board somebody has to scroll to see is not a board, and a scrollbar beside one moves the squares
   under the pointer. It is the shorter of the room it has — and the room is MEASURED
   (`useBoardFit`), which is the whole of the fix. The page used to cap the board at
   `calc(100vh - 15rem)`: 240px for the header, the padding, two seats, the controls and the
   sentence, which really measure 252 — so every full-screen game overflowed by twelve pixels and
-  carried a scrollbar. A constant cannot be right anyway, because the chrome GROWS: a refusal, the
-  head-to-head score, the rematch, the two buttons a challenge is answered with, a haul under each
-  seat, and a sentence that wraps at a narrow width each add a line nobody can put in a `calc` — and
-  the premove caption that used to be in this list is GONE for that very reason (§ WHAT A BOARD
-  DOES), because a caption paid for in board is a bad trade. Flexbox already measures what is left (`flex-1`
-  over `min-h-0`); the hook reads that number and hands it back as the stack's WIDTH, so the two
-  seats and the controls line up with the board's own edges rather than with the column's. Three
-  details are load-bearing: the width comes from the COLUMN and never from the stack (whose width
-  is the answer, so measuring it would be reading it back), a phone measures nothing (`side` stays
-  null and the CSS estimate stands), and the pure-CSS shortcut is measured to be WRONG —
-  `aspect-square` with `max-h-full` gives 700x296 rather than a square, because a min/max clamp on
+  carried a scrollbar. A constant cannot be right anyway, because the chrome still MOVES with what a
+  seat has to say: a haul the width of the row, a name that wraps at a narrow width. Flexbox already
+  measures what is left (`flex-1` over `min-h-0`); the hook reads that number and hands it back as
+  the stack's WIDTH, so the two seats line up with the board's own edges rather than with the
+  column's. Three details are load-bearing: the width comes from the COLUMN and never from the stack
+  (whose width is the answer, so measuring it would be reading it back), a phone measures nothing
+  (`side` stays null and the CSS estimate stands), and the pure-CSS shortcut is measured to be WRONG
+  — `aspect-square` with `max-h-full` gives 700x296 rather than a square, because a min/max clamp on
   one axis does not travel back through the ratio.
 - **ESCAPE LEAVES THE BOARD FOR THE CONVERSATION**, never the conversation for the chat list: the
   reader is two surfaces deep, and one Escape does one thing. It is decided in the shell, where
@@ -5096,7 +5106,7 @@ the score, and `ChessRematchButton` (`chess-game-card.tsx`) draws the one for bo
 **THE REMATCH IS AN ORDINARY CHALLENGE and deliberately not a fifth act on the wire**: a new game id,
 `open`, the clock the last game carried, and the colour the reader did NOT have. So the wire gains
 nothing, the derivation gains nothing, and a colleague on a build that predates this reads it as
-exactly what it is — somebody challenging them again. Five rules hold it, each pinned by a test:
+exactly what it is — somebody challenging them again. Six rules hold it, each pinned by a test:
 
 - **Three things decide whether one is offered at all**, and each is a game that must not: a game
   still GOING (a rematch mid-game is a second board nobody asked for, and the menu already offers a
@@ -5115,6 +5125,16 @@ exactly what it is — somebody challenging them again. Five rules hold it, each
   that did not go out must never be left looking like it did (the composer's own rule), and pressing
   twice would open a second game nobody asked for. A reload offers it again, which is the honest cost
   of writing nothing down.
+- **THE PAGE FOLLOWS THE NEW BOARD; the CARD does not** (`onSent`). A reader who pressed "play again"
+  on a full-screen board asked for the next board — they used to be dropped back through the
+  conversation to find it and press Open again, which is the one surface change a rematch should never
+  make. On a card they never asked to leave the thread, so nothing moves there. Two things about it:
+  the id travels rather than the navigation, so the button stays the one place that knows how a
+  rematch is published and nothing about where either surface goes; and the page waits for its own
+  DERIVATION to hold the game rather than navigating on the press, because the challenge is a message
+  and does not exist yet at the moment the press returns — navigating at once would draw "this
+  conversation does not hold a game with that address" for a frame or two, about a game that is on its
+  way. A rematch whose message never left leaves the reader where they are.
 
 **THE SCORE IS COUNTED OVER THE WHOLE STORED HISTORY, and that is the one thing the derivation alone
 could not do.** The history loads a page at a time, so a series taken off the loaded messages would
@@ -5220,7 +5240,7 @@ closed for an hour all reach the same two numbers.
 
 ### THE SOUNDS come from chess.com, and the BACKEND is what fetches them
 
-Twelve MP3 files, 64 KB in all, at one address:
+Eleven MP3 files, 60 KB in all, at one address:
 `https://images.chesscomfiles.com/chess-themes/sounds/_MP3_/default/<name>.mp3`. `src/chess_sound.rs`
 pins them, `web/chess-sound-file.ts` serves them, `web/src/lib/chess-sound.ts` decides which sound an
 event earns and plays it, and `src/pinned_download.rs` holds the policy this shares with the engine.
@@ -5230,10 +5250,10 @@ event earns and plays it, and `src/pinned_download.rs` holds the policy this sha
 - **They are chess.com's recordings, not ours.** This app does not redistribute somebody else's
   assets: committing them and shipping them inside the 134 MB release asset would be publishing their
   audio under our name. Fetching them per machine, from the address they publish them at, is what any
-  browser does when it opens chess.com. **It is the LICENSING argument and not a size one** — 64 KB
+  browser does when it opens chess.com. **It is the LICENSING argument and not a size one** — 60 KB
   in that asset would cost nothing, which is exactly why the engine's own reason (7.3 MB nobody who
   never opens a board should pay for) does not apply here and must not be borrowed as a
-  justification. It is also why there is no PRESS: a reader is not asked to decide about 64 KB.
+  justification. It is also why there is no PRESS: a reader is not asked to decide about 60 KB.
 - **The BROWSER never touches their server.** A page that fetched these itself would tell chess.com's
   CDN the reader's address every time it drew a board — the read receipt § Mail strips out of every
   message body, in another costume. The backend fetches ONCE per machine, verifies each file against
@@ -5242,9 +5262,9 @@ event earns and plays it, and `src/pinned_download.rs` holds the policy this sha
   number of machines that opened a board — not the number of boards, and not the number of moves.
   `web/e2e/chess.spec.ts` watches every request a real game makes and holds that list to empty.
 
-**EVERY NUMBER IS MEASURED**, on 2026-08-25, by fetching all twelve and hashing them — and the whole
+**EVERY NUMBER IS MEASURED**, on 2026-08-25, by fetching all eleven and hashing them — and the whole
 chain is verified through the code that ships (`chess_sound::tests::the_real_sounds_download_and_verify`,
-`#[ignore]`d because it reaches the network; run on 2026-08-25, all twelve verified against their
+`#[ignore]`d because it reaches the network; run on 2026-08-25, all eleven verified against their
 pinned digests). The digests are the whole of the safety: **three of the files are exactly 5 353 bytes
 long**, so a length alone is met by any of the other two.
 
@@ -5290,13 +5310,17 @@ Eleven rules hold it, and each is pinned by a test:
   chess.com does publish `game-win-long`, `game-lose-long` and `game-draw`; they are not pinned, so
   this is a stated trade rather than an oversight. **A CHECKMATE is two sounds**, `move-check` then
   `game-end`, which falls out of the two effects that already existed rather than being arranged.
-- **ALL TWELVE ARE REALLY PLAYED**, and three of them had no trigger at all before this: `notify` is
-  a DRAW THE OPPONENT OFFERS — the one thing in a game that asks the reader for something while their
-  own clock runs, and it used to happen in silence; `illegal` is a move the rules REFUSE, played where
-  a real from→to was attempted rather than in `press`, because a press on an empty square with nothing
-  picked up means nothing and must not be answered as a mistake; and `tenseconds` is the reader's OWN
-  clock crossing `LOW_TIME_MS`. A file in the table that nothing plays is a recording fetched for
-  nobody, so the set and the triggers are checked against each other.
+- **ALL ELEVEN ARE REALLY PLAYED, and the set is what the TRIGGERS decide.** `notify` is a DRAW THE
+  OPPONENT OFFERS — the one thing in a game that asks the reader for something while their own clock
+  runs, and it used to happen in silence — and `tenseconds` is the reader's OWN clock crossing
+  `LOW_TIME_MS`. A file in the table that nothing plays is a recording fetched for nobody, so the set
+  and the triggers are checked against each other in both directions. **THAT IS WHY `illegal.mp3` IS
+  NOT PINNED.** A move the rules refuse is SILENT: the board answers it by putting the piece back, and
+  nothing happened that the reader has to be told about — they were finding out where a piece can go,
+  which a player does constantly, and every one of those attempts earned a deliberately unpleasant
+  buzz. A sound is for something that HAPPENED. Dropping the trigger meant dropping the recording, the
+  route's twelfth entry and the palette's own recipe, and RECOMPUTING `SOUND_VERSION` over the
+  eleven — which is the rule working rather than a cost of it.
 - **THE CLOCK WARNING IS THE ONE SOUND ABOUT A STATE RATHER THAN AN EVENT**, so it is the one that DOES
   fire on a first pass: a board opened with eight seconds on it is a board about to be lost, and the
   warning is the whole point. Ten seconds rather than the thirty the clock starts turning at or the
@@ -5327,7 +5351,9 @@ happens. It types nothing, sends nothing, and prints byte counts and durations r
 Measured 2026-08-25: **12 of 12 decoded**, stereo at 44 100 Hz, from 0.153 s (`move-self`) to 0.620 s
 (`tenseconds`) — so the whole palette is well inside the "nothing rings for a second" rule the
 synthesized one is held to, with the ten-second warning the longest by a wide margin. All 14 sounds
-resolve to a recording, and **0 requests reached chess.com**. What is left UNVERIFIED is only that
+resolved to a recording, and **0 requests reached chess.com**. Eleven of those twelve are what ships:
+`illegal.mp3` decoded as well as the rest and was then dropped with its own trigger (a refused move is
+silent), so the measurement stands as it was taken and the pinned set is one file smaller than it. What is left UNVERIFIED is only that
 somebody has heard them come out of a speaker in the real app, which is the user's own click on their
 own board.
 
@@ -5375,8 +5401,10 @@ resignation, the board at a phone's width, the card a colleague's challenge leav
 running games, the full-screen PAGE in both themes and at a phone's width, the promotion picker, the
 DOTS a piece is offered while the opponent thinks — where it might be able to go rather than where it
 may go now — the premove those dots set, in both themes, both HAULS with the material delta beside
-them, and the head-to-head score with the REMATCH under it (on the page in both themes, and on the
-card in the conversation where a finished game is met first). `web/e2e/chess.spec.ts` pins every rule
+the name and the clock on the seat's own ONE row, and the head-to-head score with the REMATCH under
+it — on the page off its SIDEBAR's controls block, in both themes, since the board column holds
+nothing but the board and the two seats, and on the card in the conversation where a finished game is
+met first. `web/e2e/chess.spec.ts` pins every rule
 the page owns, and `chess-wire.test.ts`, `chess-thread.test.ts`, `chess-clock.test.ts`,
 `chess-act.test.ts`, `chess-premove.test.ts`, `chess-material.test.ts`, `chess-series.test.ts`,
 `chess-menu.test.ts` and `chess-sound.test.ts` the pure ones — the last of which pins the palette
@@ -5384,7 +5412,7 @@ without an AudioContext anywhere: which sound a move earns and whose move it was
 chess.com's files each one is, that the synthesized FALLBACK still holds a recipe for every sound,
 that every one of those has its own shape rather than being one click at another volume, and that
 each is short and quiet enough to happen every few seconds. The route those recordings arrive over
-has a test of its own, `web/chess-sound-file.test.ts`, which needs no browser: the twelve pinned
+has a test of its own, `web/chess-sound-file.test.ts`, which needs no browser: the eleven pinned
 names and nothing else, a 404 that says which state it is, and the year of `immutable` behind it.
 
 **What is unverified against the tenant is the pairing, and one new thing.** The wire rides `send`
@@ -5516,6 +5544,15 @@ Nine rules hold the surface, and each is pinned by a test:
   chess.com's own bargain with a bot — and the sentence a flag draws says so: a machine claims
   nothing, so the reader plays on with a clock at zero or resigns. Promising them a claim nobody
   will make is the one thing that line must not do.
+- **SO AN ENGINE GAME CARRIES NO CLOCK BY DEFAULT, and the pick is its own state.** A time control is
+  an agreement between two people about how long each may think, and there is nobody on the other side
+  of this one to hold to one; worse, by the rule above it can never be a fair one, so the ten minutes
+  the engine's row inherited from the human challenge was a countdown against a player whose own clock
+  does not really run. It is still OFFERED — a reader who wants to practise blitz against a machine is
+  asking for exactly the clock this declines to assume — in a picker of its own beside the strength, so
+  choosing one there can never move the human challenge's. Both rows read one decision about which
+  press is lit (`chessTimeControlsMatch`), because "which row is pressed" is not a question a menu may
+  have two answers to.
 - **A machine is asked for no DRAW and offered no ACCEPT.** Both are naturally impossible in the
   derivation (there is no second author to answer), and the UI draws neither rather than a control
   that reports a refusal.
@@ -5549,8 +5586,9 @@ the directory `TEAMS_LITE_ENGINE_DIR` names — so the route, the Worker-path gu
 and the whole exchange run for real and only the WebAssembly is missing. A spec MUST reset the
 `{kind:"engine"}` hook, since one mock process serves the whole run.
 `cd web && bun run preview -- --out /tmp/chess --chess` captures the row that states the size in both
-themes, the Elo picker with the side and the clock beside it (both themes, and a PHONE's width, where
-seven presses is the row that wraps), a game against the computer in both themes, and the Settings
+themes, the Elo picker with the side and its own clock row beside it (both themes, and a PHONE's
+width, where seven presses is the row that wraps), a game against the computer in both themes — which
+carries no clock at all unless one was asked for — and the Settings
 inventory. The engine's own move is POLLED for rather than waited out: the first one costs a worker
 boot, a UCI handshake and a search, and a fixed pause photographed the opening position.
 

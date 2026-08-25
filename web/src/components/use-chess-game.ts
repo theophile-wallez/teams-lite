@@ -363,14 +363,12 @@ export function useChessGame(args: {
     (from: string, to: string): boolean => {
       if (ourMove) {
         const move = resolve(chess, from, to);
-        // A move the rules refuse SAYS so — chess.com's own `illegal`, and the one sound in the
-        // palette that is deliberately unpleasant. It is played here rather than in `press` because
-        // this is where a real from→to was attempted: a press on an empty square with nothing picked
-        // up means nothing, and it must not be answered as a mistake.
-        if (!move) {
-          playChessSound("illegal", args.sounds && soundsEnabled);
-          return false;
-        }
+        // A MOVE THE RULES REFUSE IS SILENT. The board already answers it — the piece goes back
+        // where it was — and nothing happened that the reader has to be told about: they were
+        // finding out where a piece can go, which is a thing a player does constantly, and every
+        // one of those attempts earned a deliberately unpleasant buzz. A sound is for something
+        // that HAPPENED.
+        if (!move) return false;
         if (move === "promotion") {
           setPromotion({ from, to, color: ourColor as ChessColor });
           return true;
@@ -381,10 +379,9 @@ export function useChessGame(args: {
       // A PREMOVE is not judged by the rules: it is a move into the position their own move will
       // make, so what it is held to is where the piece could go at all (lib/chess-premove.ts).
       if (canPremove && ourColor && controller) {
-        if (!chessPremoveTargets(liveFen, from, ourColor).includes(to)) {
-          playChessSound("illegal", args.sounds && soundsEnabled);
-          return false;
-        }
+        // Silent for the same reason: a premove the geometry refuses is a square the piece cannot
+        // reach, and the board saying so by putting the piece back is the whole of the answer.
+        if (!chessPremoveTargets(liveFen, from, ourColor).includes(to)) return false;
         if (chessPremoveIsPromotion(liveFen, from, to, ourColor)) {
           // A premoved promotion asks now and keeps the answer: asking the moment it fires would
           // be a dialog appearing while the reader is looking somewhere else.

@@ -2271,6 +2271,10 @@ if (import.meta.main) {
       // one each and a draw — so the score reads a half, and the fourth is the finished game the
       // page is opened on. Every one is seeded, because playing three games out is twenty moves of
       // waiting for a sentence and a button.
+      //
+      // They are shot off the SIDEBAR's own controls block rather than off the board column: the
+      // board column holds the board and the two seats and nothing else, which is what makes the
+      // board as large as the page can draw it.
       await seed({ mine: "w", moves: ["e4", "e5"], base: 600, ending: "theyResigned" });
       await seed({ mine: "b", moves: ["d4", "d5"], base: 600, ending: "weResigned" });
       await seed({ mine: "w", moves: ["c4", "c5"], base: 600, ending: "draw" });
@@ -2287,9 +2291,10 @@ if (import.meta.main) {
       await page.locator('[data-testid="chess-series"]').waitFor();
       await page.locator('[data-testid="chess-rematch"]').waitFor();
       await page.waitForTimeout(400);
-      await shot(`${out}-series-light.png`, boardColumn);
+      const controls = '[data-testid="chess-page-controls"]';
+      await shot(`${out}-series-light.png`, controls);
       await setTheme("dark");
-      await shot(`${out}-series-dark.png`, boardColumn);
+      await shot(`${out}-series-dark.png`, controls);
       await setTheme("light");
       // And the same pair on the CARD in the conversation, where a finished game is met first: the
       // score and the rematch are both there, through the same hook the page uses.

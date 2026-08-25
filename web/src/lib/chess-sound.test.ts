@@ -22,7 +22,6 @@ const names: ChessSoundName[] = [
   "win",
   "lose",
   "draw",
-  "illegal",
   "premove",
   "lowTime",
   "notify",
@@ -90,15 +89,23 @@ describe("the recordings", () => {
     expect(CHESS_SOUND_FILE.draw).toBe("game-end");
   });
 
-  it("needs exactly the twelve files this build pins", () => {
+  it("needs exactly the eleven files this build pins", () => {
     // `chess_sound::SOUND_FILES` is the other side of this, and a Rust test scans this file for each
-    // name. Twelve recordings over fourteen names is the whole of the arithmetic.
-    expect(chessSoundFileNames()).toHaveLength(12);
-    expect(new Set(chessSoundFileNames()).size).toBe(12);
+    // name. Eleven recordings over thirteen names is the whole of the arithmetic.
+    expect(chessSoundFileNames()).toHaveLength(11);
+    expect(new Set(chessSoundFileNames()).size).toBe(11);
+  });
+
+  it("names NO sound for a move the rules refuse, because that plays nothing", () => {
+    // A refused move is answered by the board putting the piece back, and nothing happened that the
+    // reader has to be told about — so `illegal.mp3` is not pinned, not served and not in the
+    // palette. A file nothing plays is a recording fetched for nobody.
+    expect(Object.keys(CHESS_SOUND_FILE)).not.toContain("illegal");
+    expect(chessSoundFileNames()).not.toContain("illegal");
   });
 
   it("builds an address only from a route this app serves", () => {
-    const route = "/__chess-sound/chesscom-default-94997488/";
+    const route = "/__chess-sound/chesscom-default-eee1b887/";
     expect(chessSoundUrl(route, "capture")).toBe(`${route}capture.mp3`);
     expect(chessSoundUrl(route, "win")).toBe(`${route}game-end.mp3`);
     // The BACKEND names the route, so this is a guard rather than a parse — the rule
@@ -166,6 +173,6 @@ describe("playChessSound", () => {
   it("fetches nothing where there is no browser to fetch with", () => {
     // `primeChessSounds` is called from an effect, and this module is imported by code that is
     // server-rendered: it must be inert rather than throwing on a missing window.
-    expect(() => primeChessSounds("/__chess-sound/chesscom-default-94997488/")).not.toThrow();
+    expect(() => primeChessSounds("/__chess-sound/chesscom-default-eee1b887/")).not.toThrow();
   });
 });

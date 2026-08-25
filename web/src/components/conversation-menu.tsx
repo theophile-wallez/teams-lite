@@ -31,7 +31,7 @@ import {
   meetingUnavailableReason,
 } from "~/lib/call";
 import type { ChessGame } from "~/lib/chess-thread";
-import { CHESS_DEFAULT_TIME, CHESS_TIME_CONTROLS } from "~/lib/chess-clock";
+import { CHESS_DEFAULT_TIME, CHESS_TIME_CONTROLS, chessTimeControlsMatch } from "~/lib/chess-clock";
 import {
   CHESS_ENGINE_DEFAULT_ELO,
   CHESS_ENGINE_STRENGTHS,
@@ -196,15 +196,31 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
   const navigate = useNavigate();
   const [challenging, setChallenging] = useState(false);
   const [color, setColor] = useState<"w" | "b" | "random">("random");
-  // THE COMPUTER: whether its rows are disclosed, and at what strength the next game is opened.
-  // Both are kept across an open and close of the menu exactly as the colour and the clock are —
-  // they are preferences rather than steps.
+  // THE COMPUTER: whether its rows are disclosed, and at what strength the next game is opened. The
+  // STRENGTH is kept across an open and close of the menu exactly as the colour and the clock are —
+  // it is a preference. The DISCLOSURE is not: it is folded on close like the challenge's own form.
   const [engineOpen, setEngineOpen] = useState(false);
   const [engineElo, setEngineElo] = useState(CHESS_ENGINE_DEFAULT_ELO);
   // THE CLOCK the next challenge carries. Ten minutes out of the box, which is what somebody who
   // says "fancy a game?" in a chat means — and it is kept across an open and close of the menu
   // exactly as the colour is, because it is a preference rather than a step.
   const [time, setTime] = useState<ChessTimeControl | null>(CHESS_DEFAULT_TIME);
+  /**
+   * THE CLOCK A GAME AGAINST THE COMPUTER CARRIES, and it is NO CLOCK out of the box.
+   *
+   * A separate state from the human challenge's, and the split is the point rather than a
+   * convenience: a clock is an agreement between two people about how long each may think, and there
+   * is nobody on the other side of an engine game to hold to one. Worse, it cannot be a fair one —
+   * an engine's clock is drawn as STATED rather than counted down (see `engineSide` in
+   * lib/chess-clock.ts), because a machine cannot think while the app is closed — so an engine game
+   * can be LOST on time and never won on time. Ten minutes inherited from the human default was
+   * therefore a countdown against a player whose own clock does not really run.
+   *
+   * It is still OFFERED, in a row of its own beside the strength: a reader who wants to practise
+   * blitz against a machine is asking for exactly the clock this refuses to assume. It is kept
+   * across an open and close of the menu like every other pick here — a preference, not a step.
+   */
+  const [engineTime, setEngineTime] = useState<ChessTimeControl | null>(null);
   const [chessError, setChessError] = useState<string | null>(null);
   const [engineBusy, setEngineBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -248,12 +264,19 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
   // control is in, and what a challenge reaches, are decisions with tests of their own, and two
   // spellings of them would drift at the first group chat.
   const engine = useAppState((s) => s.chessEngine);
-  /** The press that starts the game, brought INTO VIEW when the block that holds it opens.
+  /**
+   * The press that starts the game, brought INTO VIEW whenever the block that holds it is on screen.
    *
-   *  The engine's disclosure is four rows tall — a sentence, seven strengths, three sides and the
-   *  press — and this menu already lists every running game above it, so on a phone the one row the
-   *  reader came for opened below the fold. The rule the merge-request page holds for its own
-   *  actions: `nearest`, so nothing moves when it is already readable. */
+   * The engine's disclosure is FIVE rows tall — a sentence, seven strengths, three sides, nine
+   * clocks and the press — and this menu already lists every running game above it, so the one row
+   * the reader came for opens below the fold. The rule the merge-request page holds for its own
+   * actions: `nearest`, so nothing moves when it is already readable.
+   *
+   * It fires on the disclosure OPENING, which is why the disclosure itself is folded when the menu
+   * closes (see `onOpenChange`) — left standing, a second open of the menu changed neither
+   * dependency and nothing scrolled, so the reader was handed a form with its action row off the
+   * bottom. That went unseen because a spec opens the row fresh every time.
+   */
   const enginePlayRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (engineOpen && engine.present) enginePlayRef.current?.scrollIntoView({ block: "nearest" });
@@ -337,7 +360,9 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
       ledger: {
         ...newChessLedger(mine),
         opened: true,
-        time,
+        // The engine's OWN clock pick, which is no clock unless the reader asked for one: a time
+        // control is an agreement between two people, and a machine's clock cannot really run.
+        time: engineTime,
         // The token that says the opponent is a machine — and the whole reason one ledger may carry
         // both sides' moves (see lib/chess-wire.ts).
         engineElo,
@@ -393,10 +418,16 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
           // A closed menu forgets that a challenge was being set up, and forgets a refusal it
           // reported: reopening it a minute later to flip the agent switch must not present a
           // half-filled form, and a stale failure sentence would be a report about a press
-          // the reader has moved on from. The COLOUR is deliberately kept — it is a
-          // preference, not a step.
+          // the reader has moved on from. The COLOUR, the CLOCKS and the STRENGTH are deliberately
+          // kept — they are preferences, not steps.
+          //
+          // The COMPUTER's disclosure is folded for the same reason the challenge's is, and it used
+          // to be kept: it is a form five rows tall, not a preference, and left standing it also
+          // stopped its own action row from being scrolled into view on the next open (see
+          // `enginePlayRef`).
           if (!next) {
             setChallenging(false);
+            setEngineOpen(false);
             setChessError(null);
           }
         }}
@@ -596,20 +627,15 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
                           played before this feature had none, and a game with no clock is a real
                           thing two people may want. */}
                       <div className="flex flex-wrap items-center gap-1 px-2.5 pb-1.5">
-                        {CHESS_TIME_CONTROLS.map((option) => {
-                          const picked =
-                            (option.time?.base ?? null) === (time?.base ?? null) &&
-                            (option.time?.increment ?? null) === (time?.increment ?? null);
-                          return (
-                            <PickButton
-                              key={option.label}
-                              testid={`chess-time-${option.time ? `${option.time.base}-${option.time.increment}` : "none"}`}
-                              picked={picked}
-                              onPick={() => setTime(option.time)}
-                              label={option.label}
-                            />
-                          );
-                        })}
+                        {CHESS_TIME_CONTROLS.map((option) => (
+                          <PickButton
+                            key={option.label}
+                            testid={`chess-time-${option.time ? `${option.time.base}-${option.time.increment}` : "none"}`}
+                            picked={chessTimeControlsMatch(option.time, time)}
+                            onPick={() => setTime(option.time)}
+                            label={option.label}
+                          />
+                        ))}
                       </div>
                       {/* What the press costs, before it is pressed: it is the one fact the user
                           needs and the one thing they cannot take back after. */}
@@ -751,9 +777,31 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
                           />
                         ))}
                       </div>
+                      {/* THE CLOCK, and it is the engine's OWN pick rather than the human
+                          challenge's — no clock unless the reader asks for one. A time control is
+                          an agreement between two people about how long each may think, and an
+                          engine's clock is drawn as stated rather than counted down, so an engine
+                          game can be lost on time and never won on it. */}
+                      <p className="px-2.5 pb-1 text-[11px] leading-snug text-text-dim">
+                        On a clock?
+                      </p>
+                      <div className="flex flex-wrap items-center gap-1 px-2.5 pb-1.5">
+                        {CHESS_TIME_CONTROLS.map((option) => (
+                          <PickButton
+                            key={option.label}
+                            testid={`chess-engine-time-${option.time ? `${option.time.base}-${option.time.increment}` : "none"}`}
+                            picked={chessTimeControlsMatch(option.time, engineTime)}
+                            onPick={() => setEngineTime(option.time)}
+                            label={option.label}
+                          />
+                        ))}
+                      </div>
+                      {/* The clock LAST, as the fragment the human challenge's own sentence ends
+                          with: `clockWords` is lowercase, so "no clock" opening a sentence read as
+                          a line somebody had not finished writing. */}
                       <p className="px-2.5 pb-1.5 text-[11px] leading-snug text-text-faint">
-                        {clockWords(time)}. The game is posted here under your name, so it replays on
-                        every device — and everybody in this conversation can see it.
+                        The game is posted here under your name, so it replays on every device — and
+                        everybody in this conversation can see it. {clockWords(engineTime)}.
                       </p>
                       <DropdownMenuItem
                         ref={enginePlayRef}

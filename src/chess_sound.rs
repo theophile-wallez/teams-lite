@@ -31,7 +31,7 @@
 //! holds for a reduced view: the better thing is the addition, so the feature can never cost a
 //! reader the thing itself.
 //!
-//! **EVERY NUMBER BELOW IS MEASURED**, on 2026-08-25, by fetching all twelve files and hashing them.
+//! **EVERY NUMBER BELOW IS MEASURED**, on 2026-08-25, by fetching all eleven files and hashing them.
 //! The digests are the whole of the safety here: a length alone is met by any 5 353 bytes, and three
 //! of these files are exactly that long.
 
@@ -47,7 +47,7 @@ use crate::pinned_download::{self, PinnedFile};
 /// The table below cannot be written in terms of it: a `const` array of `&'static str` needs
 /// literals, and `concat!` takes literals rather than constants. So this is the CHECKER rather than
 /// the source — `every_sound_is_pinned_by_name_size_and_digest` holds every entry to `base + name`,
-/// which is what makes the twelve spellings one address.
+/// which is what makes the eleven spellings one address.
 #[cfg(test)]
 const SOUND_BASE: &str = "https://images.chesscomfiles.com/chess-themes/sounds/_MP3_/default/";
 
@@ -66,9 +66,9 @@ pub const SOUND_LABEL: &str = "chess.com's default board sounds";
 ///
 /// `chess_sound::tests::the_version_is_the_table_s_own_digest` recomputes it, so it cannot drift
 /// from the table it names.
-pub const SOUND_VERSION: &str = "chesscom-default-94997488";
+pub const SOUND_VERSION: &str = "chesscom-default-eee1b887";
 
-/// The twelve, MEASURED on 2026-08-25 (fetched from the URL each one names, then `sha256sum`).
+/// The eleven, MEASURED on 2026-08-25 (fetched from the URL each one names, then `sha256sum`).
 ///
 /// The set is the one the user named, event by event, and it is deliberately not everything that
 /// directory holds: chess.com also publishes `game-win-long`, `game-lose-long` and `game-draw`,
@@ -76,7 +76,7 @@ pub const SOUND_VERSION: &str = "chesscom-default-94997488";
 /// `web/src/lib/chess-sound.ts`, where that trade is stated where a reader of the palette meets it).
 ///
 /// **THE ORDER IS PART OF [`SOUND_VERSION`]**, which is computed over this table as written.
-pub const SOUND_FILES: [PinnedFile; 12] = [
+pub const SOUND_FILES: [PinnedFile; 11] = [
     PinnedFile {
         name: "game-start.mp3",
         url: concat!(
@@ -166,15 +166,6 @@ pub const SOUND_FILES: [PinnedFile; 12] = [
         ),
         size: 3_817,
         sha256: "5cfab87e94b55e1e51f0ac13856e6ba223e2fda6d2f4dd43f7b7e995ab393007",
-    },
-    PinnedFile {
-        name: "illegal.mp3",
-        url: concat!(
-            "https://images.chesscomfiles.com/chess-themes/sounds/_MP3_/default/",
-            "illegal.mp3"
-        ),
-        size: 4_585,
-        sha256: "3224eb7a6d93e52229ddcb49c62e584764d1474c123d25c91ecb2c74aa6291f9",
     },
     PinnedFile {
         name: "tenseconds.mp3",
@@ -277,7 +268,7 @@ mod tests {
     /// The pinned table is the MEASURED one, and the numbers are the whole of its safety.
     #[test]
     fn every_sound_is_pinned_by_name_size_and_digest() {
-        assert_eq!(SOUND_FILES.len(), 12, "the twelve events a board has");
+        assert_eq!(SOUND_FILES.len(), 11, "the eleven recordings a board plays");
         for file in SOUND_FILES.iter() {
             assert!(
                 file.url.starts_with(SOUND_BASE),
@@ -301,7 +292,7 @@ mod tests {
             assert!(file.size > 0 && file.size < 64 * 1024, "{} is small", file.name);
         }
         // The measured total, so a typo in one size fails here rather than in a reader's browser.
-        assert_eq!(total_bytes(), 64_236);
+        assert_eq!(total_bytes(), 59_651);
 
         // THREE of them are the SAME LENGTH and hold different recordings, which is why a length is
         // never what this module trusts.
@@ -358,7 +349,7 @@ mod tests {
                 file.name
             );
         }
-        // And NOTHING else: the list is what a request is matched against, so a thirteenth entry
+        // And NOTHING else: the list is what a request is matched against, so a twelfth entry
         // would be a file this build never verified.
         assert_eq!(
             route.matches(".mp3\"").count(),
@@ -436,7 +427,7 @@ mod tests {
 
     /// THE WHOLE SET, against the real CDN — the one check that cannot be faked.
     ///
-    /// Everything above is arithmetic over a pinned table; this fetches the twelve real files,
+    /// Everything above is arithmetic over a pinned table; this fetches the eleven real files,
     /// hashes them and installs them. It is `#[ignore]`d because it reaches the network:
     ///
     /// ```text
@@ -466,7 +457,7 @@ mod tests {
             );
             println!("[chess-sound] {} verified: {} bytes", file.name, bytes.len());
         }
-        // A SECOND download is a no-op rather than twelve more requests.
+        // A SECOND download is a no-op rather than eleven more requests.
         rt.block_on(async { download(&http).await }).expect("idempotent");
         assert_eq!(forget().unwrap(), total_bytes());
         unsafe { std::env::remove_var("TEAMS_LITE_CHESS_SOUND_DIR") };

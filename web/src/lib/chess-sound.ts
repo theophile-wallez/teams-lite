@@ -7,7 +7,7 @@
  * three decisions shape everything here:
  *
  *   - **THE RECORDINGS COME FROM THIS MACHINE, never from chess.com.** The backend fetches the
- *     twelve files once, verifies each against a digest it pins, and serves them from this app's own
+ *     eleven files once, verifies each against a digest it pins, and serves them from this app's own
  *     origin (src/chess_sound.rs, web/chess-sound-file.ts). A page that fetched them itself would
  *     tell chess.com's CDN the reader's address every time it drew a board — the read receipt
  *     § Mail strips out of every message body, in another costume. This module is handed a ROUTE by
@@ -47,7 +47,6 @@ export type ChessSoundName =
   | "win"
   | "lose"
   | "draw"
-  | "illegal"
   | "premove"
   | "lowTime"
   | "notify";
@@ -77,7 +76,6 @@ export const CHESS_SOUND_FILE: Record<ChessSoundName, string> = {
   win: "game-end",
   lose: "game-end",
   draw: "game-end",
-  illegal: "illegal",
   premove: "premove",
   lowTime: "tenseconds",
   notify: "notify",
@@ -139,7 +137,7 @@ function note(
 /**
  * The FALLBACK palette, played until the recordings are on this machine. Each sound has its own
  * SHAPE rather than being the same click at another volume: a reader hears which of them it was
- * without looking at the board, which is the only reason to have fourteen.
+ * without looking at the board, which is the only reason to have thirteen.
  */
 export const CHESS_SOUNDS: Record<ChessSoundName, ChessSoundRecipe> = {
   // The commonest sound in the feature, so it is the shortest and the quietest.
@@ -180,10 +178,6 @@ export const CHESS_SOUNDS: Record<ChessSoundName, ChessSoundRecipe> = {
       note(587, 0, 0.09, 0.3),
       { kind: "tone", wave: "sine", freq: 591, at: 0, attack: 0.01, decay: 0.3, peak: 0.07 },
     ],
-  },
-  // A refusal, and the one sound here that is deliberately unpleasant.
-  illegal: {
-    layers: [{ kind: "tone", wave: "square", freq: 150, at: 0, attack: 0.002, decay: 0.1, peak: 0.055 }],
   },
   // Setting a premove is the quietest thing in the palette: it is a private intention, and it
   // happens while the opponent is still thinking.
@@ -237,7 +231,7 @@ export function chessSoundUrl(route: string, name: ChessSoundName): string | nul
   return `${route}${CHESS_SOUND_FILE[name]}.mp3`;
 }
 
-/** Every distinct file the palette needs — fourteen names over twelve recordings. */
+/** Every distinct file the palette needs — thirteen names over eleven recordings. */
 export function chessSoundFileNames(): string[] {
   return [...new Set(Object.values(CHESS_SOUND_FILE))];
 }
