@@ -89,7 +89,7 @@ export default function ChessGameCard(props: {
         id={`chess-${game.id}`}
         fen={board.fen}
         orientation={board.orientation}
-        playable={board.ourMove ? game.ourColor : null}
+        movable={board.movable}
         selected={board.selected}
         targets={board.targets}
         lastMove={board.lastMove}

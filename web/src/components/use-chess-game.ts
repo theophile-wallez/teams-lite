@@ -18,7 +18,10 @@
  *     position. Their clock is running; leaving them reviewing an old position would cost them
  *     the game, which is the one thing a review must not do.
  *   - **A PREMOVE is a private intention**: nothing is published until it is legal, and the
- *     moment their opponent's move lands it plays itself for a tenth of a second.
+ *     moment their opponent's move lands it plays itself for a tenth of a second. What it may DO
+ *     is the one question here the rules do not answer — a premove is played into the position
+ *     their move will make, so it is offered wherever the piece could go at all
+ *     (lib/chess-premove.ts) and re-asked of the real rules at the moment it fires.
  *   - **A promotion is asked over the board**, and answered by the rules rather than by spelling
  *     a SAN here.
  *   - **The sounds follow the MOVES, not the presses**: the board makes a noise when the position
@@ -32,6 +35,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chessPublishFor, type ChessAct } from "~/lib/chess-act";
 import { type ChessClockReading } from "~/lib/chess-clock";
 import { NO_CHESS_ENGINE } from "~/lib/chess-engine";
+import { chessPremoveIsPromotion, chessPremoveTargets } from "~/lib/chess-premove";
 import { chessOutcomeSound, chessSoundFor, playChessSound } from "~/lib/chess-sound";
 import {
   chessGameIsSettled,
@@ -110,6 +114,12 @@ export type ChessBoardApi = {
   promotion: ChessPromotionPrompt | null;
   /** Whether the reader may move right now. */
   ourMove: boolean;
+  /** Whose pieces the reader may PICK UP — their own on their own turn, and their own while the
+   *  opponent thinks, which is what a premove is. Null on a board nobody may touch. It is not
+   *  `ourMove`, and reading it as one is what made a premove impossible to DRAG: the renderer
+   *  disables every piece when nothing is movable, so the whole gesture was dead on the one turn
+   *  a premove is made in. */
+  movable: ChessColor | null;
   /** A move list the rules could not replay stops here, and the board SAYS so. */
   brokeAt: number | null;
   /** Which ply is drawn, and whether that is the newest one. */
@@ -126,7 +136,9 @@ export type ChessBoardApi = {
   moves: { ply: number; san: string; clockMs: number | null }[];
   press: (square: string) => void;
   drop: (from: string, to: string) => boolean;
-  rightClick: (square: string) => void;
+  /** A right press anywhere on the board: it takes a queued premove and a selection back, and it
+   *  is about no square in particular — which is why it is handed none. */
+  rightClick: () => void;
   promote: (piece: ChessPromotionPiece) => void;
   cancelPromotion: () => void;
   goTo: (ply: number) => void;
@@ -217,38 +229,34 @@ export function useChessGame(args: {
   const canPremove =
     !settled && atLive && !!ourColor && !!game.opponent && !!controller && game.turn !== ourColor;
 
-  /** The position a premove is chosen in: the live one, with the turn handed to us. chess.js is
-   *  asked what is legal there, so a premove is a real move rather than any two squares — and a
-   *  position that cannot be spelled that way (the opponent's king would be in check) simply
-   *  offers none. */
-  const premoveChess = useMemo(() => {
-    if (!canPremove || !ourColor) return null;
-    const parts = replay.chess.fen().split(" ");
-    parts[1] = ourColor;
-    // A flipped turn makes any en-passant target nonsense, and a stale one is what chess.js
-    // would refuse the FEN for.
-    parts[3] = "-";
-    try {
-      return new Chess(parts.join(" "));
-    } catch {
-      return null;
-    }
-  }, [canPremove, ourColor, replay.chess]);
+  /** The live position, which is what a premove is read from. It is the position BEFORE their
+   *  move, so the rules are the wrong judge of one — see lib/chess-premove.ts. Held against the
+   *  replay rather than taken per render: this hook re-renders on every frame of a running clock,
+   *  and the FEN moves only when the moves do. */
+  const liveFen = useMemo(() => replay.chess.fen(), [replay.chess]);
 
-  /** Which rules answer "what can this square do": the real position on our turn, the flipped one
-   *  while we are setting a premove, and nothing at all otherwise. */
-  const asking = ourMove ? chess : premoveChess;
+  /** Where the selected piece might go once they have moved. Empty unless a premove is on offer,
+   *  so the two answers below can never both be non-empty. */
+  const premoveTargets = useMemo(() => {
+    if (!canPremove || !ourColor || !selected) return [];
+    return chessPremoveTargets(liveFen, selected, ourColor);
+  }, [canPremove, liveFen, ourColor, selected]);
 
-  const fromSelected: Move[] = useMemo(() => {
-    if (!asking || !selected) return [];
+  /** Where the selected piece may go RIGHT NOW, which is the rules' own answer. */
+  const legalTargets = useMemo(() => {
+    if (!ourMove || !selected) return [];
     try {
-      return asking.moves({ square: selected as Square, verbose: true });
+      return [
+        ...new Set(chess.moves({ square: selected as Square, verbose: true }).map((m) => m.to)),
+      ];
     } catch {
       return [];
     }
-  }, [asking, selected]);
+  }, [chess, ourMove, selected]);
 
-  const targets = useMemo(() => [...new Set(fromSelected.map((m) => m.to))], [fromSelected]);
+  /** The dots and rings the board draws: the legal moves on our own turn, and what a premove
+   *  might become while they think. */
+  const targets = ourMove ? legalTargets : premoveTargets;
 
   /** The king in check, which is the one square the renderer cannot work out for itself. */
   const check = useMemo(() => {
@@ -340,13 +348,14 @@ export function useChessGame(args: {
         playMove(move.san);
         return true;
       }
-      if (premoveChess && controller) {
-        const move = resolve(premoveChess, from, to);
-        if (!move) return false;
-        if (move === "promotion") {
+      // A PREMOVE is not judged by the rules: it is a move into the position their own move will
+      // make, so what it is held to is where the piece could go at all (lib/chess-premove.ts).
+      if (canPremove && ourColor && controller) {
+        if (!chessPremoveTargets(liveFen, from, ourColor).includes(to)) return false;
+        if (chessPremoveIsPromotion(liveFen, from, to, ourColor)) {
           // A premoved promotion asks now and keeps the answer: asking the moment it fires would
           // be a dialog appearing while the reader is looking somewhere else.
-          setPromotion({ from, to, color: ourColor as ChessColor });
+          setPromotion({ from, to, color: ourColor });
           return true;
         }
         controller.setChessPremove(args.conversationId, game.id, { from, to });
@@ -358,12 +367,13 @@ export function useChessGame(args: {
     [
       args.conversationId,
       args.sounds,
+      canPremove,
       chess,
       controller,
       game.id,
+      liveFen,
       ourColor,
       ourMove,
-      premoveChess,
       playMove,
       resolve,
       soundsEnabled,
@@ -380,7 +390,8 @@ export function useChessGame(args: {
         setSelected(null);
         return;
       }
-      if (!asking) return;
+      // Nothing to pick up: not our turn, and not a moment a premove means anything either.
+      if (!ourMove && !canPremove) return;
       if (selected === square) {
         setSelected(null);
         return;
@@ -391,13 +402,26 @@ export function useChessGame(args: {
       }
       // Selecting one's own piece, and nothing else: a press on an empty square with nothing
       // selected means nothing — and it takes a queued premove back, which is what a click on
-      // the board means once one is set.
-      const piece = asking.get(square as Square);
+      // the board means once one is set. The LIVE position is what is asked, because that is the
+      // board on screen whether the reader is moving or premoving.
+      const piece = chess.get(square as Square);
       const mine = piece && piece.color === ourColor;
       if (!mine && premove && controller) controller.setChessPremove(args.conversationId, game.id, null);
       setSelected(mine ? square : null);
     },
-    [args.conversationId, asking, atLive, attempt, controller, game.id, ourColor, premove, selected],
+    [
+      args.conversationId,
+      atLive,
+      attempt,
+      canPremove,
+      chess,
+      controller,
+      game.id,
+      ourColor,
+      ourMove,
+      premove,
+      selected,
+    ],
   );
 
   const drop = useCallback(
@@ -425,7 +449,7 @@ export function useChessGame(args: {
         if (move && move !== "promotion") playMove(move.san);
         return;
       }
-      if (premoveChess && controller) {
+      if (canPremove && controller) {
         controller.setChessPremove(args.conversationId, game.id, {
           from: target.from,
           to: target.to,
@@ -437,11 +461,11 @@ export function useChessGame(args: {
     [
       args.conversationId,
       args.sounds,
+      canPremove,
       chess,
       controller,
       game.id,
       ourMove,
-      premoveChess,
       playMove,
       promotion,
       resolve,
@@ -682,6 +706,7 @@ export function useChessGame(args: {
     premove,
     promotion,
     ourMove,
+    movable: (ourMove || canPremove) && ourColor ? ourColor : null,
     brokeAt: replay.brokeAt,
     viewPly,
     atLive,

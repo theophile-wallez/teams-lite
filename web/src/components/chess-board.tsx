@@ -27,8 +27,11 @@
  *     through any option), which is right for a board that owns its screen and wrong for one
  *     sitting in a scrolling history: a finger landing on any of the 32 pieces could not scroll
  *     the conversation, which is most of the width of a phone. `scrollable` frees it (see the
- *     rule in styles/app.css) and turns touch dragging off with it, so the card is played by
- *     TAP-TAP on a phone and by dragging with a mouse, and the history scrolls either way.
+ *     rule in styles/app.css) and turns dragging off with it, so a board in the history is played
+ *     by TAP-TAP and the conversation scrolls under it. It costs the MOUSE its drag on that
+ *     board — `allowDragging` is per board and not per pointer, and dnd-kit's own touch sensor
+ *     calls `preventDefault()` on `touchmove` whatever the CSS says — which is the honest price of
+ *     the scroll. The full-screen page keeps both gestures, and a premove is made with either.
  *   - **Every piece is a dnd-kit draggable**, which spreads `role="button" tabIndex={0}` onto
  *     its wrapper — 32 tab stops per board, each one a thing a browser can scroll INTO view.
  *     They are taken out of the tab order here, because the board is played by pressing squares
@@ -63,6 +66,12 @@ const PROMOTION_LABEL: Record<ChessPromotionPiece, string> = {
   b: "Bishop",
 };
 
+/** The square a press landed on, or null for the board's own edge — the renderer names every one
+ *  of its squares with `data-square`, which is also what every spec and capture reads. */
+function squareUnder(node: EventTarget | null): string | null {
+  return (node as Element | null)?.closest?.("[data-square]")?.getAttribute("data-square") ?? null;
+}
+
 /** Their own spelling of a side, which only this file has to know. */
 function orientationOf(color: ChessColor): "white" | "black" {
   return color === "w" ? "white" : "black";
@@ -73,9 +82,14 @@ export function ChessBoard(props: {
   fen: string;
   /** Which side is at the bottom: the reader's own, or white for somebody watching. */
   orientation: ChessColor;
-  /** A board nobody may play — a spectator's, a settled game's, one being read at an earlier
-   *  ply — passes null. */
-  playable: ChessColor | null;
+  /** Whose pieces may be PICKED UP: the reader's own on their turn, and their own while the
+   *  opponent thinks, because that is a premove. A board nobody may touch — a spectator's, a
+   *  settled game's, one being read at an earlier ply — passes null.
+   *
+   *  It is deliberately not "whose turn it is". The renderer disables every piece when nothing is
+   *  movable (`allowDragging`, and `canDragPiece` per piece), so a board that named the mover here
+   *  could not be PREMOVED on by dragging at all — which is the whole gesture on a desktop. */
+  movable: ChessColor | null;
   selected: ChessSquare | null;
   targets: ChessSquare[];
   lastMove: [ChessSquare, ChessSquare] | null;
@@ -88,8 +102,9 @@ export function ChessBoard(props: {
   /** A piece dropped on a square. Answers whether the move was legal, which is what stops
    *  their snap-back animation on a move this app has accepted. */
   onDrop?: (from: ChessSquare, to: ChessSquare) => boolean;
-  /** A right press with no drag — how a premove and a selection are cancelled. */
-  onRightClick?: (square: ChessSquare) => void;
+  /** A right press with no drag, ANYWHERE on the board — how a premove and a selection are
+   *  cancelled. It carries no square, because what it cancels is not about one. */
+  onRightClick?: () => void;
   /** Unique per board on the page: a thread can hold several finished games, and their piece
    *  elements are keyed by it. */
   id: string;
@@ -109,6 +124,19 @@ export function ChessBoard(props: {
   const targets = new Set(props.targets);
   const boxRef = useRef<HTMLDivElement | null>(null);
 
+  // A RIGHT PRESS TAKES A PREMOVE BACK, and which square it landed on does not matter — so it is
+  // decided here, once, for the whole board, on the mouse UP.
+  //
+  // The UP is not a detail. Chromium dispatches `contextmenu` immediately after `mousedown`, at the
+  // square the press STARTED on and before the pointer has moved — measured, both for a press and
+  // for a drag. So at `contextmenu` time a press and the beginning of a right-DRAG are the same
+  // event, and the renderer's own `onSquareRightClick` (which fires from `contextmenu` and guards
+  // itself with state it sets on mouseup) cannot tell them apart: drawing an ARROW silently threw
+  // away the reader's queued premove. By the time the button comes up the gesture is known, and
+  // WHERE it comes up is the whole difference — the square it began on is a press, any other square
+  // is an arrow.
+  const rightPressFrom = useRef<string | null | undefined>(undefined);
+
   // The renderer's pieces are dnd-kit draggables, and dnd-kit puts `tabIndex={0}` on each. The
   // wrappers are taken out of the tab order after every render: React only re-applies the
   // attribute when its own value changes (which happens while a drag starts), and the effect
@@ -122,9 +150,9 @@ export function ChessBoard(props: {
     }
   });
 
-  // Dragging is offered only to the player whose move it is, and never by TOUCH on a board that
-  // has to let the history scroll under it.
-  const dragging = !!props.playable && !!props.onDrop && !props.scrollable;
+  // Dragging is offered to whoever may pick a piece up — their own turn, or a premove on the
+  // opponent's — and never on a board that has to let the history scroll under it.
+  const dragging = !!props.movable && !!props.onDrop && !props.scrollable;
 
   // Their own defaults with this app's inks over them: the geometry of an arrow (its width, its
   // head, how much it is shortened) is theirs and this app has no opinion about it — only the
@@ -149,6 +177,27 @@ export function ChessBoard(props: {
       data-testid="chess-board"
       data-orientation={props.orientation}
       data-scrollable={props.scrollable ? "true" : undefined}
+      // The three handlers of the right press (see `rightPressFrom` above). A square is remembered
+      // rather than a point, so a press that wanders a few pixels inside one square is still a
+      // press — which is what a hand on a mouse actually does.
+      onMouseDown={(event) => {
+        rightPressFrom.current = event.button === 2 ? squareUnder(event.target) : undefined;
+      }}
+      onMouseUp={(event) => {
+        if (event.button !== 2) return;
+        const from = rightPressFrom.current;
+        rightPressFrom.current = undefined;
+        // No press began on this board — a button released over it after starting elsewhere — so
+        // there is no gesture here to read.
+        if (from === undefined) return;
+        // A right DRAG between two squares is an ARROW, and never a cancel. `null` on both sides is
+        // a press on the board's own edge, which is still "anywhere on the board" to the reader.
+        if (from !== squareUnder(event.target)) return;
+        props.onRightClick?.();
+      }}
+      // The browser's own menu is suppressed over the whole board, edge included — which is what
+      // the renderer already does on every square of it.
+      onContextMenu={(event) => event.preventDefault()}
       // Square whatever width the box gives it, and it never grows past it. Their grid is
       // width/height 100% with aspect-ratio squares, so the box is what decides the size.
       className="relative aspect-square w-full overflow-hidden rounded-lg border border-chess-edge"
@@ -172,7 +221,7 @@ export function ChessBoard(props: {
           alphaNotationStyle: { fontSize: "9px", opacity: 0.9 },
           numericNotationStyle: { fontSize: "9px", opacity: 0.9 },
           allowDragging: dragging,
-          canDragPiece: ({ piece }) => pieceColor(piece.pieceType) === props.playable,
+          canDragPiece: ({ piece }) => pieceColor(piece.pieceType) === props.movable,
           allowDragOffBoard: false,
           // A board inside a virtualized history must not scroll itself under the reader.
           allowAutoScroll: false,
@@ -186,7 +235,9 @@ export function ChessBoard(props: {
           showAnimations: props.animate !== false,
           animationDurationInMs: props.animate === false ? 0 : 180,
           onSquareClick: ({ square }: SquareHandlerArgs) => props.onSquare?.(square),
-          onSquareRightClick: ({ square }: SquareHandlerArgs) => props.onRightClick?.(square),
+          // `onSquareRightClick` is deliberately NOT wired: the cancel is one rule for the whole
+          // board, made on the mouse UP, because theirs fires before a drag can be told from a
+          // press (see `rightPressFrom` above).
           onPieceDrop: ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) =>
             !!targetSquare && !!props.onDrop && props.onDrop(sourceSquare, targetSquare),
           // Our own meaning, over their square. It replaces the element they would style from

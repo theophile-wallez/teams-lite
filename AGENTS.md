@@ -2890,7 +2890,8 @@ user. Two independent mechanisms enforce that split:
   control, the challenge popover, the board in both themes, a game in progress with its score
   sheet, the armed resignation, the board at a phone's width, the card a colleague's challenge
   leaves for the reader to answer, the STRIP of running games, the full-screen PAGE, the promotion
-  picker — and the COMPUTER: the row that says the engine is 7.3 MB, the Elo picker, a game against
+  picker, the PREMOVE and the dots that set it — and the COMPUTER: the row that says the engine is
+  7.3 MB, the Elo picker, a game against
   it and what it costs in Settings: `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`:
   the pawn in the header is 20px). That run needs no engine on the machine: it writes the same STUB
   worker the E2E suite does into a temporary directory and points `TEAMS_LITE_ENGINE_DIR` at it, so
@@ -4792,7 +4793,8 @@ they like. Every game is carried by ordinary Teams messages; the board is a row 
 and one game in FULL is a page of its own. `web/src/lib/chess-wire.ts` is the line a chess message
 signs itself with, `chess-thread.ts` derives every game from the thread's own messages,
 `chess-clock.ts` does the clocks, `chess-act.ts` decides what a press publishes, `chess-menu.ts`
-what the header offers, `chess-sound.ts` what a move sounds like,
+what the header offers, `chess-premove.ts` where a PREMOVE may go — the one question about a game
+the rules do not answer — `chess-sound.ts` what a move sounds like,
 `web/src/components/chess-board.tsx` draws the board (and is the only place `react-chessboard` is
 touched), `use-chess-game.ts` is every behaviour a board has, `chess-game-card.tsx` the row in the
 history, `chess-page.tsx` the full-screen page, `chess-score-sheet.tsx` its right column and
@@ -4986,12 +4988,47 @@ which is the right place to play A MOVE and the wrong place to play a GAME.
   all on the one turn a player most wants to.
 - **A press while reviewing the past comes BACK to live and plays nothing.** A board that swallows a
   press says nothing about why, and the reader presses again.
-- **A PREMOVE is a private intention.** It is queued while the opponent thinks (their move drawn in
-  its own tint — never the yellow a real move wears), it is stored per conversation and game so it
-  survives the walk from the card to the page, it publishes NOTHING until it is legal, and the
-  moment their move lands it plays itself. A premove the arriving position makes illegal is dropped
-  rather than posted. It is taken back by a right press, and by a left press on anything that is
-  not the reader's own piece.
+- **A PREMOVE is a private intention.** It is queued while the opponent thinks (drawn in its own
+  tint on both of its squares — never the yellow a real move wears), it is stored per conversation
+  and game so it survives the walk from the card to the page, it publishes NOTHING until it is
+  legal, and the moment their move lands it plays itself. A premove the arriving position makes
+  illegal is dropped rather than posted. It is lichess's and chess.com's own feature and it is held
+  to their behaviour, which took three defects to reach — each one is now pinned by a test:
+  - **WHAT A PREMOVE MAY DO IS THE ONE QUESTION HERE THE RULES DO NOT ANSWER**
+    (`web/src/lib/chess-premove.ts`, pure and dependency-free like every other `lib/chess-*.ts`). A
+    premove is played into the position their move will MAKE, so "what is legal now" is the wrong
+    test — and it made the commonest premove in chess impossible to set: after 1. e4 e5 2. Nf3 that
+    pawn has no legal move at all (e5 is blocked by their own pawn, both diagonals are empty), so
+    `exd5` could not be queued. It is offered by GEOMETRY instead — where could this piece go, if
+    the board were arranged for it — so blockers, check, pins, en passant and a castle through an
+    attacked square are all premovable, exactly as they are on lichess. The argument is the
+    asymmetry of the two ways of being wrong: too permissive costs a premove that is DROPPED when
+    it fires (the real rules are re-asked about the real position before anything is posted, so an
+    impossible premove can never put an illegal ply in a ledger), and too strict costs a premove
+    that cannot be made at all in the position where it was the only move worth making. Two bounds
+    are kept, because each removes a square no move of theirs could ever free: the reader's own
+    KING's square, and a CASTLE whose right the position has already spent. A unit test walks every
+    white piece of four positions — a middlegame, a castle, an en-passant capture and a
+    capture-promotion — and holds every move the rules allow to be premovable too: a premove must
+    never be NARROWER than a move.
+  - **DRAGGING IS HALF THE GESTURE, and it was dead.** The board named the side to MOVE as the side
+    whose pieces may be picked up, and the renderer disables all 32 pieces when nothing is movable
+    (`allowDragging`, plus `canDragPiece` per piece) — so on the one turn a premove is made in, no
+    piece could be dragged at all. `movable` (`use-chess-game.ts`) is the reader's own colour on
+    their turn AND on the opponent's, and it is what the board is handed. Every premove spec drove
+    tap-tap, which is why the suite passed either side of it; `dragChessPiece` in
+    `web/e2e/helpers.ts` is the other half.
+  - **THE RIGHT PRESS IS DECIDED ON THE MOUSE UP, and that is measured.** Chromium dispatches
+    `contextmenu` immediately after `mousedown`, at the square the press STARTED on and before the
+    pointer has moved — for a press and for a drag alike. So at `contextmenu` time the two are the
+    same event, and the renderer's own `onSquareRightClick` (which fires from `contextmenu` and
+    guards itself with state it sets on mouseup) cannot tell them apart: drawing an ARROW silently
+    threw the reader's queued premove away. `chess-board.tsx` therefore wires none of theirs and
+    decides once for the whole board on the UP, where the gesture is known — the square it began on
+    is a press, any other square is an arrow. That also makes it a press ANYWHERE on the board: the
+    rounded edge and the hairline round the grid answer `null` on both sides and cancel too.
+  A premove is also taken back by a left press on anything that is not the reader's own piece, and
+  replaced by setting another.
 - **A PREMOVE COSTS 0.1 s** (`PREMOVE_SPEND_MS`), whatever the wall clock says: it is a move that
   was already decided, so charging the minutes the opponent spent thinking would punish the reader
   for the opponent's time, and charging nothing would make a premoved game free.
@@ -5107,9 +5144,11 @@ unfinished is a chip in the next test's strip, a row in its menu and a board in 
 `cd web && bun run preview -- --out /tmp/chess --chess` captures the control, the challenge form
 with its clock, the board in both themes, a game in progress with its score sheet, the armed
 resignation, the board at a phone's width, the card a colleague's challenge leaves, the STRIP of
-running games, the full-screen PAGE in both themes and at a phone's width, the promotion picker, a
-premove and a clock down to its last seconds. `web/e2e/chess.spec.ts` pins every rule the page owns,
-and `chess-wire.test.ts`, `chess-thread.test.ts`, `chess-clock.test.ts`, `chess-act.test.ts`,
+running games, the full-screen PAGE in both themes and at a phone's width, the promotion picker, the
+DOTS a piece is offered while the opponent thinks — where it might be able to go rather than where it
+may go now — and the premove those dots set, in both themes. `web/e2e/chess.spec.ts` pins every rule
+the page owns, and `chess-wire.test.ts`, `chess-thread.test.ts`, `chess-clock.test.ts`,
+`chess-act.test.ts`, `chess-premove.test.ts`,
 `chess-menu.test.ts` and `chess-sound.test.ts` the pure ones — the last of which pins the palette
 without an AudioContext anywhere: which sound a move earns, that every sound has its own shape
 rather than being one click at another volume, and that each is short and quiet enough to happen

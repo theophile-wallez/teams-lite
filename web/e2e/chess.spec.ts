@@ -12,7 +12,10 @@ import {
   chessSquareHasPiece,
   closeConversationMenu,
   conversationMenuTrigger,
+  dragChessPiece,
+  drawChessArrow,
   fetchCapturedSends,
+  rightClickChessSquare,
   gotoApp,
   openChessChallenge,
   openConversationMenu,
@@ -559,6 +562,85 @@ test.describe("chess in a conversation", () => {
     await chessOpponentMoves(page, game);
     await expect(page.locator('[data-testid="chess-moves"]')).toContainText("Nf3");
     await expect(page.locator('[data-testid="chess-premove-hint"]')).toHaveCount(0);
+  });
+
+  test("a PREMOVE is set by DRAGGING, and a right press anywhere takes it back", async ({ page }) => {
+    // THE GESTURE A DESKTOP PLAYS WITH, and the one a premove was unreachable by: the board named
+    // the side to MOVE as the side that may be picked up, so the renderer disabled all 32 pieces
+    // on the one turn a premove is made in — a whole half of the feature, dead, with the tap-tap
+    // specs passing either side of it.
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    await seedChessGame(page, { mine: "w", moves: ["e4"] });
+    await openChessPage(page);
+    await expect(page.locator('[data-testid="chess-page-status"]')).toContainText(/waiting/i);
+
+    const before = (await fetchCapturedEdits(page)).length;
+    await dragChessPiece(page, "g1", "f3");
+    await expect(page.locator('[data-testid="chess-premove-hint"]')).toContainText("g1–f3");
+    // BOTH squares are tinted, in the premove's own colour: where the piece is going, and where it
+    // is coming from — which is what says which piece is committed.
+    await expect(page.locator('[data-square="f3"] [data-premove="true"]')).toBeVisible();
+    await expect(page.locator('[data-square="g1"] [data-premove="true"]')).toBeVisible();
+    // Still a private intention: nothing has left for the thread.
+    expect((await fetchCapturedEdits(page)).length).toBe(before);
+
+    // A right DRAG draws an arrow and is NOT a cancel. This is the rail that made the board keep
+    // the renderer's own square handler: only it knows an arrow was being drawn.
+    await drawChessArrow(page, "d2", "d4");
+    await expect(page.locator('[data-testid="chess-premove-hint"]')).toContainText("g1–f3");
+
+    // A right PRESS takes it back — and on a square that has nothing to do with the premove,
+    // because what it cancels is not about a square.
+    await rightClickChessSquare(page, "h6");
+    await expect(page.locator('[data-testid="chess-premove-hint"]')).toHaveCount(0);
+    await expect(page.locator('[data-premove="true"]')).toHaveCount(0);
+  });
+
+  test("a PREMOVE may be a move the rules refuse, and THEIR move is what makes it legal", async ({
+    page,
+  }) => {
+    // The whole point of a premove, and the case the old rule could not express: after 1. e4 e5
+    // 2. Nf3 the e4 pawn has NO legal move at all — e5 is blocked by their own pawn and both
+    // diagonals are empty — so exd5, the commonest premove in chess, could not be set. It is
+    // offered wherever the piece could go once they have moved (web/src/lib/chess-premove.ts).
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true, reply: "d5" });
+    const game = await seedChessGame(page, { mine: "w", moves: ["e4", "e5", "Nf3"] });
+    await openChessPage(page);
+
+    // The pawn's own dots say so before the press: d5 is offered while nothing stands on it.
+    await page.locator('[data-square="e4"]').click();
+    await expect(page.locator('[data-square="d5"] [data-target="true"]')).toBeVisible();
+    await page.locator('[data-square="d5"]').click();
+    await expect(page.locator('[data-testid="chess-premove-hint"]')).toContainText("e4–d5");
+
+    // Their pawn arrives on d5, and the premove that was illegal a moment ago is the capture.
+    await chessOpponentMoves(page, game);
+    await expect(page.locator('[data-testid="chess-moves"]')).toContainText("exd5");
+    await expect(page.locator('[data-testid="chess-premove-hint"]')).toHaveCount(0);
+  });
+
+  test("a PREMOVE the arriving position makes illegal is DROPPED, never posted", async ({ page }) => {
+    // The other half of being permissive, and what makes it safe: the real rules are asked about
+    // the real position before anything leaves, so a premove that never became legal costs the
+    // reader their tempo and can never put an illegal ply in the ledger — which would be a game
+    // neither machine could replay.
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true, reply: "Nc6" });
+    const game = await seedChessGame(page, { mine: "w", moves: ["e4", "e5", "Nf3"] });
+    await openChessPage(page);
+
+    await playChessMove(page, "e4", "d5");
+    await expect(page.locator('[data-testid="chess-premove-hint"]')).toContainText("e4–d5");
+
+    // They develop the knight instead, so nothing is on d5 and the queued capture is dropped.
+    await chessOpponentMoves(page, game);
+    await expect(page.locator('[data-testid="chess-moves"]')).toContainText("Nc6");
+    await expect(page.locator('[data-testid="chess-premove-hint"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="chess-moves"]')).not.toContainText("d5");
+    // And it is the reader's move, with the board waiting for them rather than stuck.
+    await expect(page.locator('[data-testid="chess-page-status"]')).toContainText(/your move/i);
   });
 
   test("a PROMOTION asks which piece, over the board, with real pieces", async ({ page }) => {

@@ -6553,14 +6553,6 @@ export class TeamsController {
   }
 
   /**
-   * Set — or take back — the move that plays itself the moment the opponent's lands.
-   *
-   * It is stored rather than sent: a premove is a private intention, and posting one would be
-   * telling a colleague what the reader is about to do. It becomes a real move through
-   * {@link publishChessLedger} like any other, at which point it costs its player
-   * {@link PREMOVE_SPEND_MS} of clock rather than the minutes their opponent spent.
-   */
-  /**
    * Read what this machine holds of the engine, and remember it.
    *
    * Asked once when the app connects and again whenever a surface needs it: the answer is cheap (a
@@ -6617,6 +6609,14 @@ export class TeamsController {
     }
   }
 
+  /**
+   * Set — or take back — the move that plays itself the moment the opponent's lands.
+   *
+   * It is stored rather than sent: a premove is a private intention, and posting one would be
+   * telling a colleague what the reader is about to do. It becomes a real move through
+   * {@link publishChessLedger} like any other, at which point it costs its player
+   * `PREMOVE_SPEND_MS` of clock rather than the minutes their opponent spent.
+   */
   setChessPremove(
     conversationId: string,
     game: string,

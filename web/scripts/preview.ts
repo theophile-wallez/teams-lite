@@ -2048,6 +2048,32 @@ if (import.meta.main) {
       await page.locator('[data-testid="chess-nav-live"]').click();
       await page.waitForTimeout(300);
 
+      // A PREMOVE: the move the reader decided on while their opponent thinks, in its own tint on
+      // both of its squares — and, before it, the DOTS that make one settable at all. The position
+      // is chosen so the rules allow that pawn NOTHING (e5 is blocked by their own pawn, both
+      // diagonals are empty), because a premove is offered wherever the piece could go once THEY
+      // have moved rather than where it may go now (see web/src/lib/chess-premove.ts).
+      await page.goBack();
+      await page.locator('[data-testid="message-pane"]').waitFor();
+      const premoving = await seed({ mine: "w", moves: ["e4", "e5", "Nf3"], base: 600 });
+      // Its own ADDRESS rather than the strip's chip: the strip is bounded to three chips and puts
+      // the games waiting for the READER first, so a game waiting for the opponent — which is the
+      // only kind a premove can be set in — is exactly the one that falls off the end of it.
+      await page.goto(`${WEB_ORIGIN}/c/${encodeURIComponent(conversation)}/chess/${premoving}`);
+      await page.locator('[data-testid="chess-page"]').waitFor();
+      await page.locator('[data-testid="chess-board"]').first().waitFor();
+      await page.locator('[data-square="e4"]').click();
+      await page.locator('[data-square="d5"] [data-target="true"]').waitFor();
+      await page.waitForTimeout(300);
+      await shot(`${out}-premove-targets-light.png`);
+      await page.locator('[data-square="d5"]').click();
+      await page.locator('[data-testid="chess-premove-hint"]').waitFor();
+      await page.waitForTimeout(300);
+      await shot(`${out}-premove-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-premove-dark.png`);
+      await setTheme("light");
+
       // The PROMOTION picker: four pieces over the square the pawn lands on, drawn with the
       // renderer's own art. It needs a position with a pawn one square away, so it is seeded.
       await page.goBack();
@@ -2184,6 +2210,7 @@ if (import.meta.main) {
           `${out}-resign-armed-light.png, ${out}-mobile-light.png, ` +
           `${out}-challenged-{light,dark}.png, ${out}-strip-{light,dark}.png, ` +
           `${out}-page-{light,dark}.png, ${out}-review-light.png, ` +
+          `${out}-premove-targets-light.png, ${out}-premove-{light,dark}.png, ` +
           `${out}-promotion-{light,dark}.png, ${out}-page-mobile-light.png, ` +
           `${out}-engine-fetch-{light,dark}.png, ${out}-engine-elo-{light,dark}.png, ` +
           `${out}-engine-elo-mobile-light.png, ${out}-engine-game-{light,dark}.png ` +

@@ -295,7 +295,9 @@ function ChessPageBoard(props: {
               id={`chess-page-${game.id}`}
               fen={board.fen}
               orientation={board.orientation}
-              playable={board.ourMove ? game.ourColor : null}
+              // Their own turn AND the opponent's, because a piece picked up while they think is a
+              // PREMOVE (see `movable` in use-chess-game.ts).
+              movable={board.movable}
               selected={board.selected}
               targets={board.targets}
               lastMove={board.lastMove}

@@ -1211,6 +1211,52 @@ export async function playChessMove(page: Page, from: string, to: string): Promi
   await page.locator(`[data-square="${to}"]`).click();
 }
 
+/** The middle of a square, which every gesture below is aimed at. */
+async function chessSquareCentre(page: Page, square: string): Promise<{ x: number; y: number }> {
+  const box = await page.locator(`[data-square="${square}"]`).boundingBox();
+  expect(box, `no square ${square} on screen`).toBeTruthy();
+  const at = box as NonNullable<typeof box>;
+  return { x: at.x + at.width / 2, y: at.y + at.height / 2 };
+}
+
+/**
+ * Play — or QUEUE — a move by DRAGGING the piece, which is what a desktop reader does.
+ *
+ * It is a separate helper from {@link playChessMove} rather than an option on it, because the two
+ * reach the board through different halves of the renderer — tap-tap through its square handler,
+ * this through dnd-kit — and a premove was reachable by only one of them: the board disabled every
+ * piece while it was not the reader's turn, so a whole gesture was dead and every spec passed.
+ */
+export async function dragChessPiece(page: Page, from: string, to: string): Promise<void> {
+  const origin = await chessSquareCentre(page, from);
+  const target = await chessSquareCentre(page, to);
+  await page.mouse.move(origin.x, origin.y);
+  await page.mouse.down();
+  // dnd-kit starts a drag a pixel into the movement, so a jump straight onto the target square is
+  // a click as far as the renderer is concerned.
+  await page.mouse.move(origin.x + 4, origin.y + 4);
+  await page.mouse.move(target.x, target.y, { steps: 8 });
+  await page.mouse.up();
+}
+
+/** A right press on one square, with no drag — how a premove is taken back. */
+export async function rightClickChessSquare(page: Page, square: string): Promise<void> {
+  const at = await chessSquareCentre(page, square);
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.up({ button: "right" });
+}
+
+/** A right DRAG, which draws an ARROW and must never be read as a press that cancels one. */
+export async function drawChessArrow(page: Page, from: string, to: string): Promise<void> {
+  const origin = await chessSquareCentre(page, from);
+  const target = await chessSquareCentre(page, to);
+  await page.mouse.move(origin.x, origin.y);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.move(target.x, target.y, { steps: 8 });
+  await page.mouse.up({ button: "right" });
+}
+
 /** Whether a square holds a piece. */
 export async function chessSquareHasPiece(page: Page, square: string): Promise<boolean> {
   return (await page.locator(`[data-square="${square}"] [data-piece]`).count()) > 0;
