@@ -25,9 +25,24 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { ArrowExpand01Icon, CpuIcon } from "@hugeicons/core-free-icons";
 import { useNavigate } from "@tanstack/react-router";
 import { useReducedMotion } from "motion/react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { chessPublishFor, chessRematchFor, chessRematchLabel } from "~/lib/chess-act";
 import { formatChessClock } from "~/lib/chess-clock";
+import {
+  chessCapturedGlyphs,
+  chessCapturedWords,
+  chessDeltaLabel,
+  chessMaterialFor,
+  type ChessMaterial,
+} from "~/lib/chess-material";
 import { chessPagePath } from "~/lib/chess-menu";
+import {
+  chessOpponentMri,
+  chessSeriesBetween,
+  chessSeriesGames,
+  chessSeriesWords,
+  type ChessSeries,
+} from "~/lib/chess-series";
 import {
   chessAwaitsOurAnswer,
   chessAwaitsTheirAnswer,
@@ -37,11 +52,12 @@ import {
   type ChessGame,
   type ChessPlayer,
 } from "~/lib/chess-thread";
-import { clockWords, type ChessColor } from "~/lib/chess-wire";
+import { clockWords, newChessGameId, type ChessColor } from "~/lib/chess-wire";
+import { isGroupChat } from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { ChessBoard } from "./chess-board";
-import { useOptionalController } from "./controller-context";
+import { useOptionalAppState, useOptionalController } from "./controller-context";
 import { useChessGame } from "./use-chess-game";
 
 export default function ChessGameCard(props: {
@@ -68,6 +84,12 @@ export default function ChessGameCard(props: {
   // nothing to press, which is what the mock's own auto-accept once hid.
   const awaitingUs = !!controller && chessAwaitsOurAnswer(game);
   const awaitingThem = !!controller && chessAwaitsTheirAnswer(game);
+  // HOW THE TWO OF THEM STAND. The card holds one game, so the LIVE half is that game and the
+  // backend's snapshot is the rest of the conversation's history. Held rather than built inline: a
+  // fresh array every render would re-derive the score on every frame of a running clock.
+  const live = useMemo(() => [game], [game]);
+  const series = useChessSeries(props.conversationId, game, live);
+  const themName = (game.challenger.isSelf ? game.opponent?.name : game.challenger.name) ?? "They";
 
   return (
     <article
@@ -82,6 +104,7 @@ export default function ChessGameCard(props: {
         game={game}
         color={other(board.orientation)}
         clock={board.clock}
+        material={board.material}
         engine={!!board.engine}
         thinking={board.engineThinking}
       />
@@ -104,7 +127,7 @@ export default function ChessGameCard(props: {
         arrows={false}
         {...(controller ? { onSquare: board.press, onDrop: board.drop, onRightClick: board.rightClick } : {})}
       />
-      <ChessSeat game={game} color={board.orientation} clock={board.clock} />
+      <ChessSeat game={game} color={board.orientation} clock={board.clock} material={board.material} />
 
       <p data-testid="chess-status" className="mt-1 text-xs text-text-dim">
         {board.status}
@@ -231,6 +254,21 @@ export default function ChessGameCard(props: {
         </div>
       )}
 
+      {/* HOW THE TWO OF THEM STAND, and ANOTHER GAME. Both are here as well as on the page, because
+          the history is where a finished game is met first — and they stand with the way IN rather
+          than up beside the status, because all three are what to do NEXT: the sentences above them
+          are about the game that has just ended. */}
+      {series && (
+        <p
+          data-testid="chess-series"
+          data-series-played={series.played}
+          className="mt-1 text-[11px] text-text-faint"
+        >
+          {chessSeriesWords(series, themName)}
+        </p>
+      )}
+      <ChessRematchButton game={game} conversationId={props.conversationId} className="mt-2" />
+
       {/* THE WAY IN. Everything this card leaves out — the score sheet as a column, the moves
           walked back through, the arrows, the sounds, the chat beside the board — is one press
           away, and the press is a LINK rather than a button: the browser's own affordances
@@ -264,7 +302,7 @@ function other(color: ChessColor): ChessColor {
 }
 
 /**
- * One side of the board: who is playing it, and what their clock reads.
+ * One side of the board: who is playing it, what their clock reads, and WHAT THEY HAVE TAKEN.
  *
  * Drawn above and below the board the way a board is read, and the face and the name are the
  * app's own — so a colleague the user renamed is named here exactly as they are above their own
@@ -274,11 +312,20 @@ function other(color: ChessColor): ChessColor {
  * tinted initials are how this app draws a colleague it has no photo for and "Nobody yet" reduced
  * to `NY` is ink that names nothing. And it says WHOSE it is from the reader's own position — the
  * seat opposite a challenger is the reader's to take.
+ *
+ * **THE HAUL IS A SECOND LINE, and it is drawn only where there is one.** A seat is already a face,
+ * a name, a side and a clock in one row that has to fit a phone, so a row of glyphs pushed into it
+ * would be the thing that wraps. Under the name it is a line the reader's eye can skip until they
+ * want it — and the room it takes is measured rather than reserved, because the page sizes the board
+ * to whatever is left (see `useBoardFit`).
  */
 export function ChessSeat(props: {
   game: ChessGame;
   color: ChessColor;
   clock: { white: number | null; black: number | null; running: ChessColor | null; flagged: ChessColor | null };
+  /** What the position on screen says about material. Absent on a board that does not read one —
+   *  and a seat with nothing taken draws nothing either way. */
+  material?: ChessMaterial;
   /** A page draws the same seat larger, because it has the room for it. */
   big?: boolean;
   /** Whether THIS seat is the engine's. */
@@ -294,81 +341,267 @@ export function ChessSeat(props: {
   const running = props.clock.running === props.color;
   const flagged = props.clock.flagged === props.color;
   return (
-    <header className={cn("flex items-center gap-2 py-1.5", props.big && "gap-3 py-2")}>
-      {props.engine && player ? (
-        // THE ENGINE IS NOT A PERSON, so it is not drawn as one: an avatar seeded from an empty MRI
-        // would be tinted initials for a colleague who does not exist, and this app never puts a
-        // face on something that has none.
+    <div className={cn(props.big && "space-y-0.5")}>
+      <header className={cn("flex items-center gap-2 py-1.5", props.big && "gap-3 py-2")}>
+        {props.engine && player ? (
+          // THE ENGINE IS NOT A PERSON, so it is not drawn as one: an avatar seeded from an empty MRI
+          // would be tinted initials for a colleague who does not exist, and this app never puts a
+          // face on something that has none.
+          <span
+            data-testid="chess-engine-seat"
+            aria-hidden
+            className={cn(
+              "grid shrink-0 place-items-center rounded-md border border-border-subtle bg-accent text-text-dim",
+              props.big ? "size-8" : "size-6",
+            )}
+          >
+            <HugeiconsIcon icon={CpuIcon} className={props.big ? "size-5" : "size-4"} strokeWidth={1.8} />
+          </span>
+        ) : player ? (
+          <Avatar
+            seed={player.mri}
+            label={player.name}
+            photo={{ kind: "user", id: player.mri }}
+            className={props.big ? "size-8" : "size-6"}
+          />
+        ) : (
+          <span
+            aria-hidden
+            className={cn(
+              "shrink-0 rounded-full border border-dashed border-border-subtle",
+              props.big ? "size-8" : "size-6",
+            )}
+          />
+        )}
         <span
-          data-testid="chess-engine-seat"
-          aria-hidden
           className={cn(
-            "grid shrink-0 place-items-center rounded-md border border-border-subtle bg-accent text-text-dim",
-            props.big ? "size-8" : "size-6",
+            "truncate font-medium",
+            props.big ? "text-sm" : "text-xs",
+            player ? "text-foreground" : "text-text-dim",
           )}
         >
-          <HugeiconsIcon icon={CpuIcon} className={props.big ? "size-5" : "size-4"} strokeWidth={1.8} />
+          {player ? (player.isSelf ? "You" : player.name) : oursToTake ? "You, if you accept" : "Waiting for somebody"}
         </span>
-      ) : player ? (
-        <Avatar
-          seed={player.mri}
-          label={player.name}
-          photo={{ kind: "user", id: player.mri }}
-          className={props.big ? "size-8" : "size-6"}
-        />
-      ) : (
+        {props.thinking && (
+          <span data-testid="chess-engine-thinking" className="shrink-0 text-[11px] text-text-dim">
+            thinking…
+          </span>
+        )}
+        <span className={cn("shrink-0 text-text-faint", props.big ? "text-xs" : "text-[11px]")}>
+          {props.color === "w" ? "White" : "Black"}
+        </span>
+        {/* THE CLOCK, on the side it belongs to — both of them on screen at once, which is how a
+            player reads a game. It is drawn only where there is one: a game with no time control
+            shows nothing rather than a dash nobody can act on. */}
+        {ms !== null && (
+          <span
+            data-testid={`chess-clock-${props.color}`}
+            data-running={running ? "true" : undefined}
+            data-flagged={flagged ? "true" : undefined}
+            className={cn(
+              "ml-auto shrink-0 rounded-md px-1.5 font-mono tabular-nums",
+              props.big ? "py-1 text-lg" : "text-xs",
+              // A running clock is the one the reader is watching, so it is the one with ink behind
+              // it; the other is quiet. Under thirty seconds it turns, because that is the moment
+              // the number starts to matter more than the position.
+              flagged
+                ? "bg-destructive/15 text-destructive"
+                : running
+                  ? ms < 30_000
+                    ? "bg-destructive/15 text-destructive"
+                    : "bg-accent text-foreground"
+                  : "text-text-dim",
+            )}
+          >
+            {formatChessClock(ms)}
+          </span>
+        )}
+      </header>
+      {props.material && <ChessCaptured material={props.material} color={props.color} big={props.big} />}
+    </div>
+  );
+}
+
+/**
+ * WHAT ONE SIDE HAS TAKEN, and how far up or down it leaves them.
+ *
+ * The men are Unicode's own chess glyphs in the OPPONENT's colour, because the pieces really are the
+ * opponent's — hollow for white and solid for black, which is the typographic convention and the one
+ * spelling that reads in both themes. They are text rather than icons, so no second icon set is
+ * installed (§ Project shape) and the row scales with the type around it.
+ *
+ * **BOTH SEATS SHOW A NUMBER, and it is signed from that seat's own side.** `+3` above the board and
+ * `−3` below it is one fact twice only for somebody reading both at once — and a player looking at
+ * their own seat on a phone is not. A level position shows no number at all: a `0` is a number the
+ * reader has to read in order to learn nothing.
+ *
+ * **THE GLYPHS ARE NOT THE WHOLE MESSAGE.** A row of `♟♟♞` says nothing to a screen reader and
+ * nothing to anybody who does not read chess glyphs, so the words ride on the element's own `title`
+ * and `aria-label` — the rule a reaction chip already holds for who reacted.
+ */
+function ChessCaptured(props: { material: ChessMaterial; color: ChessColor; big?: boolean }) {
+  const { captured, delta } = chessMaterialFor(props.material, props.color);
+  const glyphs = chessCapturedGlyphs(captured, props.color);
+  const label = chessDeltaLabel(delta);
+  // Nothing taken and nothing between them: a line that says neither is a line worth not drawing.
+  if (!glyphs && !label) return null;
+  const words = chessCapturedWords(captured);
+  return (
+    <p
+      data-testid={`chess-captured-${props.color}`}
+      data-delta={delta === 0 ? undefined : delta}
+      title={words ? `Taken: ${words}` : undefined}
+      aria-label={
+        words ? `Taken: ${words}${label ? ` — ${label} on material` : ""}` : `${label} on material`
+      }
+      className={cn(
+        // THE INK IS `text-dim` RATHER THAN `text-faint`, and that is what makes the pieces legible
+        // at all: a SOLID glyph drawn in the faintest ink is a grey blob, and beside it a HOLLOW one
+        // is the same blob — so the one thing the two spellings carry, whose men these are, was lost
+        // in the first capture of this row.
+        "flex items-center gap-1 leading-none text-text-dim",
+        props.big ? "text-lg" : "text-base",
+      )}
+    >
+      <span aria-hidden className="truncate">
+        {glyphs}
+      </span>
+      {label && (
         <span
           aria-hidden
-          className={cn(
-            "shrink-0 rounded-full border border-dashed border-border-subtle",
-            props.big ? "size-8" : "size-6",
-          )}
-        />
+          className={cn("shrink-0 font-mono tabular-nums", props.big ? "text-xs" : "text-[11px]")}
+        >
+          {label}
+        </span>
       )}
-      <span
+    </p>
+  );
+}
+
+/** Nothing, held still: a new array every render would re-derive the series on every frame of a
+ *  running clock. */
+const NO_GAMES: ChessGame[] = [];
+
+/**
+ * THE HEAD-TO-HEAD SCORE between the reader and whoever they are playing, over every game this
+ * conversation holds — a draw counting a half (see lib/chess-series.ts).
+ *
+ * Two halves, and both are needed. The backend answers the chess-carrying messages of the WHOLE
+ * stored history (`chess_messages`, an ordinary read that makes no network request), because the
+ * history loads a page at a time and a score counted off the loaded page would grow as the reader
+ * scrolled back. The thread's own LIVE games then win per game id, because a game that finished a
+ * moment ago is settled in the thread and still running in that snapshot.
+ *
+ * ONE spelling for both surfaces — the card and the page — through the OPTIONAL hooks, because a
+ * card is server-rendered by its own tests with no provider around it (the seam `RichContent`
+ * already uses). The read itself is asked by whichever board is drawn rather than on connect, and
+ * the store answers it once per conversation: a reader who plays no chess never pays for it, and a
+ * history holding six boards does not ask six times.
+ *
+ * Null where there is no score to state — a board with no backend, an ENGINE game (a machine keeps
+ * no score with anybody), a game the reader is only watching, and a pair who have not finished one.
+ */
+export function useChessSeries(
+  conversationId: string,
+  game: ChessGame,
+  live: ChessGame[],
+): ChessSeries | null {
+  const controller = useOptionalController();
+  const archive = useOptionalAppState((s) => s.chessArchive[conversationId] ?? NO_GAMES, NO_GAMES);
+  useEffect(() => {
+    void controller?.loadChessArchive(conversationId);
+  }, [controller, conversationId]);
+  const them = chessOpponentMri(game);
+  const series = useMemo(
+    () => (them ? chessSeriesBetween(chessSeriesGames(archive, live), them) : null),
+    [archive, live, them],
+  );
+  return series && series.played > 0 ? series : null;
+}
+
+/**
+ * THE REMATCH a finished game earns: the same opponent, the same clock, the colours the other way
+ * round (see `chessRematchFor`).
+ *
+ * One component for both surfaces — the card in the history and the page — so the press means the
+ * same thing wherever it is made. It draws nothing at all where there is no rematch to offer: a game
+ * still going, a game the reader watched, a challenge nobody took up, and a board with no controller.
+ *
+ * Three things about it:
+ *   - **it is an ordinary CHALLENGE**, published through the one path every chess press goes down
+ *     (`chessPublishFor`), with a NEW game id. So the wire gains nothing and a colleague on an older
+ *     build reads it as what it is.
+ *   - **the outcome is reported AT the press.** A challenge that did not leave must never be left
+ *     looking like it did, which is the composer's own rule.
+ *   - **it goes quiet once it has been sent**, because the challenge is now a board of its own in the
+ *     conversation and pressing again would open a second game nobody asked for. A reload offers it
+ *     again — the button is one press and this app keeps no state about it, which is the honest cost
+ *     of not writing anything down.
+ */
+export function ChessRematchButton(props: {
+  game: ChessGame;
+  conversationId: string;
+  className?: string;
+}) {
+  const controller = useOptionalController();
+  const conversation = useOptionalAppState(
+    (s) => s.conversations.find((c) => c.id === props.conversationId),
+    undefined,
+  );
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const rematch = chessRematchFor(props.game);
+  if (!rematch || !controller) return null;
+
+  const them = props.game.challenger.isSelf
+    ? props.game.opponent?.name
+    : props.game.challenger.name;
+  const label = chessRematchLabel(rematch, {
+    them: them ?? "them",
+    group: !!conversation && isGroupChat(conversation),
+    engine: !!props.game.engine,
+  });
+
+  const press = async () => {
+    setError(null);
+    const gameId = newChessGameId();
+    const publish = chessPublishFor({
+      gameId,
+      game: null,
+      color: rematch.color,
+      act: rematch,
+      nowMs: Date.now(),
+    });
+    if (!publish) return;
+    setSent(true);
+    const ok = await controller.publishChessLedger(props.conversationId, publish);
+    if (!ok) {
+      setSent(false);
+      setError("The rematch did not go out — nothing was posted. Try again.");
+    }
+  };
+
+  return (
+    <div className={cn("flex flex-col items-center gap-1", props.className)}>
+      <button
+        type="button"
+        data-testid="chess-rematch"
+        data-rematch-color={rematch.color}
+        disabled={sent}
+        onClick={() => void press()}
         className={cn(
-          "truncate font-medium",
-          props.big ? "text-sm" : "text-xs",
-          player ? "text-foreground" : "text-text-dim",
+          "rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground",
+          "disabled:pointer-events-none disabled:opacity-60",
         )}
       >
-        {player ? (player.isSelf ? "You" : player.name) : oursToTake ? "You, if you accept" : "Waiting for somebody"}
-      </span>
-      {props.thinking && (
-        <span data-testid="chess-engine-thinking" className="shrink-0 text-[11px] text-text-dim">
-          thinking…
-        </span>
+        {sent ? "Rematch sent" : label}
+      </button>
+      {error && (
+        <p data-testid="chess-rematch-error" className="text-[11px] text-destructive">
+          {error}
+        </p>
       )}
-      <span className={cn("shrink-0 text-text-faint", props.big ? "text-xs" : "text-[11px]")}>
-        {props.color === "w" ? "White" : "Black"}
-      </span>
-      {/* THE CLOCK, on the side it belongs to — both of them on screen at once, which is how a
-          player reads a game. It is drawn only where there is one: a game with no time control
-          shows nothing rather than a dash nobody can act on. */}
-      {ms !== null && (
-        <span
-          data-testid={`chess-clock-${props.color}`}
-          data-running={running ? "true" : undefined}
-          data-flagged={flagged ? "true" : undefined}
-          className={cn(
-            "ml-auto shrink-0 rounded-md px-1.5 font-mono tabular-nums",
-            props.big ? "py-1 text-lg" : "text-xs",
-            // A running clock is the one the reader is watching, so it is the one with ink behind
-            // it; the other is quiet. Under thirty seconds it turns, because that is the moment
-            // the number starts to matter more than the position.
-            flagged
-              ? "bg-destructive/15 text-destructive"
-              : running
-                ? ms < 30_000
-                  ? "bg-destructive/15 text-destructive"
-                  : "bg-accent text-foreground"
-                : "text-text-dim",
-          )}
-        >
-          {formatChessClock(ms)}
-        </span>
-      )}
-    </header>
+    </div>
   );
 }
 

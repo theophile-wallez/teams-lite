@@ -756,6 +756,19 @@ export class Backend {
     return this.writeRequest<UpdateProgress>("update_apply", {});
   }
 
+  /**
+   * Every message of one conversation that carries a game of CHESS — what the head-to-head score
+   * is counted over (see lib/chess-series.ts).
+   *
+   * An ordinary READ, and it makes no network request on the backend either: a game IS its
+   * messages, so the store already holds all of them. It exists because the history loads a page at
+   * a time — a score counted off the loaded page would count the games that happen to be on screen
+   * and grow as the reader scrolled back.
+   */
+  chessMessages(conversation: string): Promise<{ messages: ChatMessage[] }> {
+    return this.request<{ messages: ChatMessage[] }>("chess_messages", { conversation });
+  }
+
   // ---- the chess ENGINE ----------------------------------------------------------------
   //
   // Stockfish is 7.3 MB the BACKEND fetches, verifies against a digest it pins and caches on this

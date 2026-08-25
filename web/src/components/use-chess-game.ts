@@ -35,6 +35,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chessPublishFor, type ChessAct } from "~/lib/chess-act";
 import { type ChessClockReading } from "~/lib/chess-clock";
 import { NO_CHESS_ENGINE } from "~/lib/chess-engine";
+import { chessMaterial, type ChessMaterial } from "~/lib/chess-material";
 import { chessPremoveIsPromotion, chessPremoveTargets } from "~/lib/chess-premove";
 import {
   NO_CHESS_SOUNDS,
@@ -47,9 +48,11 @@ import {
   chessGameIsSettled,
   chessGameWithPending,
   chessPlayerOf,
+  chessResultFor,
   chessSlotKey,
   chessTurnIsOurs,
   type ChessGame,
+  type ChessResult,
 } from "~/lib/chess-thread";
 import type { ChessColor } from "~/lib/chess-wire";
 import type { ChessPromotionPiece, ChessPromotionPrompt } from "./chess-board";
@@ -113,8 +116,7 @@ function other(color: ChessColor): ChessColor {
   return color === "w" ? "b" : "w";
 }
 
-/** How a finished game finished, from the reader's own side. Null while it is still going. */
-export type ChessResult = "win" | "lose" | "draw" | null;
+export type { ChessResult };
 
 export type ChessBoardApi = {
   /** The game with anything this page has published but not yet seen come back. */
@@ -145,6 +147,9 @@ export type ChessBoardApi = {
   clock: ChessClockReading;
   /** Whose clock ran out, when somebody's has and nobody has claimed it yet. */
   flagClaimable: ChessColor | null;
+  /** What each side has TAKEN and who is ahead, read off the position ON SCREEN — so walking back
+   *  through the game walks the material back with it, which is half of what a review is for. */
+  material: ChessMaterial;
   result: ChessResult;
   /** What the reader is owed in one line. */
   status: string;
@@ -209,6 +214,8 @@ export function useChessGame(args: {
   const plies = replay.positions.length - 1;
   const viewPly = viewing === null ? plies : Math.max(0, Math.min(viewing, plies));
   const atLive = viewPly === plies;
+  /** The position the reader is LOOKING at, which is the live one unless they walked back. */
+  const fenOnScreen = replay.positions[viewPly] ?? replay.chess.fen();
 
   const chess = useMemo(() => {
     // The live position is the one the replay already holds; an earlier one is read out of the
@@ -773,6 +780,11 @@ export function useChessGame(args: {
       ? clock.flagged
       : null;
 
+  // WHAT EACH SIDE HAS TAKEN, off the position on screen rather than off the move list: a FEN says
+  // it in one pass, and reading it from the position means a reader walking back through the game
+  // sees the material as it stood at that move.
+  const material = useMemo(() => chessMaterial(fenOnScreen), [fenOnScreen]);
+
   const moves = useMemo(
     () =>
       game.moves.map((san, index) => ({
@@ -785,7 +797,7 @@ export function useChessGame(args: {
 
   return {
     game,
-    fen: replay.positions[viewPly] ?? replay.chess.fen(),
+    fen: fenOnScreen,
     orientation: ourColor ?? "w",
     lastMove: viewPly > 0 ? (replay.moved[viewPly - 1] ?? null) : null,
     check,
@@ -801,6 +813,7 @@ export function useChessGame(args: {
     plies,
     clock,
     flagClaimable,
+    material,
     result,
     status: chessStatus({ game, chess: replay.chess, brokeAt: replay.brokeAt, ourMove, clock }),
     moves,
@@ -822,16 +835,23 @@ export function useChessGame(args: {
   };
 }
 
-/** How the game ended, from the reader's own side. Null while it is still going, and null for a
- *  spectator — a game the reader is not in is not one they won. */
+/**
+ * How the game ended, from the reader's own side. Null while it is still going, and null for a
+ * spectator — a game the reader is not in is not one they won.
+ *
+ * THE WIRE IS ASKED FIRST, through the one pure answer every surface shares (`chessResultFor`), and
+ * the RULES are asked only for what a position says and a message does not: a stalemate, a dead
+ * position, a draw by repetition. That split is what lets the head-to-head score read the same
+ * result off hundreds of finished games with no board (see lib/chess-series.ts).
+ */
 function resultFor(game: ChessGame, chess: Chess): ChessResult {
   const ours = game.ourColor;
   if (!ours) return null;
-  const outcome = game.outcome;
-  if (outcome.kind === "resigned") return outcome.by === ours ? "lose" : "win";
-  if (outcome.kind === "timeout") return outcome.loser === ours ? "lose" : "win";
-  if (outcome.kind === "drawAgreed") return "draw";
-  if (outcome.kind === "declined") return null;
+  const stated = chessResultFor(game);
+  if (stated) return stated;
+  // A challenge nobody took up is not a game, and asking the rules about the starting position
+  // would answer "still playing" for one that is over.
+  if (game.outcome.kind === "declined") return null;
   if (chess.isCheckmate()) return chess.turn() === ours ? "lose" : "win";
   if (chess.isStalemate() || chess.isInsufficientMaterial() || chess.isDraw()) return "draw";
   return null;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chessPublishFor } from "./chess-act";
+import { chessPublishFor, chessRematchFor, chessRematchLabel } from "./chess-act";
 import { PREMOVE_SPEND_MS } from "./chess-clock";
 import type { ChessGame } from "./chess-thread";
 import { newChessLedger, type ChessColor, type ChessLedger } from "./chess-wire";
@@ -304,5 +304,74 @@ describe("a move for the ENGINE", () => {
     });
     expect(open?.ledger.engineElo).toBe(1320);
     expect(open?.messageId).toBeNull();
+  });
+});
+
+describe("chessRematchFor", () => {
+  /** A game we lost, which is the commonest moment anybody wants another. */
+  const finished = game({ outcome: { kind: "resigned", by: "w" } });
+
+  it("INVERTS the colours and carries the clock", () => {
+    const rematch = chessRematchFor(finished);
+    // We were white, so the rematch takes black — a series played from one side is not a series.
+    expect(rematch).toEqual({ kind: "open", color: "b", time: { base: 600, increment: 0 }, engineElo: null });
+  });
+
+  it("is an ordinary CHALLENGE on the wire — a new game, sent rather than edited", () => {
+    const rematch = chessRematchFor(finished) as NonNullable<ReturnType<typeof chessRematchFor>>;
+    const publish = chessPublishFor({ gameId: "fff222", game: null, color: rematch.color, act: rematch, nowMs: T0 });
+    expect(publish?.game).toBe("fff222");
+    expect(publish?.messageId).toBeNull();
+    expect(publish?.ledger).toMatchObject({ color: "b", opened: true, time: { base: 600, increment: 0 } });
+  });
+
+  it("reads the RULES as an ending too, not only a message", () => {
+    // A mate settles nothing on the wire beyond the SAN's own `#`, so a game won that way has to
+    // offer a rematch as much as a resignation does.
+    expect(chessRematchFor(game({ moves: ["e4", "e5", "Qh5", "Nc6", "Bc4", "Nf6", "Qxf7#"], turn: "b" }))).not.toBeNull();
+    expect(chessRematchFor(game({ endedByRules: "draw", moves: ["e4", "e5"] }))).not.toBeNull();
+  });
+
+  it("offers none for a game still going, one the reader watched, or a challenge nobody played", () => {
+    expect(chessRematchFor(game())).toBeNull();
+    expect(chessRematchFor(game({ ...finished, ourColor: null }))).toBeNull();
+    // Declined and withdrawn are both "never a game", so "again" would name nothing.
+    expect(
+      chessRematchFor(game({ opponent: null, outcome: { kind: "declined", withdrawn: false } })),
+    ).toBeNull();
+    expect(
+      chessRematchFor(game({ opponent: null, outcome: { kind: "declined", withdrawn: true } })),
+    ).toBeNull();
+  });
+
+  it("offers one against the ENGINE, at the strength it was playing", () => {
+    const rematch = chessRematchFor(
+      game({
+        outcome: { kind: "resigned", by: "w" },
+        engine: { elo: 2200 },
+        opponent: { mri: "", name: "Stockfish 2200", isSelf: false },
+      }),
+    );
+    expect(rematch).toMatchObject({ color: "b", engineElo: 2200 });
+  });
+});
+
+describe("chessRematchLabel", () => {
+  it("names the side the press takes, and the clock it carries", () => {
+    const rematch = { kind: "open", color: "b", time: { base: 600, increment: 0 }, engineElo: null } as const;
+    expect(chessRematchLabel(rematch, { them: "Ada", group: false, engine: false })).toBe(
+      "Rematch Ada — you take black · 10 min",
+    );
+    // In a GROUP the wire cannot promise one person: a challenge is answered by whoever answers.
+    expect(chessRematchLabel(rematch, { them: "Ada", group: true, engine: false })).toBe(
+      "Rematch — you take black, first to accept plays · 10 min",
+    );
+    expect(chessRematchLabel(rematch, { them: "Stockfish 1800", group: false, engine: true })).toBe(
+      "Play again — you take black · 10 min",
+    );
+    // A game with no clock says nothing about one.
+    expect(
+      chessRematchLabel({ ...rematch, time: null }, { them: "Ada", group: false, engine: false }),
+    ).toBe("Rematch Ada — you take black");
   });
 });

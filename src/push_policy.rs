@@ -81,27 +81,12 @@ const SEALED_BODY: &str = "New message";
 /// The trailing marker a CHESS message signs itself with, cut off a preview.
 ///
 /// The shape is the one `web/src/lib/chess-wire.ts` writes and `chessPreviewText` strips on the
-/// page: the words, then `— chess <game> <state>, via teams-lite`. The game id is six lowercase
-/// hex characters, which is what keeps an agent's own `— claude, via teams-lite` and a
-/// colleague's prose out of this.
+/// page: the words, then `— chess <game> <state>, via teams-lite`. It lives in
+/// [`crate::chess_wire`] because the store reads the same marker to answer WHICH messages hold a
+/// game (see [`crate::store::Store::chess_messages`]), and two spellings of it would leave a push
+/// carrying a line the other reader had learned to recognise.
 fn without_chess_line(preview: &str) -> String {
-    let Some(at) = preview.rfind("— chess ") else {
-        return preview.to_string();
-    };
-    let line = preview[at..].trim();
-    let rest = match line.strip_prefix("— chess ") {
-        Some(rest) => rest,
-        None => return preview.to_string(),
-    };
-    // `<6 hex> <anything>, via teams-lite`, and nothing else is cut.
-    let Some((game, state)) = rest.split_once(' ') else {
-        return preview.to_string();
-    };
-    let is_game = game.len() == 6 && game.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
-    if !is_game || !state.ends_with(", via teams-lite") {
-        return preview.to_string();
-    }
-    preview[..at].trim().to_string()
+    crate::chess_wire::without_chess_line(preview)
 }
 
 pub fn notification_for(

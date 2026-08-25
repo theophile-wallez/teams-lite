@@ -556,14 +556,14 @@ test.describe("chess in a conversation", () => {
     // Queue g1-f3. Nothing is posted: a premove is a private intention.
     const before = (await fetchCapturedEdits(page)).length;
     await playChessMove(page, "g1", "f3");
-    await expect(page.locator('[data-testid="chess-premove-hint"]')).toBeVisible();
     await expect(page.locator('[data-square="f3"] [data-premove="true"]')).toBeVisible();
+    await expect(page.locator('[data-square="g1"] [data-premove="true"]')).toBeVisible();
     expect((await fetchCapturedEdits(page)).length).toBe(before);
 
     // Their move lands, and the premove goes out by itself.
     await chessOpponentMoves(page, game);
     await expect(page.locator('[data-testid="chess-moves"]')).toContainText("Nf3");
-    await expect(page.locator('[data-testid="chess-premove-hint"]')).toHaveCount(0);
+    await expect(page.locator('[data-premove="true"]')).toHaveCount(0);
   });
 
   test("a PREMOVE is set by DRAGGING, and a right press anywhere takes it back", async ({ page }) => {
@@ -579,23 +579,24 @@ test.describe("chess in a conversation", () => {
 
     const before = (await fetchCapturedEdits(page)).length;
     await dragChessPiece(page, "g1", "f3");
-    await expect(page.locator('[data-testid="chess-premove-hint"]')).toContainText("g1–f3");
     // BOTH squares are tinted, in the premove's own colour: where the piece is going, and where it
-    // is coming from — which is what says which piece is committed.
+    // is coming from — which is what says which piece is committed. IT IS THE WHOLE OF WHAT IS
+    // DRAWN: the three sentences that used to stand under the board explained a gesture the reader
+    // had just made, and they took room the board itself needs (see `useBoardFit`).
     await expect(page.locator('[data-square="f3"] [data-premove="true"]')).toBeVisible();
     await expect(page.locator('[data-square="g1"] [data-premove="true"]')).toBeVisible();
+    await expect(page.locator('[data-testid="chess-page"]')).not.toContainText(/premove/i);
     // Still a private intention: nothing has left for the thread.
     expect((await fetchCapturedEdits(page)).length).toBe(before);
 
     // A right DRAG draws an arrow and is NOT a cancel. This is the rail that made the board keep
     // the renderer's own square handler: only it knows an arrow was being drawn.
     await drawChessArrow(page, "d2", "d4");
-    await expect(page.locator('[data-testid="chess-premove-hint"]')).toContainText("g1–f3");
+    await expect(page.locator('[data-square="f3"] [data-premove="true"]')).toBeVisible();
 
     // A right PRESS takes it back — and on a square that has nothing to do with the premove,
     // because what it cancels is not about a square.
     await rightClickChessSquare(page, "h6");
-    await expect(page.locator('[data-testid="chess-premove-hint"]')).toHaveCount(0);
     await expect(page.locator('[data-premove="true"]')).toHaveCount(0);
   });
 
@@ -615,12 +616,12 @@ test.describe("chess in a conversation", () => {
     await page.locator('[data-square="e4"]').click();
     await expect(page.locator('[data-square="d5"] [data-target="true"]')).toBeVisible();
     await page.locator('[data-square="d5"]').click();
-    await expect(page.locator('[data-testid="chess-premove-hint"]')).toContainText("e4–d5");
+    await expect(page.locator('[data-square="d5"] [data-premove="true"]')).toBeVisible();
 
     // Their pawn arrives on d5, and the premove that was illegal a moment ago is the capture.
     await chessOpponentMoves(page, game);
     await expect(page.locator('[data-testid="chess-moves"]')).toContainText("exd5");
-    await expect(page.locator('[data-testid="chess-premove-hint"]')).toHaveCount(0);
+    await expect(page.locator('[data-premove="true"]')).toHaveCount(0);
   });
 
   test("a PREMOVE the arriving position makes illegal is DROPPED, never posted", async ({ page }) => {
@@ -634,15 +635,130 @@ test.describe("chess in a conversation", () => {
     await openChessPage(page);
 
     await playChessMove(page, "e4", "d5");
-    await expect(page.locator('[data-testid="chess-premove-hint"]')).toContainText("e4–d5");
+    await expect(page.locator('[data-square="d5"] [data-premove="true"]')).toBeVisible();
 
     // They develop the knight instead, so nothing is on d5 and the queued capture is dropped.
     await chessOpponentMoves(page, game);
     await expect(page.locator('[data-testid="chess-moves"]')).toContainText("Nc6");
-    await expect(page.locator('[data-testid="chess-premove-hint"]')).toHaveCount(0);
+    await expect(page.locator('[data-premove="true"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="chess-moves"]')).not.toContainText("d5");
     // And it is the reader's move, with the board waiting for them rather than stuck.
     await expect(page.locator('[data-testid="chess-page-status"]')).toContainText(/your move/i);
+  });
+
+  test("each SEAT says what it has taken, and how far up or down it leaves them", async ({
+    page,
+  }) => {
+    // Both hauls and both numbers on one board, which is the whole feature: a player reads the
+    // position and then reads these two things. 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Bxc6 dxc6
+    // 5. Nxe5 — white has a knight and a pawn, black has a bishop, so white is one point up.
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    await seedChessGame(page, {
+      mine: "w",
+      moves: ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Bxc6", "dxc6", "Nxe5"],
+    });
+    await openChessPage(page);
+
+    const white = page.locator('[data-testid="chess-captured-w"]');
+    const black = page.locator('[data-testid="chess-captured-b"]');
+    // The DELTA is signed from each side's own point of view, because a player reading their own
+    // seat on a phone reads one of them and never both.
+    await expect(white).toHaveAttribute("data-delta", "1");
+    await expect(black).toHaveAttribute("data-delta", "-1");
+    // The words, because a row of glyphs says nothing to a screen reader — and they name what was
+    // really taken rather than a count of pieces.
+    await expect(white).toHaveAttribute("aria-label", /1 knight and 1 pawn/i);
+    await expect(black).toHaveAttribute("aria-label", /1 bishop/i);
+
+    // WALKING BACK walks the material back with it: at the start of the game nobody has taken
+    // anything, so neither line is drawn at all.
+    await page.locator('[data-testid="chess-nav-first"]').click();
+    await expect(white).toHaveCount(0);
+    await expect(black).toHaveCount(0);
+    await page.locator('[data-testid="chess-nav-live"]').click();
+    await expect(white).toHaveAttribute("data-delta", "1");
+  });
+
+  test("a finished game offers a REMATCH: the same clock, the colours the other way round", async ({
+    page,
+  }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    // A game we played as white and lost. The rematch takes BLACK — a series played from one side
+    // is not a series.
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5"], base: 300, ending: "weResigned" });
+    await openChessPage(page);
+
+    const rematch = page.locator('[data-testid="chess-rematch"]');
+    await expect(rematch).toHaveAttribute("data-rematch-color", "b");
+    await expect(rematch).toContainText(/you take black/i);
+    // The clock the last game was played with, carried: a rematch at another time control is a
+    // different game, and re-picking one is what the menu is for.
+    await expect(rematch).toContainText("5 min");
+
+    // The press is an ordinary CHALLENGE — a SEND, not an edit of the game that just ended.
+    const before = (await fetchCapturedSends(page)).length;
+    await rematch.click();
+    await expect.poll(async () => (await fetchCapturedSends(page)).length).toBe(before + 1);
+    const sent = (await fetchCapturedSends(page)).at(-1);
+    expect(sent?.content_html).toContain("open");
+    // A NEW game, and the reader is black in it.
+    expect(sent?.content_html).toMatch(/— chess [0-9a-f]{6} v2 b open tc\.300\+0/);
+    // And it goes quiet once it has left, because pressing again would open a second game.
+    await expect(rematch).toBeDisabled();
+  });
+
+  test("a game still going, and one the reader watched, offer NO rematch", async ({ page }) => {
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    // Mid-game: a rematch here is a second board nobody asked for, and the menu already offers a
+    // fresh challenge.
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5"] });
+    await openChessPage(page);
+    await expect(page.locator('[data-testid="chess-rematch"]')).toHaveCount(0);
+  });
+
+  test("the SERIES counts every game in the thread, with a draw as a half", async ({ page }) => {
+    // THE SCORE IS OVER THE WHOLE STORED HISTORY rather than over the loaded page, which is what
+    // the backend's own read is for (`chess_messages`). Three finished games — one each and a draw
+    // — so the score has to read a half, and a fourth the page is opened on.
+    await openChessThread(page);
+    await setChessOpponent(page, { silent: true });
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5"], ending: "theyResigned" });
+    await seedChessGame(page, { mine: "b", moves: ["d4", "d5"], ending: "weResigned" });
+    await seedChessGame(page, { mine: "w", moves: ["c4", "c5"], ending: "draw" });
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5", "Nf3"], ending: "theyResigned" });
+    // The NEWEST board, which is the one at the foot of the history: the pane is virtualized, so
+    // the first of four games may not be in the DOM at all.
+    await page.locator('[data-testid="chess-open-page"]').last().click();
+    await page.locator('[data-testid="chess-page"]').waitFor();
+    await page.locator('[data-testid="chess-board"]').first().waitFor();
+
+    const series = page.locator('[data-testid="chess-series"]');
+    // Two wins, one loss and a draw: 2½–1½ to the reader over four games.
+    await expect(series).toHaveAttribute("data-series-played", "4");
+    await expect(series).toContainText("You lead 2½–1½ after 4 games");
+
+    // AND ON THE CARD, where a finished game is met first — the same hook, so the two surfaces
+    // cannot disagree about a score.
+    await page.locator('[data-testid="chess-page-back"]').click();
+    await page.locator('[data-testid="message-pane"]').waitFor();
+    const card = page.locator('[data-testid="chess-game"]').last();
+    await expect(card.locator('[data-testid="chess-series"]')).toContainText("You lead 2½–1½");
+  });
+
+  test("a game against the COMPUTER keeps no series: a machine scores with nobody", async ({
+    page,
+  }) => {
+    await openChessThread(page);
+    await setChessEngine(page, { present: true });
+    await openChessEngineRow(page);
+    await page.locator('[data-testid="chess-engine-color-w"]').click();
+    await page.locator('[data-testid="chess-engine-play"]').click();
+    await page.locator('[data-testid="chess-engine-seat"]').last().waitFor();
+    await openChessPage(page);
+    await expect(page.locator('[data-testid="chess-series"]')).toHaveCount(0);
   });
 
   test("a PROMOTION asks which piece, over the board, with real pieces", async ({ page }) => {

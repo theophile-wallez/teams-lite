@@ -13,8 +13,9 @@
  */
 
 import { chessRemainingAfterMove, chessStatedFor, chessThinkStartedAt } from "./chess-clock";
-import { chessClockStateOf, type ChessGame } from "./chess-thread";
+import { chessClockStateOf, chessGameIsOver, type ChessGame } from "./chess-thread";
 import {
+  clockWords,
   newChessLedger,
   type ChessColor,
   type ChessLedger,
@@ -188,6 +189,65 @@ export function chessPublishFor(args: {
       };
     }
   }
+}
+
+/** A rematch: the same opponent, the same clock, the colours the other way round. */
+export type ChessRematch = Extract<ChessAct, { kind: "open" }>;
+
+/**
+ * THE REMATCH one finished game earns, or null where there is none to offer.
+ *
+ * It is an ORDINARY CHALLENGE and deliberately not a fifth act on the wire: a new game id, `open`,
+ * the clock the last game was played with, and the colour the reader did NOT have. So it costs the
+ * wire nothing, it costs the derivation nothing, and a colleague on a build that predates this reads
+ * it as exactly what it is — somebody challenging them again.
+ *
+ * THREE THINGS DECIDE IT, and each one is a game that must not offer one:
+ *   - the game is OVER. A rematch mid-game is a second board nobody asked for, and the menu already
+ *     offers a fresh challenge for that.
+ *   - the reader PLAYED it. A game they watched is not theirs to replay, and it would post a
+ *     challenge under their name for two other people's series.
+ *   - somebody really ACCEPTED it. A challenge that was declined or withdrawn was never a game, so
+ *     "again" names nothing — and the reader's own challenge is one press away in the menu.
+ *
+ * THE COLOURS INVERT, which is the whole convention: a series played from one side is not a series.
+ * The clock is CARRIED for the same reason — a rematch at another time control is a different game,
+ * and re-picking it is what the menu is for.
+ *
+ * The ENGINE gets one too, at the strength it was playing: "play again" is the commonest thing
+ * anybody wants from a machine, and the token carries its Elo exactly as the first game did.
+ */
+export function chessRematchFor(game: ChessGame): ChessRematch | null {
+  if (!game.ourColor) return null;
+  if (!chessGameIsOver(game)) return null;
+  if (game.outcome.kind === "declined") return null;
+  if (!game.opponent) return null;
+  return {
+    kind: "open",
+    color: other(game.ourColor),
+    time: game.time,
+    engineElo: game.engine ? game.engine.elo : null,
+  };
+}
+
+/**
+ * What the rematch press says.
+ *
+ * It names the SIDE the reader takes, because that is the thing the press decides for them and the
+ * one fact they cannot see anywhere else. In a GROUP it says the challenge is open, for the reason
+ * `chessChallengeLabel` does: who accepts is the one thing nobody can know before the press, and a
+ * row promising a rematch with one person would be a promise the wire cannot keep — a challenge in
+ * a group thread is answered by whoever answers first.
+ */
+export function chessRematchLabel(
+  rematch: ChessRematch,
+  args: { them: string; group: boolean; engine: boolean },
+): string {
+  const side = rematch.color === "w" ? "white" : "black";
+  const clock = rematch.time ? ` · ${clockWords(rematch.time)}` : "";
+  if (args.engine) return `Play again — you take ${side}${clock}`;
+  if (args.group) return `Rematch — you take ${side}, first to accept plays${clock}`;
+  return `Rematch ${args.them} — you take ${side}${clock}`;
 }
 
 function other(color: ChessColor): ChessColor {

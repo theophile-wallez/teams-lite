@@ -7357,6 +7357,22 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return { messages: held };
     }
 
+    // Every message of one conversation that carries a game of CHESS — what the head-to-head score
+    // is counted over. An ordinary read on the real backend too (`chess_messages`): a game IS its
+    // messages, so the store already holds them.
+    //
+    // It answers the WHOLE thread rather than the page the app has loaded, which is the one thing
+    // this read exists for — so a spec can seed old games, keep them off the loaded page, and still
+    // see them in the score.
+    case "chess_messages": {
+      const id = requireString(params, "conversation");
+      const t = store.get(id) ?? channelStore.get(id);
+      const held = (t?.messages ?? [])
+        .filter((m) => !m.deleted && mockChessWire(m.content) !== null)
+        .map((m) => nicknamed(m));
+      return { messages: held };
+    }
+
     case "edit": {
       const id = requireString(params, "conversation");
       const messageId = requireString(params, "message_id");
@@ -9637,10 +9653,25 @@ type MockLedger = {
   at: number | null;
   moves: { ply: number; san: string; clockMs: number | null }[];
   resigned: boolean;
+  /** The two halves of a DRAW, anchored at the ply they happened at exactly as the wire anchors
+   *  them. They are here for the head-to-head SCORE: a draw counts a half for each side, so a mock
+   *  that could not produce one would leave that arithmetic untestable. */
+  drawOfferedAt: number | null;
+  drawAcceptedAt: number | null;
 };
 
 function blankMockLedger(color: "w" | "b"): MockLedger {
-  return { color, opened: false, joined: false, time: null, at: null, moves: [], resigned: false };
+  return {
+    color,
+    opened: false,
+    joined: false,
+    time: null,
+    at: null,
+    moves: [],
+    resigned: false,
+    drawOfferedAt: null,
+    drawAcceptedAt: null,
+  };
 }
 
 /** Read one, out of the tokens after `v2`. Null for anything this mock cannot read, which is the
@@ -9658,6 +9689,8 @@ function mockParseLedger(rest: string): MockLedger | null {
       const [base, inc] = token.slice(3).split("+");
       ledger.time = { base: Number(base), increment: Number(inc) };
     } else if (/^at\.\d+$/.test(token)) ledger.at = Number(token.slice(3));
+    else if (/^draw\.\d+$/.test(token)) ledger.drawOfferedAt = Number(token.slice(5));
+    else if (/^drawok\.\d+$/.test(token)) ledger.drawAcceptedAt = Number(token.slice(7));
     else if (/^\d/.test(token)) {
       const move = /^(\d{1,3})\.([^.\s]+)(?:\.(\d{1,7}))?$/.exec(token);
       if (!move) return null;
@@ -9686,6 +9719,8 @@ function mockSerializeLedger(ledger: MockLedger): string {
     const clock = move.clockMs === null ? "" : `.${Math.max(0, Math.round(move.clockMs / 10))}`;
     out.push(`${move.ply}.${move.san}${clock}`);
   }
+  if (ledger.drawOfferedAt !== null) out.push(`draw.${ledger.drawOfferedAt}`);
+  if (ledger.drawAcceptedAt !== null) out.push(`drawok.${ledger.drawAcceptedAt}`);
   if (ledger.resigned) out.push("resign");
   return out.join(" ");
 }
@@ -9704,6 +9739,8 @@ function mockLedgerWords(ledger: MockLedger): string {
         .join(" ")}`,
     );
   }
+  if (ledger.drawAcceptedAt !== null) parts.push("I accept the draw.");
+  else if (ledger.drawOfferedAt !== null) parts.push("I offer a draw.");
   if (ledger.resigned) parts.push("I resign.");
   return `♟ Chess — ${parts.join(" ") || "a game."}`;
 }
@@ -9820,11 +9857,19 @@ function seedMockChessGame(fallbackConvId: string, opts: Record<string, unknown>
   const ourMoves = sideMoves(mine);
   const theirMoves = sideMoves(theirs);
   const lastPly = played.length;
+  // HOW IT ENDED, when a caller asked for a finished one. It is what makes a head-to-head SCORE and
+  // a REMATCH reachable at all: both live on a game that is over, and the only ending a spec could
+  // otherwise reach is one it plays out move by move.
+  const ending = typeof opts.ending === "string" ? opts.ending : null;
   writeMockLedger(convId, other, game, {
     ...blankMockLedger(theirs),
     joined: true,
     at: lastPly % 2 === (theirs === "w" ? 1 : 0) ? now - 1_000 : now - 30_000,
     moves: theirMoves,
+    // "they resigned" is the reader's WIN; a draw is agreed by both halves, so the opponent offers
+    // and the reader accepts — the two tokens the derivation really matches on.
+    resigned: ending === "theyResigned",
+    drawOfferedAt: ending === "draw" ? lastPly : null,
   });
   const seq = nextSeq(t.messages);
   const ledger = {
@@ -9833,6 +9878,8 @@ function seedMockChessGame(fallbackConvId: string, opts: Record<string, unknown>
     time: { base, increment },
     at: lastPly % 2 === (mine === "w" ? 1 : 0) ? now - 1_000 : now - 30_000,
     moves: ourMoves,
+    resigned: ending === "weResigned",
+    drawAcceptedAt: ending === "draw" ? lastPly : null,
   };
   const msg: ChatMessage = {
     id: `${convId}#${seq}`,
@@ -11242,6 +11289,10 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       // A game already UNDER WAY, both ledgers written, with the clocks a spec asked for. It is
       // what makes a RUNNING clock, a nearly-flagged one and a long score sheet reachable at all:
       // the alternative is a spec that waits ten minutes for a number to move.
+      //
+      // `ending: "weResigned" | "theyResigned" | "draw"` seeds a FINISHED one, which is what the
+      // head-to-head SCORE and the REMATCH both need: several games with results, in one thread,
+      // without playing any of them out.
       let seeded: string | null = null;
       if (body.seed && typeof body.seed === "object") {
         seeded = seedMockChessGame(

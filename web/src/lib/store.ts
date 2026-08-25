@@ -91,7 +91,7 @@ import {
 } from "./chess-wire";
 import { NO_CHESS_ENGINE, type ChessEngineState } from "./chess-engine";
 import { NO_CHESS_SOUNDS, type ChessSoundsState } from "./chess-sound";
-import { chessSlotKey } from "./chess-thread";
+import { chessGamesInThread, chessSlotKey, type ChessGame } from "./chess-thread";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import type { AgentPersonaPatch } from "./agent-persona";
 import {
@@ -439,6 +439,18 @@ export type AppState = {
    *  the game for the reason a pending move does, and it costs {@link PREMOVE_SPEND_MS} of
    *  their clock rather than the time their opponent spent thinking. */
   chessPremove: Record<string, { from: string; to: string; promotion?: "q" | "r" | "b" | "n" }>;
+  /**
+   * Every game one conversation's WHOLE STORED HISTORY holds, keyed by conversation — what the
+   * head-to-head score is counted over (see lib/chess-series.ts).
+   *
+   * It is the backend's own read (`chess_messages`) put through THIS app's one derivation, so the
+   * wire has exactly one spelling and the backend never needs the rules. It is a SNAPSHOT: the
+   * thread's own live games win over it per game id (`chessSeriesGames`), because a game that
+   * finished a moment ago is settled in the thread and still running in here.
+   *
+   * Empty until a board asks, which is what keeps this off the path of every chat.
+   */
+  chessArchive: Record<string, ChessGame[]>;
   /**
    * What this machine holds of the CHESS ENGINE: whether it is here, what fetching it costs, how far
    * a fetch has got, and why one failed.
@@ -942,6 +954,7 @@ function initialState(): AppState {
     chessError: {},
     chessPending: {},
     chessPremove: {},
+    chessArchive: {},
     chessEngine: NO_CHESS_ENGINE,
     chessSounds: NO_CHESS_SOUNDS,
     scheduledMessages: [],
@@ -6571,6 +6584,36 @@ export class TeamsController {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Read every game this conversation's WHOLE STORED HISTORY holds, for the head-to-head score.
+   *
+   * The backend answers the chess-carrying messages (`chess_messages`, an ordinary open read that
+   * makes no network request) and the derivation here turns them into games — the SAME derivation
+   * the pane and the page use, so the wire keeps one spelling and the backend never needs the rules.
+   *
+   * It is asked when a BOARD is drawn rather than on connect: a reader who plays no chess must not
+   * pay for this, and a score is only ever read beside a board. A read that fails leaves whatever
+   * was there — a stale score is better than a score that vanishes — and the page still counts the
+   * games the thread itself holds, which is what a sealed conversation gets in any case.
+   *
+   * **ONCE per conversation, because the askers are boards.** A history holds a card per game and
+   * each one mounts and unmounts as the reader scrolls, so an ungated read would be one request per
+   * board per pass. What that costs is that a game finishing does not re-read — and nothing needs it
+   * to, because the thread's own live games win over this snapshot (`chessSeriesGames`).
+   */
+  async loadChessArchive(conversationId: string): Promise<void> {
+    if (this.get().chessArchive[conversationId]) return;
+    try {
+      const { messages } = await this.backend.chessMessages(conversationId);
+      this.set({
+        chessArchive: { ...this.get().chessArchive, [conversationId]: chessGamesInThread(messages) },
+      });
+    } catch {
+      // A backend too old to know the method, or one that could not answer. The series then counts
+      // the loaded page alone, which is the honest fallback rather than an empty score.
+    }
   }
 
   /**

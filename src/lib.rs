@@ -32,6 +32,9 @@ pub mod changelog;
 /// DOWNLOADED, and a browser in this app never fetches from a stranger's server.
 pub mod chess_engine;
 pub mod chess_sound;
+/// The one marker this side of a game of chess reads: which messages carry one. The wire itself is
+/// the page's (see AGENTS.md § Chess in a conversation).
+pub mod chess_wire;
 pub mod custom_emoji;
 pub mod gitlab;
 pub mod gitlab_approval;

@@ -2091,7 +2091,10 @@ if (import.meta.main) {
       await page.waitForTimeout(300);
       await shot(`${out}-premove-targets-light.png`);
       await page.locator('[data-square="d5"]').click();
-      await page.locator('[data-testid="chess-premove-hint"]').waitFor();
+      // The tint on both squares is the WHOLE of what a premove says: nothing is written under the
+      // board, so this is what the capture is of.
+      await page.locator('[data-square="d5"] [data-premove="true"]').waitFor();
+      await page.locator('[data-square="e4"] [data-premove="true"]').waitFor();
       await page.waitForTimeout(300);
       await shot(`${out}-premove-light.png`);
       await setTheme("dark");
@@ -2133,7 +2136,11 @@ if (import.meta.main) {
       // that states the size and offers to fetch it (§ Playing STOCKFISH). Both halves are
       // photographed, in this order, because the whole point of the first is that it comes before
       // the second: an app that downloaded on its own would never draw it.
-      await page.goBack();
+      //
+      // The conversation is reached by its own ADDRESS rather than by Back: this run walks through
+      // several boards, and a capture whose next surface depends on how deep the history happens to
+      // be is one that breaks whenever a shot is added above it.
+      await page.goto(`${WEB_ORIGIN}/c/${encodeURIComponent(conversation)}`);
       await page.locator('[data-testid="message-pane"]').waitFor();
       const engineHook = async (body: Record<string, unknown>): Promise<void> => {
         await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
@@ -2228,6 +2235,74 @@ if (import.meta.main) {
       await setTheme("light");
       await engineHook({ reset: true });
 
+      // ---- WHAT EACH SIDE HAS TAKEN, and the SCORE the two of them are keeping ----------
+      //
+      // IT COMES LAST, and that is not an accident: this block seeds five more games into the
+      // conversation, and the conversation's own MENU lists every live one above the challenge, the
+      // engine rows and the agent switch. Seeded earlier it pushed that switch out of the menu's own
+      // scrollport, and `openConversationMenu` — which waits for it as proof the menu is open —
+      // timed out in the ENGINE block below. A capture that changes what a later capture is
+      // photographing belongs after it.
+      //
+      // Both live beside the board and neither can be photographed off an opening position, so the
+      // game is seeded with a real exchange: white holds a knight and a pawn against a bishop — a
+      // point up — and both hauls are on screen at once under the seat they belong to.
+      await page.goto(`${WEB_ORIGIN}/c/${encodeURIComponent(conversation)}`);
+      await page.locator('[data-testid="message-pane"]').waitFor();
+      const material = await seed({
+        mine: "w",
+        // 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Bxc6 dxc6 5. Nxe5.
+        moves: ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Bxc6", "dxc6", "Nxe5"],
+        base: 600,
+        clock: { w: 402_000, b: 388_000 },
+      });
+      await page.goto(`${WEB_ORIGIN}/c/${encodeURIComponent(conversation)}/chess/${material}`);
+      await page.locator('[data-testid="chess-page"]').waitFor();
+      await page.locator('[data-testid="chess-captured-w"]').waitFor();
+      await page.locator('[data-testid="chess-captured-b"]').waitFor();
+      await page.waitForTimeout(400);
+      const boardColumn = '[data-testid="chess-board-column"]';
+      await shot(`${out}-material-light.png`, boardColumn);
+      await setTheme("dark");
+      await shot(`${out}-material-dark.png`, boardColumn);
+      await setTheme("light");
+
+      // THE SERIES AND THE REMATCH, which only a FINISHED game has: three games with results —
+      // one each and a draw — so the score reads a half, and the fourth is the finished game the
+      // page is opened on. Every one is seeded, because playing three games out is twenty moves of
+      // waiting for a sentence and a button.
+      await seed({ mine: "w", moves: ["e4", "e5"], base: 600, ending: "theyResigned" });
+      await seed({ mine: "b", moves: ["d4", "d5"], base: 600, ending: "weResigned" });
+      await seed({ mine: "w", moves: ["c4", "c5"], base: 600, ending: "draw" });
+      const over = await seed({
+        mine: "w",
+        moves: ["e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Ng5", "d5"],
+        base: 600,
+        ending: "theyResigned",
+      });
+      await page.goto(`${WEB_ORIGIN}/c/${encodeURIComponent(conversation)}/chess/${over}`);
+      await page.locator('[data-testid="chess-page"]').waitFor();
+      // The score counts the whole stored history rather than the loaded page, so it is READ from
+      // the backend — the wait is for that answer rather than for a render.
+      await page.locator('[data-testid="chess-series"]').waitFor();
+      await page.locator('[data-testid="chess-rematch"]').waitFor();
+      await page.waitForTimeout(400);
+      await shot(`${out}-series-light.png`, boardColumn);
+      await setTheme("dark");
+      await shot(`${out}-series-dark.png`, boardColumn);
+      await setTheme("light");
+      // And the same pair on the CARD in the conversation, where a finished game is met first: the
+      // score and the rematch are both there, through the same hook the page uses.
+      await page.locator('[data-testid="chess-page-back"]').click();
+      await page.locator('[data-testid="message-pane"]').waitFor();
+      const finished = '[data-testid="chess-game"] >> nth=-1';
+      await page.locator(`${finished} >> [data-testid="chess-rematch"]`).waitFor();
+      await page.waitForTimeout(300);
+      await shot(`${out}-rematch-light.png`, finished);
+      await setTheme("dark");
+      await shot(`${out}-rematch-dark.png`, finished);
+      await setTheme("light");
+
       console.log(
         `[preview] wrote ${out}-button-{light,dark}.png, ${out}-challenge-{light,dark}.png, ` +
           `${out}-board-{light,dark}.png, ${out}-mid-game-light.png, ` +
@@ -2236,6 +2311,8 @@ if (import.meta.main) {
           `${out}-page-{light,dark}.png, ${out}-review-light.png, ` +
           `${out}-premove-targets-light.png, ${out}-premove-{light,dark}.png, ` +
           `${out}-promotion-{light,dark}.png, ${out}-page-mobile-light.png, ` +
+          `${out}-material-{light,dark}.png, ${out}-series-{light,dark}.png, ` +
+          `${out}-rematch-{light,dark}.png, ` +
           `${out}-engine-fetch-{light,dark}.png, ${out}-engine-elo-{light,dark}.png, ` +
           `${out}-engine-elo-mobile-light.png, ${out}-engine-game-{light,dark}.png ` +
           `and ${out}-engine-settings-{light,dark}.png`,

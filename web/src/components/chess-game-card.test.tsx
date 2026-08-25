@@ -218,8 +218,50 @@ describe("ChessGameCard", () => {
     expect(status(html)).toMatch(/waiting for/i);
   });
 
-  it("offers no controls once a game is settled", () => {
-    expect(render({ outcome: { kind: "resigned", by: "b" } }).match(/<button/g)).toBeNull();
+  it("offers no ACT on a settled game — and offers another game instead", () => {
+    const html = render({ outcome: { kind: "resigned", by: "b" } });
+    // Nothing can be done to a game that is over: no resignation, no draw, no flag to claim.
+    for (const control of ["chess-resign", "chess-draw", "chess-claim-flag", "chess-accept"]) {
+      expect(html).not.toContain(`data-testid="${control}"`);
+    }
+    // A REMATCH is the one thing a finished game offers, and it INVERTS the colours: we were white.
+    expect(html).toContain('data-testid="chess-rematch"');
+    expect(html).toContain('data-rematch-color="b"');
+    expect(html).toContain("you take black");
+  });
+
+  it("offers no rematch for a game the reader watched, or one nobody played", () => {
+    // Somebody else's finished game is not the reader's to replay — it would post a challenge under
+    // their name for two other people's series.
+    const watched = render({
+      ourColor: null,
+      challenger: { mri: "8:orgid:ada", name: "Ada Lovelace", isSelf: false },
+      opponent: { mri: "8:orgid:grace", name: "Grace Hopper", isSelf: false },
+      outcome: { kind: "resigned", by: "b" },
+    });
+    expect(watched).not.toContain('data-testid="chess-rematch"');
+    // And a challenge nobody took up was never a game, so "again" names nothing.
+    const declined = render({ opponent: null, outcome: { kind: "declined", withdrawn: false } });
+    expect(declined).not.toContain('data-testid="chess-rematch"');
+  });
+
+  it("says what each side has TAKEN, and how far up it leaves them", () => {
+    // 1. e4 d5 2. exd5 — white has taken a pawn and is a point up; black has taken nothing.
+    const html = render({ moves: ["e4", "d5", "exd5"], turn: "b" });
+    expect(html).toContain('data-testid="chess-captured-w"');
+    // Black's pawn, in black's own glyph, and the delta signed from each side's own point of view.
+    expect(html).toContain("♟");
+    expect(html).toContain('data-delta="1"');
+    expect(html).toContain('data-delta="-1"');
+    // The words, because a glyph says nothing to a screen reader.
+    expect(html).toContain("1 pawn");
+  });
+
+  it("says nothing about material at the starting position", () => {
+    // Nothing taken and nothing between them: two lines that would say neither.
+    const html = render();
+    expect(html).not.toContain('data-testid="chess-captured-w"');
+    expect(html).not.toContain('data-testid="chess-captured-b"');
   });
 
   it("lists the moves as a score sheet", () => {

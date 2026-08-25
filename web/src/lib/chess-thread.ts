@@ -136,6 +136,37 @@ export function chessGameIsOver(game: ChessGame): boolean {
   return chessGameIsSettled(game) || chessEndedByRules(game) !== null;
 }
 
+/** How a finished game finished, from the reader's own side. */
+export type ChessResult = "win" | "lose" | "draw" | null;
+
+/**
+ * How this game ended for the READER, as the WIRE states it — null while it is still going, and
+ * null for a game they are only watching, which is not a game they won.
+ *
+ * It is pure on purpose, because two surfaces need it and only one of them has the rules: the
+ * board's own result reads this first and then asks `chess.js` about the draws only a position can
+ * show (stalemate, insufficient material, repetition), while the head-to-head SERIES has hundreds
+ * of finished games and no board — see lib/chess-series.ts.
+ *
+ * A MATE is read off the move list the same way `chessEndedByRules` reads it: the mating move is the
+ * last ply, so the side to move after it is the side that is mated. That is `game.turn`, which is
+ * why nothing here has to know which colour played the move.
+ */
+export function chessResultFor(game: ChessGame): ChessResult {
+  const ours = game.ourColor;
+  if (!ours) return null;
+  const outcome = game.outcome;
+  if (outcome.kind === "resigned") return outcome.by === ours ? "lose" : "win";
+  if (outcome.kind === "timeout") return outcome.loser === ours ? "lose" : "win";
+  if (outcome.kind === "drawAgreed") return "draw";
+  // A challenge nobody took up is not a game anybody played, so it is not a game anybody won.
+  if (outcome.kind === "declined") return null;
+  const rules = chessEndedByRules(game);
+  if (rules === "mate") return game.turn === ours ? "lose" : "win";
+  if (rules === "draw") return "draw";
+  return null;
+}
+
 /** The newest game still being played, or null. */
 export function activeChessGame(games: ChessGame[]): ChessGame | null {
   return activeChessGames(games)[0] ?? null;

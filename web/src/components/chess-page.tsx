@@ -40,11 +40,12 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { ChevronLeftIcon, Loading02Icon } from "@hugeicons/core-free-icons";
 import { useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { chessSeriesWords } from "~/lib/chess-series";
 import { chessGameById, chessGamesInThread, chessGameIsSettled } from "~/lib/chess-thread";
 import { clockWords } from "~/lib/chess-wire";
 import { cn } from "~/lib/utils";
 import { ChessBoard } from "./chess-board";
-import { ChessSeat, scoreSheetLine } from "./chess-game-card";
+import { ChessRematchButton, ChessSeat, scoreSheetLine, useChessSeries } from "./chess-game-card";
 import { ChessMoveNav, ChessScoreSheet } from "./chess-score-sheet";
 import { ConversationChatPanel } from "./conversation-chat-panel";
 import { useCallOwnsComposer } from "./call-stage-context";
@@ -191,6 +192,10 @@ function ChessPageBoard(props: {
   const title = `${white?.isSelf ? "You" : (white?.name ?? "White")} vs ${
     black?.isSelf ? "You" : (black?.name ?? "Black")
   }`;
+  // HOW THE TWO OF THEM STAND over every game in this conversation, which is the one thing on this
+  // page that is not derived from the loaded history alone.
+  const series = useChessSeries(props.conversationId, game, props.games);
+  const themName = (game.challenger.isSelf ? game.opponent?.name : game.challenger.name) ?? "They";
 
   return (
     <ChessPageShell
@@ -283,6 +288,7 @@ function ChessPageBoard(props: {
             game={game}
             color={board.orientation === "w" ? "b" : "w"}
             clock={board.clock}
+            material={board.material}
             engine={!!board.engine}
             thinking={board.engineThinking}
             big
@@ -316,7 +322,13 @@ function ChessPageBoard(props: {
               arrows
             />
           </div>
-          <ChessSeat game={game} color={board.orientation} clock={board.clock} big />
+          <ChessSeat
+            game={game}
+            color={board.orientation}
+            clock={board.clock}
+            material={board.material}
+            big
+          />
           <ChessMoveNav
             viewPly={board.viewPly}
             plies={board.plies}
@@ -334,17 +346,32 @@ function ChessPageBoard(props: {
                 ? `${game.opponent?.name ?? "The computer"} is thinking…`
                 : board.status}
           </p>
-          {board.premove && (
-            <p data-testid="chess-premove-hint" className="mt-0.5 text-center text-[11px] text-text-faint">
-              Premove set: {board.premove[0]}–{board.premove[1]}. It plays itself when they move,
-              for a tenth of a second. Right-click to take it back.
-            </p>
-          )}
+          {/* A PREMOVE SAYS ITSELF ON THE BOARD and nothing is written under it. Both of its squares
+              are tinted in the premove's own colour — where the piece is going and where it came
+              from — which is the whole of what a reader needs, and it is what every board they have
+              played on does. The three sentences that used to stand here explained a gesture the
+              reader had just made, moved the status line under them, and pushed the board smaller to
+              make room (see `useBoardFit`): the chrome grows, and this was chrome. */}
           {board.error && (
             <p data-testid="chess-error" className="mt-1 text-center text-[11px] text-destructive">
               {board.error}
             </p>
           )}
+          {/* HOW THE TWO OF THEM STAND, over every game this conversation holds — not only the ones
+              on screen (see `useChessSeries`). It is drawn all through a game rather than only at the
+              end of one, because that is what a series IS: the reason this move matters. */}
+          {series && (
+            <p
+              data-testid="chess-series"
+              data-series-played={series.played}
+              className="mt-1 text-center text-[11px] text-text-faint"
+            >
+              {chessSeriesWords(series, themName)}
+            </p>
+          )}
+          {/* ANOTHER GAME. It sits under the sentence that says how the last one ended, which is
+              where the reader is already looking. */}
+          <ChessRematchButton game={game} conversationId={props.conversationId} className="mt-2" />
           {/* A challenge the reader was offered is answered HERE too, so a page opened from a
               notification is not a board they can do nothing with. */}
           {!game.opponent && !game.challenger.isSelf && !settled && (

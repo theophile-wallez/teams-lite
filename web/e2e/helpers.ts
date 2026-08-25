@@ -1088,6 +1088,9 @@ export async function seedChessGame(
     base?: number;
     increment?: number;
     conversation?: string;
+    /** Seed a FINISHED game, which is what a head-to-head SCORE and a REMATCH are counted from —
+     *  neither exists on a game that is still going, and playing one out is twenty presses. */
+    ending?: "weResigned" | "theyResigned" | "draw";
   } = {},
 ): Promise<string> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {

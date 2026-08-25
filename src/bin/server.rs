@@ -144,6 +144,13 @@ const READ_ONLY_PORT: u16 = 19430;
 /// own ceiling is 30 per conversation — and it bounds a read that is otherwise unbounded
 /// by anything the user does.
 const MAX_SCHEDULED_LISTED: i64 = 200;
+
+/// How many chess-carrying messages one conversation's head-to-head score is counted over.
+///
+/// A game is TWO messages — one ledger per player, edited in place — so this is some six hundred
+/// games in one thread, well past anybody's series, and it bounds a read that would otherwise grow
+/// with the history for ever.
+const MAX_CHESS_MESSAGES: i64 = 1_200;
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
 const UA: &str = teams_lite::USER_AGENT;
 /// Give the UI ample time to connect after the server becomes ready. Authentication
@@ -6393,6 +6400,29 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let store = ctx.store()?;
             let held = store.scheduled_messages(MAX_SCHEDULED_LISTED)?;
             let messages: Vec<Value> = held
+                .iter()
+                .map(|m| message_json(m, &me.name, &me.mri, Some(&store)))
+                .collect();
+            Ok(json!({ "messages": messages }))
+        }
+
+        // Every message of one conversation that carries a game of CHESS — what the head-to-head
+        // score is counted over (§ Chess in a conversation).
+        //
+        // An ORDINARY READ, ungated like `scheduled_messages`, and it makes no network request: a
+        // game IS its messages, so the store already holds every one of them. It publishes nothing
+        // a page cannot already read — these are rows of the user's own history, in the shape the
+        // history itself answers with.
+        //
+        // It decides NOTHING about a game. Whose ply is whose, what the clocks read and who won are
+        // the page's one derivation (see src/chess_wire.rs); this answers which rows hold a game,
+        // which is the one question a page cannot answer for the history it has not loaded.
+        "chess_messages" => {
+            let conversation = param_str(params, "conversation")?;
+            let me = ctx.identity().await?;
+            let store = ctx.store()?;
+            let msgs = store.chess_messages(&conversation, MAX_CHESS_MESSAGES)?;
+            let messages: Vec<Value> = msgs
                 .iter()
                 .map(|m| message_json(m, &me.name, &me.mri, Some(&store)))
                 .collect();

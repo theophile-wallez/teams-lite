@@ -2890,8 +2890,9 @@ user. Two independent mechanisms enforce that split:
   control, the challenge popover, the board in both themes, a game in progress with its score
   sheet, the armed resignation, the board at a phone's width, the card a colleague's challenge
   leaves for the reader to answer, the STRIP of running games, the full-screen PAGE, the promotion
-  picker, the PREMOVE and the dots that set it — and the COMPUTER: the row that says the engine is
-  7.3 MB, the Elo picker, a game against
+  picker, the PREMOVE and the dots that set it, each side's HAUL with the material delta beside it,
+  the head-to-head score and the REMATCH a finished game earns — and the COMPUTER: the row that says
+  the engine is 7.3 MB, the Elo picker, a game against
   it and what it costs in Settings: `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`:
   the pawn in the header is 20px). That run needs no engine on the machine: it writes the same STUB
   worker the E2E suite does into a temporary directory and points `TEAMS_LITE_ENGINE_DIR` at it, so
@@ -4792,9 +4793,10 @@ that conversation's own MENU (§ ONE MENU in a conversation's header) — severa
 they like. Every game is carried by ordinary Teams messages; the board is a row in the history,
 and one game in FULL is a page of its own. `web/src/lib/chess-wire.ts` is the line a chess message
 signs itself with, `chess-thread.ts` derives every game from the thread's own messages,
-`chess-clock.ts` does the clocks, `chess-act.ts` decides what a press publishes, `chess-menu.ts`
-what the header offers, `chess-premove.ts` where a PREMOVE may go — the one question about a game
-the rules do not answer — `chess-sound.ts` what a move sounds like,
+`chess-clock.ts` does the clocks, `chess-act.ts` decides what a press publishes — a REMATCH among
+them — `chess-menu.ts` what the header offers, `chess-premove.ts` where a PREMOVE may go — the one
+question about a game the rules do not answer — `chess-material.ts` what each side has TAKEN,
+`chess-series.ts` how the two of them STAND, `chess-sound.ts` what a move sounds like,
 `web/src/components/chess-board.tsx` draws the board (and is the only place `react-chessboard` is
 touched), `use-chess-game.ts` is every behaviour a board has, `chess-game-card.tsx` the row in the
 history, `chess-page.tsx` the full-screen page, `chess-score-sheet.tsx` its right column and
@@ -4955,9 +4957,11 @@ which is the right place to play A MOVE and the wrong place to play a GAME.
   (`useBoardFit`), which is the whole of the fix. The page used to cap the board at
   `calc(100vh - 15rem)`: 240px for the header, the padding, two seats, the controls and the
   sentence, which really measure 252 — so every full-screen game overflowed by twelve pixels and
-  carried a scrollbar. A constant cannot be right anyway, because the chrome GROWS: a premove hint,
-  a refusal, the two buttons a challenge is answered with, and a sentence that wraps at a narrow
-  width each add a line nobody can put in a `calc`. Flexbox already measures what is left (`flex-1`
+  carried a scrollbar. A constant cannot be right anyway, because the chrome GROWS: a refusal, the
+  head-to-head score, the rematch, the two buttons a challenge is answered with, a haul under each
+  seat, and a sentence that wraps at a narrow width each add a line nobody can put in a `calc` — and
+  the premove caption that used to be in this list is GONE for that very reason (§ WHAT A BOARD
+  DOES), because a caption paid for in board is a bad trade. Flexbox already measures what is left (`flex-1`
   over `min-h-0`); the hook reads that number and hands it back as the stack's WIDTH, so the two
   seats and the controls line up with the board's own edges rather than with the column's. Three
   details are load-bearing: the width comes from the COLUMN and never from the stack (whose width
@@ -5027,6 +5031,14 @@ which is the right place to play A MOVE and the wrong place to play a GAME.
     decides once for the whole board on the UP, where the gesture is known — the square it began on
     is a press, any other square is an arrow. That also makes it a press ANYWHERE on the board: the
     rounded edge and the hairline round the grid answer `null` on both sides and cancel too.
+  - **AND NOTHING IS WRITTEN UNDER THE BOARD ABOUT IT.** The two tinted squares are the whole of
+    what a premove says, which is what every board a reader has ever played on says too. The page
+    used to carry three sentences under the status line — "Premove set: g1–f3. It plays itself when
+    they move, for a tenth of a second. Right-click to take it back." — and they were wrong in three
+    ways at once: they explained a gesture the reader had JUST made, they explained it again on every
+    premove of every game for ever, and they were CHROME on the one column whose spare room is the
+    board's own size (`useBoardFit`), so the board shrank to make room for a caption about the board.
+    `web/e2e/chess.spec.ts` holds the page to saying nothing about a premove in words.
   A premove is also taken back by a left press on anything that is not the reader's own piece, and
   replaced by setting another.
 - **A PREMOVE COSTS 0.1 s** (`PREMOVE_SPEND_MS`), whatever the wall clock says: it is a move that
@@ -5037,6 +5049,105 @@ which is the right place to play A MOVE and the wrong place to play a GAME.
 - **Nothing is playable except at the live position, on the reader's own turn, with nothing of
   theirs already in flight** — a second press before the first move's message came back would claim
   a ply the thread has not reached.
+
+### WHAT EACH SIDE HAS TAKEN (a haul under each seat, and the score between them)
+
+A player reads a board and then reads two other things: the men they have won, and whether the
+exchange left them up or down. Both are drawn under the seat they belong to — the captured pieces as
+glyphs, and the material delta beside them (`web/src/lib/chess-material.ts` decides it,
+`ChessCaptured` in `chess-game-card.tsx` draws it, and the board hands it over as `board.material`).
+
+- **THE HAUL IS "WHAT IS MISSING" AND THE SCORE IS "WHAT IS LEFT"**, and it matters which is which.
+  A side's haul is the opponent's men that are no longer on the board against the sixteen a game
+  starts with, which is lichess's own convention; the score is the material each side still HOLDS.
+  The two only disagree over a PROMOTION — a promoted pawn was captured by nobody, so a haul reads as
+  though somebody had taken a pawn while the remaining-material score correctly shows the promoting
+  side eight points up. A count that would go the other way (two queens) is clamped to nothing rather
+  than drawn as a piece somebody un-captured. The KING is in none of it: it cannot be taken.
+- **IT IS READ OFF THE POSITION ON SCREEN**, not off the move list — one pass over a FEN, through
+  `chessPlacementOf`, which is the ONE FEN reader in this app (a premove already needed it). So a
+  reader walking back through the game walks the material back with it, which is half of what a
+  review is for, and the module carries no dependency at all like every other `lib/chess-*.ts`.
+- **BOTH SEATS SHOW A NUMBER, signed from their own side.** `+3` above the board and `−3` below it is
+  one fact twice only for somebody reading both at once, and a player looking at their own seat on a
+  phone is not. A level position shows no number at all: a `0` is a number the reader has to read in
+  order to learn nothing.
+- **THE MEN ARE TEXT, not a second icon set.** Unicode's own chess pieces, hollow for white and solid
+  for black — the typographic convention, the one spelling that reads in both themes, and the reason
+  § Project shape's one-icon-library rule is untouched. They wear the OPPONENT's colour, because the
+  pieces really are the opponent's. **The INK is what makes that legible and it is `text-dim` rather
+  than `text-faint`**: the first capture of this row drew a solid glyph in the faintest ink, which is
+  a grey blob, and a hollow one beside it was the same blob — so the one thing the two spellings
+  carry was lost. A haul is a LINE of its own for the same reason a stamp is not on every bubble:
+  room, and the reader's eye skipping it until they want it.
+- **AND THE GLYPHS ARE NOT THE WHOLE MESSAGE.** A row of `♟♟♞` says nothing to a screen reader, so
+  the words ride on the element's own `title` and `aria-label` — the rule a reaction chip already
+  holds for who reacted.
+- **A seat with nothing taken and nothing between them draws NO line**, which is every game at its
+  starting position.
+
+### THE HEAD TO HEAD, and the REMATCH one finished game earns
+
+A game that ends offers another: **the same opponent, the same clock, the colours the other way
+round** — and beside it, how the two of them stand over every game the conversation holds, with a
+draw counting a half. `chessRematchFor` (`chess-act.ts`) decides the press, `chess-series.ts` counts
+the score, and `ChessRematchButton` (`chess-game-card.tsx`) draws the one for both surfaces.
+
+**THE REMATCH IS AN ORDINARY CHALLENGE and deliberately not a fifth act on the wire**: a new game id,
+`open`, the clock the last game carried, and the colour the reader did NOT have. So the wire gains
+nothing, the derivation gains nothing, and a colleague on a build that predates this reads it as
+exactly what it is — somebody challenging them again. Five rules hold it, each pinned by a test:
+
+- **Three things decide whether one is offered at all**, and each is a game that must not: a game
+  still GOING (a rematch mid-game is a second board nobody asked for, and the menu already offers a
+  fresh challenge), a game the reader WATCHED (it would post a challenge under their name for two
+  other people's series), and a challenge nobody ACCEPTED — declined or withdrawn was never a game,
+  so "again" names nothing.
+- **THE COLOURS INVERT**, which is the whole convention: a series played from one side is not a
+  series. The clock is CARRIED for the same reason — a rematch at another time control is a different
+  game, and re-picking one is what the menu is for.
+- **IN A GROUP the row says the challenge is OPEN**, for the reason `chessChallengeLabel` does: a
+  challenge in a group thread is answered by whoever answers first, and a row promising a rematch
+  with one person would be a promise the wire cannot keep.
+- **The ENGINE gets one too**, at the strength it was playing: "play again" is the commonest thing
+  anybody wants from a machine, and the token carries its Elo exactly as the first game did.
+- **The outcome is reported AT the press, and the press goes quiet once it has left.** A challenge
+  that did not go out must never be left looking like it did (the composer's own rule), and pressing
+  twice would open a second game nobody asked for. A reload offers it again, which is the honest cost
+  of writing nothing down.
+
+**THE SCORE IS COUNTED OVER THE WHOLE STORED HISTORY, and that is the one thing the derivation alone
+could not do.** The history loads a page at a time, so a series taken off the loaded messages would
+count the games that happen to be on screen and quietly grow as the reader scrolled back. Six rules,
+each pinned:
+
+- **The BACKEND answers WHICH messages hold a game, and nothing else about one.**
+  `chess_messages` (`Store::chess_messages`, over `src/chess_wire.rs`) is an ordinary OPEN read that
+  makes no network request — a game IS its messages, so the store already holds every one of them —
+  and it answers ordinary messages in the ordinary shape. Whose ply is whose, what the clocks read and
+  who won stay the page's ONE derivation, because a second spelling of any of that in Rust would be a
+  second answer to "what happened in this game", drifting at the next token anybody adds.
+- **The marker has one Rust spelling** (`chess_wire::chess_line_at`), and `push_policy` reads it
+  through the same function — the line a push must never show a reader and the line the store filters
+  on are the same line.
+- **The LIVE games win over the snapshot, per game id** (`chessSeriesGames`). The archive is read
+  once; a game that finished a moment ago is settled in the thread and still running in there, so
+  merged the other way round a resignation would leave the score unchanged until a reload.
+- **A draw is a HALF for each side**, so the two totals always add up to the games played, and the
+  score is written the way chess writes one (`2½`). A game in progress and a challenge nobody took up
+  are in neither total: the score says what has been SETTLED.
+- **The opponent is keyed by MRI, never by a display name** — two colleagues may share one (§ WHO
+  said it), so a series counted by name would pool two people's games under one score. A game against
+  the ENGINE keeps no series at all: a machine scores with nobody, and its MRI is empty, which would
+  otherwise pool every engine game into one.
+- **It is asked by the BOARD that draws it** — the card and the page share one hook
+  (`useChessSeries`, over the OPTIONAL controller, because a card is server-rendered with no provider
+  around it) — rather than on connect: a reader who plays no chess never pays for it. The store
+  answers it ONCE per conversation, because a history holding six boards must not ask six times; what
+  that costs is nothing, since the live games win over the snapshot anyway. A read that fails leaves
+  whatever was there and the board still counts the games the thread itself holds — which is also what
+  a SEALED conversation gets, since a sealed body is ciphertext in the column the store filters on.
+  That limit is stated where the read is.
 
 ### THE CLOCKS (default ten minutes, on both sides of the board)
 
@@ -5251,7 +5362,10 @@ exists because a moment cannot be reached otherwise: `challenge` makes the mock 
 absence once hid the fact that the app had no Accept button while eleven tests passed), `seed` puts a
 game mid-flight with the clocks a spec chose (the alternative is a spec that waits ten minutes for a
 number to move), and `play` makes the opponent move on its own, which is the only way to reach the
-instant a premove fires — a premove posts nothing until it is legal. **A spec MUST reset**: one mock
+instant a premove fires — a premove posts nothing until it is legal. `seed` also takes an **`ending`**
+(`weResigned`, `theyResigned`, `draw`), which is what makes the head-to-head SCORE and the REMATCH
+reachable at all: both live on a game that is over, and three finished games — one each and a draw, so
+the score really reads a half — is otherwise sixty presses. **A spec MUST reset**: one mock
 process serves the whole run, and a conversation holds several games at once now, so a game left
 unfinished is a chip in the next test's strip, a row in its menu and a board in its history.
 
@@ -5260,9 +5374,11 @@ with its clock, the board in both themes, a game in progress with its score shee
 resignation, the board at a phone's width, the card a colleague's challenge leaves, the STRIP of
 running games, the full-screen PAGE in both themes and at a phone's width, the promotion picker, the
 DOTS a piece is offered while the opponent thinks — where it might be able to go rather than where it
-may go now — and the premove those dots set, in both themes. `web/e2e/chess.spec.ts` pins every rule
+may go now — the premove those dots set, in both themes, both HAULS with the material delta beside
+them, and the head-to-head score with the REMATCH under it (on the page in both themes, and on the
+card in the conversation where a finished game is met first). `web/e2e/chess.spec.ts` pins every rule
 the page owns, and `chess-wire.test.ts`, `chess-thread.test.ts`, `chess-clock.test.ts`,
-`chess-act.test.ts`, `chess-premove.test.ts`,
+`chess-act.test.ts`, `chess-premove.test.ts`, `chess-material.test.ts`, `chess-series.test.ts`,
 `chess-menu.test.ts` and `chess-sound.test.ts` the pure ones — the last of which pins the palette
 without an AudioContext anywhere: which sound a move earns and whose move it was, which of
 chess.com's files each one is, that the synthesized FALLBACK still holds a recipe for every sound,
@@ -5279,6 +5395,12 @@ and read it back byte for byte.** The sealed-message probe measured base64url su
 characters and the v1 line has always survived, so a line of letters, digits, spaces, `+` and `.`
 is expected to — but expected is not measured, and a `.`-separated ledger is the one part of this
 feature that a tenant has never seen.
+
+**The head-to-head READ needs no tenant and has none of that doubt**: `chess_messages` is a store
+read, pinned in `store::tests` over a fixture that holds both wire shapes beside the things that must
+never be read as a game — an agent's own signature, a colleague's prose about chess, a game id that is
+not six hex characters, and a message somebody deleted. What is untested there is the same pairing as
+everything else: one real series, over a real thread, in the user's own app.
 
 ### Playing STOCKFISH (fetched only if the reader asks for it, at an Elo they pick)
 
@@ -5665,11 +5787,15 @@ user's. What changes is only what is asked.
     message signs itself with, `chess-thread.ts` derives every game from the thread's own
     messages, and `chess.js` plus `react-chessboard` are reached only through the board's lazy
     chunk (see § Chess in a conversation). A MOVE has no backend half at all — it rides the
-    `send` that is already gated. The two things that do are both bytes from the internet that
+    `send` that is already gated. Two of the three things that do are bytes from the internet that
     this app refuses to let a browser fetch: the ENGINE (`src/chess_engine.rs`) and the board's
     own SOUNDS (`src/chess_sound.rs`), which share their whole verify-before-use policy through
     `src/pinned_download.rs` and reach the page over one route each (`web/engine-file.ts`,
-    `web/chess-sound-file.ts`).
+    `web/chess-sound-file.ts`). The third is the one QUESTION a page cannot answer about a history
+    it has not loaded — which of a conversation's stored messages hold a game at all
+    (`src/chess_wire.rs`, read by `Store::chess_messages` and by `push_policy`), for the
+    head-to-head score. It reads the MARKER and never the game: the wire keeps one spelling, on
+    the page.
   - There was a terminal UI (OpenTUI + Solid, in `ui/`) until 2026-08-03. It is gone,
     and the web app is the only client: do not re-add a second front-end, and read a
     comment that names one as history rather than as a place to keep in sync.

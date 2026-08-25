@@ -5217,6 +5217,47 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every message of one conversation that carries a game of CHESS, oldest -> newest.
+    ///
+    /// **WHAT IT IS FOR IS THE HEAD-TO-HEAD SCORE** (§ Chess in a conversation). A game replays out
+    /// of the thread's own messages, so the page can already derive every game it has LOADED — and
+    /// the history loads a page at a time, so a series counted off that would count the games that
+    /// happen to be on screen and grow as the reader scrolled back. This answers the whole stored
+    /// history instead, and it costs no network read at all: the games are already here.
+    ///
+    /// **IT DECIDES NOTHING ABOUT A GAME.** Which ply is whose, what the clocks read and who won are
+    /// the page's one derivation ([`crate::chess_wire`] says why); this only says which rows hold a
+    /// game. So the answer is ordinary messages, in the ordinary shape, and the reader that already
+    /// exists is what reads them.
+    ///
+    /// Two things about the filter, and each is deliberate:
+    ///   - the SQL `LIKE` is a cheap prefilter and decides nothing. The marker is then checked on the
+    ///     body itself, through the one Rust spelling of it — so a message that merely says "chess"
+    ///     is not in the answer, and the prefilter can be widened without changing what comes back.
+    ///   - a SEALED conversation's bodies are ciphertext in this column, so the prefilter matches
+    ///     none of them and a sealed thread's series is counted from the loaded page alone (the page
+    ///     merges the two — see `chessSeriesGames`). Reading every row of every conversation to cover
+    ///     that would decrypt a whole history on every board that mounts, which is the wrong trade
+    ///     for a score.
+    pub fn chess_messages(&self, conversation_id: &str, limit: i64) -> Result<Vec<Message>> {
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM messages
+             WHERE conversation_id = ?1 AND deleted = 0 AND {NOT_STILL_HELD}
+               AND content LIKE '%chess %'
+             ORDER BY seq DESC LIMIT ?2"
+        );
+        let keyring = self.seal_keyring()?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![conversation_id, limit], msg_reader(&keyring))?;
+        let mut v: Vec<Message> = rows
+            .collect::<rusqlite::Result<Vec<Message>>>()?
+            .into_iter()
+            .filter(|m| crate::chess_wire::carries_chess_line(&m.content))
+            .collect();
+        v.reverse(); // oldest -> newest, which is the order the derivation walks
+        Ok(v)
+    }
+
     /// The `limit` messages immediately older than `before_seq`, ordered oldest -> newest.
     /// Used when the UI scrolls up; if it returns fewer than `limit`, the caller should
     /// check `has_more_older` and fetch the next page from the network.
@@ -5714,6 +5755,51 @@ mod tests {
         let after = store.conversations("Me").unwrap();
         let mine = after.iter().find(|c| c.id == conversation).expect("the conversation");
         assert_eq!(mine.last_message_preview, "the merger closes on Friday");
+    }
+
+    /// WHICH MESSAGES HOLD A GAME OF CHESS — the read a head-to-head score is counted over.
+    ///
+    /// It answers the whole stored history rather than the page a client has loaded, which is the
+    /// one thing the page's own derivation cannot do (§ Chess in a conversation). What it must NOT
+    /// do is read a game out of anything else: an agent's own `— claude, via teams-lite`, a
+    /// colleague's prose about chess, and a message this app deleted are all in this fixture
+    /// because each one would silently inflate somebody's score.
+    #[test]
+    fn the_chess_read_finds_a_game_and_nothing_that_merely_mentions_one() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = "19:chess@thread.v2";
+        let ledger = "<p>♟ Chess — I'd like a game. I'm white.</p>\
+                      <p><em>— chess 7f3a1c v2 w open tc.600+0 at.1756060012345, via teams-lite</em></p>";
+        let rows = [
+            // A game, and the older one-message-per-move shape, which still replays.
+            (1, ledger),
+            (2, "<p>♟ 1. e4</p><p><em>— chess bbb222 1 e4, via teams-lite</em></p>"),
+            // And everything that is not a game.
+            (3, "<p>fancy a game of chess later?</p>"),
+            (4, "<p>done</p><p><em>— claude, via teams-lite</em></p>"),
+            (5, "<p>♟ Chess</p><p><em>— chess not-a-game 1 e4, via teams-lite</em></p>"),
+        ];
+        for (seq, content) in rows {
+            let mut row = message_for_test(conversation, "8:orgid:ada", content);
+            row.id = format!("m{seq}");
+            row.seq = seq;
+            store.insert_message(&row).unwrap();
+        }
+        // A game somebody DELETED is not a game: its body is a placeholder, and the derivation
+        // refuses it on the page for the same reason.
+        let mut gone = message_for_test(conversation, "8:orgid:ada", ledger);
+        gone.id = "m6".to_string();
+        gone.seq = 6;
+        store.insert_message(&gone).unwrap();
+        store.mark_message_deleted(conversation, "m6").unwrap();
+
+        let found = store.chess_messages(conversation, 100).unwrap();
+        let ids: Vec<&str> = found.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["m1", "m2"], "only the two messages that carry a game");
+        // Oldest first, which is the order the page's derivation walks.
+        assert!(found[0].seq < found[1].seq);
+        // And nothing about another conversation's games.
+        assert!(store.chess_messages("19:other@thread.v2", 100).unwrap().is_empty());
     }
 
     /// EVERY read of a message body goes through the seal, and this is what keeps it that way.
