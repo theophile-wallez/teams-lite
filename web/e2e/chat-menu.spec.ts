@@ -5,6 +5,10 @@ import type { Page } from "@playwright/test";
 // how loud it is — pinned, muted, hidden — and offers them from a "…" on the row. This
 // covers that menu and the sections it fills.
 //
+// The read marker is the fourth thing that menu holds, and the one that is asymmetric:
+// marking a chat READ is published (`mark_read` moves the user's horizon forward), while
+// marking it UNREAD stays here, because no horizon ever goes backwards.
+//
 // The three do NOT reach the same place, and the split is measured rather than chosen
 // (see src/teams_chat_settings.rs): the MUTE is published to Teams and read back from it,
 // while the pin and the hide are local overrides this app holds itself. So the mute is
@@ -211,10 +215,41 @@ test.describe("chat sections and the row menu", () => {
     // Nothing was opened: the detail pane still says so.
     await expect(page.locator('[data-testid="conversation-title"]')).toHaveCount(0);
 
-    // A chat that is already read is offered no such item — the menu never states an
-    // action with nothing to do.
+    // One slot, and it now states the other action: a read chat is offered "Mark as
+    // unread" and never a "Mark as read" with nothing to do.
     await openChatMenu(page, id);
     await expect(page.locator('[data-testid="chat-menu-mark-read"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="chat-menu-mark-unread"]')).toBeVisible();
+  });
+
+  test("marks a read chat unread HERE, and it survives a reload", async ({ page }) => {
+    await gotoApp(page);
+
+    // A chat Microsoft Teams reports as read: the marker this test sets exists nowhere
+    // but this browser, since `mark_read` can only ever publish a horizon that moves
+    // FORWARD (see `chatIsUnread`).
+    const read = page
+      .locator('[data-testid="conversation-row"]:not([data-unread="true"]):not([data-muted="true"])')
+      .first();
+    const id = (await read.getAttribute("data-conversation-id")) ?? "";
+
+    await openChatMenu(page, id);
+    await page.locator('[data-testid="chat-menu-mark-unread"]').click();
+    await expect(row(page, id)).toHaveAttribute("data-unread", "true");
+    // And the pair turns over: the same slot now offers the way back.
+    await openChatMenu(page, id);
+    await expect(page.locator('[data-testid="chat-menu-mark-read"]')).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    // It is persisted like the pin and the fold, so it outlives the page — nothing
+    // about the account changed, so nothing brings it back but this browser.
+    await gotoApp(page);
+    await expect(row(page, id)).toHaveAttribute("data-unread", "true");
+
+    // OPENING the chat is what a person means by having read it, and it takes the
+    // marker back — the one way out that needs no menu.
+    await row(page, id).click();
+    await expect(row(page, id)).not.toHaveAttribute("data-unread", "true");
   });
 
   test("folding a section takes its chats off the keyboard's path too", async ({ page }) => {

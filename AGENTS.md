@@ -3232,8 +3232,8 @@ phone and a pointer's menu is the one that must not gain a dead stop.
 ## The chat list mirrors Teams too, and the "…" menu is LOCAL
 
 Hovering a chat row reveals Teams' own "…", and it holds the three settings Teams puts
-there plus the one read action: **pin to top**, **mute**, **hide**, **mark as read**
-(`web/src/components/chat-menu.tsx`). The list is then drawn in Teams' own sections —
+there plus the read marker in both directions: **pin to top**, **mute**, **hide**,
+**mark as read** / **mark as unread** (`web/src/components/chat-menu.tsx`). The list is then drawn in Teams' own sections —
 **Pinned**, **Recent**, **Hidden chats** — by `organizeChats` in `web/src/lib/protocol.ts`,
 and `web/e2e/chat-menu.spec.ts` pins the lot.
 
@@ -3266,6 +3266,19 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
   receipt — and Ghost mode still decides whether Teams is told. It is offered because
   the user asked for it on that chat, it is never automatic, and a failure is reported
   rather than swallowed.
+- **Mark as UNREAD is its opposite in the menu and NOT its opposite on the wire**, and
+  that asymmetry is the whole of it: `mark_read` publishes a horizon that moves FORWARD,
+  the service has no backwards one, and a read receipt the sender was already shown
+  cannot be withdrawn — so there is nothing outward to attempt and no RPC to gate. It is
+  a local marker (`chatUnreads`, persisted per browser beside the pin and the hide, read
+  through `chatIsUnread` — the ONE place a chat's unread state is decided, so the row, a
+  folded section's own hint and the menu's two labels cannot disagree). Two things clear
+  it and both go through `clearChatUnread`: **opening the chat**, which is what a person
+  means by having read it, and **Mark as read**, which drops the marker before it
+  publishes anything — a chat Teams already holds read must not stay bold because an
+  outward call was refused. A NEW message needs no clearing, since the chat is then
+  unread by Teams' own answer too. One slot holds whichever of the two has something to
+  do, the "Unpin"/"Pin to top" rule, and the menu's own note says which half stays here.
 - **The sections ARE the keyboard's order.** The selection is an index into the list as
   rendered, so the sidebar and the app shell both read `useChatSections()`: a chat in a
   folded section is out of the keyboard's reach as well as out of sight. Deriving that

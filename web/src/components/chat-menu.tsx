@@ -4,12 +4,19 @@ import {
   BellOffIcon,
   EyeIcon,
   EyeOffIcon,
+  Mail01Icon,
   MailOpen01Icon,
   MoreHorizontalIcon,
   PinIcon,
   PinOffIcon,
 } from "@hugeicons/core-free-icons";
-import { chatIsHidden, chatIsMuted, chatIsPinned, type Conversation } from "~/lib/protocol";
+import {
+  chatIsHidden,
+  chatIsMuted,
+  chatIsPinned,
+  chatIsUnread,
+  type Conversation,
+} from "~/lib/protocol";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
 import {
@@ -26,7 +33,7 @@ const ITEM_ICON = "size-4 shrink-0 text-text-dim";
 
 /**
  * The "…" menu on a chat row in the sidebar — the settings Microsoft Teams offers
- * there: pin the chat to the top, mute it, put it away, mark it read.
+ * there: pin the chat to the top, mute it, put it away, mark it read or unread.
  *
  * Two of the four items reach the account, and two do not — which is measurement, not
  * policy, and the menu says which is which because a switch whose reach the user has to
@@ -38,6 +45,10 @@ const ITEM_ICON = "size-4 shrink-0 text-text-dim";
  * - **Mark as read is published too**: the same `mark_read` the app makes on open, which
  *   moves the user's consumption horizon and shows the sender a read receipt. Ghost mode
  *   still decides whether Teams is told at all.
+ * - **Mark as UNREAD does not reach Teams**, and cannot: `mark_read` only publishes a
+ *   horizon that moves forward, and a read receipt the sender already saw cannot be
+ *   withdrawn. So it is a local marker, cleared by opening the chat (see
+ *   `chatIsUnread`) — the direction the pair is asymmetric in, stated rather than hidden.
  * - **Pin and hide stay HERE.** Teams keeps neither in a place this app can write: the
  *   chat service refuses `pinned`/`sticky` outright, and the properties it does accept
  *   are never read back by the payload the sidebar is built from. A write nothing reads
@@ -60,10 +71,12 @@ export function ChatMenu(props: {
 }) {
   const controller = useController();
   const prefs = useAppState((s) => s.chatPrefs);
+  const unreads = useAppState((s) => s.chatUnreads);
   const c = props.conversation;
   const pinned = chatIsPinned(c, prefs);
   const muted = chatIsMuted(c);
   const hidden = chatIsHidden(c, prefs);
+  const unread = chatIsUnread(c, unreads);
 
   return (
     // Non-modal, for the reason calendar-view-menu.tsx spells out: a modal Radix menu
@@ -139,13 +152,25 @@ export function ChatMenu(props: {
           />
           <span className="flex-1">{hidden ? "Show chat" : "Hide chat"}</span>
         </DropdownMenuItem>
-        {!c.is_read && (
+        {/* One slot, two actions, and which one is offered is which one has something
+            to do — the "Unpin"/"Pin to top" rule again. Reading it through
+            `chatIsUnread` is what makes the pair honest: a chat marked unread HERE is
+            offered "Mark as read", whatever Teams still says about it. */}
+        {unread ? (
           <DropdownMenuItem
             data-testid="chat-menu-mark-read"
             onSelect={() => void controller.markConversationRead(c.id)}
           >
             <HugeiconsIcon icon={MailOpen01Icon} className={ITEM_ICON} strokeWidth={1.6} />
             <span className="flex-1">Mark as read</span>
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem
+            data-testid="chat-menu-mark-unread"
+            onSelect={() => controller.markChatUnread(c.id)}
+          >
+            <HugeiconsIcon icon={Mail01Icon} className={ITEM_ICON} strokeWidth={1.6} />
+            <span className="flex-1">Mark as unread</span>
           </DropdownMenuItem>
         )}
 
@@ -155,8 +180,8 @@ export function ChatMenu(props: {
             note about the items above, and it is the honest half of offering them at
             all — each half of it names the settings it applies to. */}
         <p className="px-2.5 pb-1 pt-0.5 text-[11px] leading-snug text-text-faint">
-          Muting reaches Microsoft Teams, so your phone goes quiet too. Pinning and hiding
-          stay in teams-lite.
+          Muting and marking read reach Microsoft Teams, so your phone follows. Pinning,
+          hiding and marking unread stay in teams-lite.
         </p>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -1994,6 +1994,26 @@ export function chatIsHidden(c: Conversation, prefs: ChatPrefs): boolean {
   return c.last_message_time <= watermark;
 }
 
+/**
+ * Whether this chat carries an unread marker: Teams' own answer, unless the user
+ * marked it unread HERE.
+ *
+ * The marker is the one thing on a chat row this app can move in a single direction.
+ * `mark_read` publishes the user's consumption horizon FORWARD and Teams reads it back
+ * (see `markConversationRead`), so marking a chat read reaches every device — but
+ * nothing here publishes a horizon that goes backwards, and the read receipt the sender
+ * was already shown cannot be taken back either. So "mark as unread" is a local
+ * override like the pin and the hide, and the menu says so rather than leaving the user
+ * to guess how far it reaches.
+ *
+ * It is cleared by OPENING the chat — which is what a person means by having read it —
+ * and by "Mark as read", which drops the local marker and publishes the read. A NEW
+ * message needs no clearing: the chat is then unread by Teams' own answer too.
+ */
+export function chatIsUnread(c: Conversation, unreads: Record<string, boolean>): boolean {
+  return unreads[c.id] === true || !c.is_read;
+}
+
 /** The three groups the chat list renders, in the order they appear. */
 export type ChatSectionId = "pinned" | "recent" | "hidden";
 
@@ -2017,11 +2037,15 @@ export type ChatRow =
 export function chatSectionCollapsedHint(
   section: ChatSection,
   openId: string | null,
+  /** The local unread markers, so a chat the user marked unread makes its folded
+   *  section say so — required rather than defaulted, since a caller that forgot it
+   *  would silence exactly the marker the user set by hand. */
+  unreads: Record<string, boolean>,
 ): { hidesUnread: boolean; hidesOpen: boolean } {
   return {
     // A muted chat is not something a folded section should shout about, exactly as
     // it raises no unread marker of its own.
-    hidesUnread: section.chats.some((c) => !c.is_read && !chatIsMuted(c)),
+    hidesUnread: section.chats.some((c) => chatIsUnread(c, unreads) && !chatIsMuted(c)),
     hidesOpen: section.chats.some((c) => c.id === openId),
   };
 }

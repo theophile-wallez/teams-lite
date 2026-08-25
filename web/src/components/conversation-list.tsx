@@ -24,6 +24,7 @@ import {
   channelLabel,
   chatIsMuted,
   chatIsPinned,
+  chatIsUnread,
   chatSectionCollapsedHint,
   convLabel,
   mailUnreadBadge,
@@ -321,6 +322,7 @@ function MailUnreadBadge() {
 function ChatList(props: { selectedIndex: number; onSelect: (index: number) => void }) {
   const openId = useAppState((s) => s.openId);
   const prefs = useAppState((s) => s.chatPrefs);
+  const unreads = useAppState((s) => s.chatUnreads);
   const navigate = useNavigate();
   const { rows, collapsed } = useChatSections();
 
@@ -378,6 +380,7 @@ function ChatList(props: { selectedIndex: number; onSelect: (index: number) => v
                   section={row.section}
                   collapsed={collapsed[row.section.id] === true}
                   openId={openId}
+                  unreads={unreads}
                 />
               ) : (
                 <ConversationRow
@@ -386,6 +389,7 @@ function ChatList(props: { selectedIndex: number; onSelect: (index: number) => v
                   selected={props.selectedIndex === row.index}
                   pinned={chatIsPinned(row.chat, prefs)}
                   muted={chatIsMuted(row.chat)}
+                  unread={chatIsUnread(row.chat, unreads)}
                   section={row.sectionId}
                   onClick={() => {
                     props.onSelect(row.index);
@@ -410,9 +414,12 @@ function ChatSectionHeader(props: {
   section: ChatSection;
   collapsed: boolean;
   openId: string | null;
+  /** The local unread markers, so folding a section still shouts about a chat the user
+   *  marked unread by hand. */
+  unreads: Record<string, boolean>;
 }) {
   const controller = useController();
-  const hint = chatSectionCollapsedHint(props.section, props.openId);
+  const hint = chatSectionCollapsedHint(props.section, props.openId, props.unreads);
   return (
     <SectionHeader
       testId="chat-section-header"
@@ -732,7 +739,8 @@ function GhostReadMark(props: { on?: boolean }) {
 }
 
 /** One chat row. Hovering it reveals the "…" menu that holds Microsoft Teams' own
- *  settings for the chat — pin, mute, hide, mark read (see `ChatMenu`); on a phone,
+ *  settings for the chat — pin, mute, hide, mark read or unread (see `ChatMenu`); on a
+ *  phone,
  *  where there is no hover, a long press on the row opens the same menu. The menu is a
  *  SIBLING of the row rather than a child: the row is a button, and a button inside a
  *  button is neither valid markup nor clickable apart from the row. */
@@ -742,12 +750,16 @@ function ConversationRow(props: {
   selected: boolean;
   pinned: boolean;
   muted: boolean;
+  /** Whether the chat carries an unread marker — Teams' own, or one the user set from
+   *  the row's own menu (`chatIsUnread`). Resolved by the list, which holds the local
+   *  markers, exactly as the pin is. */
+  unread: boolean;
   /** Which chat-list group the row is rendered in, stated on the DOM node. */
   section: ChatSectionId;
   onClick: () => void;
 }) {
   const c = props.conversation;
-  const unread = !c.is_read && !props.muted;
+  const unread = props.unread && !props.muted;
   // WHO wrote the newest message, when it was an agent rather than the account it went out
   // under. It is read from the store because a custom agent's LABEL lives there — the same
   // resolution the bubble's own mark makes, so the row and the thread name one reply one way.

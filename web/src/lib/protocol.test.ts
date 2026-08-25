@@ -36,6 +36,7 @@ import {
   chatIsMuted,
   chatIsPinned,
   chatRows,
+  chatIsUnread,
   chatSectionCollapsedHint,
   organizeChats,
   NO_CHAT_PREFS,
@@ -1400,6 +1401,23 @@ describe("chatRows", () => {
   });
 });
 
+describe("chatIsUnread", () => {
+  it("reads Teams' own answer when the user marked nothing", () => {
+    expect(chatIsUnread(conversation({ id: "x", is_read: false }), {})).toBe(true);
+    expect(chatIsUnread(conversation({ id: "x", is_read: true }), {})).toBe(false);
+  });
+
+  it("keeps a chat the user marked unread HERE unread, whatever Teams says", () => {
+    // The half that cannot be published: `mark_read` only ever moves the horizon
+    // forward, so this marker is the local override the menu says it is.
+    expect(chatIsUnread(conversation({ id: "x", is_read: true }), { x: true })).toBe(true);
+  });
+
+  it("reads only its own id's marker", () => {
+    expect(chatIsUnread(conversation({ id: "x", is_read: true }), { y: true })).toBe(false);
+  });
+});
+
 describe("chatSectionCollapsedHint", () => {
   it("reports an unread chat a folded section holds, and the open one", () => {
     const chats = [
@@ -1407,7 +1425,7 @@ describe("chatSectionCollapsedHint", () => {
       conversation({ id: "b", is_pinned: true }),
     ];
     const [pinned] = organizeChats(chats, NO_CHAT_PREFS);
-    expect(chatSectionCollapsedHint(pinned!, "b")).toEqual({
+    expect(chatSectionCollapsedHint(pinned!, "b", {})).toEqual({
       hidesUnread: true,
       hidesOpen: true,
     });
@@ -1418,10 +1436,18 @@ describe("chatSectionCollapsedHint", () => {
     // not shout on its behalf.
     const chats = [conversation({ id: "a", is_read: false, is_muted: true, is_pinned: true })];
     const [pinned] = organizeChats(chats, NO_CHAT_PREFS);
-    expect(chatSectionCollapsedHint(pinned!, null)).toEqual({
+    expect(chatSectionCollapsedHint(pinned!, null, {})).toEqual({
       hidesUnread: false,
       hidesOpen: false,
     });
+  });
+
+  it("shouts about a chat the user marked unread by hand", () => {
+    // Teams holds this one read; the marker is the user's own, and a folded section
+    // that stayed quiet about it would hide the very thing they set it for.
+    const chats = [conversation({ id: "a", is_read: true, is_pinned: true })];
+    const [pinned] = organizeChats(chats, NO_CHAT_PREFS);
+    expect(chatSectionCollapsedHint(pinned!, null, { a: true }).hidesUnread).toBe(true);
   });
 });
 

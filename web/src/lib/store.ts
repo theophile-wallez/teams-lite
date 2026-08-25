@@ -324,6 +324,11 @@ export type AppState = {
    *  value on the conversation row; a chat absent from a map keeps it. Drives the
    *  chat list's Pinned / Recent / Hidden sections (see `organizeChats`). */
   chatPrefs: ChatPrefs;
+  /** Chats the user marked unread HERE (chat id → true), persisted to localStorage.
+   *  Not part of `chatPrefs`: that is where a chat SITS in the list, and this is what
+   *  its row says. Read through `chatIsUnread`, cleared by opening the chat or by
+   *  marking it read. */
+  chatUnreads: Record<string, boolean>;
   /** Which sidebar sections the user has collapsed, keyed by team id (and
    *  `"pinned"` for the channel tree's top section, `"hidden:<team id>"` for a team's
    *  hidden channels, `"chats:<section>"` for a chat-list group), persisted to
@@ -816,6 +821,9 @@ const COLLAPSED_SECTIONS_KEY = "teams-lite:collapsed-teams";
 // read back from it, so the conversation row is its only home.
 const CHAT_PINS_KEY = "teams-lite:chat-pins";
 const CHAT_HIDES_KEY = "teams-lite:chat-hides";
+// And where a chat the user marked unread by hand is remembered. Its own key for the
+// same reason: a malformed value costs the marker and neither the pin nor the hide.
+const CHAT_UNREADS_KEY = "teams-lite:chat-unreads";
 // How many conversations keep a cached message page at all. Re-opening one of
 // these is instant; beyond that the least-recently-opened page is dropped, so a
 // long session spent hopping between dozens of chats doesn't accumulate their
@@ -898,6 +906,7 @@ function initialState(): AppState {
     // A fresh set of maps per store, not the shared `NO_CHAT_PREFS` constant: two
     // controllers (a test spawns several) must never share one object.
     chatPrefs: { pins: {}, hides: {} },
+    chatUnreads: {},
     collapsedSections: {},
     openId: null,
     messages: [],
@@ -1253,6 +1262,7 @@ export class TeamsController {
     this.applyPersistedSounds();
     this.applyPersistedChannelPins();
     this.applyPersistedChatPrefs();
+    this.applyPersistedChatUnreads();
     this.applyPersistedCollapsedSections();
     this.applyPersistedVisibleCalendars();
     this.applyPersistedCalendarSettings();
@@ -3218,6 +3228,13 @@ export class TeamsController {
     this.set({ chatPrefs: { pins: pins ?? {}, hides: hides ?? {} } });
   }
 
+  /** Load the chats the user marked unread by hand. Same best-effort contract: on any
+   *  failure a chat reads as Teams reports it. */
+  private applyPersistedChatUnreads(): void {
+    const unreads = readFlagMap(CHAT_UNREADS_KEY);
+    if (unreads) this.set({ chatUnreads: unreads });
+  }
+
   /** Toggle a channel's pin, lifting it into (or out of) the sidebar's top Pinned
    *  section. Records a local override that wins over Teams' own `is_pinned`,
    *  updates reactive state, and persists it. */
@@ -3284,6 +3301,31 @@ export class TeamsController {
     writeTimeMap(CHAT_HIDES_KEY, hides);
   }
 
+  /** Mark one chat unread — HERE, and this browser only.
+   *
+   *  Teams is told nothing: `mark_read` only ever publishes a horizon that moves
+   *  FORWARD, and the read receipt the sender was already shown cannot be taken back,
+   *  so there is no outward call to make and nothing to report (see `chatIsUnread`).
+   *  There is no opposite of this method either — that is "Mark as read", which is the
+   *  outward `markConversationRead` below. */
+  markChatUnread(id: string): void {
+    if (!this.get().conversations.some((c) => c.id === id)) return;
+    const unreads = { ...this.get().chatUnreads, [id]: true };
+    this.set({ chatUnreads: unreads });
+    writeFlagMap(CHAT_UNREADS_KEY, unreads);
+  }
+
+  /** Drop the local unread marker, if the chat carries one. Both ways back from
+   *  `markChatUnread` come through here — opening the chat, and marking it read — so a
+   *  marker can never outlive the thing it was waiting for. */
+  private clearChatUnread(id: string): void {
+    if (this.get().chatUnreads[id] !== true) return;
+    const unreads = { ...this.get().chatUnreads };
+    delete unreads[id];
+    this.set({ chatUnreads: unreads });
+    writeFlagMap(CHAT_UNREADS_KEY, unreads);
+  }
+
   /** Where a live message landed, with the setting that decides how loud it may be: a
    *  chat's mute (in Teams or here), or a channel's own Teams notification setting. Read
    *  on every inbound message, so a mute silences this app's notification and cue as
@@ -3313,6 +3355,9 @@ export class TeamsController {
    * failure is reported: the user clicked, so they must learn it did not happen.
    */
   async markConversationRead(id: string): Promise<void> {
+    // The local marker is this browser's, so it goes first and always succeeds: a chat
+    // Teams already holds read must not stay bold because the outward call was refused.
+    this.clearChatUnread(id);
     try {
       const { ghost } = await this.backend.markRead(id);
       this.applyLocalRead(id, ghost);
@@ -4554,6 +4599,10 @@ export class TeamsController {
   }
 
   async openConversation(id: string): Promise<void> {
+    // Opening a chat is what a person means by having read it, so it takes back a
+    // marker they set by hand — the thread is on screen and `markThreadRead` is about
+    // to publish the read anyway.
+    this.clearChatUnread(id);
     const previousId = this.get().openId;
     if (previousId && previousId !== id) {
       this.flushDraft(previousId);
