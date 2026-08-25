@@ -69,6 +69,16 @@ export type ChessLedger = {
    *  open the game may echo it, and the opener's is what counts. */
   time: ChessTimeControl | null;
   /**
+   * The ELO of the engine this author is playing, when their opponent is not a person.
+   *
+   * Stockfish has no MRI: it cannot author a message and it cannot edit one, so a game against it
+   * is ONE ledger — the reader's own — carrying BOTH sides' moves. That is the only place in this
+   * feature where one author writes the other colour's plies, and this token is what makes it
+   * legible: without it a ledger holding both parities is a ledger nobody can trust (see the parity
+   * rule in `parseLedger`).
+   */
+  engineElo: number | null;
+  /**
    * The moment this author last MOVED, by their own clock (epoch ms) — the moment their
    * opponent's clock therefore started. It is why a reload, a phone and an app that was closed
    * for an hour all draw the same two numbers.
@@ -189,6 +199,7 @@ export function newChessLedger(color: ChessColor): ChessLedger {
     joined: false,
     declined: false,
     time: null,
+    engineElo: null,
     at: null,
     moves: [],
     drawOfferedAt: null,
@@ -286,6 +297,12 @@ function parseLedger(rest: string): ChessLedger | null {
       };
       continue;
     }
+    // The ENGINE this author is playing, and its Elo. `sf` is Stockfish's own short name.
+    const engine = /^sf\.(\d{3,4})$/.exec(token);
+    if (engine) {
+      ledger.engineElo = Number(engine[1]);
+      continue;
+    }
     const time = LEDGER_TIME.exec(token);
     if (time) {
       ledger.time = { base: Number(time[1]), increment: Number(time[2]) };
@@ -331,8 +348,16 @@ function parseLedger(rest: string): ChessLedger | null {
   ledger.moves = [...plies.values()].sort((a, b) => a.ply - b.ply);
   // Every ply in one player's ledger is theirs, so its parity is decided by their colour. A
   // ledger claiming the other side's ply is not a ledger this app can trust at all.
-  const wants = color === "w" ? 1 : 0;
-  if (ledger.moves.some((m) => m.ply % 2 !== wants)) return null;
+  //
+  // THE ONE EXCEPTION is a game against an ENGINE, and it is the narrowest one there is: a ledger
+  // that declares `sf.<elo>` is one whose author is playing a machine that cannot author a message,
+  // so both sides' plies are theirs to write. An ordinary ledger can never reach it — the token has
+  // to be there — and a ledger that claims an engine is a ledger claiming nothing about anybody
+  // else: there is no second player for it to speak for.
+  if (ledger.engineElo === null) {
+    const wants = color === "w" ? 1 : 0;
+    if (ledger.moves.some((m) => m.ply % 2 !== wants)) return null;
+  }
   return ledger;
 }
 
@@ -375,6 +400,7 @@ export function serializeLedger(ledger: ChessLedger): string {
   if (ledger.joined) out.push("join");
   if (ledger.declined) out.push("decline");
   if (ledger.time) out.push(`tc.${ledger.time.base}+${ledger.time.increment}`);
+  if (ledger.engineElo !== null) out.push(`sf.${Math.round(ledger.engineElo)}`);
   if (ledger.at !== null) out.push(`at.${Math.round(ledger.at)}`);
   for (const move of [...ledger.moves].sort((a, b) => a.ply - b.ply)) {
     const clock = move.clockMs === null ? "" : `.${Math.max(0, Math.round(move.clockMs / 10))}`;
@@ -426,7 +452,12 @@ export function chessMessageWords(body: ChessWireBody): string {
  */
 function ledgerWords(ledger: ChessLedger): string {
   const parts: string[] = [];
-  if (ledger.opened) {
+  // A game against the ENGINE says so first: it is the one thing a colleague reading the thread
+  // needs to know, because the message is the reader playing alone rather than an invitation.
+  if (ledger.engineElo !== null) {
+    parts.push(`I'm playing ${chessEngineName(ledger.engineElo)}.`);
+    if (ledger.time) parts.push(`${clockWords(ledger.time)}.`);
+  } else if (ledger.opened) {
     parts.push(`I'd like a game. I'm ${ledger.color === "w" ? "white" : "black"}.`);
     if (ledger.time) parts.push(`${clockWords(ledger.time)}.`);
   } else if (ledger.joined && ledger.moves.length === 0) {
@@ -438,7 +469,8 @@ function ledgerWords(ledger: ChessLedger): string {
     const list = shown
       .map((m) => `${Math.ceil(m.ply / 2)}${m.ply % 2 === 1 ? "." : "…"} ${m.san}`)
       .join(" ");
-    parts.push(`my moves: ${elided}${list}`);
+    // In an engine game the ledger holds BOTH sides, so the words say "moves" rather than "mine".
+    parts.push(`${ledger.engineElo === null ? "my moves" : "moves"}: ${elided}${list}`);
   }
   if (ledger.drawAcceptedAt !== null) parts.push("I accept the draw.");
   else if (ledger.drawOfferedAt !== null) parts.push("I offer a draw.");
@@ -450,6 +482,17 @@ function ledgerWords(ledger: ChessLedger): string {
   }
   if (ledger.declined) parts.push("not right now, thanks.");
   return `♟ Chess — ${parts.join(" ") || "a game."}`;
+}
+
+/**
+ * What the engine is CALLED at one strength — the name a seat, a chip and a menu row all draw.
+ *
+ * One spelling, here, because five surfaces show it and the Elo is the only thing that tells two
+ * engine games apart. The build is "Stockfish 18 Lite" (see src/chess_engine.rs); what a player
+ * reads is the strength they chose, because that is the fact they picked.
+ */
+export function chessEngineName(elo: number): string {
+  return `Stockfish ${Math.round(elo)}`;
 }
 
 /** A time control in words: `10 min`, `3 min + 2 s`, `no clock`. */

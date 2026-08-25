@@ -2888,9 +2888,13 @@ user. Two independent mechanisms enforce that split:
   beside the providers, the chip and one answering under its own face:
   `bun run preview -- --out /tmp/ca --custom-agents`. For a game of CHESS — the header's
   control, the challenge popover, the board in both themes, a game in progress with its score
-  sheet, the armed resignation, the board at a phone's width and the card a colleague's challenge
-  leaves for the reader to answer: `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`:
-  the pawn in the header is 20px). For a tracker REFERENCE drawn as a
+  sheet, the armed resignation, the board at a phone's width, the card a colleague's challenge
+  leaves for the reader to answer, the STRIP of running games, the full-screen PAGE, the promotion
+  picker — and the COMPUTER: the row that says the engine is 7.3 MB, the Elo picker, a game against
+  it and what it costs in Settings: `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`:
+  the pawn in the header is 20px). That run needs no engine on the machine: it writes the same STUB
+  worker the E2E suite does into a temporary directory and points `TEAMS_LITE_ENGINE_DIR` at it, so
+  the route and the whole UCI exchange are real and only the 7.3 MB of WebAssembly is missing. For a tracker REFERENCE drawn as a
   chip — in a chat message, in an agent's own answer and in a merge request's
   description: `bun run preview -- --out /tmp/ref --tracker-refs`. For the typing hint above the
   composer, one typist then three: `bun run preview -- --out /tmp/typ --typing`
@@ -5106,6 +5110,167 @@ and read it back byte for byte.** The sealed-message probe measured base64url su
 characters and the v1 line has always survived, so a line of letters, digits, spaces, `+` and `.`
 is expected to — but expected is not measured, and a `.`-separated ledger is the one part of this
 feature that a tenant has never seen.
+
+### Playing STOCKFISH (fetched only if the reader asks for it, at an Elo they pick)
+
+The opponent can be a machine: **Stockfish 18 Lite**, running in the reader's own browser, at one of
+seven strengths. It is **not part of this app** — it is two files fetched once, verified against a
+digest this build pins, and kept in this machine's cache. `src/chess_engine.rs` is the pinned table
+and the download, `web/engine-file.ts` the one route that serves the bytes,
+`web/src/lib/chess-engine.ts` every pure decision (the strengths, the UCI lines, the Worker path),
+`web/src/components/use-chess-engine.ts` the Worker and the search, and
+`chess-engine-settings.tsx` the inventory.
+
+**NOTHING IS DOWNLOADED UNTIL THE READER ASKS, and the row says what it costs first.** 7.3 MB on a
+metered phone link is not something an app takes on somebody's behalf, which is the argument the
+update button already makes for its own 130 MB — so the conversation's menu offers "Play the
+computer" as a row that states the size, and the fetch is a press. A build ships no engine bytes at
+all: the release asset would grow by 7.3 MB for a feature most readers never open.
+
+**THE ENGINE RUNS IN THE BROWSER, and that is the whole privacy story.** No position, no move and
+no game ever leaves the machine — the search happens in a Web Worker in the reader's own page, so
+this app needs no engine service, no API key and no network request per move. What the BACKEND does
+is fetch the files and serve them, exactly as it serves an avatar's bytes.
+
+**EVERY NUMBER BELOW IS MEASURED off the binary and the release**, not read from a vendor's page:
+
+- **`UCI_Elo` is `type spin default 1320 min 1320 max 3190`**, so **1320 is the engine's floor** —
+  there is no "beginner" below it, and a rung claiming one would be a number the engine silently
+  clamps. That is why the weakest press is NAMED as the floor rather than dressed up as a level.
+- **The lite build is SINGLE-THREADED** (`Threads type spin default 1 min 1 max 1`), and that
+  decided the shape of the whole feature: a multi-threaded WASM engine needs `SharedArrayBuffer`,
+  which needs `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` on every response —
+  and COEP would refuse every cross-origin image this app draws (a colleague's face, a mail
+  sender's icon, an inline picture). One thread costs some strength at a fixed search time and
+  costs nothing else; the headers would have cost the app its pictures.
+- **The two files are 20 670 and 7 295 411 bytes**, and `the_real_engine_downloads_and_verifies`
+  (`#[ignore]`d, run by hand) fetched both through this crate's own code and matched both SHA-256
+  digests — so the whole chain is verified against the real release rather than against a mock.
+
+**THE DOWNLOAD CARRIES THE UPDATE'S OWN RAILS**, because it is the same act — bytes from the
+internet becoming code this machine runs (`src/update.rs` and `src/sender_icon.rs` are where each
+rail comes from). Each is pinned by a test:
+
+- **The URL is a CONSTANT per file, never assembled from anything a client said.** `engine_path`
+  resolves a name only if it is one of the two pinned ones, so no request can name a third file or
+  a path outside the cache.
+- **A file is verified by its LENGTH and its DIGEST, every time it is looked for**, not once at
+  install. That is what makes the E2E stub unreachable in production: a stub cannot be installed by
+  a backend that hashes what it installs, so only a directory a test named can hold one. The result
+  is cached per process, because the status is asked for on every connect and hashing 7.3 MB is not
+  free.
+- **The transfer is bounded, streamed to `<name>.part.<pid>`, and RENAMED into place.** Bounded,
+  because a server that answered forever would fill the disk; per PID, because this machine runs
+  three backends against one cache and `with_extension` would have given them all one temporary
+  file; renamed, because a half-written engine that verified tomorrow is worse than none.
+- **A file that fails any check is DELETED**, and the failure says which file and why.
+- **The version is part of the cache PATH**, so a later build with different pins cannot load these
+  bytes by accident, and `chess_engine_forget` sweeps the part files with them.
+
+**THE BYTES REACH THE PAGE OVER ONE HTTP ROUTE**, `/__engine/<version>/<name>` (`web/engine-file.ts`,
+the shape `web/write-token.ts` already has: one module, called by `web/server.ts` and by the dev
+plugin). A Blob worker was the obvious alternative and is wrong twice: the glue derives its
+`.wasm` URL from its own location, so a blob would look for the WebAssembly next to `blob:`, and it
+would put 9.7 MB of base64 over the socket on every page load. The route looks the request path up
+in a two-entry table and answers a MATCH rather than a REQUEST — the rule
+`gitlab_mr::UploadRef::parse` holds — so it cannot serve a file outside the pinned set, and it is
+`immutable` for a year because the version is in the path.
+
+**A Worker is CODE, so the page takes the path the BACKEND named and checks it anyway**
+(`chessEngineWorkerUrl`): it must begin with `/__engine/`, hold no `..` and no `//`. A page that
+passed any string to `new Worker` would run whatever a backend answered.
+
+**THE ROUTE NAMES NOTHING FROM BUN, and that is a rule rather than a style.** `engine-file.ts` is
+imported by the production server, which is Bun, AND by `vite.config.ts`, which Vite evaluates under
+NODE — so `Bun.file` in it threw `ReferenceError: Bun is not defined` inside the dev middleware and
+took the whole dev server down on the first engine request: a board that worked in production and
+killed the server in dev. `engine-file.test.ts` scans the module's own code for it. The cost is that
+the file is read into memory rather than streamed — 7.3 MB, once per page, behind a year of
+`immutable`.
+
+**AN ENGINE GAME IS ONE LEDGER, and `sf.<elo>` is the whole of what makes that legible.** Stockfish
+has no MRI: it cannot author a message and it cannot edit one, so the reader's own ledger carries
+BOTH colours' plies. Exactly two rules bend, and both are keyed on the token being present:
+`parseLedger`'s parity refusal, and the per-claim colour check in the derivation. An ordinary ledger
+can reach neither, a ledger that declares an engine speaks for nobody else (the declaration is
+honoured only from the challenger's own message), and a **non-empty** MRI is required on both
+comparisons — `playerOf` writes `""` for a message with no author at all, and `"" === ""` would have
+made every authorless claim the challenger's own.
+
+Nine rules hold the surface, and each is pinned by a test:
+
+- **The strength is a PRESS, not a number field**: seven rungs from 1320 to 3190, each named, opening
+  on 1800 — a strength a club player can beat. A strength between two rungs is played at the number
+  the game states with the nearer rung's search time, and one outside the range is CLAMPED rather
+  than refused: a game opened by another build is real either way, and a board that would not move
+  would strand it.
+- **The reader picks their SIDE here, in the engine's own row.** The colour was the human
+  challenge's alone, behind a different disclosure — and NOTES draws no challenge at all, so every
+  engine game opened there took a colour nobody chose. Both rows now move ONE state, so they can
+  never disagree, and both draw through one `PickButton`: four rows of presses in one menu (colour,
+  clock, strength, and colour again) must not be four slightly different controls.
+- **`UCI_Elo` means nothing without `UCI_LimitStrength`**, so the flag is set with it, in that order
+  — and at the top rung the cap is taken OFF rather than set to the maximum, because full strength is
+  what that press promises.
+- **A search is bounded by MOVETIME**, 100 ms at the floor to 1 200 ms at full strength. A reader
+  waits for every one of them, so even the top rung is barely a second: a board that pauses for five
+  reads as a board that has frozen. `Hash` is 16 MB, because this runs on a phone too.
+- **The engine is asked about a POSITION** (`position fen …`), which cannot disagree with the board
+  the reader is looking at. The cost is stated: it does not see the repetition history, so it may
+  claim a draw by repetition later than a full record would.
+- **ONE search at a time, and the Worker is terminated on unmount, on a disable and on a path
+  change.** A second `go` into a busy engine answers the first question twice.
+- **The engine's clock is never drained by the WALL** (`engineSide`), and its move is charged what
+  the search really spent. So an engine game can be lost on time and never won on time — which is
+  chess.com's own bargain with a bot — and the sentence a flag draws says so: a machine claims
+  nothing, so the reader plays on with a clock at zero or resigns. Promising them a claim nobody
+  will make is the one thing that line must not do.
+- **A machine is asked for no DRAW and offered no ACCEPT.** Both are naturally impossible in the
+  derivation (there is no second author to answer), and the UI draws neither rather than a control
+  that reports a refusal.
+- **NOTES offers the computer, and it is the one conversation the engine unlocks.** A solo thread has
+  nobody to play, which is why it held no chess at all; against a machine there is nothing to wait
+  for, so it offers the computer and only the computer.
+- **The engine is NOT A PERSON anywhere it is drawn.** Its seat and its chip wear a mark rather than
+  an avatar, because a face seeded from an empty MRI is tinted initials for a colleague who does not
+  exist — the wrong-face rule § A tracker user who is also a colleague already states.
+
+**THE GATES.** `chess_engine_status` is OPEN — a page has to know whether the engine is here in order to
+draw the row, and the answer holds no secret. `chess_engine_download` and `chess_engine_forget` are
+`MACHINE_METHODS`: the write token, refused read-only, and the automation hook blocks either against
+a live port. Each decides something a client that merely found this socket must not — whether this
+machine fetches 7.3 MB from the internet, and whether it throws away what it fetched.
+
+**What an engine game COSTS, stated because each is real:** it notifies NOBODY after the challenge
+(the whole game is one message and one edit per ply, and an edit neither bumps a preview nor pushes —
+the ledger's own cost); its ledger is about twice a human one's length, since both sides live in one
+line; nothing about it is checkable by anybody, because there is one author, so the human game's
+clock argument has no counterpart here; and a colleague in the thread sees one message rewritten
+sixty times whose words are a growing score sheet of a game they are not in. An older build reads
+`sf.<elo>` as a token it has never heard of and therefore shows a white reader's engine challenge as
+an open challenge until the first reply lands — contained, because the join is ignored and the moves
+are refused by its own parity rule.
+
+`web/mock/server.ts` answers the status, the fetch and the removal with no GitHub and no bytes, and
+the E2E harness replaces the engine's **bytes** and never its **address**: `web/mock/engine-stub.js`
+is a Worker that speaks UCI and asks the mock for one legal move, written under the PINNED name into
+the directory `TEAMS_LITE_ENGINE_DIR` names — so the route, the Worker-path guard, `new Worker(url)`
+and the whole exchange run for real and only the WebAssembly is missing. A spec MUST reset the
+`{kind:"engine"}` hook, since one mock process serves the whole run.
+`cd web && bun run preview -- --out /tmp/chess --chess` captures the row that states the size in both
+themes, the Elo picker with the side and the clock beside it (both themes, and a PHONE's width, where
+seven presses is the row that wraps), a game against the computer in both themes, and the Settings
+inventory. The engine's own move is POLLED for rather than waited out: the first one costs a worker
+boot, a UCI handshake and a search, and a fixed pause photographed the opening position.
+
+**THE REAL ENGINE HAS PLAYED, through the code that ships.** Measured 2026-08-25: both files fetched
+from the pinned release matched the pinned lengths and both SHA-256 digests, and the capture run —
+`TEAMS_LITE_ENGINE_DIR=<a directory holding them> bun run preview -- --out /tmp/real --chess`, which is
+the one way to point the harness at the real bytes instead of the stub — answered `1. e4 e5` from 7.3
+MB of WebAssembly in the browser, over this app's own route, its own Worker guard and the one ledger.
+Its clock came back 0.6 s down, which is the search and not the wall. **What is UNVERIFIED is the
+pairing in ONE press**: nobody has pressed Fetch in the real app and then played the game it enables —
+two halves each measured, in the user's own app, which is their own click.
 
 ## Renaming a person, and giving them a face (LOCAL, and gated)
 

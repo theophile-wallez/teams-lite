@@ -16,6 +16,7 @@
 import { existsSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
+import { ENGINE_ROUTE, engineFileResponse } from "./engine-file";
 import { bundleWasReplaced, readBuildInfo, refuseToServeReason } from "./build-info";
 
 const here = import.meta.dir;
@@ -245,6 +246,13 @@ export const server = Bun.serve<Relay>({
     // The app's page cannot read the backend's write token from disk, so hand it
     // over here. Without it the client is read-only (see write-token.ts).
     if (url.pathname === WRITE_TOKEN_ROUTE) return writeTokenResponse();
+    // The CHESS ENGINE's own files, from the cache the backend fetched them into. It serves the two
+    // PINNED names and nothing else, so a request cannot reach any other file on this machine (see
+    // engine-file.ts).
+    if (url.pathname.startsWith(ENGINE_ROUTE)) {
+      const engine = engineFileResponse(url.pathname);
+      if (engine) return engine;
+    }
     // Browsers request /favicon.ico unconditionally; map it to our SVG so it
     // never falls through to the SSR handler as a 404.
     if (url.pathname === "/favicon.ico") {

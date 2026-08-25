@@ -28,6 +28,7 @@ function game(over: Partial<ChessGame> = {}): ChessGame {
     ourColor: "w",
     ledgers: { w: null, b: null },
     endedByRules: null,
+    engine: null,
     absorbed: ["m1"],
     refusedPlies: [],
     ...over,
@@ -209,5 +210,99 @@ describe("chessPublishFor", () => {
     expect(publish?.ledger.joined).toBe(true);
     expect(publish?.ledger.opened).toBe(false);
     expect(publish?.ledger.moves).toEqual([{ ply: 2, san: "e5", clockMs: 597_000 }]);
+  });
+});
+
+describe("a move for the ENGINE", () => {
+  /** A game against the computer: one ledger, the reader as white, the engine to move. */
+  function vsEngine(over: Partial<ChessGame> = {}): ChessGame {
+    return game({
+      engine: { elo: 1800 },
+      opponent: { mri: "", name: "Stockfish 1800", isSelf: false },
+      moves: ["e4"],
+      moveClocks: [598_000],
+      turn: "b",
+      ledgers: {
+        w: ours("w", { engineElo: 1800, moves: [{ ply: 1, san: "e4", clockMs: 598_000 }] }),
+        b: null,
+      },
+      ...over,
+    });
+  }
+
+  it("writes the OTHER colour's ply into the reader's own ledger", () => {
+    const publish = chessPublishFor({
+      gameId: "aaa111",
+      game: vsEngine(),
+      color: "w",
+      act: { kind: "move", san: "e5", engine: { spentMs: 250 } },
+      nowMs: T0 + 60_000,
+    });
+    // The reader's own message, holding a move black played.
+    expect(publish?.messageId).toBe("m1");
+    expect(publish?.ledger.moves.at(-1)).toEqual({ ply: 2, san: "e5", clockMs: 599_750 });
+    // Charged what the SEARCH cost — 250 ms — rather than the minute that passed on the wall: the
+    // engine cannot think while the app is closed, and a clock that said otherwise would hand the
+    // reader a win on time they never played for.
+    expect(publish?.ledger.moves.at(-1)?.clockMs).toBe(600_000 - 250);
+  });
+
+  it("is REFUSED in a game that is not against an engine", () => {
+    // Otherwise a client could move for a colleague by claiming their opponent was a machine.
+    expect(
+      chessPublishFor({
+        gameId: "aaa111",
+        game: game({ turn: "b" }),
+        color: "w",
+        act: { kind: "move", san: "e5", engine: { spentMs: 10 } },
+        nowMs: T0,
+      }),
+    ).toBeNull();
+  });
+
+  it("is REFUSED when it is not the engine's turn", () => {
+    expect(
+      chessPublishFor({
+        gameId: "aaa111",
+        game: vsEngine({ turn: "w" }),
+        color: "w",
+        act: { kind: "move", san: "e5", engine: { spentMs: 10 } },
+        nowMs: T0,
+      }),
+    ).toBeNull();
+  });
+
+  it("offers neither a DRAW nor a FLAG against a machine", () => {
+    // There is nobody to ask for a draw, and an engine's clock is never counted down by the wall —
+    // so there is no flag to claim either.
+    expect(
+      chessPublishFor({ gameId: "aaa111", game: vsEngine(), color: "w", act: { kind: "draw" }, nowMs: T0 }),
+    ).toBeNull();
+    expect(
+      chessPublishFor({ gameId: "aaa111", game: vsEngine(), color: "w", act: { kind: "flag" }, nowMs: T0 }),
+    ).toBeNull();
+  });
+
+  it("still RESIGNS, because that is the reader's own act", () => {
+    const publish = chessPublishFor({
+      gameId: "aaa111",
+      game: vsEngine(),
+      color: "w",
+      act: { kind: "resign" },
+      nowMs: T0,
+    });
+    expect(publish?.ledger.resigned).toBe(true);
+  });
+
+  it("carries the ENGINE's strength when the game is opened", () => {
+    const open = chessPublishFor({
+      gameId: "eee111",
+      game: null,
+      color: "w",
+      act: { kind: "open", color: "w", time: { base: 600, increment: 0 }, engineElo: 1320 },
+      nowMs: T0,
+    });
+    expect(open?.ledger.engineElo).toBe(1320);
+    expect(open?.messageId).toBeNull();
   });
 });

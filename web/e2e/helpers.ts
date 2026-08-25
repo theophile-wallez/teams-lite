@@ -1144,6 +1144,50 @@ export async function startChessGame(page: Page, color: "w" | "b" = "w"): Promis
   );
 }
 
+// ---- the chess ENGINE -------------------------------------------------------
+//
+// The real engine is 7.3 MB the backend fetches; the suite serves a STUB instead (see
+// mock/engine-stub.js and e2e/global-setup.ts). What the mock owns is the ANSWER a page reads —
+// whether an engine is on "this machine" — which is what decides whether a game against the
+// computer is offered at all.
+
+/**
+ * Say whether this machine holds the engine, or arm the fetch to fail.
+ *
+ * ALWAYS finish with `resetChessEngine`: one mock process serves the whole run, and an engine left
+ * present would let a later spec pass without ever pressing the row that fetches one.
+ */
+export async function setChessEngine(
+  page: Page,
+  body: { present?: boolean; error?: string } = {},
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "engine", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Put the engine back the way the mock declares it: absent, and armed to fail at nothing. */
+export async function resetChessEngine(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "engine", reset: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Open the conversation's menu and DISCLOSE what it offers about the computer — the fetch row when
+ * the engine is absent, the strength picker when it is here.
+ */
+export async function openChessEngineRow(page: Page): Promise<void> {
+  await openConversationMenu(page);
+  if (!(await page.locator('[data-testid="chess-engine-download"]').count())) {
+    if (!(await page.locator('[data-testid="chess-engine-play"]').count())) {
+      await page.locator('[data-testid="chess-engine-row"]').click();
+    }
+  }
+}
+
 /** Have the OPPONENT play its next move in one game, now — the only way to reach the moment a
  *  premove fires, since a premove posts nothing until it is legal. */
 export async function chessOpponentMoves(page: Page, game: string): Promise<void> {

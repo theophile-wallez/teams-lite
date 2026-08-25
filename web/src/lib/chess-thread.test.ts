@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { chessClockReading } from "./chess-clock";
 import {
   activeChessGame,
   activeChessGames,
   chessClockStateOf,
   chessEndedByRules,
   chessGameById,
+  chessIsEngineGame,
   chessGameIsOver,
   chessAwaitsOurAnswer,
   chessAwaitsTheirAnswer,
@@ -726,5 +728,112 @@ describe("a game the RULES ended", () => {
       chess(ME, { game: "bbb222", body: { kind: "move", ply: 1, san: "Qxf7#" } }),
     ]);
     expect(mate[0] && chessEndedByRules(mate[0])).toBe("mate");
+  });
+});
+
+describe("a game against the ENGINE", () => {
+  const T0 = 1_900_000_000_000;
+
+  /** The reader's own ledger for an engine game: one message, both sides' moves. */
+  function engineGame(over: Partial<ChessLedger> = {}, composeTime = T0): ChatMessage {
+    return {
+      ...chess(ME, {
+        game: "eee111",
+        body: {
+          kind: "ledger",
+          ledger: {
+            ...newChessLedger("w"),
+            opened: true,
+            time: { base: 600, increment: 0 },
+            engineElo: 1800,
+            ...over,
+          },
+        },
+      }),
+      compose_time: composeTime,
+    };
+  }
+
+  it("is playable at once: there is nobody to accept it", () => {
+    const [game] = chessGamesInThread([engineGame()]);
+    expect(game?.engine).toEqual({ elo: 1800 });
+    // The opponent is SYNTHETIC — named by its strength, with no MRI, so it can never be mistaken
+    // for a colleague — and every rule that asks "is this playable" reads it.
+    expect(game?.opponent).toEqual({ mri: "", name: "Stockfish 1800", isSelf: false });
+    expect(game && chessTurnIsOurs(game)).toBe(true);
+    expect(game && chessAwaitsOurAnswer(game)).toBe(false);
+    expect(game && chessIsEngineGame(game)).toBe(true);
+    // And its clock starts when the message was POSTED, because no accept ever will.
+    expect(game && chessClockStateOf(game).startedAt).toBe(T0);
+    expect(game && chessClockStateOf(game).live).toBe(true);
+  });
+
+  it("takes BOTH sides' moves from the one author", () => {
+    const [game] = chessGamesInThread([
+      engineGame({
+        at: T0 + 30_000,
+        moves: [
+          { ply: 1, san: "e4", clockMs: 598_000 },
+          { ply: 2, san: "e5", clockMs: 599_900 },
+          { ply: 3, san: "Nf3", clockMs: 596_000 },
+        ],
+      }),
+    ]);
+    expect(game?.moves).toEqual(["e4", "e5", "Nf3"]);
+    expect(game?.turn).toBe("b");
+    expect(game?.refusedPlies).toEqual([]);
+    // One ledger, one `at`, so both sides read the same moment — which is what the side to move
+    // counts down from.
+    const state = game && chessClockStateOf(game);
+    expect(state?.actedAt).toEqual({ w: T0 + 30_000, b: T0 + 30_000 });
+    expect(state?.stated).toEqual({ w: 596_000, b: 599_900 });
+  });
+
+  it("never lets the ENGINE's clock be drained by the wall", () => {
+    // It thinks in bursts of a second while the reader is at the board, and not at all while the app
+    // is closed: counting real time against it would hand the reader a win on time they never played
+    // for. So the engine's side is named, and nothing is running while it is its turn.
+    const [game] = chessGamesInThread([
+      engineGame({ at: T0, moves: [{ ply: 1, san: "e4", clockMs: 598_000 }] }),
+    ]);
+    const state = game && chessClockStateOf(game);
+    expect(state?.engineSide).toBe("b");
+    expect(state?.turn).toBe("b");
+    const reading = state && chessClockReading(state, T0 + 20 * 60_000);
+    expect(reading?.running).toBeNull();
+    expect(reading?.black).toBe(600_000);
+    expect(reading?.flagged).toBeNull();
+  });
+
+  it("is only the OPENER's own claim: a colleague cannot make somebody's game an engine game", () => {
+    const [game] = chessGamesInThread([
+      chess(ME, { game: "fff222", body: { kind: "open", color: "w" } }),
+      chess(ADA, {
+        game: "fff222",
+        body: {
+          kind: "ledger",
+          ledger: { ...newChessLedger("b"), joined: true, engineElo: 3190 },
+        },
+      }),
+    ]);
+    expect(game?.engine).toBeNull();
+    // It is an ordinary game with Ada in it, exactly as it reads.
+    expect(game?.opponent?.mri).toBe(ADA.mri);
+  });
+
+  it("refuses a ply nobody in the game claimed, engine or not", () => {
+    const [game] = chessGamesInThread([
+      engineGame({ moves: [{ ply: 1, san: "e4", clockMs: null }] }),
+      // A third person writing into somebody else's engine game.
+      chess(GRACE, {
+        game: "eee111",
+        body: {
+          kind: "ledger",
+          ledger: { ...newChessLedger("b"), moves: [{ ply: 2, san: "e5", clockMs: null }] },
+        },
+      }),
+    ]);
+    expect(game?.moves).toEqual(["e4"]);
+    expect(game?.refusedPlies).toEqual([2]);
   });
 });

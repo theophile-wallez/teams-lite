@@ -2,6 +2,9 @@ import {
   test,
   expect,
   chessChallengeFromOpponent,
+  openChessEngineRow,
+  resetChessEngine,
+  setChessEngine,
   chessOpponentMoves,
   fetchCapturedEdits,
   openChessPage,
@@ -45,8 +48,10 @@ test.describe("chess in a conversation", () => {
 
   test.afterEach(async ({ page }) => {
     // One mock process serves the whole run: an opponent left silent or aimed at one move
-    // would break every later game.
+    // would break every later game — and an ENGINE left present would let a later spec pass
+    // without ever pressing the row that fetches one.
     await resetChess(page);
+    await resetChessEngine(page);
     await setSendControl(page, { clear: true });
   });
 
@@ -636,5 +641,193 @@ test.describe("chess in a conversation", () => {
     await expect
       .poll(async () => page.locator(scroller).evaluate((el) => el.scrollTop))
       .toBeGreaterThan(0);
+  });
+
+  // ---- playing the COMPUTER ---------------------------------------------------------
+  //
+  // The engine is not in this app: it is 7.3 MB the backend fetches on the reader's own press, and
+  // these tests are about that chain — the row that offers it, the strength they pick, and a game
+  // that really advances because the computer moved.
+  test("the computer is offered only once its engine is HERE, and the row says what it costs", async ({
+    page,
+  }) => {
+    await openChessThread(page);
+    await openChessEngineRow(page);
+
+    // ABSENT is the state a fresh machine is in, and the row states the size before the press: it is
+    // the one fact the reader decides with.
+    const fetchRow = page.locator('[data-testid="chess-engine-download"]');
+    await expect(fetchRow).toBeVisible();
+    await expect(page.locator('[data-testid="chess-engine-row"]')).toContainText("7.3 MB");
+    // No strength picker and no game while there is no engine: an offer drawn on a hopeful answer
+    // would start a game whose first move nothing could make.
+    await expect(page.locator('[data-testid="chess-engine-play"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="chess-elo-1800"]')).toHaveCount(0);
+
+    // The press fetches it, and the row counts while it runs.
+    await fetchRow.click();
+    await expect(page.locator('[data-testid="chess-engine-row"]')).toContainText(/%|on this machine/);
+    await expect(page.locator('[data-testid="chess-engine-play"]')).toBeVisible({ timeout: 10_000 });
+    // And now the strengths are offered — the engine's own scale, whose floor is 1320.
+    await expect(page.locator('[data-testid="chess-elo-1320"]')).toBeVisible();
+    await expect(page.locator('[data-testid="chess-elo-3190"]')).toBeVisible();
+    await closeConversationMenu(page);
+  });
+
+  test("a fetch that FAILS says so where the press was made", async ({ page }) => {
+    await openChessThread(page);
+    await setChessEngine(page, { error: "the release could not be reached" });
+    await openChessEngineRow(page);
+    await page.locator('[data-testid="chess-engine-download"]').click();
+
+    await expect(page.locator('[data-testid="chess-engine-error"]')).toContainText(
+      /could not be reached/i,
+    );
+    // Nothing pretends it worked: the game is still not offered.
+    await expect(page.locator('[data-testid="chess-engine-play"]')).toHaveCount(0);
+    await closeConversationMenu(page);
+  });
+
+  test("a game against the computer is ONE message, and the computer really moves", async ({
+    page,
+  }) => {
+    await openChessThread(page);
+    await setChessEngine(page, { present: true });
+    await setChessOpponent(page, { silent: true });
+    const before = Number(await page.locator(scroller).getAttribute("data-loaded-count"));
+
+    await openChessEngineRow(page);
+    await page.locator('[data-testid="chess-elo-1320"]').click();
+    // WHITE, said out loud: the picker opens on Random, so a test that took the default would be a
+    // test that asserts "your move" half the time.
+    await page.locator('[data-testid="chess-engine-color-w"]').click();
+    await page.locator('[data-testid="chess-engine-play"]').click();
+
+    // The board arrives, playable at once: there is nobody to accept a game against a machine.
+    const engineBoard = page.locator('[data-testid="chess-game"]').last();
+    await expect(engineBoard).toBeVisible();
+    await expect(engineBoard.locator('[data-testid="chess-engine-seat"]')).toBeVisible();
+    // ONE message in the thread — the reader's own ledger, carrying both sides.
+    const after = Number(await page.locator(scroller).getAttribute("data-loaded-count"));
+    expect(after).toBe(before + 1);
+
+    // The reader moves, and the computer answers — by editing that same message.
+    await expect(engineBoard.locator(status)).toContainText(/your move/i);
+    await playChessMove(page, "e2", "e4");
+    await expect(engineBoard.locator('[data-testid="chess-moves"]')).toContainText("1. e4");
+    // The engine's own move lands in the SAME message: the history does not grow.
+    await expect
+      .poll(async () => (await engineBoard.locator('[data-testid="chess-moves"]').textContent()) ?? "")
+      .toMatch(/1\. e4 \S+/);
+    expect(Number(await page.locator(scroller).getAttribute("data-loaded-count"))).toBe(before + 1);
+    await expect(engineBoard.locator(status)).toContainText(/your move/i);
+
+    // The wire says who the opponent is, and it never says it with a colon.
+    const sends = await fetchCapturedSends(page);
+    const opened = sends.at(-1);
+    expect(opened?.content_html).toMatch(/— chess [0-9a-f]{6} v2 [wb] open tc\.600\+0 sf\.1320,/);
+    expect(opened?.content_html).toContain("I'm playing Stockfish 1320");
+  });
+
+  test("the computer OPENS the game when it has white, with nobody having moved", async ({
+    page,
+  }) => {
+    // The other half of every engine game, and the half no assertion covered: with the reader as
+    // BLACK the first ply is the machine's, so the board has to play it with nothing pressed. It is
+    // also the case a fixed pause hid in a capture — the first move costs a worker boot, a UCI
+    // handshake and a search before the message is edited.
+    await openChessThread(page);
+    await setChessEngine(page, { present: true });
+    await setChessOpponent(page, { silent: true });
+
+    await openChessEngineRow(page);
+    await page.locator('[data-testid="chess-engine-color-b"]').click();
+    await page.locator('[data-testid="chess-engine-play"]').click();
+    const engineBoard = page.locator('[data-testid="chess-game"]').last();
+    await expect(engineBoard.locator('[data-testid="chess-engine-seat"]')).toBeVisible();
+
+    // Nothing was pressed on the board, and the game is one ply in.
+    await expect(engineBoard.locator('[data-testid="chess-moves"]')).toContainText(/1\. \S+/);
+    await expect(engineBoard.locator(status)).toContainText(/your move/i);
+    // The reader's own clock is the one running now — and the engine's is barely touched, because
+    // its move costs what the SEARCH cost rather than the seconds the reader sat there.
+    await expect(engineBoard.locator('[data-testid="chess-clock-b"]')).toHaveAttribute(
+      "data-running",
+      "true",
+    );
+    await expect(engineBoard.locator('[data-testid="chess-clock-w"]')).not.toHaveAttribute(
+      "data-running",
+      "true",
+    );
+  });
+
+  test("on a PHONE the press that starts the game is on screen, not below the fold", async ({
+    page,
+  }) => {
+    // The engine's disclosure is four rows tall and this menu lists every running game above it, so
+    // on a 390px screen the one row the reader came for opened off the bottom. It brings itself into
+    // view — the rule the merge-request page holds for its own actions.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openChessThread(page);
+    await setChessEngine(page, { present: true });
+    // Two games running, which is what pushes the block down — and the state a real thread is in.
+    await seedChessGame(page, { mine: "w", moves: ["e4", "e5"] });
+    await seedChessGame(page, { mine: "b", moves: ["d4"] });
+
+    await openChessEngineRow(page);
+    const play = page.locator('[data-testid="chess-engine-play"]');
+    await expect(play).toBeVisible();
+    const box = await play.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.y).toBeGreaterThanOrEqual(0);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(844);
+    await closeConversationMenu(page);
+  });
+
+  test("a machine is asked for no DRAW and claims no FLAG", async ({ page }) => {
+    await openChessThread(page);
+    await setChessEngine(page, { present: true });
+    await setChessOpponent(page, { silent: true });
+    await openChessEngineRow(page);
+    await page.locator('[data-testid="chess-engine-color-w"]').click();
+    await page.locator('[data-testid="chess-engine-play"]').click();
+    const engineBoard = page.locator('[data-testid="chess-game"]').last();
+    await expect(engineBoard).toBeVisible();
+
+    // There is nobody to offer a draw to, and an engine's clock is never drained by the wall — so
+    // neither control is drawn. Resigning is still the reader's own act.
+    await expect(engineBoard.locator('[data-testid="chess-draw"]')).toHaveCount(0);
+    await expect(engineBoard.locator('[data-testid="chess-claim-flag"]')).toHaveCount(0);
+    await expect(engineBoard.locator('[data-testid="chess-resign"]')).toBeVisible();
+  });
+
+  test("NOTES offers the computer, and only the computer", async ({ page }) => {
+    // The one place a human game is refused because there is nobody to play — and the computer is
+    // somebody, so the chat with oneself is exactly where a solo game belongs.
+    await gotoApp(page);
+    await setChessEngine(page, { present: true });
+    await openConversationNamed(page, "Notes");
+    await openConversationMenu(page);
+    await expect(page.locator('[data-testid="chess-engine-row"]')).toBeVisible();
+    await expect(page.locator('[data-testid="chess-button"]')).toHaveCount(0);
+    await closeConversationMenu(page);
+  });
+
+  test("Settings says what the engine costs, and takes it back", async ({ page }) => {
+    await gotoApp(page);
+    await setChessEngine(page, { present: true });
+    await page.locator('[data-testid="open-settings"]').click();
+    await expect(page.locator('[data-testid="settings-pane"]')).toBeVisible();
+    const section = page.locator('[data-testid="chess-engine-settings"]');
+    await section.scrollIntoViewIfNeeded();
+    await expect(section.locator('[data-testid="chess-engine-state"]')).toContainText(
+      /on this machine/i,
+    );
+    await expect(section).toContainText("7.3 MB");
+
+    await section.locator('[data-testid="chess-engine-remove"]').click();
+    await expect(section.locator('[data-testid="chess-engine-state"]')).toContainText(/fetch/i);
+    // And nothing is left to remove.
+    await expect(section.locator('[data-testid="chess-engine-remove"]')).toHaveCount(0);
   });
 });

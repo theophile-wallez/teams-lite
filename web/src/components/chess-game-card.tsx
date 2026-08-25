@@ -22,7 +22,7 @@
  */
 
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ArrowExpand01Icon } from "@hugeicons/core-free-icons";
+import { ArrowExpand01Icon, CpuIcon } from "@hugeicons/core-free-icons";
 import { useNavigate } from "@tanstack/react-router";
 import { useReducedMotion } from "motion/react";
 import { useState } from "react";
@@ -78,7 +78,13 @@ export default function ChessGameCard(props: {
         props.className,
       )}
     >
-      <ChessSeat game={game} color={other(board.orientation)} clock={board.clock} />
+      <ChessSeat
+        game={game}
+        color={other(board.orientation)}
+        clock={board.clock}
+        engine={!!board.engine}
+        thinking={board.engineThinking}
+      />
       <ChessBoard
         id={`chess-${game.id}`}
         fen={board.fen}
@@ -175,7 +181,7 @@ export default function ChessGameCard(props: {
         <div className="mt-2 flex flex-wrap items-center gap-2">
           {/* A clock that has run out is claimed rather than taken: nothing here ends a game on a
               timer, because no machine's clock can be trusted over another's. */}
-          {board.flagClaimable && (
+          {board.flagClaimable && !board.engine && (
             <button
               type="button"
               data-testid="chess-claim-flag"
@@ -202,7 +208,7 @@ export default function ChessGameCard(props: {
           >
             {armedResign ? "Resign — nothing takes it back" : "Resign"}
           </button>
-          {game.drawOfferedBy && game.drawOfferedBy !== game.ourColor ? (
+          {board.engine ? null : game.drawOfferedBy && game.drawOfferedBy !== game.ourColor ? (
             <button
               type="button"
               data-testid="chess-draw-accept"
@@ -275,6 +281,10 @@ export function ChessSeat(props: {
   clock: { white: number | null; black: number | null; running: ChessColor | null; flagged: ChessColor | null };
   /** A page draws the same seat larger, because it has the room for it. */
   big?: boolean;
+  /** Whether THIS seat is the engine's. */
+  engine?: boolean;
+  /** Whether it is searching right now — the one thing a seat says that a clock cannot. */
+  thinking?: boolean;
 }) {
   const player: ChessPlayer | null = chessPlayerOf(props.game, props.color);
   // Not the controller's question: whether a press would WORK is the board's, and whether the seat
@@ -285,7 +295,21 @@ export function ChessSeat(props: {
   const flagged = props.clock.flagged === props.color;
   return (
     <header className={cn("flex items-center gap-2 py-1.5", props.big && "gap-3 py-2")}>
-      {player ? (
+      {props.engine && player ? (
+        // THE ENGINE IS NOT A PERSON, so it is not drawn as one: an avatar seeded from an empty MRI
+        // would be tinted initials for a colleague who does not exist, and this app never puts a
+        // face on something that has none.
+        <span
+          data-testid="chess-engine-seat"
+          aria-hidden
+          className={cn(
+            "grid shrink-0 place-items-center rounded-md border border-border-subtle bg-accent text-text-dim",
+            props.big ? "size-8" : "size-6",
+          )}
+        >
+          <HugeiconsIcon icon={CpuIcon} className={props.big ? "size-5" : "size-4"} strokeWidth={1.8} />
+        </span>
+      ) : player ? (
         <Avatar
           seed={player.mri}
           label={player.name}
@@ -310,6 +334,11 @@ export function ChessSeat(props: {
       >
         {player ? (player.isSelf ? "You" : player.name) : oursToTake ? "You, if you accept" : "Waiting for somebody"}
       </span>
+      {props.thinking && (
+        <span data-testid="chess-engine-thinking" className="shrink-0 text-[11px] text-text-dim">
+          thinking…
+        </span>
+      )}
       <span className={cn("shrink-0 text-text-faint", props.big ? "text-xs" : "text-[11px]")}>
         {props.color === "w" ? "White" : "Black"}
       </span>

@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   CallIcon,
   ChessPawnIcon,
+  CpuIcon,
+  Download04Icon,
   Loading02Icon,
   LockIcon,
   MoreHorizontalIcon,
@@ -31,6 +33,12 @@ import {
 import type { ChessGame } from "~/lib/chess-thread";
 import { CHESS_DEFAULT_TIME, CHESS_TIME_CONTROLS } from "~/lib/chess-clock";
 import {
+  CHESS_ENGINE_DEFAULT_ELO,
+  CHESS_ENGINE_STRENGTHS,
+  chessEngineRowLabel,
+  megabytes,
+} from "~/lib/chess-engine";
+import {
   clockWords,
   newChessGameId,
   newChessLedger,
@@ -46,6 +54,7 @@ import {
   chessMenuState,
   chessPagePath,
   conversationHoldsChess,
+  conversationHoldsEngineChess,
 } from "~/lib/chess-menu";
 import { useAppState, useController } from "./controller-context";
 import { SealDialog } from "./seal-dialog";
@@ -138,6 +147,41 @@ const ITEM_ICON = "size-4 shrink-0 text-text-dim";
  * The two do not compete: the accent is a standing state, the dot is a thing waiting to be
  * done, and this app already spells them that way in both places they came from.
  */
+/**
+ * One press in a row of presses — the shape this menu picks a colour, a clock and a strength with.
+ *
+ * It is ONE component because there are four such rows now, and a control the reader learns once
+ * must not be four slightly different controls. Each carries the 44px touch floor itself: these are
+ * drawn by hand rather than through `DropdownMenuItem`, which is where every row of this menu
+ * otherwise gets it.
+ */
+function PickButton(props: {
+  testid: string;
+  picked: boolean;
+  label: string;
+  title?: string;
+  onPick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={props.testid}
+      onClick={props.onPick}
+      aria-pressed={props.picked}
+      {...(props.title ? { title: props.title } : {})}
+      className={cn(
+        "rounded-md px-2 text-xs transition-colors",
+        "min-h-8 [@media(pointer:coarse)]:min-h-11",
+        props.picked
+          ? "bg-primary font-medium text-primary-foreground"
+          : "border border-border-subtle text-text-dim hover:bg-accent hover:text-foreground",
+      )}
+    >
+      {props.label}
+    </button>
+  );
+}
+
 export function ConversationMenu(props: { conversationId: string; games: ChessGame[] }) {
   const controller = useController();
   const conversation = useAppState((s) =>
@@ -152,11 +196,17 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
   const navigate = useNavigate();
   const [challenging, setChallenging] = useState(false);
   const [color, setColor] = useState<"w" | "b" | "random">("random");
+  // THE COMPUTER: whether its rows are disclosed, and at what strength the next game is opened.
+  // Both are kept across an open and close of the menu exactly as the colour and the clock are —
+  // they are preferences rather than steps.
+  const [engineOpen, setEngineOpen] = useState(false);
+  const [engineElo, setEngineElo] = useState(CHESS_ENGINE_DEFAULT_ELO);
   // THE CLOCK the next challenge carries. Ten minutes out of the box, which is what somebody who
   // says "fancy a game?" in a chat means — and it is kept across an open and close of the menu
   // exactly as the colour is, because it is a preference rather than a step.
   const [time, setTime] = useState<ChessTimeControl | null>(CHESS_DEFAULT_TIME);
   const [chessError, setChessError] = useState<string | null>(null);
+  const [engineBusy, setEngineBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
 
@@ -197,7 +247,22 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
   // The pure half comes from lib/chess-menu.ts rather than being restated here: which state the
   // control is in, and what a challenge reaches, are decisions with tests of their own, and two
   // spellings of them would drift at the first group chat.
+  const engine = useAppState((s) => s.chessEngine);
+  /** The press that starts the game, brought INTO VIEW when the block that holds it opens.
+   *
+   *  The engine's disclosure is four rows tall — a sentence, seven strengths, three sides and the
+   *  press — and this menu already lists every running game above it, so on a phone the one row the
+   *  reader came for opened below the fold. The rule the merge-request page holds for its own
+   *  actions: `nearest`, so nothing moves when it is already readable. */
+  const enginePlayRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (engineOpen && engine.present) enginePlayRef.current?.scrollIntoView({ block: "nearest" });
+  }, [engineOpen, engine.present]);
+
   const holdsChess = conversationHoldsChess(conversation);
+  // NOTES offers no game against a colleague — there is nobody in it — but the COMPUTER is somebody,
+  // so the chat with oneself is exactly where a solo game belongs.
+  const holdsEngineChess = conversationHoldsEngineChess(conversation);
   const chess = chessMenuState(props.games);
   // EVERY live game, most urgent first, and the FIRST of them is what the trigger states — one
   // reading of the same pair of conditions, because three separate ones is where one of them ends
@@ -260,6 +325,36 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Open a game against the ENGINE, at the strength the reader picked. */
+  const playEngine = async () => {
+    const mine: ChessColor = color === "random" ? (Math.random() < 0.5 ? "w" : "b") : color;
+    setChessError(null);
+    const sent = await controller.publishChessLedger(props.conversationId, {
+      game: newChessGameId(),
+      messageId: null,
+      ledger: {
+        ...newChessLedger(mine),
+        opened: true,
+        time,
+        // The token that says the opponent is a machine — and the whole reason one ledger may carry
+        // both sides' moves (see lib/chess-wire.ts).
+        engineElo,
+      },
+    });
+    if (sent) setOpen(false);
+    else setChessError("The game did not go out — nothing was posted. Try again.");
+  };
+
+  /** Fetch the engine onto this machine. The reader's own press, and the only thing that ever
+   *  downloads it. */
+  const fetchEngine = async () => {
+    setEngineBusy(true);
+    setChessError(null);
+    const ok = await controller.downloadChessEngine();
+    setEngineBusy(false);
+    if (!ok) setChessError("The engine did not download. Check the machine's network and try again.");
   };
 
   const challenge = async () => {
@@ -484,25 +579,15 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
                       </p>
                       <div className="flex items-center gap-1 px-2.5 pb-1.5">
                         {(["random", "w", "b"] as const).map((option) => (
-                          <button
+                          <PickButton
                             key={option}
-                            type="button"
-                            data-testid={`chess-color-${option}`}
-                            onClick={() => setColor(option)}
-                            aria-pressed={color === option}
-                            className={cn(
-                              "rounded-md px-2 text-xs transition-colors",
-                              // 44px under a thumb, the floor every row of this menu clears
-                              // through the shared primitive — these three are drawn by hand,
-                              // so they carry it themselves.
-                              "min-h-8 [@media(pointer:coarse)]:min-h-11",
-                              color === option
-                                ? "bg-primary font-medium text-primary-foreground"
-                                : "border border-border-subtle text-text-dim hover:bg-accent hover:text-foreground",
-                            )}
-                          >
-                            {option === "random" ? "Random" : option === "w" ? "White" : "Black"}
-                          </button>
+                            testid={`chess-color-${option}`}
+                            picked={color === option}
+                            onPick={() => setColor(option)}
+                            label={
+                              option === "random" ? "Random" : option === "w" ? "White" : "Black"
+                            }
+                          />
                         ))}
                       </div>
                       {/* THE CLOCK, in the same shape as the colour: a row of presses rather than
@@ -516,22 +601,13 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
                             (option.time?.base ?? null) === (time?.base ?? null) &&
                             (option.time?.increment ?? null) === (time?.increment ?? null);
                           return (
-                            <button
+                            <PickButton
                               key={option.label}
-                              type="button"
-                              data-testid={`chess-time-${option.time ? `${option.time.base}-${option.time.increment}` : "none"}`}
-                              onClick={() => setTime(option.time)}
-                              aria-pressed={picked}
-                              className={cn(
-                                "rounded-md px-2 text-xs transition-colors",
-                                "min-h-8 [@media(pointer:coarse)]:min-h-11",
-                                picked
-                                  ? "bg-primary font-medium text-primary-foreground"
-                                  : "border border-border-subtle text-text-dim hover:bg-accent hover:text-foreground",
-                              )}
-                            >
-                              {option.label}
-                            </button>
+                              testid={`chess-time-${option.time ? `${option.time.base}-${option.time.increment}` : "none"}`}
+                              picked={picked}
+                              onPick={() => setTime(option.time)}
+                              label={option.label}
+                            />
                           );
                         })}
                       </div>
@@ -571,6 +647,129 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
                   )}
                 </>
               }
+            </>
+          )}
+
+          {/* THE COMPUTER. It is its own row rather than a colour in the challenge above, because it
+              answers a different question: a challenge waits for a colleague, and this one starts a
+              game that is playable the moment it is posted. It is also the one game NOTES can hold —
+              there is nobody in that chat, and the computer is somebody. */}
+          {holdsEngineChess && (
+            <>
+              {!holdsChess && <DropdownMenuSeparator />}
+              {!holdsChess && <DropdownMenuLabel>Chess</DropdownMenuLabel>}
+              <DropdownMenuItem
+                data-testid="chess-engine-row"
+                data-engine-present={engine.present ? "true" : undefined}
+                aria-expanded={engineOpen}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  setChessError(null);
+                  setEngineOpen((was) => !was);
+                }}
+              >
+                <HugeiconsIcon icon={CpuIcon} className={ITEM_ICON} strokeWidth={1.8} />
+                <span className="flex-1 truncate">
+                  {engine.present ? "Play the computer" : chessEngineRowLabel(engine)}
+                </span>
+              </DropdownMenuItem>
+
+              {engineOpen && (
+                <>
+                  {/* THE ENGINE IS NOT IN THIS APP. The row says what fetching it costs before the
+                      press, which is the one fact the reader decides with — and it is fetched once
+                      per machine, by the backend, verified against a digest this build pins. */}
+                  {!engine.present ? (
+                    <>
+                      <p className="px-2.5 pb-1.5 text-[11px] leading-snug text-text-dim">
+                        {engine.downloading
+                          ? chessEngineRowLabel(engine)
+                          : `${engine.label} is ${megabytes(engine.bytes)} and is not on this machine yet. It is fetched once, verified, and runs in this browser — nothing about your games leaves it.`}
+                      </p>
+                      <DropdownMenuItem
+                        data-testid="chess-engine-download"
+                        disabled={engineBusy || engine.downloading}
+                        onSelect={(event) => {
+                          event.preventDefault();
+                          void fetchEngine();
+                        }}
+                      >
+                        <HugeiconsIcon
+                          icon={Download04Icon}
+                          className={ITEM_ICON}
+                          strokeWidth={1.8}
+                        />
+                        {engine.downloading ? chessEngineRowLabel(engine) : "Fetch the engine"}
+                      </DropdownMenuItem>
+                      {engine.error && (
+                        <p
+                          data-testid="chess-engine-error"
+                          className="px-2.5 pb-1.5 text-[11px] leading-snug text-destructive"
+                        >
+                          {engine.error}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {/* THE STRENGTH, in the engine's own scale. The floor is the engine's
+                          (1320) and the top is its full strength — both are measured off the
+                          binary, so the picker offers nothing it cannot really play. */}
+                      <p className="px-2.5 pb-1 text-[11px] leading-snug text-text-dim">
+                        How strong should it play?
+                      </p>
+                      <div className="flex flex-wrap items-center gap-1 px-2.5 pb-1.5">
+                        {CHESS_ENGINE_STRENGTHS.map((rung) => (
+                          <PickButton
+                            key={rung.elo}
+                            testid={`chess-elo-${rung.elo}`}
+                            picked={engineElo === rung.elo}
+                            onPick={() => setEngineElo(rung.elo)}
+                            label={String(rung.elo)}
+                            title={rung.note ? `${rung.elo} — ${rung.note}` : `${rung.elo}`}
+                          />
+                        ))}
+                      </div>
+                      {/* WHICH SIDE, which the reader could not choose at all until this row: the
+                          human challenge's own colour sits behind a different disclosure, and NOTES
+                          draws no challenge — so half of every engine game opened there was a
+                          random colour nobody picked. One state behind both rows, so the two can
+                          never disagree. */}
+                      <p className="px-2.5 pb-1 text-[11px] leading-snug text-text-dim">
+                        Which side do you play?
+                      </p>
+                      <div className="flex items-center gap-1 px-2.5 pb-1.5">
+                        {(["random", "w", "b"] as const).map((option) => (
+                          <PickButton
+                            key={option}
+                            testid={`chess-engine-color-${option}`}
+                            picked={color === option}
+                            onPick={() => setColor(option)}
+                            label={
+                              option === "random" ? "Random" : option === "w" ? "White" : "Black"
+                            }
+                          />
+                        ))}
+                      </div>
+                      <p className="px-2.5 pb-1.5 text-[11px] leading-snug text-text-faint">
+                        {clockWords(time)}. The game is posted here under your name, so it replays on
+                        every device — and everybody in this conversation can see it.
+                      </p>
+                      <DropdownMenuItem
+                        ref={enginePlayRef}
+                        data-testid="chess-engine-play"
+                        onSelect={(event) => {
+                          event.preventDefault();
+                          void playEngine();
+                        }}
+                      >
+                        <HugeiconsIcon icon={CpuIcon} className={ITEM_ICON} strokeWidth={1.8} />
+                        Play Stockfish {engineElo}
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </>
+              )}
             </>
           )}
 

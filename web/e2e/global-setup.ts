@@ -13,12 +13,40 @@
 // a GET with its name, the Rust backend speaks only WebSocket and returns nothing.
 // We check that once, before any spec runs, and abort the whole run otherwise.
 
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { ENGINE_SERVED } from "../engine-file";
+import { ENGINE_DIR } from "../playwright.config";
+
 const MOCK_PORT = process.env.E2E_MOCK_PORT ?? "19457";
 const MOCK_URL = `http://127.0.0.1:${MOCK_PORT}/`;
 /** What `web/mock/server.ts` answers to a plain GET. */
 const MOCK_GREETING = "teams-lite mock backend";
 
+/**
+ * THE CHESS ENGINE, stood in for.
+ *
+ * A game against the computer loads a Worker from the path the backend names, out of the directory
+ * `TEAMS_LITE_ENGINE_DIR` points at (see src/chess_engine.rs and web/engine-file.ts). The real
+ * engine is 7.3 MB, so this run writes a STUB there instead — `web/mock/engine-stub.js`, with the
+ * mock's own origin baked in so it can ask the mock for a LEGAL move.
+ *
+ * It is written under the PINNED file name, because that is the only name the route will serve: the
+ * harness stands in for the bytes, never for the address. And it can never be reached in production:
+ * the real backend verifies every file it installs against a digest it pins, so a stub cannot be
+ * installed by one — only a directory a test named can hold it.
+ */
+function installEngineStub(): void {
+  const stub = readFileSync(join(dirname(import.meta.filename), "..", "mock", "engine-stub.js"), "utf8");
+  mkdirSync(ENGINE_DIR, { recursive: true });
+  writeFileSync(
+    join(ENGINE_DIR, ENGINE_SERVED[0]!.name),
+    stub.replace("__MOCK_ORIGIN__", `http://127.0.0.1:${MOCK_PORT}`),
+  );
+}
+
 export default async function globalSetup(): Promise<void> {
+  installEngineStub();
   let body: string;
   try {
     body = await (await fetch(MOCK_URL)).text();

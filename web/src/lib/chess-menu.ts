@@ -104,3 +104,16 @@ export function chessChallengeIsOpen(conversation: Conversation): boolean {
 export function conversationHoldsChess(conversation: Conversation | undefined): boolean {
   return !!conversation && conversation.kind !== "notes";
 }
+
+/**
+ * Whether this conversation can hold a game against the ENGINE.
+ *
+ * NOTES can. It is the one place `conversationHoldsChess` refuses because "there is nobody to play"
+ * — and the computer is somebody, so the chat with oneself is exactly where a solo game belongs.
+ * Everything a human game is refused for still refuses this one: a CHANNEL's history is drawn as
+ * threads, and a board inside one is a different surface.
+ */
+export function conversationHoldsEngineChess(conversation: Conversation | undefined): boolean {
+  if (!conversation) return false;
+  return conversationHoldsChess(conversation) || conversation.kind === "notes";
+}

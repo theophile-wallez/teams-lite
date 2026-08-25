@@ -27,6 +27,10 @@ pub mod auth;
 pub mod calendar;
 pub mod calling;
 pub mod changelog;
+/// The chess ENGINE this machine can fetch, so a game has an opponent when no colleague does
+/// (see AGENTS.md § Playing STOCKFISH). It is in the backend because the engine has to be
+/// DOWNLOADED, and a browser in this app never fetches from a stranger's server.
+pub mod chess_engine;
 pub mod custom_emoji;
 pub mod gitlab;
 pub mod gitlab_approval;

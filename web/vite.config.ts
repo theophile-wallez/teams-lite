@@ -10,6 +10,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
+import { ENGINE_ROUTE, engineFileResponse } from "./engine-file";
 import { BUILD_INFO_FILE, type BuildInfo } from "./build-info";
 import { BACKEND_WS_ROUTE } from "./src/lib/backend-route";
 
@@ -41,6 +42,34 @@ function writeTokenPlugin(): Plugin {
         res.statusCode = response.status;
         res.setHeader("content-type", response.headers.get("content-type") ?? "text/plain");
         res.end(await response.text());
+      });
+    },
+  };
+}
+
+/**
+ * The CHESS ENGINE's own files, in dev.
+ *
+ * The same route the production server holds (see engine-file.ts): the engine is a Worker script
+ * that finds its wasm beside itself, so both topologies have to serve it from one path or a board
+ * works in one and not the other.
+ */
+function chessEnginePlugin(): Plugin {
+  return {
+    name: "teams-lite-chess-engine",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use(ENGINE_ROUTE, async (req, res) => {
+        // The middleware is mounted AT the route, so `req.url` is what follows it.
+        const response = engineFileResponse(ENGINE_ROUTE + (req.url ?? "").replace(/^\/+/, ""));
+        if (!response) {
+          res.statusCode = 404;
+          res.end("no such engine file\n");
+          return;
+        }
+        res.statusCode = response.status;
+        for (const [name, value] of response.headers) res.setHeader(name, value);
+        res.end(Buffer.from(await response.arrayBuffer()));
       });
     },
   };
@@ -119,6 +148,7 @@ export default defineConfig(({ command }) => ({
   },
   plugins: [
     writeTokenPlugin(),
+    chessEnginePlugin(),
     buildInfoPlugin(),
     tsConfigPaths({ projects: ["./tsconfig.json"] }),
     tailwindcss(),

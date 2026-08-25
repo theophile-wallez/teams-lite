@@ -51,6 +51,10 @@ export const RUNTIME_ENTRIES: readonly string[] = [
   "server.ts",
   "write-token.ts",
   "build-info.ts",
+  // The CHESS ENGINE's own route. It reads the cache the backend fetched Stockfish into and serves
+  // those two files to the page (see engine-file.ts); without it the staged app answers 404 for the
+  // engine and every board against the computer says it could not start.
+  "engine-file.ts",
   "dist/server",
   "dist/client",
   `dist/${BUILD_INFO_FILE}`,

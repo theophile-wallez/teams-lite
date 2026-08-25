@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  chessEngineName,
   chessMessageHtml,
   chessWireLine,
   chessMessageText,
@@ -324,5 +325,66 @@ describe("newChessGameId", () => {
       const wire: ChessWire = { game: id, body: { kind: "join" } };
       expect(chessWireIn(message(chessMessageHtml(wire)))).toEqual(wire);
     }
+  });
+});
+
+// ---- a game against the ENGINE -----------------------------------------------------
+//
+// Stockfish has no MRI: it cannot author a message and it cannot edit one, so a game against it is
+// ONE ledger — the reader's own — carrying BOTH sides' moves. These tests are about the token that
+// makes that legible and the parity rule it is allowed to bend.
+describe("an engine ledger", () => {
+  function engineLedger(over: Partial<ChessLedger> = {}): ChessLedger {
+    return {
+      ...newChessLedger("w"),
+      opened: true,
+      time: { base: 600, increment: 0 },
+      engineElo: 1800,
+      at: 1_700_000_123_456,
+      moves: [
+        { ply: 1, san: "e4", clockMs: 598_000 },
+        { ply: 2, san: "e5", clockMs: 599_900 },
+        { ply: 3, san: "Nf3", clockMs: 596_000 },
+      ],
+      ...over,
+    };
+  }
+
+  it("round-trips, with BOTH sides' plies in one ledger", () => {
+    const wire: ChessWire = { game: "7f3a1c", body: { kind: "ledger", ledger: engineLedger() } };
+    expect(chessWireIn(message(chessMessageHtml(wire)))).toEqual(wire);
+  });
+
+  it("writes the strength as its own token, and still no colon anywhere", () => {
+    expect(serializeLedger(engineLedger())).toBe(
+      "w open tc.600+0 sf.1800 at.1700000123456 1.e4.59800 2.e5.59990 3.Nf3.59600",
+    );
+    expect(serializeLedger(engineLedger())).not.toContain(":");
+  });
+
+  it("BENDS the parity rule only for a ledger that declares an engine", () => {
+    // Both parities from one author, which is the whole point…
+    const both = chessWireIn(
+      message(body("— chess 7f3a1c v2 w sf.1500 1.e4 2.e5, via teams-lite")),
+    );
+    expect(both?.body.kind).toBe("ledger");
+    expect(both?.body.kind === "ledger" && both.body.ledger.moves).toHaveLength(2);
+    // …and an ORDINARY ledger claiming the other side's ply is refused exactly as before, because
+    // there the other side is a person who speaks for themselves.
+    expect(chessWireIn(message(body("— chess 7f3a1c v2 w 1.e4 2.e5, via teams-lite")))).toBeNull();
+  });
+
+  it("says in WORDS that the opponent is a machine, which is what a colleague reads", () => {
+    const words = chessMessageWords({ kind: "ledger", ledger: engineLedger() });
+    expect(words).toContain("I'm playing Stockfish 1800");
+    expect(words).toContain("10 min");
+    // The moves are the GAME's rather than one player's, because one ledger holds both.
+    expect(words).toContain("moves:");
+    expect(words).not.toContain("my moves:");
+  });
+
+  it("names the engine by its STRENGTH, in one place", () => {
+    expect(chessEngineName(1800)).toBe("Stockfish 1800");
+    expect(chessEngineName(1320.4)).toBe("Stockfish 1320");
   });
 });

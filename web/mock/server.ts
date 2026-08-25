@@ -7601,6 +7601,53 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     // The update's first click: fetch the new build. Reports progress on a timer the way
     // the real one reports it per whole percent, and joins a download already in flight
     // rather than starting a second one — the button may be open in two pages.
+    // ---- the CHESS ENGINE ------------------------------------------------------------
+    //
+    // The real backend fetches 7.3 MB from a pinned release and verifies it against a digest (see
+    // src/chess_engine.rs). This mock fetches nothing: it answers whether an engine is "here", and
+    // its download is a short walk to `present: true` — because what a spec has to exercise is the
+    // PAGE's own chain (the row that offers it, the bar, the failure sentence, and a game that
+    // really advances), and the bytes it would load are a stub the suite writes itself.
+    case "chess_engine_status":
+      return mockEngineStatus();
+
+    case "chess_engine_download": {
+      if (mockEngine.present) return mockEngineStatus();
+      // Armed to FAIL, and it stays armed: a spec that asks for the failure asserts the sentence and
+      // then resets, exactly as it does for a refused send.
+      if (mockEngineError) {
+        mockEngine = { ...mockEngine, downloading: false, error: mockEngineError };
+        broadcast("chess_engine_progress", mockEngineStatus());
+        throw new Error(mockEngineError);
+      }
+      mockEngine = { ...mockEngine, downloading: true, received: 0, error: "" };
+      broadcast("chess_engine_progress", mockEngineStatus());
+      // Three ticks rather than one, so the bar is a bar: a download that only ever appears finished
+      // would let a page that draws no progress at all pass.
+      let received = 0;
+      const step = Math.ceil(MOCK_ENGINE_BYTES / 3);
+      const timer = setInterval(() => {
+        received = Math.min(MOCK_ENGINE_BYTES, received + step);
+        const done = received >= MOCK_ENGINE_BYTES;
+        if (done) clearInterval(timer);
+        mockEngine = {
+          ...mockEngine,
+          downloading: !done,
+          received,
+          present: done ? true : mockEngine.present,
+        };
+        broadcast("chess_engine_progress", mockEngineStatus());
+      }, MOCK_ENGINE_TICK_MS);
+      return mockEngineStatus();
+    }
+
+    case "chess_engine_forget": {
+      const freed = mockEngine.present ? MOCK_ENGINE_BYTES : 0;
+      mockEngine = { ...mockEngine, present: false, downloading: false, received: 0, error: "" };
+      broadcast("chess_engine_progress", mockEngineStatus());
+      return { ...mockEngineStatus(), freed };
+    }
+
     case "update_download": {
       if (!mockUpdate) throw new Error("there is no new build to download");
       if (mockUpdateProgress.phase === "downloading") return { ...mockUpdateProgress };
@@ -9449,6 +9496,54 @@ const MOCK_CHESS_DELAY_MS = Number(process.env.MOCK_CHESS_DELAY_MS ?? 350);
 let mockChessReply: string | null = null;
 let mockChessSilent = false;
 
+// ---- the CHESS ENGINE, as this mock answers for it -----------------------------------
+//
+// The engine is 7.3 MB the real backend fetches and verifies; nothing is fetched here. What the mock
+// owns is the ANSWER a page reads — is it on this machine, how big is it, how far has a fetch got —
+// because that is what decides whether the menu offers a game against the computer at all.
+
+/** What the real thing weighs, so the row's sentence says a true number. */
+const MOCK_ENGINE_BYTES = 7_316_081;
+/** How long each of the three ticks of a mock download takes. */
+const MOCK_ENGINE_TICK_MS = Number(process.env.MOCK_ENGINE_TICK_MS ?? 120);
+/** The engine's own Elo range, MEASURED off the binary and pinned in src/chess_engine.rs. */
+const MOCK_ENGINE_MIN_ELO = 1320;
+const MOCK_ENGINE_MAX_ELO = 3190;
+/** The version, which is the middle segment of the route the page loads a Worker from. It must be
+ *  the one `web/engine-file.ts` serves, or the page asks for an address nothing answers. */
+const MOCK_ENGINE_VERSION = "18.0.0-lite-single-a8fbc05e";
+const MOCK_ENGINE_WORKER = "stockfish-18-lite-single.js";
+
+/** ABSENT out of the box, which is the state a fresh machine is really in — and the one the
+ *  download row exists for. A spec arms `present` when it wants to play. */
+let mockEngine = { present: false, downloading: false, received: 0, error: "" };
+/** Armed by `{kind:"engine", error:"…"}`: the download refuses, in words. A spec MUST reset. */
+let mockEngineError: string | null = null;
+
+function mockEngineStatus(): Record<string, unknown> {
+  return {
+    label: "Stockfish 18 Lite",
+    version: MOCK_ENGINE_VERSION,
+    present: mockEngine.present,
+    bytes: MOCK_ENGINE_BYTES,
+    worker_path: `/__engine/${MOCK_ENGINE_VERSION}/${MOCK_ENGINE_WORKER}`,
+    min_elo: MOCK_ENGINE_MIN_ELO,
+    max_elo: MOCK_ENGINE_MAX_ELO,
+    downloading: mockEngine.downloading,
+    received: mockEngine.received,
+    error: mockEngine.error,
+  };
+}
+
+/** Put the engine back the way this file declares it: absent, and armed to fail at nothing. One mock
+ *  process serves the whole run, so an engine a spec left "present" would let a later spec pass
+ *  without ever exercising the row that fetches one. */
+function resetMockEngine(): void {
+  mockEngine = { present: false, downloading: false, received: 0, error: "" };
+  mockEngineError = null;
+  broadcast("chess_engine_progress", mockEngineStatus());
+}
+
 /**
  * Open a game AS THE OPPONENT, so the reader is the one challenged.
  *
@@ -11037,6 +11132,22 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // answering at all (`silent`), which is how a spec reaches a board waiting on somebody.
     // A spec MUST reset it (`{kind:"chess", reset:true}`): one mock process serves the whole
     // run, and an opponent left silent leaves every later game unanswered.
+    // The CHESS ENGINE: whether this "machine" holds one, and whether fetching it refuses. Nothing
+    // is downloaded either way — the bytes a page loads are the stub the suite writes (see
+    // mock/engine-stub.js). A spec MUST reset, because an engine left present would let a later one
+    // pass without ever pressing the row that fetches it.
+    if (body.kind === "engine") {
+      if (body.reset === true) {
+        resetMockEngine();
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      if (typeof body.present === "boolean") {
+        mockEngine = { ...mockEngine, present: body.present, downloading: false, received: 0 };
+      }
+      if (typeof body.error === "string") mockEngineError = body.error || null;
+      broadcast("chess_engine_progress", mockEngineStatus());
+      return Response.json({ ok: true, ...mockEngineStatus() }, { status: 200 });
+    }
     if (body.kind === "chess") {
       if (body.reset === true) {
         resetMockChess();
@@ -11410,6 +11521,33 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
   }
   if (req.method === "GET" && url.pathname === "/__test/sends") {
     return Response.json({ sends: capturedSends, edits: capturedEdits });
+  }
+  // ONE LEGAL MOVE for the engine STUB (see mock/engine-stub.js). The stub holds no chess at all —
+  // a fixed answer would be an illegal move in almost every position, and the board refuses one of
+  // those, so the game would stall and a spec would pass for the wrong reason. The mock already
+  // holds `chess.js` to play the human opponent, so it plays the engine too: ONE source of legal
+  // moves in the whole harness.
+  //
+  // CORS is open on this one route because the stub is a WORKER on the app's origin fetching the
+  // mock's: a page fetch across origins needs the header, and this endpoint exists only when the
+  // test hooks do.
+  if (req.method === "GET" && url.pathname === "/__test/engine-move") {
+    const cors = { "access-control-allow-origin": "*", "content-type": "text/plain" };
+    if (!TEST_HOOKS) return new Response("(none)", { headers: cors });
+    const fen = url.searchParams.get("fen") ?? "";
+    let uci = "(none)";
+    try {
+      const chess = new Chess(fen);
+      const legal = chess.moves({ verbose: true });
+      // The armed reply when a spec named one, otherwise the first legal move — deterministic, so a
+      // spec can assert on what the computer plays.
+      const picked =
+        legal.find((move) => mockChessReply && move.san === mockChessReply) ?? legal[0];
+      if (picked) uci = `${picked.from}${picked.to}${picked.promotion ?? ""}`;
+    } catch {
+      /* a FEN this mock cannot read answers "no move", which the page reads as a finished game */
+    }
+    return new Response(uci, { headers: cors });
   }
   if (req.method === "GET" && url.pathname === "/__test/conversations") {
     return Response.json(

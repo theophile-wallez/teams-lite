@@ -428,6 +428,20 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
         "ws.send(JSON.stringify({ method: 'restart_backend' }));\n"
     ),
+    # The CHESS ENGINE: fetching it spends the user's bandwidth on 7.3 MB and writes it to their
+    # disk (MACHINE_METHODS in src/bin/server.rs). It posts to nobody, which makes it the weakest
+    # entry in the list — and a side effect nobody asked for is still one.
+    "engine-fetcher.ts": (
+        "// Downloads the chess engine onto the user's machine.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'chess_engine_download' }));\n"
+    ),
+    # Asking whether the engine is THERE changes nothing and names no path: a read, and allowed.
+    "engine-reader.ts": (
+        "// Asks whether the engine is on this machine, which is allowed.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19420');\n"
+        "ws.send(JSON.stringify({ method: 'chess_engine_status' }));\n"
+    ),
     # Asking whether a newer build exists changes nothing on the machine and is the same
     # request the backend already makes every two minutes: a read, and allowed.
     "update-checker.ts": (
@@ -672,6 +686,8 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/emoji-importer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/self-updater.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/backend-restarter.ts"),
+        # Fetching the chess engine spends the user's bandwidth and writes to their disk.
+        ("BLOCK", PROJECT, f"bun run {tmp}/engine-fetcher.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-backend-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/released-relay-writer.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/released-backend-reader.ts"),
@@ -936,6 +952,8 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, f"bun run {tmp}/signin-asker.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/persona-reader.ts"),
         ("ALLOW", PROJECT, f"bun run {tmp}/update-checker.ts"),
+        # Asking whether the engine is there names no path and changes nothing.
+        ("ALLOW", PROJECT, f"bun run {tmp}/engine-reader.ts"),
         # Reading the call state names no write and reaches nobody.
         ("ALLOW", PROJECT, f"bun run {tmp}/call-status-reader.ts"),
         # An example pinned to the pre-authorized channel is the sanctioned shape,

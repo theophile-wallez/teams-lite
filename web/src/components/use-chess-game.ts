@@ -31,6 +31,7 @@ import { Chess, type Move, type Square } from "chess.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chessPublishFor, type ChessAct } from "~/lib/chess-act";
 import { type ChessClockReading } from "~/lib/chess-clock";
+import { NO_CHESS_ENGINE } from "~/lib/chess-engine";
 import { chessOutcomeSound, chessSoundFor, playChessSound } from "~/lib/chess-sound";
 import {
   chessGameIsSettled,
@@ -44,6 +45,7 @@ import type { ChessColor } from "~/lib/chess-wire";
 import type { ChessPromotionPiece, ChessPromotionPrompt } from "./chess-board";
 import { useAppState, useOptionalAppState, useOptionalController } from "./controller-context";
 import { useChessClock } from "./use-chess-clock";
+import { useChessEngine } from "./use-chess-engine";
 
 /** What the rules say about a move list. */
 export type ChessReplay = {
@@ -134,6 +136,10 @@ export type ChessBoardApi = {
   /** Whether the reader is a player in this game with a controller to act through. */
   canAct: boolean;
   error: string | null;
+  /** Whether this game is against the ENGINE, and whether it is searching right now — which is what
+   *  the board draws in place of "waiting for them". */
+  engine: { elo: number } | null;
+  engineThinking: boolean;
 };
 
 export function useChessGame(args: {
@@ -156,6 +162,9 @@ export function useChessGame(args: {
   const pending = useOptionalAppState((s) => s.chessPending[slot] ?? null, null);
   const storedPremove = useOptionalAppState((s) => s.chessPremove[slot] ?? null, null);
   const soundsEnabled = useOptionalAppState((s) => s.soundsEnabled, false);
+  // What this machine holds of the ENGINE. A board with no controller (a server-rendered test) reads
+  // "absent", which is what makes an engine game render as a board rather than throw.
+  const engineState = useOptionalAppState((s) => s.chessEngine, NO_CHESS_ENGINE);
 
   const [selected, setSelected] = useState<string | null>(null);
   const [promotion, setPromotion] = useState<ChessPromotionPrompt | null>(null);
@@ -563,6 +572,90 @@ export function useChessGame(args: {
     controller?.settleChessMove(args.conversationId, game.id, args.game.moves.length);
   }, [args.conversationId, args.game.moves.length, controller, game.id]);
 
+  // ---- THE ENGINE ------------------------------------------------------------------
+  //
+  // A game against Stockfish is one ledger the READER's machine writes both sides of (see
+  // lib/chess-wire.ts), so the engine's move is published from here — by the board that is mounted,
+  // which is the only surface that can hold a Worker. Three things follow and each is deliberate:
+  //
+  //   - the worker is started by the first ASK, so a conversation full of finished engine games
+  //     costs nothing until a board really needs a move;
+  //   - the engine moves while the reader is AT the board. A game left with the engine to move waits
+  //     — which is honest, and it is why an engine's clock is never drained by the wall (see
+  //     `engineSide` in lib/chess-clock.ts);
+  //   - a ply is asked for ONCE. The effect re-runs on every frame of a clock, so the ply it last
+  //     asked about is remembered rather than guessed at.
+  const engineOn = !!game.engine && !settled && atLive && !!controller && !!engineState.present;
+  const engine = useChessEngine({ workerPath: engineState.worker_path, enabled: engineOn });
+  // THE SEARCH IS IN FLIGHT ACROSS RENDERS, so nothing this effect uses may be a dependency that a
+  // render replaces. `engine` is a fresh object every render (its own `thinking` flips the moment a
+  // search starts) and `publish` follows the game — so with either in the array the effect was torn
+  // down and re-run a frame after it asked, and its cleanup CANCELLED the very search it had just
+  // started: the engine answered into a discarded promise and the board waited for ever. They are
+  // read through refs instead, and what really re-runs this is the POSITION.
+  const askRef = useRef(engine.ask);
+  askRef.current = engine.ask;
+  const publishRef = useRef(publish);
+  publishRef.current = publish;
+  /** The position the board is really at, as of the last run — what an answer is checked against. */
+  const positionRef = useRef("");
+  const askedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const elo = game.engine?.elo;
+    if (!engineOn || elo === undefined || !ourColor) return;
+    // Only when it is the ENGINE's turn, and only at the live position with nothing of ours in
+    // flight — the same three conditions a move of the reader's own needs.
+    if (game.turn === ourColor || game.moves.length !== args.game.moves.length) return;
+    const key = `${game.id}/${game.moves.length}`;
+    positionRef.current = key;
+    // A ply is asked for ONCE: this runs again whenever the clock or a frame re-renders the board.
+    if (askedRef.current === key) return;
+    askedRef.current = key;
+    const fen = replay.chess.fen();
+    void (async () => {
+      const answer = await askRef.current({ fen, elo });
+      // The game moved on while the engine thought — the reader walked back, or another frame
+      // arrived — so the move is about a position that is no longer there.
+      if (!answer || positionRef.current !== key) return;
+      // The engine answers in UCI; the SAN — and whether the move ends the game — is asked of the
+      // rules here, exactly as it is for a move the reader plays.
+      try {
+        const probe = new Chess(fen);
+        const made = probe.move({
+          from: answer.move.from,
+          to: answer.move.to,
+          ...(answer.move.promotion ? { promotion: answer.move.promotion } : {}),
+        });
+        let ends: "mate" | "draw" | null = null;
+        if (probe.isCheckmate()) ends = "mate";
+        else if (probe.isGameOver()) ends = "draw";
+        publishRef.current({
+          kind: "move",
+          san: made.san,
+          ends,
+          // What the SEARCH cost, which is what its clock is charged.
+          engine: { spentMs: answer.spentMs },
+        });
+      } catch {
+        // A move the rules refuse in the position the board is really at. Nothing is posted — a
+        // ledger with an illegal ply in it is a game neither machine can replay — and it is not
+        // asked again either: the same position would earn the same answer, so the board is left
+        // saying it is the engine's turn rather than looping on a move that cannot be played.
+      }
+    })();
+    // The position and whose turn it is are what re-run this; `askRef` and `publishRef` are why
+    // nothing else may.
+  }, [
+    args.game.moves.length,
+    engineOn,
+    game.engine?.elo,
+    game.id,
+    game.moves.length,
+    game.turn,
+    ourColor,
+    replay.chess,
+  ]);
+
   const flagClaimable =
     !settled && clock.flagged && game.opponent && ourColor && clock.flagged !== ourColor
       ? clock.flagged
@@ -607,7 +700,12 @@ export function useChessGame(args: {
     step,
     act: publish,
     canAct: !settled && !!ourColor && !!game.opponent && !!controller,
-    error,
+    // The engine's own failure is the board's to say, and it stands beside a refused publish rather
+    // than replacing it: one is "your move did not go out", the other is "your opponent cannot
+    // move", and a reader needs to know which.
+    error: error ?? engine.error,
+    engine: game.engine,
+    engineThinking: engine.thinking,
   };
 }
 
@@ -677,6 +775,15 @@ export function chessStatus(args: {
   // claim is the reader's own press, so the sentence has to tell them there is one to make.
   if (args.clock.flagged) {
     const who = chessPlayerOf(game, args.clock.flagged);
+    // A MACHINE CLAIMS NOTHING, so the sentence must not promise that one will. Against the computer
+    // the reader is the only author, so their own flag is theirs to settle: they play on with a
+    // clock at zero, or they resign. Saying "they can claim the win" would leave them waiting for a
+    // press nobody is ever going to make.
+    if (game.engine) {
+      return who?.isSelf
+        ? "Your clock ran out. The computer will not claim it — play on, or resign."
+        : `${who?.name ?? "The computer"} ran out of time.`;
+    }
     return who?.isSelf
       ? "Your clock has run out — they can claim the win."
       : `${who?.name ?? "They"} ran out of time — claim the win.`;

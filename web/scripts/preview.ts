@@ -77,9 +77,11 @@
 //
 //   bun run web/scripts/preview.ts --out /tmp/chip --element '[data-testid="message-file"]' --dpr 4
 
-import { readdirSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
+import { ENGINE_SERVED } from "../engine-file";
 
 /**
  * Ports a send-capable backend — or the app server that relays to one — may be on.
@@ -1206,12 +1208,42 @@ function startMock(): ReturnType<typeof Bun.spawn> {
   });
 }
 
+/**
+ * THE CHESS ENGINE, stood in for — the same substitution the E2E run makes.
+ *
+ * A game against the computer loads a Worker from the path the backend names, out of the directory
+ * `TEAMS_LITE_ENGINE_DIR` points at (see src/chess_engine.rs and engine-file.ts). The real engine is
+ * 7.3 MB, so a capture writes the STUB there instead — `web/mock/engine-stub.js`, which asks the mock
+ * for a legal move — and the shot is of a game that really advances. It stands in for the BYTES and
+ * never for the address: the route, the Worker-path guard and the whole UCI exchange are the real
+ * ones, and this can never be reached in production, where a backend installs only what it hashed.
+ */
+function engineStubDir(): string {
+  const dir = join(tmpdir(), `teams-lite-preview-engine-${MOCK_PORT}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, ENGINE_SERVED[0]!.name),
+    readFileSync(join(WEB_DIR, "mock", "engine-stub.js"), "utf8").replace(
+      "__MOCK_ORIGIN__",
+      `http://127.0.0.1:${MOCK_PORT}`,
+    ),
+  );
+  return dir;
+}
+
 function startWebServer(): ReturnType<typeof Bun.spawn> {
   return Bun.spawn(["bun", "run", "vite", "dev", "--port", String(WEB_PORT), "--host", "127.0.0.1"], {
     cwd: WEB_DIR,
     // The explicit WS target is what keeps the app off the real backend; the dev
     // build refuses to start without it (see `defaultWsUrl` in lib/ws-client.ts).
-    env: { ...process.env, VITE_TEAMS_WS_URL: MOCK_WS_URL },
+    env: {
+      ...process.env,
+      VITE_TEAMS_WS_URL: MOCK_WS_URL,
+      // The STUB by default, and the REAL engine when the caller names a directory holding it:
+      //   TEAMS_LITE_ENGINE_DIR=/path/to/engine bun run preview -- --out /tmp/chess --chess
+      // which is how one checks that 7.3 MB of WebAssembly really plays a move in a browser.
+      TEAMS_LITE_ENGINE_DIR: process.env.TEAMS_LITE_ENGINE_DIR ?? engineStubDir(),
+    },
     stdout: "inherit",
     stderr: "inherit",
   });
@@ -2045,13 +2077,117 @@ if (import.meta.main) {
       await shot(`${out}-page-mobile-light.png`);
       await page.setViewportSize(VIEWPORT);
 
+      // ---- THE COMPUTER --------------------------------------------------------------
+      //
+      // The engine is 7.3 MB this machine may not hold, so the row a reader meets FIRST is the one
+      // that states the size and offers to fetch it (§ Playing STOCKFISH). Both halves are
+      // photographed, in this order, because the whole point of the first is that it comes before
+      // the second: an app that downloaded on its own would never draw it.
+      await page.goBack();
+      await page.locator('[data-testid="message-pane"]').waitFor();
+      const engineHook = async (body: Record<string, unknown>): Promise<void> => {
+        await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+          data: { kind: "engine", ...body },
+        });
+        await page.waitForTimeout(200);
+      };
+      // The row is a DISCLOSURE, so it is pressed open — and re-pressed for every shot, because a
+      // closed menu forgets it and a capture that only opened it once would photograph the row shut.
+      const openEngine = async (): Promise<void> => {
+        await openConversationMenu(page);
+        await page.locator('[data-testid="chess-engine-row"]').waitFor();
+        if (
+          !(await page.locator('[data-testid="chess-engine-download"]').count()) &&
+          !(await page.locator('[data-testid="chess-engine-play"]').count())
+        ) {
+          await page.locator('[data-testid="chess-engine-row"]').click();
+        }
+        await page.waitForTimeout(250);
+      };
+      await engineHook({ present: false });
+      await openEngine();
+      await shot(`${out}-engine-fetch-light.png`);
+      await setTheme("dark");
+      await openEngine();
+      await shot(`${out}-engine-fetch-dark.png`);
+      await setTheme("light");
+
+      // Here: the seven strengths, with the one that is picked marked. The picker is what "we can
+      // choose the Elo" IS, so it is captured open — and at a PHONE's width too, because seven
+      // presses in a menu is exactly the row that wraps badly at 390px.
+      await engineHook({ present: true });
+      await openEngine();
+      await page.locator('[data-testid="chess-elo-2400"]').click();
+      await page.waitForTimeout(200);
+      await shot(`${out}-engine-elo-light.png`);
+      await setTheme("dark");
+      await openEngine();
+      await shot(`${out}-engine-elo-dark.png`);
+      await setTheme("light");
+      await page.setViewportSize({ width: 390, height: 844 });
+      await openEngine();
+      await shot(`${out}-engine-elo-mobile-light.png`);
+      await page.setViewportSize(VIEWPORT);
+
+      // A GAME against it: one message, both sides in one ledger, and a seat that wears a mark
+      // rather than a face — the engine is not a person, and nothing here draws it as one.
+      await openEngine();
+      // WHITE, said out loud: the picker opens on Random, and a capture whose subject depends on a
+      // coin toss is a capture that photographs a different thing every run.
+      await page.locator('[data-testid="chess-engine-color-w"]').click();
+      await page.locator('[data-testid="chess-engine-play"]').click();
+      const engineBoard = '[data-testid="chess-game"] >> nth=-1';
+      await page.locator('[data-testid="chess-engine-seat"]').last().waitFor();
+      // Play one move so the board is a GAME rather than an opening position: the computer answers
+      // from the stub the harness installs, so the shot holds both sides' first move.
+      const engineStatus = page.locator('[data-testid="chess-status"]').last();
+      if (/your move/i.test((await engineStatus.textContent()) ?? "")) {
+        await page.locator(`${engineBoard} >> [data-square="e2"]`).click();
+        await page.locator(`${engineBoard} >> [data-square="e4"]`).click();
+      }
+      // POLLED rather than waited out: the colour is random, so this shot is of the engine's own
+      // first move about half the time — and that move costs a worker boot, a UCI handshake and a
+      // search before the message is edited. A fixed pause photographed the opening position.
+      const engineMoves = page.locator(`${engineBoard} >> [data-testid="chess-moves"]`);
+      for (let i = 0; i < 80; i += 1) {
+        if (/[a-h1-8]/.test((await engineMoves.textContent()) ?? "")) break;
+        await page.waitForTimeout(150);
+      }
+      await page.waitForTimeout(400);
+      await shot(`${out}-engine-game-light.png`, engineBoard);
+      await setTheme("dark");
+      await shot(`${out}-engine-game-dark.png`, engineBoard);
+      await setTheme("light");
+
+      // What it COSTS, in the one place a reader can find it months later: Settings' own
+      // inventory, which is the half of this feature the conversation's menu cannot offer.
+      // The board's own layer is dismissed first: a menu or a picker still open would take the
+      // press meant for Settings, which is a capture that photographs the wrong surface.
+      // A RELOAD first, deliberately: this run has walked through several chess pages and pressed
+      // Back, and Settings is reached from the sidebar rather than from any of them. A fresh page is
+      // the shortest way to a state where that press means one thing.
+      await page.goto(`${WEB_ORIGIN}/`);
+      await page.locator('[data-testid="backend-badge"][data-backend="mock"]').waitFor();
+      await openSettings(page);
+      const inventory = '[data-testid="chess-engine-settings"]';
+      await page.locator(inventory).scrollIntoViewIfNeeded();
+      await page.waitForTimeout(300);
+      await shot(`${out}-engine-settings-light.png`, inventory);
+      await setTheme("dark");
+      await shot(`${out}-engine-settings-dark.png`, inventory);
+      await setTheme("light");
+      await engineHook({ reset: true });
+
       console.log(
         `[preview] wrote ${out}-button-{light,dark}.png, ${out}-challenge-{light,dark}.png, ` +
           `${out}-board-{light,dark}.png, ${out}-mid-game-light.png, ` +
           `${out}-resign-armed-light.png, ${out}-mobile-light.png, ` +
           `${out}-challenged-{light,dark}.png, ${out}-strip-{light,dark}.png, ` +
           `${out}-page-{light,dark}.png, ${out}-review-light.png, ` +
-          `${out}-promotion-{light,dark}.png and ${out}-page-mobile-light.png`,
+          `${out}-promotion-{light,dark}.png, ${out}-page-mobile-light.png, ` +
+          `${out}-engine-fetch-{light,dark}.png, ${out}-engine-elo-{light,dark}.png, ` +
+          `${out}-engine-elo-mobile-light.png, ${out}-engine-game-{light,dark}.png ` +
+          `and ${out}-engine-settings-{light,dark}.png`,
       );
     });
     process.exit(0);

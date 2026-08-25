@@ -356,7 +356,12 @@ test.describe("mobile single-pane layout", () => {
     // Three colours and nine clocks.
     expect(targets.colours.length).toBe(12);
     for (const target of [...targets.rows, ...targets.colours]) {
-      expect(target.h, `${target.name} is ${target.h}px tall`).toBeGreaterThanOrEqual(44);
+      // 44px, MEASURED — with a sub-pixel allowance rather than an exact floor. This menu is taller
+      // than a phone and therefore scrolls, and a row inside a scrolled box measures 43.99997 at a
+      // fractional scroll offset: a row whose CSS height is exactly the floor would otherwise fail
+      // for a rounding, which teaches its next reader to lower the number. Anything really short —
+      // the 32px rows this rule was written for — is still caught.
+      expect(target.h, `${target.name} is ${target.h}px tall`).toBeGreaterThanOrEqual(43.5);
     }
     // And it fits the phone it is read on: a menu wider than the screen puts its own words
     // off the edge.

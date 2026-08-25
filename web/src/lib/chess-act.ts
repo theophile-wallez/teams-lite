@@ -23,7 +23,13 @@ import {
 
 /** One thing a player can do to a game. */
 export type ChessAct =
-  | { kind: "open"; color: ChessColor; time: ChessTimeControl | null }
+  | {
+      kind: "open";
+      color: ChessColor;
+      time: ChessTimeControl | null;
+      /** Open a game against the ENGINE at this strength, rather than against a colleague. */
+      engineElo?: number | null;
+    }
   | { kind: "join" }
   | { kind: "decline" }
   /** A move, already checked against the rules by the board that offers it. `premove` is what
@@ -32,6 +38,10 @@ export type ChessAct =
       kind: "move";
       san: string;
       premove?: boolean;
+      /** The ENGINE's own move, published by the reader's machine because the engine cannot post
+       *  one. It is the only act that writes the other colour's ply, and it costs the engine the
+       *  milliseconds it really searched for rather than the wall time. */
+      engine?: { spentMs: number };
       /** How this move ENDED the game, when it did — the one thing only a board with the rules in
        *  it can see, said on the wire so the surfaces without them can read it. */
       ends?: "mate" | "draw" | null;
@@ -73,7 +83,14 @@ export function chessPublishFor(args: {
     return {
       game: args.gameId,
       messageId: null,
-      ledger: { ...newChessLedger(act.color), opened: true, time: act.time },
+      ledger: {
+        ...newChessLedger(act.color),
+        opened: true,
+        time: act.time,
+        // A game against the ENGINE is playable the moment it is posted: there is nobody to accept
+        // it, and the token is what says so to every reader of the thread.
+        engineElo: act.engineElo ?? null,
+      },
     };
   }
 
@@ -106,15 +123,21 @@ export function chessPublishFor(args: {
       return { game: game.id, messageId, ledger: { ...base, declined: true } };
     }
     case "move": {
-      if (!game.opponent || game.turn !== color) return null;
+      // The ENGINE's move is the reader's machine writing the other colour's ply — refused unless
+      // the game really is against an engine and it really is the engine's turn, so a client cannot
+      // move for a colleague by claiming one.
+      const mover = act.engine ? other(color) : color;
+      if (act.engine && !game.engine) return null;
+      if (!game.opponent || game.turn !== mover) return null;
       const ply = game.moves.length + 1;
       const state = chessClockStateOf(game);
       const clockMs = chessRemainingAfterMove({
         time: game.time,
-        stated: chessStatedFor(state, color),
+        stated: chessStatedFor(state, mover),
         thinkStartedAt: chessThinkStartedAt(state),
         nowMs: args.nowMs,
         premove: act.premove === true,
+        ...(act.engine ? { spentMs: act.engine.spentMs } : {}),
       });
       return {
         game: game.id,
@@ -133,7 +156,8 @@ export function chessPublishFor(args: {
       };
     }
     case "draw": {
-      if (!game.opponent) return null;
+      // An engine is not asked for a draw: there is nobody to ask.
+      if (!game.opponent || game.engine) return null;
       return {
         game: game.id,
         messageId,
@@ -153,8 +177,10 @@ export function chessPublishFor(args: {
       return { game: game.id, messageId, ledger: { ...base, resigned: true } };
     }
     case "flag": {
-      // A flag is claimed against whoever is ON the clock, and never by them.
-      if (!game.opponent || game.turn === color) return null;
+      // A flag is claimed against whoever is ON the clock, and never by them. An ENGINE's clock is
+      // never counted down by the wall (see lib/chess-clock.ts), so there is no flag to claim
+      // against one either.
+      if (!game.opponent || game.engine || game.turn === color) return null;
       return {
         game: game.id,
         messageId,
@@ -162,4 +188,8 @@ export function chessPublishFor(args: {
       };
     }
   }
+}
+
+function other(color: ChessColor): ChessColor {
+  return color === "w" ? "b" : "w";
 }

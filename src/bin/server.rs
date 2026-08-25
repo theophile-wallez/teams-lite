@@ -465,7 +465,7 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// authenticates as the user, `signin_frame` answers with a picture of a sign-in page, and
 /// `signin_input` presses keys into it. `signin_frame` is gated as hard as the rest for that
 /// reason: a read whose answer is the pixels of somebody's password field is not a read.
-const MACHINE_METHODS: [&str; 30] = [
+const MACHINE_METHODS: [&str; 32] = [
     "repair_broker",
     "signin_start",
     "signin_frame",
@@ -474,6 +474,11 @@ const MACHINE_METHODS: [&str; 30] = [
     "restart_backend",
     "update_download",
     "update_apply",
+    // The CHESS ENGINE: fetching it reaches the network and writes 7.3 MB to this machine's disk on
+    // the user's behalf, and dropping it takes those bytes back. Reading whether it is here stays
+    // open — a page has to know whether it can offer a game at all, and the answer names no path.
+    "chess_engine_download",
+    "chess_engine_forget",
     "call_prepare",
     "call_subscribe",
     "push_subscribe",
@@ -551,6 +556,11 @@ fn machine_effect(method: &str) -> &'static str {
              connection and cuts off a local agent that is writing a reply"
         }
         "update_download" => "downloads a new build of this app onto this machine",
+        "chess_engine_download" => {
+            "downloads the chess engine onto this machine — 7 MB from a pinned release, which then \
+             runs in the reader's own browser"
+        }
+        "chess_engine_forget" => "deletes the chess engine from this machine",
         "update_apply" => {
             "replaces this app's own binary on this machine, and restarts everything the \
              user's Teams account runs through"
@@ -1334,6 +1344,28 @@ enum ReleaseNow {
 /// of installing it. They live together because a client learns both on one greeting,
 /// and because two backends of the same build must not disagree about which phase the
 /// user's own app is showing.
+/// The chess engine's download, as every page sees it.
+#[derive(Default)]
+struct EngineSlot {
+    /// Whether a download is in flight. One at a time: a second press joins the first rather than
+    /// fetching 7.3 MB twice.
+    downloading: bool,
+    received: u64,
+    /// Why the last attempt failed, in the words of what happened — the composer's rule, because a
+    /// download that did not finish must never be left looking like it did.
+    error: String,
+}
+
+impl EngineSlot {
+    fn json(&self) -> Value {
+        let mut payload = teams_lite::chess_engine::status_json();
+        payload["downloading"] = json!(self.downloading);
+        payload["received"] = json!(self.received);
+        payload["error"] = json!(self.error);
+        payload
+    }
+}
+
 #[derive(Debug, Default)]
 struct UpdateSlot {
     /// The `update_available` payload, once the check has found a newer release.
@@ -1388,6 +1420,11 @@ struct Ctx {
     /// connects at any moment — between two passes of the release poll, or in the middle of
     /// a download it has to draw a progress bar for. See {@link UpdateSlot}.
     update: Arc<std::sync::Mutex<UpdateSlot>>,
+    /// What the CHESS ENGINE download is doing, if anything. It is the update slot's own shape at
+    /// a tenth of the size, and for its reason: 7.3 MB is seconds on a good link and a minute on a
+    /// tethered phone, so a page that pressed "download" needs something to draw — and every open
+    /// page needs it, not just the one that pressed (see `chess_engine`).
+    engine: Arc<std::sync::Mutex<EngineSlot>>,
     /// Mail folders the live poll watches (see `spawn_mail_sync`). Seeded with the
     /// inbox and extended whenever a UI opens a folder, so the poll costs one
     /// request per folder the user actually looks at rather than one per folder the
@@ -2178,6 +2215,116 @@ impl Ctx {
     /// second click (or a second phone) must join the download in flight rather than
     /// start a second one over the same file. A previous FAILURE is the one state a
     /// click retries from.
+    // ---- the chess ENGINE ---------------------------------------------------------------
+    //
+    // A game of chess is played against a colleague who also runs teams-lite; the engine is the
+    // other opponent, and it is 7.3 MB that nobody who never opens a board should pay for. So it is
+    // fetched on the user's own press, verified against a digest this build pins, and served to the
+    // page from this machine (see `chess_engine`, and the `/engine/` route in web/server.ts).
+
+    /// What the engine is doing on this machine. An open read: it names no path, publishes nothing
+    /// about the user, and a page cannot offer a game without it.
+    fn chess_engine_status(&self) -> Result<Value> {
+        self.with_engine(|slot| slot.json())
+    }
+
+    fn with_engine<T>(&self, f: impl FnOnce(&mut EngineSlot) -> T) -> Result<T> {
+        let mut slot = self
+            .engine
+            .lock()
+            .map_err(|_| anyhow::anyhow!("engine state lock poisoned"))?;
+        Ok(f(&mut slot))
+    }
+
+    /// Publish the engine's state to every connected page, so a second window draws the same bar.
+    fn emit_engine_progress(&self) {
+        if let Ok(payload) = self.with_engine(|slot| slot.json()) {
+            self.emit("chess_engine_progress", payload);
+        }
+    }
+
+    /// Fetch the engine, once, on the user's press.
+    ///
+    /// A second press while one is in flight JOINS it rather than starting a second transfer — the
+    /// rule the update's own download follows, and the reason is the same: two of these would fetch
+    /// 7.3 MB twice and race over one `.part` file.
+    async fn start_engine_download(&self) -> Result<Value> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never downloads the chess \
+             engine, or anything else"
+        );
+        if teams_lite::chess_engine::is_present() {
+            return self.chess_engine_status();
+        }
+        let already = self.with_engine(|slot| {
+            if slot.downloading {
+                return true;
+            }
+            slot.downloading = true;
+            slot.received = 0;
+            slot.error.clear();
+            false
+        })?;
+        if already {
+            return self.chess_engine_status();
+        }
+        self.emit_engine_progress();
+
+        let ctx = self.clone();
+        let http = self.http.clone();
+        tokio::spawn(async move {
+            // Throttled to whole percents: the page draws a bar, and a frame per chunk over 7.3 MB
+            // is thousands of events for a bar 200 pixels wide.
+            let mut last = 0u64;
+            let outcome = teams_lite::chess_engine::download(&http, |received, total| {
+                let step = (total / 100).max(64 * 1024);
+                if received >= last + step || received == total {
+                    last = received;
+                    if let Ok(()) = ctx.with_engine(|slot| slot.received = received) {
+                        ctx.emit_engine_progress();
+                    }
+                }
+            })
+            .await;
+            let _ = ctx.with_engine(|slot| {
+                slot.downloading = false;
+                match &outcome {
+                    Ok(()) => slot.error.clear(),
+                    Err(e) => slot.error = format!("{e:#}"),
+                }
+            });
+            match outcome {
+                Ok(()) => eprintln!(
+                    "[engine] {} is on this machine ({} bytes)",
+                    teams_lite::chess_engine::ENGINE_LABEL,
+                    teams_lite::chess_engine::total_bytes()
+                ),
+                Err(e) => eprintln!("[engine] download failed: {e:#}"),
+            }
+            ctx.emit_engine_progress();
+        });
+        self.chess_engine_status()
+    }
+
+    /// Give the disk back. The one action here that takes something away, so it says how much.
+    fn forget_engine(&self) -> Result<Value> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never deletes anything"
+        );
+        let freed = teams_lite::chess_engine::forget()?;
+        self.with_engine(|slot| {
+            slot.received = 0;
+            slot.error.clear();
+        })?;
+        eprintln!("[engine] removed, freeing {freed} bytes");
+        self.emit_engine_progress();
+        let mut payload = self.chess_engine_status()?;
+        payload["freed"] = json!(freed);
+        Ok(payload)
+    }
+
     async fn start_update_download(&self) -> Result<Value> {
         anyhow::ensure!(
             !read_only(),
@@ -3016,6 +3163,7 @@ async fn main() -> Result<()> {
         db_path: Arc::new(db_path.clone()),
         events: events_tx,
         update: Arc::new(std::sync::Mutex::new(UpdateSlot::default())),
+        engine: Arc::new(std::sync::Mutex::new(EngineSlot::default())),
         mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         calendar_watch: Arc::new(Mutex::new(None)),
         last_repair: Arc::new(Mutex::new(None)),
@@ -3352,6 +3500,15 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // about the user, and it is the same request the poll already makes every two
         // minutes.
         "update_check" => ctx.check_release_now().await,
+
+        // THE CHESS ENGINE (see `chess_engine` and AGENTS.md § Playing STOCKFISH). Reading its
+        // state is OPEN: a page has to know whether it can offer a game against one, the answer
+        // carries no path, and it publishes nothing about the user. Fetching it and dropping it are
+        // MACHINE methods — one reaches a pinned host and writes 7.3 MB to this disk, the other
+        // takes those bytes back.
+        "chess_engine_status" => ctx.chess_engine_status(),
+        "chess_engine_download" => ctx.start_engine_download().await,
+        "chess_engine_forget" => ctx.forget_engine(),
 
         // Restart this backend, through whatever runs it. A MACHINE method: it takes the
         // process every open page is talking to down, so it is the user's own click and

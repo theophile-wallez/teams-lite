@@ -27,6 +27,7 @@ function game(over: Partial<ChessGame> = {}): ChessGame {
     ourColor: "w",
     ledgers: { w: null, b: null },
     endedByRules: null,
+    engine: null,
     absorbed: ["m1", "m2"],
     refusedPlies: [],
     ...over,

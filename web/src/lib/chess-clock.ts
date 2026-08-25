@@ -68,6 +68,18 @@ export type ChessClockState = {
   /** How many plies each side has PLAYED. It is what bounds a stated clock (see
    *  {@link chessClockCeilingMs}), and it is derived from the same move list the clocks are. */
   plies?: Record<ChessColor, number>;
+  /**
+   * The side an ENGINE plays, when one does.
+   *
+   * Its clock is drawn as STATED rather than counted down, and that is a fact about what an engine
+   * is: it thinks in bursts of a second while the reader is at the board, and it cannot think at
+   * all while the app is closed. Counting wall time against it would drain a ten-minute clock over
+   * a lunch break and hand the reader a win on time they did not play for — which is exactly the
+   * fake ending the flag rules exist to prevent. What it costs is stated: an engine's clock only
+   * moves when it really searched (see `chessRemainingAfterMove` and the `spentMs` a caller passes
+   * for an engine move).
+   */
+  engineSide?: ChessColor | null;
   /** The moment of each side's newest act, by their own clock. */
   actedAt: Record<ChessColor, number | null>;
   /** When the clock STARTED: the moment the challenge was accepted. Before that a game has
@@ -154,6 +166,12 @@ export function chessClockReading(state: ChessClockState, nowMs: number): ChessC
     return { white: mine, black: theirs, running: null, flagged: outOf(byColor) };
   }
 
+  // An ENGINE's clock is never counted down by the wall: it is drawn where its own searches left
+  // it, and nothing else is running while it is the engine's turn.
+  if (state.engineSide && state.turn === state.engineSide) {
+    return { white: mine, black: theirs, running: null, flagged: outOf(byColor) };
+  }
+
   const from = chessThinkStartedAt(state);
   // No moment to count from — a game whose ledgers carry no `at:` at all. The clocks are drawn
   // as stated rather than guessed at, because a countdown from "now" would restart on every
@@ -198,13 +216,19 @@ export function chessRemainingAfterMove(args: {
   nowMs: number;
   /** A premove costs {@link PREMOVE_SPEND_MS} rather than the time that really passed. */
   premove?: boolean;
+  /** What the mover really SPENT, when the caller knows better than the wall clock does. It is the
+   *  ENGINE's own case: it spent the milliseconds it searched for, and the minutes the app was
+   *  closed are not its thinking time. */
+  spentMs?: number;
 }): number | null {
   if (!args.time) return null;
   const spent = args.premove
     ? PREMOVE_SPEND_MS
-    : args.thinkStartedAt === null
-      ? 0
-      : Math.max(0, args.nowMs - args.thinkStartedAt);
+    : args.spentMs !== undefined
+      ? Math.max(0, args.spentMs)
+      : args.thinkStartedAt === null
+        ? 0
+        : Math.max(0, args.nowMs - args.thinkStartedAt);
   const left = args.stated - spent;
   if (left <= 0) return 0;
   return left + args.time.increment * 1000;

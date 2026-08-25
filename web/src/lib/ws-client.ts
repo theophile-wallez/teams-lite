@@ -11,6 +11,7 @@ import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import type { AgentPersonaPatch } from "./agent-persona";
 import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { CallPreparation, CallStatus, MeetingAddress } from "./call";
+import type { ChessEngineState } from "./chess-engine";
 import type { SendImage } from "./composer-image";
 import type { DiffDepth, GitLabDiff } from "./gitlab-diff";
 import type { WireDiffPosition } from "./gitlab-diff-comment";
@@ -752,6 +753,28 @@ export class Backend {
    *  moment later — the page's own reconnect is what shows the app coming back. */
   updateApply(): Promise<UpdateProgress> {
     return this.writeRequest<UpdateProgress>("update_apply", {});
+  }
+
+  // ---- the chess ENGINE ----------------------------------------------------------------
+  //
+  // Stockfish is 7.3 MB the BACKEND fetches, verifies against a digest it pins and caches on this
+  // machine (see src/chess_engine.rs): this page never fetches it, and never learns where it is.
+
+  /** Whether the engine is on this machine, what fetching it costs, and how far a fetch has got. A
+   *  READ: it names no path, publishes nothing about the user, and a page cannot offer a game
+   *  against an engine without it. */
+  engineStatus(): Promise<ChessEngineState> {
+    return this.request<ChessEngineState>("chess_engine_status", {});
+  }
+  /** Fetch it. A WRITE: it spends the user's bandwidth and 7 MB of their disk. Idempotent — a
+   *  second press, or a second window, joins the download in flight rather than starting another. */
+  engineDownload(): Promise<ChessEngineState> {
+    return this.writeRequest<ChessEngineState>("chess_engine_download", {});
+  }
+  /** Delete it. A WRITE, and the only one here that takes something away — it answers with what it
+   *  freed. */
+  engineForget(): Promise<ChessEngineState & { freed?: number }> {
+    return this.writeRequest<ChessEngineState & { freed?: number }>("chess_engine_forget", {});
   }
 
   /** What the backend can do about push notifications, and which devices it already

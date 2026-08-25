@@ -27,7 +27,13 @@
  */
 
 import { chessFlagIsFair, type ChessClockState } from "./chess-clock";
-import { chessWireIn, type ChessColor, type ChessLedger, type ChessTimeControl } from "./chess-wire";
+import {
+  chessEngineName,
+  chessWireIn,
+  type ChessColor,
+  type ChessLedger,
+  type ChessTimeControl,
+} from "./chess-wire";
 import type { ChatMessage } from "./protocol";
 
 /** One side's player. Named by MRI and never by display name — two colleagues may share
@@ -81,6 +87,16 @@ export type ChessGame = {
   ledgers: Record<ChessColor, ChessLedgerRef | null>;
   /** How the RULES ended it, when the mover said so on the wire (see `chessEndedByRules`). */
   endedByRules: "mate" | "draw" | null;
+  /**
+   * The ENGINE the reader is playing, when the opponent is not a person.
+   *
+   * A game against Stockfish is ONE ledger carrying both sides (see lib/chess-wire.ts): the engine
+   * has no MRI, cannot author a message and cannot edit one, so the reader's own machine writes its
+   * moves. `opponent` is then a SYNTHETIC player with an empty MRI — which is what every rule that
+   * asks "is this game playable" already reads, and an empty MRI matches nobody in `colorOf`, so
+   * the engine can never be mistaken for a colleague.
+   */
+  engine: { elo: number } | null;
   /** Every message of this game, the challenge included — what the pane absorbs. */
   absorbed: string[];
   /** Plies a message claimed and the game refused: a move out of turn, a duplicate, a
@@ -178,6 +194,11 @@ export function chessWantsUs(game: ChessGame): boolean {
   return chessTurnIsOurs(game) || chessAwaitsOurAnswer(game);
 }
 
+/** Whether this game is against the ENGINE rather than a person. */
+export function chessIsEngineGame(game: ChessGame): boolean {
+  return game.engine !== null;
+}
+
 /** Whether the reader is playing this game at all, rather than watching it. */
 export function chessWePlay(game: ChessGame): boolean {
   return !!game.ourColor;
@@ -190,6 +211,10 @@ export function chessClockStateOf(game: ChessGame): ChessClockState {
   for (let ply = 1; ply <= game.moves.length; ply += 1) plies[ply % 2 === 1 ? "w" : "b"] += 1;
   return {
     time: game.time,
+    // WHICH SIDE AN ENGINE PLAYS, so its clock is not drained by wall time (see lib/chess-clock.ts):
+    // an engine thinks in bursts of a second while the reader is at the board, and it cannot think
+    // at all while the app is closed.
+    engineSide: game.engine ? other(game.ourColor ?? game.challengerColor) : null,
     stated: { w: statedClock(game, "w"), b: statedClock(game, "b") },
     // What bounds a stated clock: a player gains the increment once per move they made, so
     // nothing above `base + increment × their own plies` is arithmetic anybody could reach.
@@ -284,7 +309,16 @@ type Draft = {
   id: string;
   order: number;
   absorbed: string[];
-  open: { by: ChessPlayer; color: ChessColor; time: ChessTimeControl | null; messageId: string; seq: number } | null;
+  open: {
+    by: ChessPlayer;
+    color: ChessColor;
+    time: ChessTimeControl | null;
+    messageId: string;
+    seq: number;
+    /** When the challenge was POSTED. It is what an ENGINE game's clock starts from, because there
+     *  is nobody to accept one. */
+    at: number;
+  } | null;
   join: { by: ChessPlayer; seq: number; at: number | null } | null;
   declines: { by: ChessPlayer; seq: number }[];
   /** v1 acts, which are ordered by their message. */
@@ -295,6 +329,9 @@ type Draft = {
   };
   ledgers: { by: ChessPlayer; messageId: string; seq: number; ledger: ChessLedger }[];
   moves: MoveClaim[];
+  /** The engine this game is against, from the ledger that declared one — and WHEN that message
+   *  was posted, which is when the clock starts: an engine game needs no accept. */
+  engine: { elo: number; by: ChessPlayer; at: number } | null;
 };
 
 /** The games this message list holds, in the order they were opened. */
@@ -323,7 +360,11 @@ export function chessGamesInThread(messages: ChatMessage[]): ChessGame[] {
           time: ledger.time,
           messageId: message.id,
           seq: message.seq,
+          at: message.compose_time,
         };
+      }
+      if (ledger.engineElo !== null && !draft.engine) {
+        draft.engine = { elo: ledger.engineElo, by: who, at: message.compose_time };
       }
       if (ledger.joined && !draft.join) {
         // THE ACCEPT IS TIMED BY ITS OWN MESSAGE, never by the ledger's `at:`. A ledger is
@@ -356,6 +397,7 @@ export function chessGamesInThread(messages: ChatMessage[]): ChessGame[] {
             time: wire.body.time ?? null,
             messageId: message.id,
             seq: message.seq,
+            at: message.compose_time,
           };
         }
         break;
@@ -407,6 +449,7 @@ function blankDraft(id: string, order: number): Draft {
     v1: { resigns: [], draws: [], drawOks: [] },
     ledgers: [],
     moves: [],
+    engine: null,
   };
 }
 
@@ -424,8 +467,19 @@ function resolve(draft: Draft): ChessGame | null {
   const challenger = open.by;
   const challengerColor = open.color;
   const opponentColor = other(challengerColor);
+  // AN ENGINE GAME needs no accept and has no second person: the ledger that opened it declared the
+  // engine, so the game is playable from the moment it was posted. Only the OPENER's own engine
+  // declaration counts — a colleague cannot turn somebody else's game into an engine game.
+  const engine =
+    draft.engine && !!draft.engine.by.mri && draft.engine.by.mri === challenger.mri
+      ? { elo: draft.engine.elo }
+      : null;
   // A game needs two people: the challenger cannot answer their own challenge.
-  const opponent = draft.join && draft.join.by.mri !== challenger.mri ? draft.join.by : null;
+  const opponent = engine
+    ? { mri: "", name: chessEngineName(engine.elo), isSelf: false }
+    : draft.join && draft.join.by.mri !== challenger.mri
+      ? draft.join.by
+      : null;
 
   const colorOf = (mri: string): ChessColor | null => {
     if (mri && mri === challenger.mri) return challengerColor;
@@ -446,7 +500,16 @@ function resolve(draft: Draft): ChessGame | null {
     const wants = claim.ply % 2 === 1 ? "w" : "b";
     // Nobody outside the game may act on it, a ply belongs to one colour, and a move before
     // anybody accepted is a move in a game that had not started.
-    if (!opponent || !color || color !== wants) {
+    //
+    // In an ENGINE game the reader writes both sides, because the engine cannot write anything —
+    // so a claim from the game's own author is accepted whichever colour the ply belongs to. It is
+    // the same relaxation the parse makes, and it is bounded the same way: only the author of the
+    // ledger that declared the engine, and only in a game that declared one.
+    // A NON-EMPTY mri, which is the guard `colorOf` carries above: `playerOf` writes `""` for a
+    // message with no author at all (a recording, a thread activity), so `"" === ""` would make
+    // every authorless claim the challenger's own in an engine game.
+    const mine = engine && !!claim.mri && claim.mri === challenger.mri;
+    if (!opponent || (!mine && (!color || color !== wants))) {
       refusedPlies.push(claim.ply);
       continue;
     }
@@ -548,8 +611,17 @@ function resolve(draft: Draft): ChessGame | null {
   for (const entry of draft.ledgers) {
     const color = colorOf(entry.by.mri);
     if (color && entry.ledger.at !== null) actedAt[color] = entry.ledger.at;
+    // In an ENGINE game one ledger holds both sides, so its `at` is the moment of the newest move
+    // whoever played it — which is exactly what the side to move counts from.
+    if (engine && entry.by.mri === challenger.mri && entry.ledger.at !== null) {
+      actedAt.w = entry.ledger.at;
+      actedAt.b = entry.ledger.at;
+    }
   }
-  const startedAt = draft.join?.at ?? null;
+  // An engine game starts when it was POSTED: there is nobody to accept it, and its clock has to
+  // start somewhere — the message's own moment is the one fact both a reload and another device
+  // agree on.
+  const startedAt = engine ? draft.engine?.at ?? open.at : (draft.join?.at ?? null);
 
   // A flag is CHECKED before it is believed: the arithmetic both machines hold has to agree
   // that the clock really was out at the moment it was claimed (see chessFlagIsFair).
@@ -636,6 +708,7 @@ function resolve(draft: Draft): ChessGame | null {
     ourColor,
     ledgers,
     endedByRules,
+    engine,
     absorbed: draft.absorbed,
     refusedPlies,
   };

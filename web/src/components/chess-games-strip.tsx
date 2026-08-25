@@ -23,6 +23,8 @@
  *     message of the conversation.
  */
 
+import { HugeiconsIcon } from "@hugeicons/react";
+import { CpuIcon } from "@hugeicons/core-free-icons";
 import { useNavigate } from "@tanstack/react-router";
 import { formatChessClock } from "~/lib/chess-clock";
 import { chessPagePath } from "~/lib/chess-menu";
@@ -111,7 +113,18 @@ function ChessGameChip(props: { game: ChessGame; conversationId: string }) {
         wants ? "border-primary/60" : "border-border-subtle",
       )}
     >
-      {them ? (
+      {game.engine ? (
+        // THE ENGINE IS NOT A PERSON, and its MRI is empty. An avatar seeded from that is tinted
+        // initials for a colleague who does not exist — this app never puts a face on something
+        // that has none, which is the rule § Renaming a person states for a mail's own senders.
+        <span
+          data-testid="chess-chip-engine"
+          aria-hidden
+          className="grid size-8 shrink-0 place-items-center rounded-full border border-border-subtle bg-accent text-text-dim"
+        >
+          <HugeiconsIcon icon={CpuIcon} className="size-4" strokeWidth={1.8} />
+        </span>
+      ) : them ? (
         <Avatar
           seed={them.mri}
           label={them.name}

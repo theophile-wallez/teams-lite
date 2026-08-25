@@ -89,6 +89,7 @@ import {
   type ChessLedger,
   type ChessWire,
 } from "./chess-wire";
+import { NO_CHESS_ENGINE, type ChessEngineState } from "./chess-engine";
 import { chessSlotKey } from "./chess-thread";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import type { AgentPersonaPatch } from "./agent-persona";
@@ -432,6 +433,15 @@ export type AppState = {
    *  the game for the reason a pending move does, and it costs {@link PREMOVE_SPEND_MS} of
    *  their clock rather than the time their opponent spent thinking. */
   chessPremove: Record<string, { from: string; to: string; promotion?: "q" | "r" | "b" | "n" }>;
+  /**
+   * What this machine holds of the CHESS ENGINE: whether it is here, what fetching it costs, how far
+   * a fetch has got, and why one failed.
+   *
+   * It is the BACKEND's answer (`chess_engine_status`, refreshed by every `chess_engine_progress` event), because
+   * the engine is 7.3 MB on this machine's disk rather than anything in a browser — so two open pages
+   * see one truth, and a page that reloads mid-download picks the bar back up.
+   */
+  chessEngine: ChessEngineState;
   /** Every message Teams is HOLDING for this account, soonest first — what "see all
    *  scheduled messages" lists. Loaded on demand and after anything that changes it;
    *  empty until then, because a list nobody has opened is a read nobody asked for. */
@@ -913,6 +923,7 @@ function initialState(): AppState {
     chessError: {},
     chessPending: {},
     chessPremove: {},
+    chessEngine: NO_CHESS_ENGINE,
     scheduledMessages: [],
     composerRestore: null,
     replyingTo: null,
@@ -1291,6 +1302,11 @@ export class TeamsController {
       // holds an agent CLI at all. Best-effort: a failure leaves the menu saying the
       // backend has not answered, never a switch that pretends to work.
       void this.loadAgentStatus();
+      // Whether this machine holds the CHESS ENGINE, and what fetching it would cost. Two file
+      // stats on the backend, so it costs nothing — and the answer is what decides whether a
+      // conversation offers a game against the computer at all: an offer drawn before the answer
+      // arrives would start a game whose first move nothing could make.
+      void this.loadChessEngine();
       // Which chats this machine seals, and which passphrases it holds for each. Best-effort
       // on the same terms, and the failure reads correctly on its own: with no answer nothing
       // about sealing is drawn at all, which is what the app looked like before the feature —
@@ -1810,6 +1826,15 @@ export class TeamsController {
     // each phase change, and replayed on connect — so this handler is also what a page
     // that opened in the middle of one learns from.
     on("update_progress", (p) => this.set({ updateProgress: p as UpdateProgress }));
+    // How the CHESS ENGINE's download is going, and whether it is here at all. Sent on every whole
+    // percent and on every change of state, so a second window draws the same bar and a page that
+    // opened in the middle of a fetch learns from this rather than from nothing.
+    on("chess_engine_progress", (raw) => {
+      const next = raw as Partial<ChessEngineState> | null;
+      if (next && typeof next.present === "boolean") {
+        this.set({ chessEngine: { ...NO_CHESS_ENGINE, ...next } });
+      }
+    });
     // How sign-in is doing. The backend sends this on a change of state and in the
     // greeting, so an outage that started before this tab opened still reaches it.
     on("broker_status", (raw) => {
@@ -6486,6 +6511,63 @@ export class TeamsController {
    * {@link publishChessLedger} like any other, at which point it costs its player
    * {@link PREMOVE_SPEND_MS} of clock rather than the minutes their opponent spent.
    */
+  /**
+   * Read what this machine holds of the engine, and remember it.
+   *
+   * Asked once when the app connects and again whenever a surface needs it: the answer is cheap (a
+   * stat of two files) and the whole feature turns on it — a menu cannot offer a game against an
+   * engine that is not there, and an offer drawn on a hopeful answer would start a game whose first
+   * move nothing could make.
+   */
+  async loadChessEngine(): Promise<void> {
+    try {
+      const state = await this.backend.engineStatus();
+      this.set({ chessEngine: { ...NO_CHESS_ENGINE, ...state } });
+    } catch {
+      // A backend too old to know the method, or one that could not answer: the engine reads as
+      // ABSENT, which is what stops a game being offered that nothing could play.
+      this.set({ chessEngine: NO_CHESS_ENGINE });
+    }
+  }
+
+  /**
+   * Fetch the engine onto this machine — the user's own press.
+   *
+   * It is the BACKEND that downloads it (this page never fetches from a stranger's server) and the
+   * backend that verifies it against a digest it pins, so all this does is ask and then draw what
+   * comes back. The progress arrives as `chess_engine_progress` events, so a second window draws the same
+   * bar and a reload picks it up.
+   */
+  async downloadChessEngine(): Promise<boolean> {
+    try {
+      const state = await this.backend.engineDownload();
+      this.set({ chessEngine: { ...NO_CHESS_ENGINE, ...state } });
+      return true;
+    } catch (e) {
+      // The refusal in the backend's own words, where the press was made: a download that did not
+      // start must never be left looking like it did.
+      this.set({
+        status: `engine download failed: ${errText(e)}`,
+        chessEngine: { ...this.get().chessEngine, downloading: false, error: errText(e) },
+      });
+      playCue("error");
+      return false;
+    }
+  }
+
+  /** Give the disk back. The one action here that takes something away, so the row says how much. */
+  async forgetChessEngine(): Promise<boolean> {
+    try {
+      const state = await this.backend.engineForget();
+      this.set({ chessEngine: { ...NO_CHESS_ENGINE, ...state } });
+      return true;
+    } catch (e) {
+      this.set({ status: `engine remove failed: ${errText(e)}` });
+      playCue("error");
+      return false;
+    }
+  }
+
   setChessPremove(
     conversationId: string,
     game: string,

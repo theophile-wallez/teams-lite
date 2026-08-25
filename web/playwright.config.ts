@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 import { existsSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Resolve a Chromium binary without a network install: prefer CHROME_PATH, then
@@ -32,6 +32,11 @@ const WEB_PORT = process.env.E2E_WEB_PORT ?? "19447";
 // MOCK_PORT here. Moving the mock's port without this is exactly how the suite
 // ended up driving a real account: the mock moved, the app kept dialing 19420.
 const MOCK_WS_URL = `ws://127.0.0.1:${MOCK_PORT}`;
+// WHERE THE CHESS ENGINE IS, for this run only: a temporary directory the setup writes a STUB
+// worker into (see e2e/global-setup.ts). It must never be the real cache — a machine that has
+// really fetched Stockfish would otherwise load 7.3 MB of WebAssembly into every spec, and one
+// that has not would behave differently from one that has.
+export const ENGINE_DIR = join(tmpdir(), `teams-lite-e2e-engine-${MOCK_PORT}`);
 const executablePath = resolveChromium();
 
 export default defineConfig({
@@ -102,6 +107,8 @@ export default defineConfig({
         HOST: "127.0.0.1",
         VITE_TEAMS_WS_URL: MOCK_WS_URL,
         TEAMS_LITE_ALLOW_PINNED_BUILD: "1",
+        // The engine's own files, for this run: the stub, never the real cache (see above).
+        TEAMS_LITE_ENGINE_DIR: ENGINE_DIR,
       },
       stdout: "ignore",
       stderr: "pipe",

@@ -35,6 +35,7 @@ import { pushBlockerMessage, pushBlockerRemedy } from "~/lib/push";
 import { cn } from "~/lib/utils";
 import { AiProvidersSettings } from "./ai-providers-settings";
 import { CallRecordingsSettings } from "./call-recordings-settings";
+import { ChessEngineSettings } from "./chess-engine-settings";
 import { CustomAgentsSettings } from "./custom-agents-settings";
 import { CustomEmojiSettings } from "./custom-emoji-settings";
 import { MaintenanceSettings } from "./maintenance-settings";
@@ -124,6 +125,10 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <SenderIconSettings />
           <AlwaysAvailableSettings />
           <CallRecordingsSettings />
+          {/* The CHESS ENGINE, beside the recordings for the same reason: both are things this app
+              keeps on the machine, and an inventory is the only place a reader can find out that
+              7 MB is sitting there. */}
+          <ChessEngineSettings />
           <CustomEmojiSettings />
           <RenamedPeopleSettings />
           <NotificationSettings />

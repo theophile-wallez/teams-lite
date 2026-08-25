@@ -202,7 +202,7 @@ function ChessPageBoard(props: {
           {/* The two decisions a player opens a board to make stand in the header, where they do
               not scroll away — the shape the merge request's own page settled on. The WORDS that
               explain them stay below, with the board. */}
-          {board.flagClaimable && (
+          {board.flagClaimable && !board.engine && (
             <button
               type="button"
               data-testid="chess-claim-flag"
@@ -214,7 +214,8 @@ function ChessPageBoard(props: {
           )}
           {board.canAct && (
             <>
-              {game.drawOfferedBy && game.drawOfferedBy !== game.ourColor ? (
+              {/* A DRAW is never offered against a machine: there is nobody to ask. */}
+              {board.engine ? null : game.drawOfferedBy && game.drawOfferedBy !== game.ourColor ? (
                 <button
                   type="button"
                   data-testid="chess-draw-accept"
@@ -278,7 +279,14 @@ function ChessPageBoard(props: {
           )}
           style={fit.side === null ? undefined : { width: fit.side }}
         >
-          <ChessSeat game={game} color={board.orientation === "w" ? "b" : "w"} clock={board.clock} big />
+          <ChessSeat
+            game={game}
+            color={board.orientation === "w" ? "b" : "w"}
+            clock={board.clock}
+            engine={!!board.engine}
+            thinking={board.engineThinking}
+            big
+          />
           {/* THE BOARD'S OWN ROOM: what is left of the column once the seats, the controls and
               whatever the page has to say are drawn. It is `flex-1` with `min-h-0`, so flexbox
               measures that room for us — which is the number `useBoardFit` reads. */}
@@ -318,7 +326,11 @@ function ChessPageBoard(props: {
           {/* The sentence, under the board where the press was made. A game being REVIEWED says so
               here rather than in the header: it is a fact about what the board is showing. */}
           <p data-testid="chess-page-status" className="mt-1 text-center text-xs text-text-dim">
-            {board.atLive ? board.status : `Move ${board.viewPly} of ${board.plies} — the board is not live.`}
+            {!board.atLive
+              ? `Move ${board.viewPly} of ${board.plies} — the board is not live.`
+              : board.engineThinking
+                ? `${game.opponent?.name ?? "The computer"} is thinking…`
+                : board.status}
           </p>
           {board.premove && (
             <p data-testid="chess-premove-hint" className="mt-0.5 text-center text-[11px] text-text-faint">
