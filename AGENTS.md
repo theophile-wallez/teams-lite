@@ -4353,11 +4353,16 @@ feature worth having: a local-only decoration would be a different, smaller feat
     store orders them (`store.rs`: `ORDER BY name ASC`) and a Map-backed mock did not, so a
     menu whose order depends on which backend answered is a menu no spec can pin. The mock
     sorts now too, and the unit test asserts the sort on a deliberately unsorted pack.
-  - **Enter SENDS on a lone colon, and PICKS once a letter is typed** (`handleKeyDown` in
-    `web/src/components/rich-editor.tsx`). French puts a space before a colon — "voici :" —
-    so a message ending in one is an ordinary sentence, and stealing its Enter would post an
-    emoji nobody asked for instead of the words. Tab picks in both cases: it means "complete
-    this" and it sends nothing.
+  - **Enter PICKS whenever the list is open, a lone colon included, and ESCAPE is the way
+    out** (`handleKeyDown` in `web/src/components/rich-editor.tsx`). A list standing over
+    the field with a row already active is a list the next key belongs to; Tab picked from
+    a lone colon and Enter sent, so the pack a bare ":" exists to show could only be taken
+    with the one key nobody reaches for. Tab still picks — it means "complete this" and it
+    sends nothing. What it COSTS is stated rather than hidden: French puts a space before a
+    colon, so "voici :" is an ordinary sentence with the pack open over it and Enter
+    completes instead of posting. Escape closes the list and leaves the ":" as text, and the
+    Enter after it sends the words — which is why the spec pins that pair rather than the
+    old "Enter sends a sentence ending in a colon".
   - **A row is activated on `mousemove`, never on `mouseenter`** — in BOTH composer
     typeaheads, `web/src/components/emoji-suggestions.tsx` and `mention-suggestions.tsx`.
     Either list opens right over the field the reader just clicked, so a row appearing

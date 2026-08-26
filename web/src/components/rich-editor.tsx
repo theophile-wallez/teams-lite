@@ -412,12 +412,15 @@ export function RichEditor(props: {
             setEmojiActive((emojiActiveIndexRef.current + step + count) % count);
             return true;
           }
-          // Enter PICKS while the reader is typing a code, and SENDS while the list merely
-          // stands open on a lone ":". French writes a space before a colon — "voici :" —
-          // so a message ending in one is an ordinary sentence, and stealing its Enter
-          // would post an emoji nobody asked for instead of the words. Tab picks in both
-          // cases: it means "complete this" and it sends nothing.
-          if (event.key === "Tab" || (event.key === "Enter" && emojiRef.current?.query !== "")) {
+          // Enter PICKS whenever the list is open, a lone ":" included, because a list
+          // standing over the field with a row already active is a list the next key
+          // belongs to — Tab was the only way to take that row, and Tab is not the key
+          // anybody reaches for. What it costs is stated where the rule is: French writes
+          // a space before a colon, so "voici :" is an ordinary sentence with the pack
+          // open over it, and Enter now completes rather than posts. Escape is the way
+          // out — it closes the list and leaves the ":" as text, and the Enter after it
+          // sends the words.
+          if (event.key === "Tab" || event.key === "Enter") {
             event.preventDefault();
             const suggestion = emojiRankedRef.current[emojiActiveIndexRef.current];
             if (suggestion) pickEmoji(suggestion);

@@ -13,7 +13,8 @@ import type { Locator, Page } from "@playwright/test";
  *     large with the bubble chrome dropped — one decision, so both halves are asserted;
  *  4b. the reaction row offers the pack's own art, and the chip that lands IS that art;
  *  5. the `:` list offers custom emoji above the Unicode ones, and Enter inserts the chip;
- *  5b. a LONE `:` opens the pack alone, Tab picks from it, and Enter still SENDS;
+ *  5b. a LONE `:` opens the pack alone and BOTH Tab and Enter pick from it;
+ *  5c. Escape is the way out of that list, and the Enter after it sends the words;
  *  6. a taken name is refused with Slack's own sentence;
  *  7. delete asks twice, and the confirming label is "Delete Emoji";
  *  8. one Backspace removes a whole chip;
@@ -413,7 +414,9 @@ test.describe("custom emoji", () => {
     await page.keyboard.press("Backspace");
   });
 
-  test("a lone : offers the pack, in order, and Tab takes a row from it", async ({ page }) => {
+  test("a lone : offers the pack, in order, and Tab or Enter takes a row from it", async ({
+    page,
+  }) => {
     const field = await openEmojiThread(page);
 
     // Nothing typed after the colon. Somebody who has just added their first emoji does
@@ -438,9 +441,22 @@ test.describe("custom emoji", () => {
       "emoji-suggestion-shipit",
     ]);
 
-    // TAB picks here, and Enter does not — see the test below for why.
+    // BOTH keys pick from it. Tab means "complete this", and Enter belongs to the list
+    // while the list is open — the pack a bare ":" exists to show would otherwise be
+    // reachable only with the one key nobody reaches for.
     await page.keyboard.press("Tab");
     await expect(packArt(page, "partyparrot")).toBeVisible();
+
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.press("Backspace");
+    await expect(packArt(page, "partyparrot")).toHaveCount(0);
+    await page.keyboard.type(":");
+    await expect(list).toBeVisible();
+    await page.keyboard.press("Enter");
+    // `packArt` is scoped to the COMPOSER, so this says the chip landed in the field
+    // rather than in a message: Enter picked, it did not post.
+    await expect(packArt(page, "partyparrot")).toBeVisible();
+    await expect(list).toHaveCount(0);
 
     // A space after the colon is prose, not a query: "note: " closes the list again.
     await page.keyboard.press("ControlOrMeta+a");
@@ -453,20 +469,26 @@ test.describe("custom emoji", () => {
     await expect(field).toHaveText("");
   });
 
-  test("Enter SENDS a sentence that ends in a colon, rather than picking an emoji", async ({
+  test("Escape leaves the list, and the Enter after it sends a sentence ending in a colon", async ({
     page,
   }) => {
     // French writes a space before a colon, so "voici :" is an ordinary sentence with the
-    // menu standing open over it. Enter must post the words. One typed letter hands the key
-    // back to the list, which is the case the test above covers.
+    // pack standing open over it — and Enter belongs to that list, so it completes rather
+    // than posts. Escape is the whole way out: it closes the list and LEAVES the ":" as
+    // text, so the next Enter posts the words the reader wrote. This pair is what pays for
+    // Enter picking on a lone colon, so it is pinned rather than assumed.
     await openEmojiThread(page);
 
+    const list = page.locator('[data-testid="emoji-suggestions"]');
     await page.keyboard.type("les emojis custom, ça marche comme ça :");
-    await expect(page.locator('[data-testid="emoji-suggestions"]')).toBeVisible();
+    await expect(list).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(list).toHaveCount(0);
 
     const sent = await sendAndAwaitEcho(page);
     await expect(sent).toContainText("comme ça :");
-    // No art anywhere in it: nothing was picked.
+    // No art anywhere in it: nothing was picked, and the colon is still the reader's own.
     await expect(sent.locator('img[itemtype="http://schema.skype.com/Emoji"]')).toHaveCount(0);
   });
 
