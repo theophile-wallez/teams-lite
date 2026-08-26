@@ -2484,6 +2484,44 @@ function seedChessThread(): void {
 }
 
 /**
+ * Register a thread the PET spec keeps its creatures in, of its own for the reason the chess board
+ * and the ten-picture message both taught this suite: one mock process serves the whole run, and a
+ * pet is a MESSAGE that stays in the history — the reader's ledger plus the colleague's own — so a
+ * creature left behind in a shared fixture is a row every later spec counts and a card every later
+ * spec draws.
+ *
+ * One plain message so the thread is not empty: a pet is drawn where its ledger sits, and a row with
+ * nothing above it says nothing about where a creature sits in a conversation.
+ *
+ * It is dated OLDER than every other fixture (31 days, against the 10–30 the rest use) so it sorts to
+ * the FOOT of the sidebar: ~90 specs open `openConversationAt(page, 0)` meaning "a chat I can send
+ * into", and a new fixture landing among the others would move the row under every index they name.
+ */
+const MOCK_PET_THREAD = "19:pet-demo@thread.v2";
+
+/** How many messages the seed put in that thread, so `resetMockPet` can put it back. */
+let mockPetSeedCount = 0;
+
+function seedPetThread(): void {
+  const convId = MOCK_PET_THREAD;
+  const base = Date.now() - 31 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const other = PEOPLE[0]!;
+  push(
+    {
+      sender: other.name,
+      sender_mri: other.mri,
+      content: "<p>Shall we keep a pet in here?</p>",
+      is_self: false,
+    },
+    0,
+  );
+  addFixtureConversation(convId, "Pet Corner", messages);
+  mockPetSeedCount = messages.length;
+}
+
+/**
  * Register the SEALED thread: a chat whose messages this app encrypts before they reach Teams
  * (see the seal block further down, and § A sealed chat).
  *
@@ -7385,8 +7423,8 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           text,
           ...(typeof html === "string" ? { content_html: html } : {}),
         });
-        // The same refusal a SEND can be armed with: a move that could not go out has to be
-        // reachable, and a move is an edit now.
+        // The same refusal a SEND can be armed with: an act that could not go out has to be
+        // reachable, and a chess move — like a pet's feed — is an edit now.
         if (testSendError) throw new Error(testSendError);
       }
       editMessage(id, messageId, text, typeof html === "string" ? html : undefined);
@@ -9267,7 +9305,14 @@ function editMessage(
   // well as on a send: woken only by sends, the mock accepted a challenge and then never answered
   // a single move. It returns at once for a body that carries no chess line, so an ordinary edit
   // costs nothing.
-  if (msg.is_self) maybeAnswerMockChess(convId, msg);
+  //
+  // A PET ACT IS AN EDIT for the same reason and it is the commoner case: only the FIRST spawn posts
+  // a message, so every feed, play, nap, skin change, despawn — and every spawn after one — arrives
+  // here and nowhere else.
+  if (msg.is_self) {
+    maybeAnswerMockChess(convId, msg);
+    maybeAnswerMockPet(convId, msg);
+  }
 }
 
 /** Flag a stored message as deleted and broadcast it, mirroring the Rust backend's
@@ -9505,6 +9550,10 @@ function scheduleSendEcho(
     broadcast(t.changedEvent, {});
     maybeRunMockAgent(convId, msg);
     maybeAnswerMockChess(convId, msg);
+    // A SPAWN is the one pet act that posts a message, so this is where a colleague first meets a
+    // creature. Every act after it is an EDIT, which is why the responder is woken on both edit
+    // paths as well.
+    maybeAnswerMockPet(convId, msg);
   }, SEND_ECHO_DELAY_MS);
 }
 
@@ -10081,6 +10130,409 @@ function maybeAnswerMockChess(convId: string, msg: ChatMessage): void {
   // IN THE GAME: answer whatever the reader just did. `mockChessPlayNow` refuses a turn that is
   // not the mock's, so this is one question rather than three.
   answer();
+}
+
+// ---------------------------------------------------------------------------
+// A PET, answered — THE OTHER MACHINE.
+//
+// The whole feature is the page's — no RPC, no backend half — so there is nothing here to mirror.
+// What the mock has to supply is the COLLEAGUE: an install that takes a creature of its own, does
+// something to the reader's, and pats it. Without one, every path that draws or acts on SOMEBODY
+// ELSE's pet is unreachable, which is most of the feature.
+//
+// THE WIRE IS RE-SPELLED HERE RATHER THAN IMPORTED, which is this file's own rule (see the chess
+// block above): it stands for another machine, so a divergence between the two spellings has to FAIL
+// a test rather than be impossible. `src/lib/mock-pet-wire.test.ts` scans what this block writes.
+//
+// One difference from chess is worth stating, because it is what the lookups here are keyed on: a
+// pet ledger is ONE MESSAGE PER PERSON however many pets the conversation holds, where chess keeps
+// one per player per GAME. So an author's mri is the whole key.
+// ---------------------------------------------------------------------------
+
+/** How long the colleague takes to answer. Slow enough to watch, quick enough for a spec. */
+const MOCK_PET_DELAY_MS = Number(process.env.MOCK_PET_DELAY_MS ?? 350);
+
+/** The art the colleague's creature wears, and what the words above its line call it. Deliberately
+ *  NOT the reader's default (`cat`): a capture holding both pets should show two different animals,
+ *  and a skin key this build does not hold would draw them both in the same art. */
+const MOCK_PET_SKIN = "duck";
+const MOCK_PET_LABEL = "Duck";
+
+/** The Teams reaction that IS a pat — one of Microsoft's own six canonical keys, so a colleague on
+ *  stock Teams pats the creature without knowing this app exists. Re-spelled from `PET_PAT_KEY`
+ *  rather than imported, like everything else in this block. */
+const MOCK_PET_PAT_KEY = "heart";
+
+/** The version a payload opens with, checked as a LITERAL prefix. A newer one leaves the message an
+ *  ordinary message here, which is the page's own rule for a record it cannot read. */
+const MOCK_PET_LEDGER_VERSION = "v1";
+
+/** How many of an author's own acts a ledger keeps — the wire's own bound (`PET_ACTS_KEPT`), so a
+ *  colleague who played all afternoon writes a line the length the page would write. */
+const MOCK_PET_ACTS_KEPT = 30;
+
+/** The wire spelling of each act, one letter each. Pinned by `mock-pet-wire.test.ts` against the
+ *  vocabulary the page writes: a letter that disagreed would be an act every reader's fold refuses,
+ *  which reads as a colleague whose creature nothing can be done to. */
+const MOCK_PET_ACT_TO_WIRE: Record<MockPetActKind, string> = { feed: "f", play: "p", nap: "z" };
+const MOCK_PET_WIRE_TO_ACT: Record<string, MockPetActKind> = { f: "feed", p: "play", z: "nap" };
+
+/** Armed by the `{kind:"pet"}` test hook: the colleague answers nothing at all, which is how a spec
+ *  reaches a conversation holding the reader's creature and no other. A spec MUST reset it — one mock
+ *  process serves the whole run, and a colleague left silent leaves every later thread with one pet. */
+let mockPetSilent = false;
+
+type MockPetActKind = "feed" | "play" | "nap";
+type MockPetAct = { at: number; kind: MockPetActKind; target: string };
+type MockPetLedger = { pet: string; skin: string; gone: boolean; acts: MockPetAct[] };
+
+/** Six lowercase hex, the shape the page's own `newPetId` mints — and never an MRI, which would put
+ *  a colon in the line (see `mockSerializePetLedger`). */
+function mockPetId(): string {
+  const bytes = new Uint8Array(3);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Oldest first, and stable on the kind then the target, so this machine and the page emit the same
+ *  bytes for the same record — which is what makes a no-op edit really a no-op. */
+function mockSortedPetActs(acts: MockPetAct[]): MockPetAct[] {
+  return [...acts].sort(
+    (a, b) => a.at - b.at || a.kind.localeCompare(b.kind) || a.target.localeCompare(b.target),
+  );
+}
+
+/**
+ * Write a payload out.
+ *
+ * **EVERY SEPARATOR IS A FULL STOP AND NEVER A COLON.** The backend substitutes custom emoji into
+ * every outbound body, on a send and on an edit alike, and `:f:` inside an act would become an
+ * `<img>` for any reader whose pack held an emoji of that name — packs grow on their own. That breaks
+ * the signature the line lives in, and every pet in the conversation becomes unreadable for
+ * everybody, for good, with nothing left to repair it with. `mock-pet-wire.test.ts` scans this body
+ * for a colon, which is why it is written without one anywhere in it.
+ */
+function mockSerializePetLedger(ledger: MockPetLedger): string {
+  const parts = [MOCK_PET_LEDGER_VERSION];
+  if (ledger.skin) parts.push(`s.${ledger.skin}`);
+  if (ledger.gone) parts.push("gone");
+  for (const act of mockSortedPetActs(ledger.acts)) {
+    parts.push(`${act.at}.${MOCK_PET_ACT_TO_WIRE[act.kind]}.${act.target}`);
+  }
+  return parts.join(" ");
+}
+
+/** The line itself — scanned for a colon by the same test, and written without one for that reason. */
+function mockPetLedgerLine(ledger: MockPetLedger): string {
+  return `— pet ${ledger.pet} ${mockSerializePetLedger(ledger)}, via teams-lite`;
+}
+
+/**
+ * Read a payload back, or null for a record this mock refuses.
+ *
+ * The two refusal rules are OPPOSITE, exactly as the page's are, and the digit prefix is what tells
+ * the classes apart: an unknown NAMED token is skipped, so a newer build's ledger still folds here,
+ * and a DIGIT-led token that does not parse refuses the WHOLE record, so a corrupt act is never
+ * half-applied.
+ */
+function mockParsePetLedger(pet: string, payload: string): MockPetLedger | null {
+  if (payload !== MOCK_PET_LEDGER_VERSION && !payload.startsWith(`${MOCK_PET_LEDGER_VERSION} `)) {
+    return null;
+  }
+  const ledger: MockPetLedger = { pet, skin: "", gone: false, acts: [] };
+  const rest = payload.slice(MOCK_PET_LEDGER_VERSION.length);
+  for (const token of rest.split(/\s+/).filter(Boolean)) {
+    if (/^\d/.test(token)) {
+      const act = /^(\d{1,15})\.([fpz])\.([0-9a-f]{6})$/.exec(token);
+      if (!act) return null;
+      const kind = MOCK_PET_WIRE_TO_ACT[act[2] ?? ""];
+      if (!kind) return null;
+      ledger.acts.push({ at: Number(act[1]), kind, target: (act[3] ?? "").toLowerCase() });
+      continue;
+    }
+    if (token === "gone") {
+      ledger.gone = true;
+      continue;
+    }
+    const skin = /^s\.([a-z0-9][a-z0-9-]{0,23})$/.exec(token);
+    if (skin) ledger.skin = skin[1] ?? "";
+    // Anything else is a token from a build that knows more than this one. Ignored on purpose.
+  }
+  ledger.acts = mockSortedPetActs(ledger.acts);
+  return ledger;
+}
+
+/** How many counts the words state — the page's own `WORDS_ACTS`. A no-op at three kinds, and kept
+ *  anyway for the reason the unreachable `gone` token is: a fourth act would otherwise diverge here
+ *  silently, in the direction a spec reads.
+ *
+ *  **A FOURTH ACT KIND IS WHAT WOULD MAKE THE NUMBER OBSERVABLE, and it is what should pin it.**
+ *  `WORDS_ACTS` is not exported, and with three kinds the clamp is a no-op on both sides — so
+ *  `mock-pet-wire.test.ts` derives the verbs and the separator from `petMessageWords` and cannot see
+ *  this number at all. Whoever adds a fourth kind should export it there and assert it here. */
+const MOCK_PET_WORDS_ACTS = 3;
+
+/** The words above the line. They state the STATE rather than the event, because the message is
+ *  rewritten whole on every act — and what a colleague on stock Teams reads is exactly these. */
+function mockPetWords(ledger: MockPetLedger, label: string): string {
+  if (ledger.gone) return `${label} has gone home.`;
+  const counts: string[] = [];
+  for (const [kind, word] of [
+    ["feed", "fed"],
+    ["play", "played"],
+    ["nap", "napped"],
+  ] as const) {
+    const n = ledger.acts.filter((act) => act.kind === kind).length;
+    if (n > 0) counts.push(`${word} ${n}`);
+  }
+  const shown = counts.slice(0, MOCK_PET_WORDS_ACTS);
+  return shown.length > 0 ? `${label} · ${shown.join(" · ")}` : `${label} is here.`;
+}
+
+/** The pet line a message carries, read the way the page reads it. A DELETED message carries no
+ *  creature: its placeholder IS its body, and a pet must not absorb a row the reader is being shown
+ *  a tombstone for. */
+function mockPetWire(msg: ChatMessage): { pet: string; rest: string } | null {
+  if (msg.deleted === true) return null;
+  const signature = /<p>\s*<em>\s*([^<]*?)\s*<\/em>\s*<\/p>\s*$/i.exec(msg.content ?? "");
+  if (!signature) return null;
+  const line = /^—\s*pet\s+([0-9a-f]{6})\s+(.+?),\s*via teams-lite$/i.exec(signature[1] ?? "");
+  if (!line) return null;
+  return { pet: (line[1] ?? "").toLowerCase(), rest: (line[2] ?? "").trim() };
+}
+
+/**
+ * One person's ledger message in a thread — THE FIRST THEY WROTE, which is the one every reader's
+ * fold keeps (a second is absorbed and ignored whole). Keyed on the AUTHOR alone, because a pet
+ * ledger is one message per person however many pets the conversation holds.
+ */
+function findMockPetLedger(
+  convId: string,
+  mri: string,
+): { msg: ChatMessage; ledger: MockPetLedger } | null {
+  const t = threadFor(convId);
+  // An EMPTY mri names nobody rather than the first authorless row: a recording and a thread
+  // activity carry no author at all, and `"" === ""` would hand back somebody else's creature.
+  if (!t || !mri) return null;
+  for (const msg of t.messages) {
+    if (msg.sender_mri !== mri) continue;
+    const wire = mockPetWire(msg);
+    if (!wire) continue;
+    const ledger = mockParsePetLedger(wire.pet, wire.rest);
+    if (ledger) return { msg, ledger };
+  }
+  return null;
+}
+
+/** Post the colleague's ledger, or EDIT the one they already have — which is the whole point of a
+ *  ledger, and what makes an afternoon of feeding ONE message in this thread rather than fifty. */
+function writeMockPetLedger(convId: string, who: Person, ledger: MockPetLedger): void {
+  const t = threadFor(convId);
+  if (!t) return;
+  const content = `<p>${escapeHtml(mockPetWords(ledger, MOCK_PET_LABEL))}</p><p><em>${escapeHtml(
+    mockPetLedgerLine(ledger),
+  )}</em></p>`;
+  const existing = findMockPetLedger(convId, who.mri);
+  if (existing) {
+    existing.msg.content = content;
+    t.recompute();
+    broadcast("message", nicknamed(existing.msg));
+    broadcast(t.changedEvent, {});
+    return;
+  }
+  const seq = nextSeq(t.messages);
+  const msg: ChatMessage = {
+    id: `${convId}#${seq}`,
+    conversation_id: convId,
+    seq,
+    compose_time: Date.now(),
+    sender: who.name,
+    sender_mri: who.mri,
+    content,
+    is_self: false,
+  };
+  t.messages.push(msg);
+  t.recompute();
+  broadcast("message", nicknamed(msg));
+  broadcast(t.changedEvent, {});
+}
+
+/**
+ * The COLLEAGUE takes a creature of their own.
+ *
+ * It is both the automatic answer to a reader who has just spawned one (see `maybeAnswerMockPet`) and
+ * the `{kind:"pet", colleague:true}` arm, which is what a spec uses to put the colleague's pet in the
+ * thread FIRST — a conversation whose only creature is the reader's leaves every path that draws
+ * somebody else's unreachable.
+ *
+ * THE COLLEAGUE NEVER SENDS ITS CREATURE HOME, and stating that is what keeps this function this
+ * size: there is no `gone` here and no id kept across one, because nothing in this mock writes that
+ * state and a branch nothing reaches is a branch no test can hold to anything. What a spec needs of a
+ * pet that HAS gone is the reader's own, which the page's own despawn writes.
+ */
+function mockPetSpawn(convId: string): string | null {
+  const t = threadFor(convId);
+  const other = t?.participants[0];
+  if (!t || !other) return null;
+  // A ledger is a STATE, so "have they got one already?" is asked of the RECORD: their message still
+  // declares a pet on their fortieth act, and a SECOND record is one every reader's fold absorbs and
+  // ignores whole — a creature nobody can ever see.
+  const held = findMockPetLedger(convId, other.mri);
+  if (held) return held.ledger.pet;
+  const ledger: MockPetLedger = { pet: mockPetId(), skin: MOCK_PET_SKIN, gone: false, acts: [] };
+  writeMockPetLedger(convId, other, ledger);
+  return ledger.pet;
+}
+
+/**
+ * The COLLEAGUE does something to the READER's pet, now.
+ *
+ * It is what the `{kind:"pet", act:"feed"}` arm calls and what the responder answers a reader's own
+ * act with. Nothing in this feature happens on a timer, so an act only ever arrives because somebody
+ * pressed something — which is why a spec that wants one at a moment of its choosing needs the hook.
+ */
+function mockPetActNow(convId: string, kind: MockPetActKind): boolean {
+  const t = threadFor(convId);
+  const other = t?.participants[0];
+  if (!t || !other) return false;
+  const target = findMockPetLedger(convId, SELF_MRI);
+  // An act aimed at a creature that is not there is a line about a pet no reader can find. It is the
+  // page's own refusal, so a mock that wrote one anyway would let a broken one pass.
+  if (!target || target.ledger.gone) return false;
+  const held = findMockPetLedger(convId, other.mri);
+  // An act is a line in its author's OWN ledger and a ledger must name a pet, so a colleague with no
+  // creature of their own can act on nobody. That is the wire's consequence rather than a rule
+  // invented here, and it is what `petPublishFor` refuses on the page's side. What such a colleague
+  // HAS is the pat, which needs no record at all.
+  if (!held) return false;
+  const acts = mockSortedPetActs([
+    ...held.ledger.acts,
+    { at: Date.now(), kind, target: target.ledger.pet },
+  ]);
+  writeMockPetLedger(convId, other, {
+    ...held.ledger,
+    acts: acts.slice(Math.max(0, acts.length - MOCK_PET_ACTS_KEPT)),
+  });
+  return true;
+}
+
+/**
+ * The COLLEAGUE pats the reader's creature.
+ *
+ * A pat is a REACTION on the pet's own message rather than a line in a ledger, so this writes no
+ * record at all — which is why it is an arm of its own and not a kind of act, and why somebody with
+ * no creature could pat one.
+ */
+function mockPetPat(convId: string): boolean {
+  const t = threadFor(convId);
+  const other = t?.participants[0];
+  if (!t || !other) return false;
+  const target = findMockPetLedger(convId, SELF_MRI);
+  if (!target) return false;
+  const held = (target.msg.reactions ?? []).find((r) => r.key === MOCK_PET_PAT_KEY);
+  const mris = [...(held?.mris ?? [])];
+  // Teams keeps ONE reaction per person, so a second pat from the same colleague is not a second pat
+  // — it is the same one, and a count that grew would be a number no other client would agree with.
+  if (mris.includes(other.mri)) return true;
+  mris.push(other.mri);
+  const others = (target.msg.reactions ?? []).filter((r) => r.key !== MOCK_PET_PAT_KEY);
+  // The count is INCREMENTED, never taken from this list, which is what `reactMessage` does and what
+  // `patsOn` reads: a fixture may seed a reaction as a count with no names at all (the honest state
+  // for a reactor this machine has never seen write), and `mris.length` would silently reduce five
+  // pats to one.
+  target.msg.reactions = [
+    ...others,
+    { key: MOCK_PET_PAT_KEY, count: (held?.count ?? 0) + 1, mine: held?.mine ?? false, mris },
+  ];
+  broadcast("message", nicknamed(target.msg));
+  return true;
+}
+
+/**
+ * Put the colleague back the way this file declares it, and the pet THREAD back to its seed.
+ *
+ * The thread matters as much as the aim: a pet is a message that stays in the history, so a creature
+ * a test left behind is a card in the next test's conversation, a row in its menu and a state
+ * somebody else's spec has to reason about. Truncating the fixture is the discipline `resetMockChess`
+ * follows, for its reason — put the seeded state back rather than leaving one test's leftovers in
+ * front of the next.
+ */
+function resetMockPet(): void {
+  mockPetSilent = false;
+  const cs = store.get(MOCK_PET_THREAD);
+  if (cs && cs.messages.length > mockPetSeedCount) {
+    cs.messages.length = mockPetSeedCount;
+    recomputeSummary(cs);
+    broadcast("conversations_changed", {});
+  }
+}
+
+/**
+ * Answer the reader's pet message as a colleague's own install would.
+ *
+ * **THE ORDER OF THE QUESTIONS IS THE WHOLE OF IT: whether the colleague is already IN this
+ * conversation comes FIRST.** A ledger is a STATE, so the reader's message still declares a pet on
+ * their fortieth act — asked "did they take a creature?" first, this answers "yes, and I have one
+ * too" and returns, so the colleague meets the reader's pet and then never answers a single thing
+ * done to its own. It is the bug the chess opponent shipped, in another vocabulary.
+ *
+ * It is woken on a SEND and on both EDIT paths, because a reader's FIRST spawn is the only act that
+ * posts a message at all: everything after it rewrites the one ledger they already have. Woken by
+ * sends alone this would answer the first thing a reader ever did and nothing after it.
+ */
+function maybeAnswerMockPet(convId: string, msg: ChatMessage): void {
+  if (mockPetSilent) return;
+  const wire = mockPetWire(msg);
+  if (!wire) return;
+  const t = threadFor(convId);
+  // The non-self party of this conversation is the colleague — the mock's own idea of who else is in
+  // a thread, so no second notion of "the other person" is invented here.
+  const other = t?.participants[0];
+  if (!t || !other) return;
+  // Never answer our OWN record: the colleague's ledger is a message in this thread too, and reading
+  // it back as something to answer would be a creature feeding itself for ever.
+  if (msg.sender_mri === other.mri) return;
+  const theirs = mockParsePetLedger(wire.pet, wire.rest);
+  if (!theirs) return;
+
+  const held = findMockPetLedger(convId, other.mri);
+
+  // NOT IN THIS CONVERSATION YET: the only thing to decide is whether to take a creature too.
+  if (!held) {
+    setTimeout(() => {
+      mockPetSpawn(convId);
+    }, MOCK_PET_DELAY_MS);
+    return;
+  }
+
+  // IN IT: answer ACT FOR ACT, and DECIDE WHICH ACT INSIDE THE TIMEOUT — `mockPetActOwed` reads both
+  // ledgers as they stand when it fires, exactly as chess re-reads the position inside its own
+  // `mockChessPlayNow` rather than carrying a move in. Decided at WAKE time instead, two reader acts
+  // inside `MOCK_PET_DELAY_MS` — two Playwright clicks — both see nothing answered yet and both
+  // answer the FIRST one: the colleague answers a feed twice and never answers the nap at all.
+  setTimeout(() => {
+    const owed = mockPetActOwed(convId, other.mri);
+    if (owed) mockPetActNow(convId, owed);
+  }, MOCK_PET_DELAY_MS);
+}
+
+/**
+ * The kind the colleague owes the reader next, or null when it owes nothing.
+ *
+ * COUNTING rather than remembering is what makes the answer terminate, and the case it really
+ * prevents is an UNRELATED act: a reader who naps their own creature wakes the responder too, and
+ * "answer every wake" would have the colleague feed once more each time. It is not a loop guard —
+ * three separate things already make a loop unreachable (`writeMockPetLedger` mutates the body
+ * directly rather than going through `editMessage`, that path gates on `is_self` while the
+ * colleague's message is not, and the responder returns on the colleague's own mri).
+ */
+function mockPetActOwed(convId: string, otherMri: string): MockPetActKind | null {
+  const theirs = findMockPetLedger(convId, SELF_MRI);
+  const held = findMockPetLedger(convId, otherMri);
+  if (!theirs || !held) return null;
+  const asked = theirs.ledger.acts.filter((act) => act.target === held.ledger.pet);
+  const answered = held.ledger.acts.filter((act) => act.target === theirs.ledger.pet).length;
+  return asked[answered]?.kind ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -10816,7 +11268,14 @@ function editAgentReply(convId: string, messageId: string, content: string): voi
   // well as on a send: woken only by sends, the mock accepted a challenge and then never answered
   // a single move. It returns at once for a body that carries no chess line, so an ordinary edit
   // costs nothing.
-  if (msg.is_self) maybeAnswerMockChess(convId, msg);
+  //
+  // A PET ACT IS AN EDIT TOO, and this path is the third one that makes one: the agent rewrites a
+  // message of the user's own, so a ledger it replaced has to wake the colleague here as well. A
+  // body carrying no pet line costs nothing either.
+  if (msg.is_self) {
+    maybeAnswerMockChess(convId, msg);
+    maybeAnswerMockPet(convId, msg);
+  }
 }
 
 /** Every ~7s, drop an incoming (is_self:false) message into a random chat and
@@ -11307,6 +11766,37 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           silent: mockChessSilent,
           game: challenged ?? seeded,
         },
+        { status: 200 },
+      );
+    }
+    // The OTHER MACHINE's half of a PET: a colleague who takes a creature of their own
+    // (`colleague`), does something to the reader's (`act`), pats it (`pat`), or answers nothing at
+    // all (`silent`). Each exists because the moment cannot be reached otherwise — nothing in this
+    // feature happens on a timer, so every incoming act is somebody's press, and the presses of a
+    // colleague's install belong to a machine this suite does not have.
+    //
+    // A spec MUST reset it (`{kind:"pet", reset:true}`): one mock process serves the whole run, and a
+    // pet is a message that STAYS in the history, so a creature left behind is a card, a menu row and
+    // a state every later spec has to reason about. THE RESET TAKES `silent` WITH IT, which matters
+    // because `silent` has to be armed BEFORE the reader's first spawn to be worth anything: reset
+    // first, then arm, or the colleague answers the spawn the spec was trying to be alone with.
+    if (body.kind === "pet") {
+      if (body.reset === true) {
+        resetMockPet();
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      const convId = typeof body.conversation === "string" ? body.conversation : MOCK_PET_THREAD;
+      if (typeof body.silent === "boolean") mockPetSilent = body.silent;
+      const pet = body.colleague === true ? mockPetSpawn(convId) : null;
+      // The kind is checked against the vocabulary rather than passed through: an act naming
+      // something else would be a token every reader's fold refuses, and a hook that answered `ok`
+      // for one would report a colleague acting when nothing had happened.
+      const kind = typeof body.act === "string" ? body.act : "";
+      const acted =
+        kind === "feed" || kind === "play" || kind === "nap" ? mockPetActNow(convId, kind) : false;
+      const patted = body.pat === true ? mockPetPat(convId) : false;
+      return Response.json(
+        { ok: true, silent: mockPetSilent, pet, acted, patted },
         { status: 200 },
       );
     }
@@ -12100,6 +12590,7 @@ seedForwardedMessages();
 seedPlainTextSamples();
 seedStopAgentThread();
 seedChessThread();
+seedPetThread();
 seedSealedThread();
 seedAgentSandbox();
 seedMergeRequestReview();

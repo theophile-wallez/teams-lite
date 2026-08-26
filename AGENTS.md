@@ -183,7 +183,13 @@ screenshots carry the last one.
   the old page's refusal in `teams_send::tests`. That spec deliberately does NOT send its ten-picture message: one mock
   process serves the whole run, and a message ten pictures tall is shared state — it makes
   the deep-link scroll in `notifications.spec.ts` time out, which is a fragility of the
-  virtualized history worth its own look and NOT something a test should hide.
+  virtualized history worth its own look and NOT something a test should hide. **A SECOND surface
+  has now said the same thing, which is what makes it worth writing down**: measured while the
+  companion suite was being added, `notifications.spec.ts:71` and `quote-jump.spec.ts:64` fail in
+  every FULL run and all nine tests of both specs pass in ISOLATION, while the REST of the failing
+  set varies between runs. So the suite is red only once some 45 spec files have accumulated shared
+  state — that is not broken behaviour, and a spec of one's own is proved innocent by running it
+  beside the failing one rather than by counting failures.
 
 ## A channel post has a TITLE (its own field in the composer, a heading above the body)
 
@@ -2898,7 +2904,13 @@ user. Two independent mechanisms enforce that split:
   Settings: `bun run preview -- --out /tmp/chess --chess` (pass `--dpr 2`:
   the pawn in the header is 20px). That run needs no engine on the machine: it writes the same STUB
   worker the E2E suite does into a temporary directory and points `TEAMS_LITE_ENGINE_DIR` at it, so
-  the route and the whole UCI exchange are real and only the 7.3 MB of WebAssembly is missing. For a tracker REFERENCE drawn as a
+  the route and the whole UCI exchange are real and only the 7.3 MB of WebAssembly is missing. For a
+  COMPANION walking over a conversation — the spawn row the conversation's menu offers, one creature
+  and two of them re-cutting each other's lanes, the speech bubble, the pet's own menu and its armed
+  Remove, a colleague's creature, the RED trigger a refused press leaves, the whole thing at a phone's
+  width and Settings › Companions: `bun run preview -- --out /tmp/pet --pet` (see § A COMPANION in a
+  conversation — everything in it goes through the mock's `{kind:"pet"}` hook, which that run resets
+  at the end, because a pet is a MESSAGE that stays in the history). For a tracker REFERENCE drawn as a
   chip — in a chat message, in an agent's own answer and in a merge request's
   description: `bun run preview -- --out /tmp/ref --tracker-refs`. For the typing hint above the
   composer, one typist then three: `bun run preview -- --out /tmp/typ --typing`
@@ -4891,11 +4903,40 @@ the store) and no way past the seal (which still runs last). `web/mock/server.ts
 
 **What an edit COSTS, stated because it is real and it is a trade the user asked for:**
 
-- **A MOVE NO LONGER NOTIFIES.** An edit does not bump a conversation's preview and does not push,
-  so a colleague whose app is CLOSED is buzzed by the challenge and the accept and by nothing after
-  them. With a clock running that is the honest exchange — a game against somebody who is not
-  looking is lost on time either way — and an OPEN page still redraws the board on every edit,
-  because the backend broadcasts the whole stored message.
+- **A MOVE NO LONGER NOTIFIES, and the MECHANISM is not the one this used to state.** A colleague
+  whose app is CLOSED is buzzed by the challenge and the accept and by nothing after them — but it is
+  NOT that an edit stays away from the push path. It reaches it: `Store::insert_message` returns
+  `true` whenever the content really changed (its `WHERE` clause admits
+  `excluded.content <> '' AND messages.content <> excluded.content`), and the ingest loop pushes on
+  `inserted` — so **the honest sentence is that an edit reaches the push path, and the per-message
+  claim means only the first frame for a given message ever delivers.** That claim is
+  `store.claim_once("<conversation>/<message>")` in `push_live_message`, whose `push_deliveries` row
+  is also what stops a second backend on the same store from pushing the same frame. Two things
+  follow, and they are why the OUTCOME is right even though the old reason was wrong. The claim table
+  is PRUNED at `CLAIM_RETENTION` (24 h), so the claim alone would let a ledger edited across a day
+  boundary deliver again — what really stops that one is that a Teams edit keeps the message's
+  original `compose_time`, so `push_policy::is_stale` refuses any frame more than `MAX_AGE_MS`
+  (10 min) old. And the TRUNCATED case is still reachable, which is why the wire is stripped from a
+  push at all: the FIRST frame an install ingests can already carry many plies, if the app was closed
+  while a colleague played. With a clock running the silence is the honest exchange — a game against
+  somebody who is not looking is lost on time either way — and an OPEN page still redraws the board on
+  every edit, because the backend broadcasts the whole stored message.
+- **THE SIDEBAR ROW IS THE OTHER HALF OF THAT SENTENCE, and it splits in two: an edit changes the
+  row's WORDS and never its POSITION.** This used to say "an edit does not bump a conversation's
+  preview", which is true at the MOMENT of the edit and false across the next sync. The live path
+  writes `messages` and nothing else — the ingest loop's own `Store::upsert_conversation` is the
+  BLIND upsert, which touches the title and `last_message_time` alone and says so in its docstring,
+  while `last_message_preview` is written ONLY by `upsert_conversation_full` from a CSA snapshot
+  (`teams_read::parse_last_message`). So nothing about the row moves when the frame lands; the WORDS
+  change at the next conversation-list sync, when Teams' own copy of the newest message carries the
+  rewritten body. **The POSITION never changes on either path**: the sidebar's order is
+  `is_pinned DESC, last_message_time DESC` (`idx_conv_sidebar_order`), `last_message_time` is written
+  as `MAX(stored, incoming)`, and a Teams edit keeps the message's original `compose_time` — so a
+  game played for an hour cannot lift its chat above one somebody wrote in five minutes ago. What is
+  UNMEASURED is the one thing that belongs to the tenant rather than to this store: whether CSA's own
+  snapshot really re-states an EDITED body. It carries the newest message's body for every other
+  message, and nothing here has checked it for an edit; `examples/chat_settings_recon.rs` reads that
+  payload and is where one would look.
 - **THE LEDGER IS THE GAME'S RECORD.** One corrupted body ends the game for both players with
   nothing to repair it with, where the old shape lost one move per bad message. That is why the
   colon rule above is a rule rather than a preference.
@@ -4903,13 +4944,17 @@ the store) and no way past the seal (which still runs last). `web/mock/server.ts
   mark, rather than a conversation. The words state a growing score sheet, which is the most useful
   thing that message can say.
 
-**A PUSH ABOUT A CHESS MESSAGE CARRIES NO WIRE** (`push_policy::without_chess_line`). The page
+**A PUSH ABOUT A CHESS MESSAGE CARRIES NO WIRE** (`push_policy::without_chess_line`, a two-line
+wrapper over the shared `without_wire_line` a COMPANION's own strip also calls — one rule for both
+features, since the two lines are one shape). The page
 strips the marker out of a sidebar preview itself and a push has no page — and it matters more than
 it did: a move used to be its own short message, and a whole game's record now lives in one line of
 several hundred characters, so an unstripped push would be a screenful of wire with the sentence it
 is about pushed off the end of it. Nothing else is ever cut: an agent's own `— claude, via
 teams-lite`, a colleague's prose and a bare em dash are all left alone, which is what the six-hex
-game id and the exact trailing shape are checked for.
+game id and the exact trailing shape are checked for. **It also survives a preview CUT MID-WIRE**,
+which was a live shipped defect until the companion's own strip was written: see § A COMPANION for
+the arithmetic and for what that second branch cannot prove.
 
 ### SEVERAL GAMES AT ONCE
 
@@ -5575,8 +5620,8 @@ a live port. Each decides something a client that merely found this socket must 
 machine fetches 7.3 MB from the internet, and whether it throws away what it fetched.
 
 **What an engine game COSTS, stated because each is real:** it notifies NOBODY after the challenge
-(the whole game is one message and one edit per ply, and an edit neither bumps a preview nor pushes —
-the ledger's own cost); its ledger is about twice a human one's length, since both sides live in one
+(the whole game is one message and one edit per ply, and an edit of an already-pushed message delivers
+nothing — the ledger's own cost, whose exact mechanism is under § A MOVE NO LONGER NOTIFIES above); its ledger is about twice a human one's length, since both sides live in one
 line; nothing about it is checkable by anybody, because there is one author, so the human game's
 clock argument has no counterpart here; and a colleague in the thread sees one message rewritten
 sixty times whose words are a growing score sheet of a game they are not in. An older build reads
@@ -5605,6 +5650,674 @@ MB of WebAssembly in the browser, over this app's own route, its own Worker guar
 Its clock came back 0.6 s down, which is the search and not the wall. **What is UNVERIFIED is the
 pairing in ONE press**: nobody has pressed Fetch in the real app and then played the game it enables —
 two halves each measured, in the user's own app, which is their own click.
+
+## A COMPANION in a conversation (a creature IS the thread, and an OVERLAY draws it)
+
+A conversation can hold a small animated creature — the reader's own and every colleague's — that
+paces a strip over the history, gets hungry, gets bored, sleeps, and is fed, played with, patted and
+sent home by anybody in the thread who also runs teams-lite. It is taken from a row of that
+conversation's own MENU (§ ONE MENU in a conversation's header), and it is carried entirely by
+ordinary Teams messages. `web/src/lib/pet-wire.ts` is the line a pet message signs itself with,
+`pet-thread.ts` derives every creature from the thread's own messages, `pet-state.ts` says what one
+IS right now, `pet-act.ts` decides what a press publishes, `pet-skin.ts` holds the art,
+`pet-visibility.ts` the one preference, `web/src/vendor/desksprite.ts` is the vendored engine that
+animates a sprite, `web/src/components/pet-layer.tsx` is the overlay and `pet-menu.tsx` the control
+in each creature's own lane.
+
+**IT IS CHESS'S OWN ARCHITECTURE, AND IT TAKES IT ONE STEP FURTHER.** Teams has no private data
+channel, so anything that must reach another machine is a message in the conversation — which is
+exactly why **nothing about a pet is stored**: the creature replays out of the thread's own history,
+so a reload, a phone and a colleague's install all fold the same animal, and there is nothing to
+reconcile when a frame is lost. Where chess draws its board as a ROW in the history, a pet is drawn
+by a canvas OVERLAY that takes no room in the conversation at all — so a creature adds nothing to
+the thread's length, nothing moves when one arrives, and the ledger message that carries it is taken
+out of the history rather than becoming anything.
+
+**NO NEW RPC EXISTS ANYWHERE IN THIS FEATURE, and that is the whole safety story.** Every act rides
+`send`, `edit` or `react`, each already an `OUTWARD_METHODS` entry — the rule a picture, a mention
+and a channel post's title already hold: the act is part of the message being posted rather than a
+second action. So there is no gate to add and none to want. A spawn is one message the reader pressed
+for, an act is an edit of their own message, and a pat is a reaction. The only thing this feature
+persists anywhere is one local preference (Settings › Companions), per browser like the chat pins,
+with no upstream to publish it to.
+
+### THE LEDGER: one message per PERSON, edited in place
+
+    Cat · fed 1 · played 1
+    — pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c 1756060012346.p.7f3a1c, via teams-lite
+
+One message per person per conversation — that person's whole record, rewritten on every act — and
+the conversation's creatures are the MERGE of every ledger in the thread. The line is versioned and
+read from the WORDS, never from markup, which is the choice `agent-message.ts`, `agent-tag.ts`,
+`tracker-ref.ts` and `chess-wire.ts` all make. Eleven rules hold it, and each is pinned by a test:
+
+- **ONE PER PERSON rather than one per pet, because a shared message is impossible.** This app
+  refuses to edit a message that is not the user's own and so does the backend before the network
+  (§ Sending messages), so each person keeps their own record — which is what makes "anybody may play
+  with anybody's creature" safe with no server in the middle: an act is a line in its own author's
+  message, and nobody else can write one there. It is chess's own argument for a ledger per PLAYER.
+- **A LEDGER SAYS TWO THINGS AT ONCE**: which pet is its author's, and what its author has done to
+  pets in this conversation — theirs and their friends'. Both jobs live in one message for the reason
+  above, and it is why an act names a TARGET.
+- **NO COLON EVER APPEARS IN A LEDGER LINE**, and this is chess's own rule inherited for the
+  identical reason rather than a preference. The backend substitutes custom emoji into every outbound
+  body on a send AND on an edit, and `custom_emoji::code_spans_in_text` matches `:name:` ANYWHERE in
+  the text — no whitespace needed in front of it — for any lowercase name in the user's own pack. An
+  act written `1756060012345:f:7f3a1c` therefore carries the code span `:f:`, and a pack holding an
+  emoji of that name (packs grow on their own — § Custom emoji imports a colleague's) would replace
+  it with an `<img …>`. That breaks `SIGNATURE`'s own `[^<]*?` and every pet in the conversation
+  becomes unreadable, for everybody, for good, with nothing left to repair it with, because the app
+  can no longer see a ledger to edit. Every separator is a full stop, and
+  `serializes_no_colon_with_everything_set` pins exactly that. **`skinCanTravel` is the same rule at
+  the other end**: a skin name is a string a caller hands over, so it is tested against `PET_SKIN`'s
+  own regex rather than against a copy of the charset — one colon in `s.a:b` is half a code span, and
+  the rule is that no colon reaches the line rather than that a pair is refused.
+- **A PET IS NAMED BY A 6-HEX ID, NEVER BY AN MRI.** An act reaches across people, so it has to name
+  whose pet it touched — and an MRI is `8:orgid:bea5de00-…`, which is the colon rule again. Six
+  lowercase hex is chess's own id, short enough to read inside a sentence and wide enough that two
+  creatures in one conversation cannot collide in practice.
+- **AN ACT TOKEN OPENS WITH A DIGIT, and that is what chooses the failure mode.** A NAMED token this
+  build does not know is IGNORED, so a newer build's ledger still folds into a creature here; a
+  DIGIT-led token that does not parse refuses the WHOLE record, so a corrupt act is never
+  half-applied. The two classes have to be syntactically unmistakable for that to work, which is why
+  the moment leads and the kind follows. Every field is bounded — an epoch is 1–15 digits, a target
+  exactly six hex — because an unbounded `\d+` is how four hundred characters of garbage becomes a
+  number nothing can reason about.
+- **WHAT IS DELIBERATELY NOT ON THE WIRE: no stat, no mood, no level, no position.** Decay is a pure
+  function of elapsed time (below), so two machines holding the same acts hold the same creature and
+  a number on the wire would only be a second answer to a question both sides can already give.
+  Position is each window's own business, because two readers have two window sizes. What travels is
+  an ACT, at human cadence — a few an hour rather than one a frame.
+- **A LEDGER IS A STATE, not a stream.** The whole line is written again on every act, so a token
+  that is no longer true is simply not written and there is no history inside the message to disagree
+  with itself. `serializePetLedger` is deterministic by construction — one fixed token order, and the
+  acts sorted THERE rather than trusted from the caller — which is what makes two builds holding the
+  same state emit the same bytes, makes a no-op edit really a no-op, and lets a test assert the exact
+  line. A `skin` press that would write the same bytes is refused for that reason: an outward write
+  that changes nothing is one not to make.
+- **BIRTH IS THE MESSAGE'S OWN `compose_time`, never a value out of the payload.** An edited Teams
+  message keeps the moment it was FIRST posted, so a creature's age is stamped by the service rather
+  than claimed by a client — which is what makes every act's own moment checkable against something
+  nobody can move. It is the rule the chess ACCEPT already holds, for its reason.
+- **THE WALK IS COLLECT-THEN-RESOLVE, and ONE LEDGER PER AUTHOR WINS.** A ledger is edited in place,
+  so its message keeps the `seq` it was first posted at while its payload holds everything since:
+  nothing about what happened can be read off message order, so every ledger's acts are gathered
+  first and handed to the pets they NAME afterwards. A second ledger from the same author is absorbed
+  and ignored WHOLE, acts included — counting it would double everything both records state — and it
+  is absorbed onto the draft their FIRST one landed in, whatever pet id it names, because every pet
+  message must belong to some record or the reader is shown the raw wire in their history.
+- **THE BOUND IS SAFE RATHER THAN SLOPPY.** `PET_ACTS_KEPT` is 30, and what makes that
+  correctness-preserving is the arithmetic below: every stat is clamped to 0…100 and reaches its
+  floor in about 50 hours, so an act a week old moves the fold by nothing a reader could see. Without
+  a bound a message edited for months grows without limit, and a Teams message has a real ceiling
+  (102 400 bytes, measured by `examples/sealed_message_probe.rs`).
+- **THE WORDS ABOVE THE LINE STATE THE STATE**, because they are rewritten with it: `Cat · fed 3`,
+  and `Cat has gone home.` A message whose words said "I fed the cat" while its line held forty acts
+  would lie to every client but this one — and a colleague on stock Teams sees exactly those words,
+  which makes them the most useful thing that message can say.
+
+**What the edit COSTS, stated because each is real and each is the trade the feature is built on:**
+
+- **A MOVE NOTIFIES NOBODY AFTER THE SPAWN.** The spawn is a `send`, so it notifies like any other
+  message; every act after it is an edit, and an edit of an already-pushed message delivers nothing —
+  see § A MOVE NO LONGER NOTIFIES under § Chess for the precise mechanism, because the obvious
+  reading of it is wrong: an edit REACHES the push path and is stopped by the per-message claim. So a
+  colleague whose app is CLOSED is told the creature arrived and is told nothing else. An OPEN page
+  redraws it on every edit, because the backend broadcasts the whole stored message.
+- **THE LEDGER IS THE CREATURE'S RECORD.** One corrupted body loses that author's whole history —
+  their pet and every act they performed on anybody else's — which is why the colon rule is a rule.
+- **A COLLEAGUE ON STOCK TEAMS sees one message rewritten many times**, wearing Teams' own edited
+  mark, whose words are a growing score sheet of a creature their client draws nothing for.
+- **WHETHER A SPAWN SHOULD PUSH AT ALL IS AN OPEN PRODUCT QUESTION.** It buzzes every colleague's
+  phone with "Cat is here." § Push notifications says widening the delivery policy is a product
+  decision, and narrowing it is equally one, so this feature's job was only that the BODY carries no
+  wire (below). Nobody has decided the other half.
+
+### WHO MAY DO WHAT — and why a PAT is a REACTION rather than an act
+
+**A PAT IS A TEAMS REACTION ON THE PET'S OWN LEDGER MESSAGE** (`PET_PAT_KEY`, `heart` — one of
+Microsoft's own six canonical keys, so it is a single tap in every client the reader's colleagues
+might be holding and a colleague on stock Teams pats the creature without knowing this app exists; a
+custom emoji would have been prettier and would have made a pat impossible for everybody but a
+teams-lite reader). It costs one gate less than an edit, it TOGGLES, and it is the ONE thing a reader
+with no creature of their own can do — which is not a courtesy but the wire's own consequence: an act
+is a line in its author's own ledger, a ledger must name a pet, and writing one for somebody who
+never spawned would either mint a creature they did not ask for or announce the death of one that was
+never born.
+
+**A PAT IS THEREFORE A STANDING TERM AND NOT A MOMENT IN TIME**, and that was a ruling rather than a
+convenience: the page is handed `Reaction = {key, count, mine, users?}` with **no timestamp and no
+MRI**, because § WHO reacted deliberately withholds the MRIs — one answer about a name in this app.
+So there is no moment to age a pat from and nobody to attribute it to, and a fold that invented
+either would be two machines inventing two different creatures. Three routes were weighed: adding
+`time` to `ReactionUser` (a backend and protocol change, and a step toward publishing what the
+backend withholds), making a pat a ledger act (one EDIT per pat, on the most frequent interaction in
+the feature — the worst possible carrier), and a standing bonus off `reaction.count`. The count won,
+because every client reads the same number, so it converges exactly and needs no wire change at all.
+Three costs, all stated where the rule is (`petAffectionBonus`): **un-reacting takes the pat back**
+and the bond drops, which is the one interaction here with an undo at all and is consistent across
+machines precisely because every one of them folds the same set; **a pat earns NO xp**, because a
+standing term would make a level flap up and down as somebody toggled a reaction, and a level that
+comes and goes is not a level; and it **SILENCES the bond as a complaint** — two pats put the floor
+at `PET_LOW` exactly and three put it above (`PET_PATS_COUNTED` is 3), so a creature with a couple of
+reactions on its message can never again be one `petNeedsSomething` speaks up about for affection.
+That is the deliberate shape: a bond somebody keeps reaffirming is not a problem.
+
+**WHICH PET IS OURS IS ANSWERED BY `owner.isSelf` AND BY NOTHING ELSE.** The page never learns the
+user's own MRI — the backend resolves that question and hands the page the answer (§ Push
+notifications) — which is exactly why `Pet.owner.isSelf` exists, off the ledger message's own
+`is_self`, and why nothing in `pet-act.ts` takes an identity as an argument. An MRI-keyed lookup
+would match nobody: every act would be refused and every spawn would SEND a second ledger. It is the
+reading `ChessPlayer.isSelf` already makes, for its reason. An EMPTY mri names nobody rather than the
+first authorless record — a recording and a thread activity carry no author, and `"" === ""` would
+hand a reader somebody else's creature.
+
+**ONE PUBLISH AT A TIME PER CONVERSATION, and the grain of that slot is the finding that shaped it.**
+A reader's ledger is ONE MESSAGE for the whole conversation, so every press they make contends on it:
+two feeds inside one round trip both read N acts, both build N+1, and last write wins — one act gone
+from the record while both were drawn, and a despawn racing a feed on a colleague's pet permanently
+losing that colleague's act. So `petPending` is keyed per CONVERSATION and carries the target pet
+beside the act, and `publishPetLedger` refuses a second publish while it is held. A per-PET slot was
+the first shape and is exactly the wrong GRAIN: two presses on two different pets are
+two edits of one message, so a per-pet check sees no conflict at all. `petError` stays keyed per PET,
+because a refusal belongs to the creature the press was about. The refusal is SILENT, on the
+composer's own `sendingRef` precedent, which is acceptable only because **no control is drawn live
+while the slot is held**: for a feed the silence is masked by the press's own optimistic act, but a
+despawn and a skin change draw nothing at all, so a second press there would be a dead control with
+no sentence and no cue. All five publishing rows carry `disabled={busy}`, and each one is pinned
+individually.
+
+**THE SLOT IS RELEASED ON SUCCESS AS WELL AS ON FAILURE, and that ordering belongs to `edit` ALONE.**
+The backend's `edit` arm writes the local row and emits `message` BEFORE it answers `{edited: true}`,
+so by the time the promise resolves the derived ledger already states the act and a pending copy would
+be counted twice. What that really buys is a BOUND rather than a proof — the event and the response
+travel over one socket but not necessarily through one queue — which over a stat that decays two
+points an hour is nothing a reader can see. **The `send` arm does neither**: it answers
+`{sent: true}` and the message reaches the page only on the trouter echo. So a SPAWN has a window in
+which the slot is free and the creature is nowhere on this page — 150 ms against the mock, one round
+trip against the tenant, unbounded while the live feed is reconnecting — and a second press inside it
+mints a fresh id and SENDS AGAIN, which the fold absorbs whole: two visible arrival messages, one
+drawing no creature, with `despawn` editing the first, so nothing in this feature can ever reach the
+other again. Nothing visible happens on the press either, which is exactly the "press it again because
+nothing happened" pattern every duplicate that ever reached a colleague came out of. The window is
+held shut by the CONTROL rather than by the slot (`petSpawnIsTravelling`), over a RECEIPT — the
+conversation the press was made in and the pet it minted:
+
+- **The receipt carries its CONVERSATION, and that half is load-bearing.** `ConversationMenu` is
+  mounted unkeyed, so walking to another chat re-renders the same instance with a new
+  `conversationId`; a receipt with no conversation on it read as "a spawn is travelling" in every
+  other conversation the reader opened, for the life of the page — permanently worse than the defect
+  it replaced.
+- **The landing test is `owner.isSelf` ALONE, and `gone` must not be part of it.** A self record
+  exists iff the next press would be an EDIT, which is the arm that needs no window at all. Adding
+  `&& !pet.gone` was measured to re-arm the gate for good after spawn → echo → Remove: the row reads
+  "Bring your cat back", no error exists, and a landing test that ignores a `gone` record never sees
+  one.
+- **It needs NO RESET, and a reset is a BUG rather than a redundancy.** The receipt is retired by the
+  conversation it names and by any ledger of ours arriving. An effect clearing it on a conversation
+  change closed the outbound half and RE-OPENED the return half — back in the first chat before the
+  echo, the row says "Take a cat" again. It is pinned as exactly one `setSpawnedPet(` write.
+- **What it deliberately does not cover, stated rather than fixed:** an echo that NEVER arrives leaves
+  the row disabled with no sentence until a reload (`petError` is the only slot that produces words),
+  which is the right trade against a duplicate nothing can delete; an answer merely LOST rather than
+  refused reports a failure, enables the row, and the retry mints a fresh id — and that one is not
+  this gate's to close, because `send` runs under `retry::RetryPolicy::auth_only()` and Teams
+  publishes no idempotency key on that endpoint, so nothing in this feature can tell a lost answer
+  from a refused one; and two open pages share neither the pending slot nor the receipt, so a phone's
+  row stays live whatever the laptop just did.
+
+**THE SPAWN IS OFFERED ONLY WHERE IT WOULD WORK** (`petSpawnIsOffered`), and each of its four
+refusals is a rule some other surface already holds rather than a refusal this row REPORTS. A CHANNEL
+is refused, and the signal is that it is not in the conversation list at all — its history is drawn
+as THREADS while the layer walks a chat's own, so where a creature paces one of those is a different
+surface's question, which is the limit § A SEALED chat states for a channel and for its reason.
+NOTES is OFFERED, the deliberate opposite: a solo thread has nobody to play with, and a companion is
+the one thing there that needs nobody — § Playing STOCKFISH's own argument for offering the computer
+in the chat with oneself. A reader whose own creature is HERE is offered none, and one whose pet has
+GONE is, which is half the point of the row: Remove would otherwise be a one-way door, and the spawn
+branch RE-SPAWNS the record it finds — the same creature, keeping its id and its acts, because what
+its owner did to their friends' pets did not un-happen. And a window that would DRAW nothing offers
+nothing, on either of the layer's own refusals (Settings › Companions, and a reader who asked for
+less motion): a spawn posts a message everybody in the thread sees, and one whose own presser cannot
+see what it bought is a message posted for nothing.
+
+**IT IS ONE PRESS, NOT TWO.** A spawn is reversible from the same menu, and asking twice for what
+undoes teaches the reader that this app's confirmations mean nothing. What the press costs is stated
+ABOVE it instead. The section is UNFOLDED where the chess challenge beside it is a disclosure, and
+that is argued rather than assumed: the challenge row is in every chat for ever, while this one is
+drawn only until the reader has a creature, so one press deletes it for good — and the feature is
+reachable from nowhere else. What that costs is stated too: a reader who never takes a companion
+carries the section in every conversation's menu for ever.
+
+### EVERY NUMBER A PET HAS IS DERIVED, and none is sent
+
+`pet-state.ts` is the module the whole feature rests on. Hunger is never a value anybody publishes:
+it is `petSnapshot(birth, acts, now)`, which is what lets a shared creature cost a few writes a day
+instead of one a frame. **Every rate is MEASURED**, off openpets' own virtual-pet plugin
+(`plugins/official/openpets.virtual-pet/index.js`) rather than invented, and the shape of the game is
+in the arithmetic — from FULL: **50 h to starve, 33.3 h to exhaust, 50 h to bore, and 100 h to
+forget**, since affection is the one stat that falls a single point an hour; from the GENESIS values
+it is **40 h, 26.7 h, 40 h and 50 h**. (An earlier note here said "50 h to forget" from full, which
+is affection's genesis figure standing in the full-stat sentence — and that 50 is the number the
+`PET_ACTS_KEPT` bound is argued against, so the bound survives the correction while the sentence did
+not.) Either baseline is what makes a creature three people share survive a weekend nobody looks at
+it: it goes flat inside two days on three of the stats and inside four on affection from full, and no
+further. A nap is 15
+minutes and sleep is the only thing it buys (energy at +15/h against −3/h awake). Affection starts
+LOW where the other three start at 80, because a bond is the one stat a creature earns.
+
+- **IT IS A FOLD RATHER THAN A SUM, and the order is why.** Feeding a pet and then neglecting it for
+  two days is not the same creature as neglecting it for two days and then feeding it, because the
+  clamp at 0 and at 100 loses whatever fell outside. So the walk ages the pet to each act, applies
+  it, and ages it once more to now — with the span SPLIT into the part inside a nap and the part
+  outside it, since sleep runs its own rates.
+- **`petSnapshot` IS THE ONE PLACE THAT REFUSES AN ACT.** A moment in a ledger is the actor's own
+  clock, so one dated before the pet was born or in the future is dropped — the rule
+  `chessClockCeilingMs` holds for a self-reported clock, applied to a self-reported moment.
+  `petsInThread` deliberately LEAVES such an act in the pet's list, because two refusal sites are two
+  chances to disagree about which acts count.
+- **THE MOOD IS AN ORDER, not a score**, and `sleeping` wins over everything: a pet nobody can wake
+  has nothing to say about being hungry. openpets' own thresholds, and it is an order because the
+  creature has to say ONE thing — "hungry" is more actionable than "a bit low on three counts".
+- **A LEVEL IS UNBOUNDED ON PURPOSE**, because there is no end state to a creature three people keep.
+
+### THE OVERLAY (a sibling of the history, never a child of the scroller)
+
+`pet-layer.tsx` keeps `chess-games-strip.tsx`'s four rules for that file's reasons — it FLOATS rather
+than taking room, the FRAME LOOP is the engine's and reaches React never, it is BOUNDED and says what
+it left out, and it mounts NOTHING when there is nothing to draw. Fourteen more decisions are this
+surface's own, and `web/e2e/pet.spec.ts` or `pet-layer.test.tsx` pins each:
+
+- **IT IS A SIBLING OF THE HISTORY WRAPPER AND NEVER A CHILD OF THE SCROLLER, and there are three
+  separate reasons.** That element is `getScrollElement()` for the virtualizer, it is
+  `overflow-x-hidden` so a squashing sprite would be clipped, and a child taller than the content
+  grows it. **And nothing here ever writes `scrollTop` or calls `scrollTo`**: a live agent run
+  already owns that every frame, and `e2e/history.spec.ts` polices the virtualizer's own scroll
+  correction to two pixels.
+- **NOT `overflow-hidden` on the overlay either, and that is a ruling rather than an omission.** The
+  engine's landing squash scales a sprite to 1.35x about its own feet, so a pet spans some nine
+  pixels past each side of its box for the dozen frames the squash takes to relax, and clipping would
+  take back exactly what scaling about the feet bought. It also buys nothing: `bandBounds` already
+  keeps the whole creature inside by subtracting the sprite's own width.
+- **`pointer-events-none` ON THE CONTAINER IS MANDATORY.** At a phone's width there is no gutter:
+  every horizontal position is over a bubble and every row under it is a live target — a hold that
+  opens a menu, a reaction chip, a quote jump. Only the sprite and its own trigger take a pointer.
+- **THREE CREATURES, then a count.** `PET_LAYER_MAX` is 3, which is the chess strip's own bound and
+  here also what makes a LANE wide enough to walk: at 390px three lanes are 130px each and a 52px
+  sprite has room to pace one, while a fourth would leave every pet standing almost still. The lanes
+  tile the arena exactly and are divided by how many are DRAWN rather than by the maximum, so one
+  creature gets the whole width instead of pacing the left third of an empty strip.
+- **THE READER'S OWN PET IS NEVER THE ONE LEFT OUT, and that is a correctness rule rather than a
+  courtesy.** This layer's menu is the only place in the app that changes a creature's art or sends
+  it home, and `petPublishFor` refuses a fresh spawn while a record already stands — so a reader who
+  spawned fourth in a five-person chat would have a creature they could never reach again, ageing in
+  a thread with no control anywhere. Theirs is lifted into the drawn set when message order would have
+  cut it, and only then: re-ordering where there is already room would move somebody's lane for
+  nothing.
+- **THE ARENA CLEARS THE THREE BANDS THIS RECTANGLE ALREADY OWES, IN TWO CONSTANTS.** The top is
+  `CHESS_STRIP_HEIGHT_PX` — the strip's own measurement rather than a number restated here, and this
+  cost a defect: a chip is `h-11` and its container adds `py-1.5` either side, so the strip is 56px
+  and not the 44 a reading of the chip alone gives, and restated wrong the arena began twelve pixels
+  INSIDE a live strip, painted over it as a later sibling at the same `z-10`, and put `pets-more`
+  over the strip's own `+N more` — a bounded-count label drawn over a bounded-count label. The
+  bottom is 56px, where `composer-fade` (`h-14`) dissolves anything below `z-20` and `JumpToLatest`
+  reaches; one number clears both, so a pet's floor is the fade's own top edge. The top inset is
+  unconditional rather than measured against a live game, because a pet WALKS and a thrown one arcs:
+  an arena that grew and shrank as a game came and went would move the floor under a creature for a
+  reason the reader cannot see. What that costs is 56px of height a pet never uses in a conversation
+  with no game in it.
+- **A SIZE IS READ OUT OF THE ART, AND IT THEREFORE NEEDS A CEILING.** The shipped skins DISAGREE —
+  `cat` and `duck` are 13x13 (52px at `PX = 4`) where `blue-boy` is 14x14 (56px), measured off
+  upstream's own art, which is why nothing here spells a sprite's size as a constant. `PET_MAX_PX`
+  (64) is the other half: a skin authored at 40x40 would draw a 160px animal over somebody's
+  conversation, so art over the cap falls back to the default. It is a cap on the ART rather than a
+  scaler, because scaling is not available — the engine sizes its own canvas from the skin, which is
+  the rule that keeps a picture from being squashed (§ A picture somebody SENT: the box IS the
+  picture).
+- **THE CANVAS IS NOT DEVICE-PIXEL-RATIO AWARE, and that is a refusal rather than an oversight.** The
+  engine draws each art pixel as a `PX`-wide `fillRect` under `image-rendering: pixelated`, so a
+  browser upscaling that by a whole-number device ratio reproduces every block exactly — the one case
+  where a bigger backing store buys nothing. Buying it anyway would mean writing `canvas.width`
+  behind the vendored engine and scaling its context: a second answer to "how big is this sprite".
+- **NOTHING IS DRAWN IN AN ARENA WITH NO ROOM FOR A CREATURE** (`PET_LAYER_MIN_PX` — the tallest art
+  admitted, the floor margin, and 24px for the trigger pill). The two insets take 112px off a
+  rectangle whose height nothing here controls, and an absolutely-positioned box with both edges
+  pinned then computes a height of ZERO: `spriteFloor` floors at 0, so a pet would be drawn at the
+  arena's top edge with its whole body hanging out of a box with no height, unclipped, over the
+  composer's fade. The element itself stays even then, because it is what the box is measured off — a
+  layer that unmounted there could never learn the window had grown back. **What it costs, said
+  rather than left to be found: that reader has no control for their creature ANYWHERE.** Nothing is
+  drawn, so there is no pet menu — and the conversation's spawn row is correctly not offered either,
+  because a record already stands. A landscape phone with the keyboard up therefore holds a companion
+  nobody can feed, rename or send home; it self-heals the moment the box grows back, which is why it
+  is a stated cost rather than a state to report.
+- **AN ANIMATED CREATURE HELD STILL IS NOT A STILL CREATURE, IT IS A BROKEN ONE**, so under
+  `prefers-reduced-motion` the layer draws NOTHING rather than freezing a sprite. It is
+  `.agent-shine`'s own precedent: stopped, that sweep is a smear of colour over one corner rather
+  than a light going round an edge. **The cost is that the whole feature becomes silently unreachable
+  for that reader** — the spawn row is correctly not offered, which is the house rule that a control
+  must not report a refusal, but `petsShown` at least has a switch they turned themselves while this
+  reader is told nothing anywhere. **AND IT IS LIVE, which it was not.** motion/react's own
+  `useReducedMotion` is `useState(prefersReducedMotion.current)` with NO subscription — its source
+  carries `TODO See if people miss automatically updating shouldReduceMotion setting` under a
+  docstring claiming it responds actively — so it is read once per MOUNT, and for the one gate that
+  takes a whole feature away that is worse than a stale flag: a reader who turned Reduce Motion OFF
+  had no in-app path to a companion at all until they reloaded, with nothing saying why. So the layer
+  reads `usePrefersReducedMotion` (`web/src/lib/platform.ts`), which subscribes the way
+  `useCoarsePointer` does and for its stated reason — `false` until it has asked, because this app is
+  server-rendered and a lazy `matchMedia` initialiser would mismatch at hydration, which costs one
+  frame behind two other answers of "nothing". `.agent-shine`, the precedent this rule cites, is a
+  CSS `@media` rule and has always been live; this layer was the odd one out, and `pet.spec.ts` now
+  flips the query in BOTH directions with no reload rather than asserting the reload path.
+- **THREE ANSWERS ARE "NOTHING", and the third closes a real window.** `petsShown` is read from
+  `localStorage` inside `start()`, which runs in `ControllerProvider`'s own effect, and children
+  render before any effect does — so the first committed render always carries the hopeful default
+  `true`, and a layer that keyed on the route alone would draw a pet for one frame to somebody who
+  had turned the switch off. Real pet data arrives over the socket long after `start()`, which is why
+  it gates on that.
+- **ONLY COMPOSITABLE PROPERTIES MOVE, and the budget is measured.**
+  `web/src/lib/word-effect-motion.ts` holds the measurement: on Chromium **8 animating things held 60 fps, 24 sat on the edge and 100
+  collapsed to 8 fps**, while the same DOM with the animations switched off held 60 fps at 300 — the
+  DOM is not the cost, the running animations are. Three sprites are well inside that; a sprite
+  animating `filter` or `box-shadow` is exactly what collapsed.
+- **THE SPEECH BUBBLE'S LOOK IS THIS APP'S AND ITS GEOMETRY IS THE ENGINE'S.** Upstream injected a
+  stylesheet with a dark bubble of its own in it, which is § Project shape's icon-set mistake in
+  another vocabulary, so the engine sets no colour at all and `app.css` dresses
+  `.pet-sprite-bubble` from tokens this app already publishes. The one number that is a decision is
+  the 12rem ceiling, and it needs its two companions: the engine writes `white-space: nowrap` inline,
+  so a long `traits.messages` line would run off the side of the conversation and `max-width` alone
+  would not stop it. Truncating is right rather than wrapping, because the engine measures the bubble
+  ONCE per line and positions it from that number.
+- **EVERY TARGET CLEARS THE 44px FLOOR.** The trigger's INK is a 24px pill and its target is grown
+  with a pseudo-element rather than by making the pill a thumb wide — the technique the dialog's
+  close and the slider's thumb already use — because a creature is a small piece of art in a
+  scrolling column and its control must not be bigger than it is. **And the 4px that was off-screen
+  was found by the first capture**: the rightmost lane's pill sat flush with the window, measured at
+  exactly 1280.0 on a 1280px viewport and exactly 390.0 on a phone, so its `after:-inset-x-1` ran 4px
+  past the edge and the ink read as clipped. `pr-2` is the gutter — the same 8px `pets-more` keeps
+  and the chess strip takes as `px-2` — and it insets EVERY lane rather than only the last, because a
+  gutter that depended on which lane a creature walked in would move the target between two pets.
+
+**THE MENU IS STILL ITS OWN TARGET**, because a creature has more done to it than two gestures can
+carry: a pat, a feed, a play, a nap, its art and sending it home. It is one small labelled trigger
+per pet, in that pet's own lane, and it is also where a refusal is met — HELD OPEN across a publish,
+because Radix closes a menu on select and for an outward action that would take away the only surface
+that can report it in the same frame. **A refusal is visible with the menu SHUT too**: a pat is
+published from the creature itself, so the reader who made that press is looking at the lane rather
+than at a menu they never opened — the trigger turns and carries the sentence in its own `title` and
+`aria-label`, which is the composer's rule at the size a 24px pill has. Two costs, both from the
+first capture: the menu opens `side="top" align="end"` over exactly the lane it belongs to, so a
+reader watching their creature react to a Feed is watching a menu instead (measured at up to 41% of
+the sprite covered against a ~54% ceiling); and on a phone a creature walking to its lane's right
+edge stands ON its own trigger — at maximum covering the pill entirely, in 30% of samples.
+
+### THE VENDORED ENGINE (`web/src/vendor/desksprite.ts`, MIT — four marked patches)
+
+The creature is desksprite v2.1.0's: the frame player, the walk cycle, the grab/dangle/throw physics,
+the scared tremble, the sweat drop and the speech bubble. It is converted from its own IIFE to a TS
+module with the desk stripped, and **every divergence is MARKED**. There are four patches, and each
+says what it prevents:
+
+- **PATCH 1 — ONE TICKER FOR EVERY SPRITE.** Upstream armed a `requestAnimationFrame` loop per
+  instance, which is right for one desk widget and wrong for a conversation drawing a pet per person:
+  five pets meant five loops racing, five `document.hidden` checks and five chances to leave one
+  running after its element was gone. A sprite leaves the set by answering FALSE from its own step
+  rather than by stopping the loop for its neighbours. It is deliberately NOT narrowed further than
+  "every pose but a throw in flight, under reduced motion", because `pauseFor` counts down in TICKS:
+  a pet standing at the end of its band is counting, and one dropped for standing still would never
+  resume. What a really still pet costs is one clear and a few dozen `fillRect`s a frame.
+- **PATCH 2 — THE BOX RATHER THAN THE WINDOW.** Upstream read `global.innerHeight`, which is the
+  wrong number for a creature living in a strip over a conversation, so the caller owns the resize
+  and this engine watches no window. **AND THE FLOOR MOVES BOTH WAYS, which is the half that was
+  missing until the first capture measured it.** A floor that ROSE re-seated the pet at once, because
+  there is nowhere else for it to be; a floor that DROPPED left it in MID-AIR and nothing ever
+  brought it down, because a `roaming` pet walks at a fixed y and only `falling` reads gravity —
+  measured, growing the arena from 500px to 900px tall left a **406px gap**, a creature pacing an
+  empty stretch with its own trigger 400px below it. Every trigger is ordinary: rotating a phone, an
+  on-screen keyboard closing, un-maximising a window, an iOS toolbar collapsing. It FALLS now, which
+  hands the problem to a pose the engine already has, so the arc, the landing and the squash all come
+  free. A HELD pet is left exactly where the reader's finger has it, which is upstream's own
+  exclusion: clamping a pet somebody is holding yanks it out of their hand for a frame.
+- **PATCH 3 — HOME BANDS, and `setBand` so a lane change does not rebuild a sprite.** Upstream put
+  every sprite in one lane and three of them bunched at the same end. The band is a VARIABLE rather
+  than a const, and re-stating it is a SETTER for a measured reason: a rebuild loses everything the
+  closure holds — where the creature is standing, which way it faces, how far through its walk cycle
+  it is, and what it is doing — and while the band was in the create effect's dependency list, a
+  fourth person spawning re-cut every lane and **snapped every pet in the conversation to the left
+  edge of its new one**, which was the one defect of the three a reader would actually have seen. It
+  also re-played the speech bubble and forced three reflows, since `say` reads `offsetWidth`. There is
+  deliberately NO CLAMP into the new lane — a clamp is precisely the teleport this deleted — so an
+  errored pet (whose `roamStep` returns early) stands outside its re-cut lane until its state changes:
+  two lanes visibly overlap, the creature is still inside the box and still drawn.
+- **PATCH 4 — THE TAP/THROW SPLIT** (`TAP_SLOP = 10`). Upstream needed no threshold and had none: its
+  `dragEnd` was `if (overScreen) seatInto(); else setLoc('falling')`, with no callback out of the
+  engine, so a press that moved nothing and a fling across the desk were the same harmless thing. The
+  moment a HOST hangs an outward write on the release they stop being the same thing — and this app
+  publishes a `play` act, which is an EDIT to a real Teams message. So a release is told apart by its
+  DISTANCE from the grab, into two separate callbacks: a press that did not move is `onTap` → a PAT,
+  and one that did is `onThrow` → `play`. **The value is 10 rather than the 4 a mouse-only widget
+  would use**, against platform convention — Chromium's scroll touch-slop is 8 CSS px, Android's
+  `ViewConfiguration` 8 dp, iOS about 10 pt — and it is deliberately generous because the two mistakes
+  are ASYMMETRIC: a deliberate throw read as a tap publishes a reaction that toggles and takes itself
+  back, while a tap read as a throw publishes an act that costs the creature energy and stays in its
+  record for good. The value itself is pinned (`expect(TAP_SLOP).toBe(10)` plus an 8–12 band), because
+  editing it to 0 would restore the whole defect class with every other test passing.
+
+**FOUR OUTWARD-WRITE PATHS WERE FOUND IN THIS ENGINE, three of them by review**, and the fourth is
+the plain zero-distance TAP that PATCH 4 above exists for. They are one class — a gesture nobody meant
+as one publishing to a real Teams message — so they are worth naming together, though each rail is
+argued where it stands:
+
+- **`onThrow` NEVER FIRES FOR A CANCELLED GESTURE.** A touch scroll that starts on a pet fires
+  `onGrab` on the way in and, through `pointercancel`, would have reached `dragEnd` on the way out —
+  so every accidental scroll over a creature would have been an outward write. The physics still
+  drops the pet, which is honest. **So nothing outward may ever hang off `onGrab`**, and its contract
+  says so where it is declared.
+- **THE POINTER IS IDENTIFIED AT THE GRAB** (`isPrimary`, `button === 0`, and a matching `pointerId`
+  in both `dragMove` and `dragEnd`). Without it, right-clicking while holding a pet with the left
+  button fired `onThrow` and tore the drag listeners off mid-hold; and a second finger tapping
+  anywhere reached `dragMove`, so the pet TELEPORTED to it with large momentum and its release
+  published a flung throw. `setPointerCapture` was offered as the fix and correctly refused: a
+  mouse's buttons share one `pointerId`, so capture retargets the right-button `pointerup`
+  identically — and the Pointer Events spec's implicit-release step would have SILENTLY DROPPED the
+  capture, so the left release would then not be retargeted at all.
+- **A HOLD WHOSE RELEASE IS LOST IS ENDED AS A CANCEL.** Ignoring a non-matching `pointerup` left the
+  pet held, and the next click anywhere — the composer, say — carried the same `pointerId` and
+  `button`, passed both guards and PUBLISHED. A mouse released outside the browser window delivers no
+  `pointerup` at all, which is the commoner route. The detector is a document `pointerdown` in the
+  CAPTURE phase (a listener added on an ancestor during a descendant's handler IS invoked for that
+  same event on the way up, so a bubble listener would cancel the grab that registered it), narrowed
+  to a press by the GRABBING pointer so the deliberate two-finger behaviour survives untouched. A
+  TOUCH grab that ends with neither `pointerup` nor `pointercancel` can still never be cleared,
+  because a fresh touch gets a fresh id — parked, because it is stuck-pet rather than unmeant-write:
+  `onThrow` stays armed and unreachable, since every path into `dragEnd` requires the dead id.
+- **AND AN ACCIDENTAL PRESS STILL PUBLISHES SOMETHING — say so plainly, because it is the trade and
+  not a bug that was fixed.** The canvas takes `pointer-events: auto` and claims `pointerdown`, so a
+  tap the reader aimed at a bubble a creature had wandered over reaches the pet and pats it: an
+  outward write, a `heart` reaction on the pet's own ledger message, under the reader's name. What the
+  distance split changed is WHICH write — it was an `edit` that took energy off the creature and
+  appended to its record for ever. **Nobody may later read the closed defect as "an accidental press
+  publishes nothing".** Costing the reader that press at all is the price of a toy in a scrolling
+  column, and it is why the whole layer has an off switch.
+
+**THERE IS A DEAD ZONE ON A PHONE, and it is measured.** `touch-action: pan-y` on the canvas was
+chosen with the argument that the browser takes the vertical gesture, and the SAFETY half of that
+holds — Chromium really does fire `pointercancel`, nothing is published, the pet is released. The
+other half is false: `pet-layer` is a SIBLING of `message-scroll`, so the canvas has **no scrollable
+ancestor to pan**, and Chromium claims the gesture and then scrolls nothing. Measured on a Pixel 7
+with one creature: the same 200px flick moves the conversation **185px from the message area and 0px
+from the sprite** — and 0px from the pet's own 44px trigger pill, which is the same root cause on a
+second target. So the cost is a 52px dead zone that WALKS plus a fixed pill, in the bottom band of
+the arena where a thumb starts a flick: the exact failure § Chess records for `touch-action: none` on
+a board, one step less bad because the pet lets go. It is pinned AS IT IS by `pet.spec.ts`, with a
+CONTROL flick in the same test so "the scroller did not move" cannot pass on a touch driver that did
+nothing — **so the day it is mended that test fails, and the fix is to fold its assertion back into
+the test above it.** The upgrade is the one the engine itself names: do not grab on `pointerdown` for
+a touch pointer, grab only once it has passed `TAP_SLOP` HORIZONTALLY, so a vertical-first touch is
+never claimed and the browser's own hit-test reaches the scroller underneath. It was not taken here
+because every candidate — that, moving the layer inside the virtualized scroller, or
+`touch-action: none` plus forwarding the pan in JavaScript — is a behavioural change with its own
+trade.
+
+### THE SIX SURFACES THE WIRE MUST NEVER REACH
+
+Chess enumerated four and missed one; this feature enumerated five and found a sixth. Each showed a
+machine-readable line where somebody's words should be, and two of them were nearly missed:
+
+1. **The sidebar CHAT row** (`previewLine`).
+2. **The sidebar CHANNEL row** (`channelPreviewLine`) — a channel holds no creature, but a colleague
+   running teams-lite may still post one into it.
+3. **The Web Push body**, in Rust (`push_policy::without_pet_line`), because a push has no page.
+4. **The call and chess-page chat column**, which **FILTERS the message out rather than stripping the
+   line off it** (`transcriptMessages`). Nobody typed those words: they are machinery regenerated on
+   every act, so a stripped line would leave `Cat · fed 3` standing between two things people really
+   said, in a bounded transcript beside a live call or a board. This panel has neither a board nor an
+   overlay, and the creature is on screen beside it.
+5. **The BUBBLE in the history**, absorbed by **WIRE PRESENCE and never by resolved state** — and
+   this deliberately does not copy chess. A game is absorbed from the games the derivation RESOLVED,
+   so a game whose own root has paged out of the loaded history is absorbed by nothing and its ledger
+   renders as several hundred characters of wire in the conversation. Asking the message itself
+   (`petWireIn`) cannot have that failure, and it also covers what no derivation would hand back: a
+   pet that has GONE HOME, whose record still exists while nothing on screen draws it.
+6. **The page's own DESKTOP NOTIFICATION**, and it was found only because somebody went looking. It
+   is built from `copyableMessageText(m)` — the WHOLE flattened body rather than a 120-character
+   preview — so a colleague's spawn arriving while another conversation was open popped a
+   notification carrying the entire ledger line. **It had the same hole for CHESS**, and the fix is
+   one shared `withoutWireLine` in `protocol.ts` with three readers. `copyableMessageText` itself is
+   untouched, because COPY hands the reader the message as it really is.
+
+**THE STRIP HAD TO SURVIVE A PREVIEW CUT MID-WIRE, or it did nothing for a real pet — and the
+arithmetic is computed rather than trusted.** `teams_read::preview_from_html` keeps **120 code
+points** and marks its own truncation with an ellipsis. An act token costs **23 characters with its
+separator**, so a pet's flattened body crosses 120 **at its third act of MIXED kind** — measured
+through this app's own functions over the three shipped skins: **140 for the cat, 142 for the duck,
+150 for the blue boy**. Three FEEDS of the same creature is shorter, because its words are — and it
+lands on BOTH SIDES of the ceiling: 118 for the cat, exactly 120 for the duck (uncut, since the
+preview keeps 120) and **128 for the blue boy, which DOES cross**. So the truncated path is reachable
+at three FEEDS as well, for one of three shipped skins. **The ceiling is crossed by the BODY rather
+than by an act count**, WHERE depends on the art's own label and skin name as much as on the acts,
+and the only claim safe of every skin is that TWO acts never cross. Past it the line loses its own trailing
+`, via teams-lite`, so a rule requiring the complete ending matched NOTHING: every push and every
+sidebar row about a played-with pet carried a truncated wire dump.
+**And CHESS crossed it at the challenger's FIRST OWN MOVE** — 61 characters of
+words plus a space plus a 77-character line is **139**, against 112 for the challenge alone (those
+words are the TEN-MINUTE challenge's own, so another clock spelling moves the number and not the
+fact) — so that
+half was a live shipped defect on master: every clocked v2 game leaked a truncated wire onto its chat
+row from move one. (An earlier note recorded 137, which is that 139 with the `♟ ` prefix left out of
+the count.)
+
+**THE ELLIPSIS CLAUSE IS A WEAKER PROOF THAN THE WHOLE-LINE BRANCH, and saying so is the point.** The
+whole-line branch is `— pet ` + a six-hex id + a payload ending `, via teams-lite`, which no prose
+reaches. The cut branch has only the marker, a **six-character all-hex word** and a space — and
+English has such words (`facade`, `decade`, `deface`, `beaded`), so `"…— pet facade beats…"` would be
+cut. **And an author's own trailing `…` is indistinguishable from the preview's cut marker**, so the
+rule fires on an untruncated message that simply ends in one. Both are nil-probability rather than
+impossible and neither loses a message: what one costs is a trailing clause. Do not read the hex as
+"keeping prose out" of this branch — it keeps prose out of the branch above it. One cut is NOT caught
+and is stated rather than assumed: landing inside the id, or straight after it with no space yet,
+leaves no `<id> <payload>` to split, so the ~13-character marker fragment survives.
+
+**AND THE ARITHMETIC IS PINNED ACROSS THE PROCESS BOUNDARY, because a wrong mirror is SILENT.** The
+page's tests build a truncated fixture through `backendPreview`, a TypeScript port of
+`preview_from_html` — and a second spelling of a Rust function is a thing that DRIFTS, which is the
+class the mock's own re-spelled wire is guarded against below.
+Measured: moving that mirror's cap from 120 to 130 failed NOTHING (60 and 200 were caught, so the
+guard band was an accident of two numbers), and moving Rust's own `MAX_CHARS` while the mirror stood
+still failed nothing at all. So `push_policy::tests::the_page_mirrors_this_previews_own_ceiling`
+measures the ceiling THROUGH `preview_from_html` itself and then scans the page's spec for the number
+via `include_str!` — the cross-process pattern `update::tests` and `agent::tests` already use, so a
+moved file is a build error — and the page pins its own cap where it is spelled. Two divergences are
+stated in `backendPreview`'s own comment rather than fixed: an INLINE tag becomes a space where Rust
+drops it, and entities are not decoded, so a pet whose label held `&` would compute the wrong cut
+point. It is faithful for the bodies this feature writes and is not a general port.
+
+**A PET CONTRIBUTES NO ROW, and that opens a deep-link gap the plan never considered.** Chess maps
+every absorbed message id into `rowOfMessage`, because that map is what a notification's deep link
+scrolls to — and an absorbed chess message BECOMES the board row. A pet is drawn by the overlay, so
+absorbed chess-fashion its id would be in that map nowhere and a reader who taps a push about a pet
+message scrolls to NOTHING. The case is real rather than hypothetical, precisely because surface 3
+exists: a spawn is a `send`, so it notifies like any other message. So `petRowNeighbours` maps the id
+to the row that FOLLOWS it in time — and to the last row when the pet message is the newest thing in
+the thread — with a comment saying why a pet maps to a NEIGHBOUR where a game maps to its own board.
+It runs over the FINAL rows, after a recording has been spliced in and the map rebuilt, because both
+move indices a neighbour rule has already resolved.
+
+**One shape is deliberately LEFT as chess has it**, and both failure directions are safe: an absorbed
+ledger is still the `prev`/`next` NEIGHBOUR of the messages around it and `messageTimeMarks` runs over
+the raw list too, so a pet ledger between two DIFFERENT people's messages can draw a duplicate sender
+name and one inside an hour-long gap can eat a time mark. A name repeated is never a WRONG name and a
+mark missing is never a WRONG time. The right fix is ONE shared "messages as drawn" list feeding both,
+which mends chess and pet at once — and precisely because it changes chess's shipped rendering it
+wants its own commit and its own capture rather than a rider here.
+
+### THE MOCK, THE CAPTURES, AND THE TESTS' OWN LESSON
+
+`web/mock/server.ts` plays the COLLEAGUE, because a shared creature needs two machines and the suite
+has one: it keeps a ledger of its own and EDITS it, which is what the other machine really does — a
+mock answering with a message per act would let a broken merge pass every test. The wire is
+**re-spelled rather than imported**, on purpose, since the mock stands for another install; what must
+not drift is the PATTERN, so `PET_ACT`, `PET_SKIN` and `PET_ACTS_KEPT` are exported from the page and
+`mock-pet-wire.test.ts` asserts the mock holds those very sources. That distinction was proved real
+rather than theoretical: a mock timestamp loosened to `\d+` still matches `1756060012345.f.7f3a1c`
+with all three captures correct, so every assertion that only fed it real bytes would have passed
+against a drifted mock — acceptance is not equality. Two more shapes of the mock are worth knowing:
+its responder asks whether the COLLEAGUE is already in this conversation before it asks anything about
+the reader's press, because a ledger is a STATE and the reader's message still declares a spawn on
+their fortieth act — the other order made the colleague meet the reader's pet and then never answer a
+single thing done to its own, which is the bug the chess opponent shipped in another vocabulary; and
+it decides WHICH act it owes inside its own timeout rather than at wake time, because two reader
+presses inside one delay both read "nothing answered yet" and both answer the first one — which is
+what `mockChessPlayNow` re-reads its position inside a timeout for. The `{kind:"pet"}` hook arms a
+silent colleague, a colleague's spawn, a colleague's act and a pat, and **a spec MUST reset it**: one
+mock process serves the whole run, and a pet is a MESSAGE that stays in the history.
+
+`cd web && bun run preview -- --out /tmp/pet --pet` captures nineteen states, and most of them had
+never been drawn in a browser at all: the spawn row the menu offers in both themes, one creature and
+two of them re-cutting each other's lanes in both themes, the speech bubble in both themes, the pet's
+own menu and its armed Remove in both themes, a colleague's creature, the RED trigger a refused press
+leaves and that trigger cropped, the whole thing at a phone's width where the pet, its trigger and
+the header's own trigger are three targets in one column, and Settings › Companions. `pet.spec.ts`
+pins every rule the page owns in fifteen tests, and `pet-wire.test.ts`, `pet-state.test.ts`,
+`pet-thread.test.ts`, `pet-act.test.ts`, `pet-skin.test.ts`, `pet-visibility.test.ts`,
+`pet-layer.test.tsx` and `desksprite.test.ts` the pure ones.
+
+**AND THIS FEATURE CLOSED ONE TEST DEFECT SIXTEEN TIMES, which is the durable lesson of the whole
+branch.** Sixteen measured instances of *a source-scan test satisfied by something other than the
+thing it names* — every one found by MUTATION and none by reading. Five were WINDOWS (a slice that
+ran to EOF so a sibling's copy of a line satisfied it, a scan that did not exist, a window reaching
+the next row's own attribute, three rows outside the loop entirely, and a marker whose absence made
+`indexOf` return −1 and silently sliced from the end); three were PREDICATES (`aria-disabled`
+satisfying `disabled={busy}` by SUBSTRING — a shippable edit that left all five rows fully live, a
+prefix asserted with no terminator, and a trailing comment quoting the deleted line); two were
+HELPERS whose comment strip was weaker than the sibling they claimed to follow; and the rest were
+assertions true of the defect as well as of the fix — a re-lane test green under the rebuild mutation,
+because a fresh sprite starts at `bounds.min` and a creature measured seconds after birth is already
+standing where a teleport would put it, and a headline test asserting `scrollTop` in a history with
+`scrollable === 0`, so it read `0 === 0` and the rule it named — *it floats rather than taking room* —
+was pinned by nothing. **Three rules came out of it and they belong to any test of this shape:** bound
+a window at a marker the text inside it cannot itself contain and assert BOTH ends; assert the exact
+spelling that does the work, never a substring of it; and prove every one by mutation, confirming the
+edit LANDED in both directions (the new form present AND the old form gone) — a mutation aimed at a
+stale line number passes and proves nothing. Twice on this branch a mutation harness committed its own
+probe, once because it asserted the landing between the write and the restore and then re-took its
+backup from the mutated file, and once because Python runs no `finally` on `SIGTERM`. Both were
+caught, nothing shipped, and the harness now restores from git on every exit path.
+
+**WHAT IS UNVERIFIED AGAINST THE TENANT.** Three things, and each is exact:
+
+- **No probe has posted a pet ledger line and read it back byte for byte.** The wire rides `send` and
+  `edit`, both measured elsewhere, and `examples/sealed_message_probe.rs` measured a base64url token
+  surviving Teams' own sanitizer at 10 923 characters — so a line of letters, digits, spaces and full
+  stops is *expected* to survive. Expected is not measured, and **chess's own `.`-separated ledger
+  carries the identical gap.**
+- **THE PAIRING HAS NEVER HAPPENED.** Nobody has had a colleague's creature arrive on a live frame,
+  because that needs a second machine running this app. What the mock proves is that this build folds
+  another ledger correctly; what nothing proves is that a real colleague's frame is the one it folds.
+- **EVERY CAPTURE IS AGAINST THE MOCK.** The five states drawn for the first time in this feature's
+  whole life were drawn there — and what they revealed is in this section rather than in a note: the
+  floor that never fell, the trigger 4px off screen, the menu over its own creature, the creature on
+  its own trigger, and the phone dead zone.
 
 ## Renaming a person, and giving them a face (LOCAL, and gated)
 

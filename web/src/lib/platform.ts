@@ -119,6 +119,35 @@ export function useCoarsePointer(): boolean {
 }
 
 /**
+ * Whether this reader asked for LESS MOTION — live, which is the whole reason it is here.
+ *
+ * motion/react publishes `useReducedMotion`, and it is `useState(prefersReducedMotion.current)`
+ * with NO SUBSCRIPTION: its own source carries `TODO See if people miss automatically updating
+ * shouldReduceMotion setting` under a docstring claiming it responds actively. So it is read once
+ * per MOUNT, and for a surface it can switch off entirely that is worse than a stale flag. Under
+ * reduced motion the companion layer draws nothing AND its spawn row is not offered — so a reader
+ * who turns Reduce Motion OFF had no in-app path to a creature at all until they reloaded, with
+ * nothing anywhere saying why.
+ *
+ * It follows {@link useCoarsePointer} line for line, including `false` until it has asked: this app
+ * is server-rendered, so a lazy initializer reading `matchMedia` would answer one thing on the
+ * server and another on the client and mismatch at hydration. What that costs is one frame, and the
+ * one surface that reads this has two other answers of "nothing" over it (the stored preference,
+ * also read in an effect, and real pet data, which arrives over the socket long after either).
+ */
+export function usePrefersReducedMotion(): boolean {
+  const [reduce, setReduce] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setReduce(query.matches);
+    const onChange = (event: MediaQueryListEvent) => setReduce(event.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+  return reduce;
+}
+
+/**
  * Whether a dismissable LAYER was open at the moment the reader last pressed a key.
  *
  * This exists because the obvious test cannot be made at the obvious time. The app shell's own

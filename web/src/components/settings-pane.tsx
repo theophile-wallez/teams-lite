@@ -14,6 +14,8 @@ import {
   Moon02Icon,
   Settings02Icon,
   Sun03Icon,
+  ViewIcon,
+  ViewOffIcon,
   VolumeHighIcon,
   VolumeOffIcon,
 } from "@hugeicons/core-free-icons";
@@ -102,8 +104,8 @@ export function SettingsPane(props: { onBack?: () => void }) {
         <div className="flex min-w-0 flex-col">
           <h2 className="truncate text-sm font-medium text-foreground">Settings</h2>
           <p className="truncate text-[11px] text-text-faint">
-            AI providers, custom agents, integrations, privacy, people, appearance, sounds, and
-            this app
+            AI providers, custom agents, integrations, privacy, people, appearance, sounds,
+            companions, and this app
           </p>
         </div>
       </header>
@@ -134,6 +136,9 @@ export function SettingsPane(props: { onBack?: () => void }) {
           <NotificationSettings />
           <AppearanceSettings />
           <SoundsSettings />
+          {/* Beside the sounds, at the end of the run that says what this WINDOW is like:
+              appearance, then what it plays, then what it draws. */}
+          <CompanionsSettings />
           <MaintenanceSettings />
         </div>
       </div>
@@ -1154,6 +1159,83 @@ function SoundsSettings() {
             className={cn(
               "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
               enabled ? "translate-x-[22px]" : "translate-x-0.5",
+            )}
+          />
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** Whether THIS WINDOW draws the conversations' companions. A per-device preference, persisted
+ *  client side beside the sounds and the appearance (lib/pet-visibility.ts holds the whole of
+ *  it), because whether a reader wants to look at a creature is not a fact about the
+ *  conversation — so there is nothing to publish and no backend row behind this switch.
+ *
+ *  **HIDING IS NOT DESPAWNING, and the words say so rather than leaving it to be worked out** —
+ *  in the SUBTITLE, which is on screen at the moment the reader is deciding, and again in the
+ *  row once the switch is off. It used to be in the off state alone, so the one fact somebody
+ *  needs BEFORE the press arrived only after it: reversible in the same second, and still the
+ *  wrong order. Off stops this window drawing them; the reader's own pet stays in the thread,
+ *  their friends still see it, and it goes on ageing. Putting a pet down for everybody is its
+ *  own menu's Remove, which asks twice — and a reader who could not tell the two apart would
+ *  turn this off believing they had done that. That menu is deliberately NOT named on screen
+ *  until it exists: a control the reader cannot find reads as one this app has lost.
+ *
+ *  **It is drawn whether or not a pet exists anywhere**, with no empty state: Settings is where
+ *  somebody goes to turn a thing off before they have ever met it. */
+function CompanionsSettings() {
+  const controller = useController();
+  const shown = useAppState((s) => s.petsShown);
+
+  return (
+    <section className="flex flex-col gap-4" data-testid="companions-settings">
+      <div className="flex flex-col">
+        <h3 className="text-[15px] font-medium text-foreground">Companions</h3>
+        <p className="text-[13px] text-text-faint">
+          Draw the little creature a conversation keeps — yours and your colleagues'. This
+          decides what this browser SHOWS: it never takes a pet away from the thread.
+        </p>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4 shadow-chip">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary shadow-chip">
+            <HugeiconsIcon
+              icon={shown ? ViewIcon : ViewOffIcon}
+              className="size-5"
+              strokeWidth={1.5}
+            />
+          </div>
+          <div className="flex min-w-0 flex-col">
+            <span className="text-[13px] font-medium text-foreground">Show companions</span>
+            {/* The cost of OFF, where the reader is deciding: this hides them in this window
+                only. A pet is taken away for everybody from its own menu. */}
+            <span className="text-[11px] text-text-faint">
+              {shown
+                ? "On — in this browser"
+                : "Off — hidden in this browser only. Your pet is still in the thread and your colleagues still see it."}
+            </span>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          role="switch"
+          aria-checked={shown}
+          aria-label="Show companions"
+          data-testid="companions-toggle"
+          onClick={() => controller.setPetsShown(!shown)}
+          className={cn(
+            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+            shown ? "bg-primary" : "bg-element",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block size-5 transform rounded-full bg-white shadow-sm transition-transform",
+              shown ? "translate-x-[22px]" : "translate-x-0.5",
             )}
           />
         </button>

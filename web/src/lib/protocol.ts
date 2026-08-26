@@ -9,9 +9,11 @@
 // second copy that would drift.
 import type { TrackerPerson } from "./tracker-people";
 
-// A chess message signs itself with a trailing marker, and the chat list must show the move
-// rather than the line that carries it (see lib/chess-wire.ts).
+// A chess message and a pet message each sign themselves with a trailing marker, and the chat
+// list must show what happened rather than the line that carries it (see lib/chess-wire.ts and
+// lib/pet-wire.ts).
 import { chessPreviewText } from "./chess-wire";
+import { stripPetLine } from "./pet-wire";
 
 // Mirrors the Rust `ConversationKind` (src/store.rs).
 export type ConversationKind = "one_on_one" | "group" | "notes" | "unknown";
@@ -1896,6 +1898,31 @@ function firstName(full: string): string {
 }
 
 /**
+ * What somebody SAID, with the machine-readable line a feature signed the body with taken off.
+ *
+ * Two features sign a body that way — a game of CHESS and a COMPANION — and no surface that shows
+ * a message's words as TEXT may show either line. Both strips run in ONE place rather than once
+ * per surface: a rule spelled twice is one the third reader is given only half of, which is
+ * exactly how the page's own desktop notification came to carry a whole pet record.
+ *
+ * Each strip RE-VALIDATES the tail before cutting, so a real message that happens to contain
+ * "— chess " or "— pet " is left whole — and a message is one or the other and never both, so the
+ * order they run in decides nothing.
+ *
+ * THREE readers, and each showed a line it should not have. A chat row read `♟ 1. e4 — chess
+ * 7f3a1c 1 e4, via teams-lite`; a channel row the same; and a desktop notification about a
+ * colleague's spawn read `Nori is here. — pet 7f3a1c v1 s.cat, via teams-lite` — the WHOLE line
+ * there, because a notification is built from the body rather than from a 120-character preview.
+ *
+ * A surface that draws the message as its own THING rather than as words does not use this: the
+ * history absorbs both into what draws them, and the narrow chat panel beside a call leaves them
+ * out. Stripping is for the places that have only a line of text to give.
+ */
+export function withoutWireLine(text: string): string {
+  return stripPetLine(chessPreviewText(text));
+}
+
+/**
  * Sidebar preview line: "You:" when we sent it, "FirstName:" in a group, and the
  * bare snippet in a 1:1 / Notes where the sender is implicit.
  *
@@ -1908,10 +1935,9 @@ function firstName(full: string): string {
  * in the list and in the thread alike.
  */
 export function previewLine(c: Conversation, agent?: string | null): string {
-  // A chess message's trailing marker is the machine-readable half and nothing a reader of
-  // the chat list wants: left in, a row would read "♟ 1. e4 — chess 7f3a1c 1 e4, via
-  // teams-lite".
-  const body = chessPreviewText(c.last_message_preview ?? "");
+  // A chess or a pet message's trailing marker is the machine-readable half and nothing a
+  // reader of the chat list wants — see {@link withoutWireLine}.
+  const body = withoutWireLine(c.last_message_preview ?? "");
   if (!body) return "";
   if (agent) return `${agent}: ${body}`;
   if (c.last_message_from_me) return `You: ${body}`;
@@ -2122,9 +2148,9 @@ export function channelLabel(c: Channel): string {
  * conversation the local agent answers in out of the box.
  */
 export function channelPreviewLine(c: Channel, agent?: string | null): string {
-  // A channel holds no board, but a colleague running teams-lite may still have posted a
-  // chess message into one — and the marker is no more readable here than in a chat.
-  const body = chessPreviewText(c.last_message_preview ?? "");
+  // A channel holds no board and no companion, but a colleague running teams-lite may still
+  // have posted either into one — and the marker is no more readable here than in a chat.
+  const body = withoutWireLine(c.last_message_preview ?? "");
   if (!body) return "";
   if (agent) return `${agent}: ${body}`;
   if (c.last_message_from_me) return `You: ${body}`;

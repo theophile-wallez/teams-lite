@@ -1,0 +1,89 @@
+{
+  "name": "duck",
+  "label": "Duck",
+  "author": "teams-lite",
+  "palette": {
+    ".": null,
+    "Y": "#FFD23F",
+    "y": "#E0A92B",
+    "O": "#F58A2E",
+    "o": "#D06A18",
+    "W": "#FFF6E0",
+    "N": "#1A1A2E"
+  },
+  "size": { "w": 13, "h": 13 },
+  "anchor": { "x": 6, "y": 13 },
+  "traits": {
+    "walkSpeed": 0.9,
+    "messages": {
+      "working": "paddling…",
+      "done": "quack ✓",
+      "error": "…quack?",
+      "seat": "back to the pond."
+    }
+  },
+  "frames": {
+    "idle": [
+      "....YYYYY....",
+      "...YYYYYYY...",
+      "..YYNYYYNYY..",
+      "..YYYYYYYYY..",
+      "...YOOOOOY...",
+      "....YoooY....",
+      "..YYYYYYYYY..",
+      ".YYYYWWWYYYY.",
+      ".YYYWWWWWYYY.",
+      ".yYYWWWWWYYy.",
+      "..yyYYYYYyy..",
+      "...OO...OO...",
+      "..OOO...OOO.."
+    ],
+    "held": [
+      "....YYYYY....",
+      "...YYYYYYY...",
+      "..YWNYYYNWY..",
+      "..YYYYYYYYY..",
+      "...YOOOOOY...",
+      "...YoooooY...",
+      "..YYYYYYYYY..",
+      ".YYYYWWWYYYY.",
+      ".YYYWWWWWYYY.",
+      ".yYYWWWWWYYy.",
+      "..yyYYYYYyy..",
+      ".............",
+      "............."
+    ],
+    "walk": [
+      [
+        "....YYYYY....",
+        "...YYYYYYY...",
+        "..YYNYYYNYY..",
+        "..YYYYYYYYY..",
+        "...YOOOOOY...",
+        "....YoooY....",
+        "..YYYYYYYYY..",
+        ".YYYYWWWYYYY.",
+        ".YYYWWWWWYYY.",
+        ".yYYWWWWWYYy.",
+        "..yyYYYYYyy..",
+        "........OO...",
+        "..OOO...OOO.."
+      ],
+      [
+        "....YYYYY....",
+        "...YYYYYYY...",
+        "..YYNYYYNYY..",
+        "..YYYYYYYYY..",
+        "...YOOOOOY...",
+        "....YoooY....",
+        "..YYYYYYYYY..",
+        ".YYYYWWWYYYY.",
+        ".YYYWWWWWYYY.",
+        ".yYYWWWWWYYy.",
+        "..yyYYYYYyy..",
+        "...OO........",
+        "..OOO...OOO.."
+      ]
+    ]
+  }
+}

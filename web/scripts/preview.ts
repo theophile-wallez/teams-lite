@@ -62,6 +62,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/mr --merge-request # review + approve a merge request
 //   bun run web/scripts/preview.ts --out /tmp/chat --chat-menu  # chat sections + the row's "…" menu
 //   bun run web/scripts/preview.ts --out /tmp/seal --seal       # a chat whose words are encrypted
+//   bun run web/scripts/preview.ts --out /tmp/pet --pet         # a companion walking a conversation
 //
 // To capture a specific thread instead of the top row — `--conversation` matches a
 // sidebar row by name, so a fixture can be aimed at without writing a driver:
@@ -900,6 +901,50 @@ export async function closeConversationMenu(page: Page): Promise<void> {
   if (!(await page.locator('[data-testid="conversation-menu-content"]').count())) return;
   await page.locator('[data-testid="conversation-menu"]').click();
   await page.waitForSelector('[data-testid="conversation-menu-content"]', { state: "detached" });
+}
+
+// ---- the CREATURE a conversation keeps ---------------------------------------
+
+/** The thread the creatures live in, and its own id — the fixture the pet spec keeps them in. */
+export const PET_THREAD_NAME = "Pet Corner";
+export const PET_THREAD_ID = "19:pet-demo@thread.v2";
+
+/**
+ * TAKE a companion from the conversation's own menu, and wait for it to be walking.
+ *
+ * A spawn is a `send` — a real message under the user's name, which is why this asserts the mock
+ * sentinel like every other write in this file. The creature appears only when its own ledger comes
+ * back, so what is waited on is the sprite and not the press.
+ *
+ * The reader's own pet is found by the one thing on screen that says whose a pet is: the trigger in
+ * its lane is a NAME, "You" for theirs. Taking `.first()` would drive whichever creature the fold
+ * happened to put first, which in a thread with a colleague's own pet in it is a coin toss.
+ */
+export async function takeCompanion(page: Page, skin = "cat"): Promise<string> {
+  await assertMockBackend(page);
+  await openConversationMenu(page);
+  await page.locator(`[data-testid="pet-spawn-skin-${skin}"]`).click();
+  await page.locator('[data-testid="pet-spawn"]').click();
+  // The menu closes ITSELF on a successful spawn, so this waits for that rather than pressing the
+  // trigger: a press landing while it is mid-close RE-OPENS it, and then nothing ever detaches.
+  await page
+    .locator('[data-testid="conversation-menu-content"]')
+    .waitFor({ state: "detached", timeout: 20_000 });
+  const trigger = page.locator('[data-testid="pet-menu-trigger"]', { hasText: "You" });
+  await trigger.waitFor({ state: "attached", timeout: 20_000 });
+  return (await trigger.getAttribute("data-pet")) ?? "";
+}
+
+/** Open one creature's own menu — the small named pill standing in that pet's lane. */
+export async function openPetMenu(page: Page, petId?: string): Promise<void> {
+  const trigger = page.locator(
+    petId
+      ? `[data-testid="pet-menu-trigger"][data-pet="${petId}"]`
+      : '[data-testid="pet-menu-trigger"]',
+  );
+  await trigger.first().click();
+  await page.waitForSelector('[data-testid="pet-menu"]');
+  await page.waitForTimeout(200);
 }
 
 /**
@@ -4184,6 +4229,197 @@ if (import.meta.main) {
       console.log(
         `[preview] wrote ${out}-{week,week-all,details,month,day,agenda,weekends,mobile,` +
           `mobile-details,mobile-open-in}-light.png and ${out}-{month,week}-dark.png`,
+      );
+    });
+    process.exit(0);
+  }
+
+  // A COMPANION walking over a conversation, and every state of it a screenshot can hold.
+  //
+  // Most of what is below had never been drawn in a browser at all before this run: the creature
+  // itself, two of them re-cutting each other's lanes, the speech bubble, the pet's own menu, the
+  // armed Remove, the RED trigger a refused press leaves, and the whole thing at a phone's width
+  // where the pet, its trigger and the header's own trigger are three targets in one column.
+  //
+  // The pet thread is its own fixture and everything here goes through the mock's `{kind:"pet"}`
+  // hook, which is reset at the end: one mock process serves the whole run, and a pet is a MESSAGE
+  // that stays in the history.
+  if (args.includes("--pet")) {
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      const layer = '[data-testid="pet-layer"]';
+      const sendControl = (data: Record<string, unknown>) =>
+        page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/send-control`, { data });
+      /** How many bubbles are SHOWING. A string predicate, because this file is type-checked
+       *  without the DOM lib and a function running in the page cannot name `document`. */
+      const bubblesShowing = (count: number) =>
+        page.waitForFunction(
+          `document.querySelectorAll(".pet-sprite-bubble:not([hidden])").length === ${count}`,
+        );
+
+      // SILENT first, so the reader's own creature arrives alone and the colleague's is a second
+      // event this capture chooses the moment of. Reset before arming, because `silent` has to be
+      // set before the first spawn to be worth anything.
+      await emit({ kind: "pet", reset: true });
+      await emit({ kind: "pet", silent: true });
+      await openConversation(page, PET_THREAD_NAME);
+
+      // THE OFFER: the conversation's own menu, with the art to pick and what the press costs. It
+      // is the only way into the feature, which is why it is unfolded rather than a disclosure.
+      await openConversationMenu(page);
+      await page.locator('[data-testid="pet-spawn"]').waitFor();
+      await page.waitForTimeout(200);
+      await shot(`${out}-offer-light.png`);
+      await setTheme("dark");
+      await openConversationMenu(page);
+      await shot(`${out}-offer-dark.png`);
+      await setTheme("light");
+      await closeConversationMenu(page);
+
+      // ONE CREATURE, walking. Given a moment to leave its lane's left edge first, because a sprite
+      // photographed the instant it is created is standing in the corner of its own box.
+      const mine = await takeCompanion(page, "cat");
+      await page.waitForSelector('[data-testid="pet-sprite"]');
+      await page.waitForTimeout(2500);
+      await shot(`${out}-one-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-one-dark.png`);
+      await setTheme("light");
+
+      // TWO, which is the state the lanes exist for: the colleague takes a duck, every lane
+      // narrows, and no creature may be snapped back to the edge of its new one.
+      await emit({ kind: "pet", colleague: true });
+      await page.waitForFunction(
+        'document.querySelectorAll(\'[data-testid="pet-sprite"]\').length === 2',
+      );
+      await page.waitForTimeout(2000);
+      await shot(`${out}-two-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-two-dark.png`);
+      await setTheme("light");
+
+      // THE MENU on the reader's own creature: the pat, the three acts, the art it wears, and the
+      // way to send it home. The trigger says whose pet it is, which is the one thing the art
+      // cannot — and NOTE what this shot shows: the menu grows upward from a trigger at the foot of
+      // the lane, so it covers the creature it is about.
+      await openPetMenu(page, mine);
+      await shot(`${out}-menu-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-menu-dark.png`);
+      await setTheme("light");
+
+      // THE ARMED REMOVE, which is a one-way door for that creature's ledger: the second press
+      // posts "gone home" to everybody in the thread, so the words have to say so before it.
+      await page.locator('[data-testid="pet-remove"]').click();
+      await page.waitForSelector('[data-testid="pet-remove"][data-armed="true"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-armed-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-armed-dark.png`);
+      await setTheme("light");
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(300);
+
+      // A COLLEAGUE'S menu, which is a different set: the pat and the three acts, but no skin rows
+      // and no Remove — a colleague's creature is not the reader's to re-dress or to send home.
+      const theirs = page.locator('[data-testid="pet-menu-trigger"]').filter({ hasNotText: "You" });
+      await theirs.first().click();
+      await page.waitForSelector('[data-testid="pet-menu"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-theirs-light.png`);
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(300);
+
+      // THE RED TRIGGER: a refused press, reported in the pet's own lane. A pat is published from
+      // the creature itself, so a reader who tapped it is looking at the lane and not at a menu they
+      // never opened — the trigger therefore turns and carries the sentence in its own title, and
+      // the menu one press away draws it in full. Armed through the mock's send control, which
+      // refuses the EDIT a feed is.
+      await sendControl({ error: "the tenant refused this edit" });
+      await openPetMenu(page, mine);
+      await page.locator('[data-testid="pet-feed"]').click();
+      await page.waitForSelector('[data-testid="pet-error"]');
+      await page.waitForTimeout(200);
+      await shot(`${out}-refused-light.png`);
+      // And the trigger alone: 24px of pill carrying a whole refusal.
+      await shot(
+        `${out}-refused-trigger-light.png`,
+        `[data-testid="pet-menu-trigger"][data-pet="${mine}"]`,
+      );
+      // TAKEN BACK before anything else is captured. `petError` is cleared by the next press on that
+      // pet and by nothing else, so a refusal left standing would put a red trigger in every shot
+      // below it — which is the state of a capture rather than a fact about the surface.
+      await sendControl({ clear: true });
+      await page.locator('[data-testid="pet-feed"]').click();
+      await page.waitForSelector('[data-testid="pet-error"]', { state: "detached" });
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(400);
+
+      // A PHONE, which is where this app is read and where three targets share one column: the
+      // header's own trigger, the creature, and the creature's trigger. At 390px each lane is 195px
+      // wide with two pets in it, so this is also the width the lanes are tightest at.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(800);
+      await shot(`${out}-phone-light.png`);
+      await openPetMenu(page, mine);
+      await shot(`${out}-phone-menu-light.png`);
+      await page.keyboard.press("Escape");
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(400);
+
+      // A SPEECH BUBBLE, and it is captured LAST of the conversation's states because reaching it
+      // puts a GAME in this thread. The engine speaks one line on entering a non-idle state, and
+      // what puts a creature to work is its owner's turn in a live game — so a game is seeded here
+      // and taken away again. It is the only way to reach the state: nothing about a pet speaks on
+      // its own, and the shipped skins carry no `work` FRAME, so a bubble is all `working` looks
+      // like besides a faster pace.
+      //
+      // EACH THEME GETS A FRESH LINE, and getting one takes more than repeating the trigger. Two
+      // things had to be learned here, and both are worth the words:
+      //
+      //   - A BUBBLE LIVES 2.6 s, so a wait for "a bubble is showing" was satisfied by the PREVIOUS
+      //     capture's own — which then expired during the theme switch, and the dark shot came back
+      //     with no bubble in it. That is this feature's own defect class (a wait satisfied by
+      //     something other than the thing it names) reappearing in a capture script. So each line
+      //     is waited for from ZERO.
+      //   - A SPEECH IS A STATE CHANGE, and `{kind:"chess", reset:true}` does not undo one here: it
+      //     puts the chess FIXTURE back and leaves a game seeded in THIS thread alone, so the
+      //     creature stays `working` and a second seed says nothing at all. The colour is therefore
+      //     what moves: `mine: "w"` is the reader's turn, so their CAT works and speaks; `mine: "b"`
+      //     is the colleague's, so their DUCK does — one line each, on two different creatures, with
+      //     no reset in between.
+      const speak = async (mine: "w" | "b") => {
+        await bubblesShowing(0);
+        await emit({ kind: "chess", seed: { mine, moves: [], conversation: PET_THREAD_ID } });
+        await page.waitForSelector('[data-testid="pet-sprite"][data-state="working"]');
+        await bubblesShowing(1);
+      };
+      await speak("w");
+      await shot(`${out}-bubble-light.png`, layer);
+      await setTheme("dark");
+      await speak("b");
+      await shot(`${out}-bubble-dark.png`, layer);
+      await setTheme("light");
+      await emit({ kind: "chess", reset: true });
+
+      // AND THE SWITCH, which is the whole of this feature's off state: the creature stays in the
+      // thread and the colleagues still see it, and this browser draws none of it.
+      await openSettings(page);
+      const section = page.locator('[data-testid="companions-settings"]');
+      await section.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(200);
+      await shot(`${out}-settings-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-settings-dark.png`, '[data-testid="companions-settings"]');
+      await setTheme("light");
+
+      // Leave the shared mock as this file declares it: the pet thread back to its seed, the
+      // colleague un-silenced, no game anywhere, and no armed send failure.
+      await emit({ kind: "pet", reset: true });
+      await emit({ kind: "chess", reset: true });
+      await sendControl({ clear: true });
+      console.log(
+        `[preview] wrote ${out}-{offer,one,two,menu,armed,bubble,settings}-{light,dark}.png and ` +
+          `${out}-{theirs,refused,refused-trigger,phone,phone-menu}-light.png`,
       );
     });
     process.exit(0);

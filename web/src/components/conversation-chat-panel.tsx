@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Loading02Icon } from "@hugeicons/core-free-icons";
 import { chessWireIn } from "~/lib/chess-wire";
+import { petWireIn } from "~/lib/pet-wire";
 import { bodyFormat, mentionsByItemId, type ChatMessage } from "~/lib/protocol";
 import { agentAuthorship } from "~/lib/agent-message";
 import { Avatar } from "./avatar";
@@ -82,6 +83,40 @@ export function CallStageChat(props: { conversation: string }) {
   return <ConversationChatPanel conversation={props.conversation} />;
 }
 
+/**
+ * Whether a message is MACHINERY rather than something somebody said.
+ *
+ * A game of CHESS and a COMPANION are each carried by ordinary Teams messages signed with a
+ * trailing line, and the history draws each as its own thing — a BOARD
+ * (components/chess-game-card.tsx) and a creature the OVERLAY walks over the thread
+ * (components/pet-layer.tsx). Left in, this column showed the raw signed line instead, which is
+ * the one thing both features promise is drawn nowhere.
+ *
+ * It LEAVES THEM OUT rather than stripping the line off them, and that is the difference between
+ * this panel and a sidebar row. Nobody typed those words: a pet's are `Nori · fed 3`, regenerated
+ * on every act, so a stripped line would leave a row of machinery standing between two things
+ * people really said. The pane absorbs them into what draws them; this panel has neither a board
+ * nor an overlay, and the game or the creature is on screen beside it.
+ *
+ * Read by WIRE PRESENCE, never from a game or a pet some derivation resolved: a record whose own
+ * root has paged out of the loaded history resolves to nothing, and asking the message itself
+ * cannot have that failure.
+ */
+function carriesWire(message: ChatMessage): boolean {
+  return chessWireIn(message) !== null || petWireIn(message) !== null;
+}
+
+/**
+ * What the column SHOWS: the newest of what was said, with the machinery left out.
+ *
+ * Both halves of that in one pure function, exported so a test drives the decision rather than
+ * reading it — the bound as much as the filter, since which end of the thread survives it is what
+ * a reader of a live call is looking at.
+ */
+export function transcriptMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((message) => !carriesWire(message)).slice(-TRANSCRIPT_MESSAGES);
+}
+
 /** The newest of the thread, oldest first, stuck to the bottom.
  *
  *  It is NOT virtualized, and that is why it is bounded: a panel this narrow is read
@@ -90,18 +125,7 @@ export function CallStageChat(props: { conversation: string }) {
  *  {@link TRANSCRIPT_MESSAGES} is in the conversation itself. */
 function ChatTranscript(props: { messages: ChatMessage[]; testId?: string }) {
   const scroller = useRef<HTMLDivElement | null>(null);
-  const shown = useMemo(
-    () =>
-      props.messages
-        // A CHESS message is a game rather than something somebody said, and the history draws it
-        // as a BOARD (see components/chess-game-card.tsx). Left in, this column showed the raw
-        // signed line the game is carried by — which is the one thing the whole feature promises
-        // is drawn nowhere. The pane absorbs them into their board; this panel has no board, so
-        // it leaves them out: the game is on screen beside it.
-        .filter((message) => chessWireIn(message) === null)
-        .slice(-TRANSCRIPT_MESSAGES),
-    [props.messages],
-  );
+  const shown = useMemo(() => transcriptMessages(props.messages), [props.messages]);
   const newest = shown[shown.length - 1]?.id;
 
   // Stick to the bottom as messages arrive. A call's chat is followed live, so the newest

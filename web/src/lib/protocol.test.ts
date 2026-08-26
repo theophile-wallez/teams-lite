@@ -22,6 +22,7 @@ import {
   mergeRefreshedHistoryPage,
   trimHistoryPage,
   previewLine,
+  withoutWireLine,
   convLabel,
   isGroupChat,
   isMeetingChat,
@@ -92,6 +93,8 @@ import type {
   Channel,
   ReadReceipt,
 } from "./protocol";
+import { newPetLedger, petMessageHtml, withPetAct } from "./pet-wire";
+import { chessMessageHtml, newChessLedger } from "./chess-wire";
 
 function message(
   seq: number,
@@ -887,6 +890,168 @@ describe("trimHistoryPage", () => {
   });
 });
 
+/**
+ * The preview the BACKEND stores for a body, mirroring `teams_read::preview_from_html`: the blocks
+ * flattened, whitespace collapsed, and cut at 120 characters with the ellipsis it marks its own
+ * truncation with.
+ *
+ * The fixtures below are DERIVED through it rather than hand-typed, because the whole defect was a
+ * line the cut had already broken: a fixture written out by hand is an untruncated one, which is
+ * exactly what a strip requiring `, via teams-lite` passes on.
+ *
+ * **IT IS A SECOND SPELLING OF A RUST FUNCTION, so its ceiling is PINNED IN BOTH DIRECTIONS.** A
+ * wrong mirror is otherwise silent: measured, moving the cap here from 120 to 130 failed nothing at
+ * all, because below ~120 the marker leaves the string and above 141 the pet fixture stops being
+ * truncated — the band the numbers happen to leave is where a wrong mirror hides. So the test below
+ * asserts this cap where it is spelled, and `push_policy::tests::
+ * the_page_mirrors_this_previews_own_ceiling` measures the ceiling through `preview_from_html`
+ * itself and scans THIS FILE for the number, which is what catches `MAX_CHARS` moving in Rust.
+ *
+ * **It is faithful for the bodies THIS feature writes and it is not a general port**, in two ways
+ * that do not arise on those bodies and would both shift the cut point: an INLINE tag becomes a
+ * space here where the backend drops it (`<p>a<b>b</b>c</p>` → `a b c` against `abc`), and ENTITIES
+ * are not decoded (`Tom &amp; Jerry` counts 15 here and 11 there — so a pet named `Tom & Jerry`,
+ * whose label `petMessageHtml` escapes, would compute the wrong cut point).
+ */
+function backendPreview(html: string): string {
+  const flat = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return [...flat].length > 120 ? `${[...flat].slice(0, 120).join("").trimEnd()}…` : flat;
+}
+
+/** A pet record with three acts of MIXED kind — a third act is where a body crosses 120 for every
+ *  shipped skin (measured: 140 for the cat, 142 for the duck, 150 for the blue boy). THIS fixture is
+ *  141 raw, because `Nori` is a four-character label rather than any skin's own; the shipped labels
+ *  are what pet-wire.ts states, and three FEEDS of the blue boy crosses too (128), so only "two acts
+ *  never cross" holds of every skin. */
+function playedWithPet(): string {
+  let ledger = newPetLedger("7f3a1c", "cat");
+  for (const kind of ["feed", "play", "nap"] as const) {
+    ledger = withPetAct(ledger, { at: 1756060012345, kind, target: "7f3a1c" });
+  }
+  return petMessageHtml(ledger, "Nori");
+}
+
+/** A clocked v2 game after the challenger's FIRST own move — measured as the point a chess body
+ *  crosses 120: 61 characters of words, a space, and a 77-character line is 139, against 112 for
+ *  the challenge alone — those words being the TEN-MINUTE challenge's, so another clock spelling
+ *  moves the number and not the fact. Every clocked game leaked from move one. */
+function clockedGameOneMove(): string {
+  const ledger = {
+    ...newChessLedger("w"),
+    opened: true,
+    time: { base: 600, increment: 0 },
+    at: 1756060012345,
+    moves: [{ ply: 1, san: "e4", clockMs: 598300 }],
+  };
+  return chessMessageHtml({ game: "7f3a1c", body: { kind: "ledger", ledger } });
+}
+
+// The one strip THREE surfaces that have only a line of text to give share: a chat row, a channel
+// row, and the page's own desktop notification — which is the sharpest of them, because it is
+// built from the BODY rather than from a 120-character preview, so a colleague's spawn popped a
+// notification carrying their pet's whole record.
+describe("withoutWireLine", () => {
+  // THE MIRROR'S OWN CEILING, pinned where it is spelled: 120 code points plus the ellipsis the
+  // backend marks its cut with. A body of one repeated character is used rather than a fixture,
+  // because `trimEnd` would take a cut landing on a space and make this a fact about that body.
+  // `push_policy::tests::the_page_mirrors_this_previews_own_ceiling` reads this line for the
+  // number, so the two sides cannot drift apart in silence.
+  it("mirrors the backend's own 120-character ceiling", () => {
+    expect([...backendPreview(`<p>${"a".repeat(400)}</p>`)].length).toBe(121);
+  });
+
+  it("takes off a game's line and a companion's", () => {
+    expect(withoutWireLine("♟ 1. e4\n— chess 7f3a1c 1 e4, via teams-lite")).toBe("♟ 1. e4");
+    expect(
+      withoutWireLine(
+        "Nori · fed 3 · played 1\n— pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c, via teams-lite",
+      ),
+    ).toBe("Nori · fed 3 · played 1");
+  });
+
+  // THE HALF THAT SHIPPED BROKEN. A preview is 120 characters, so on a record of any size the
+  // line has no `, via teams-lite` left to re-validate — and a strip that required one passed the
+  // whole cut wire through to the row.
+  it("takes off a line the preview CUT, on both features", () => {
+    const pet = backendPreview(playedWithPet());
+    expect(pet.endsWith("…")).toBe(true);
+    expect(pet).toContain("— pet ");
+    expect(withoutWireLine(pet)).toBe("Nori · fed 1 · played 1 · napped 1");
+
+    const game = backendPreview(clockedGameOneMove());
+    expect(game.endsWith("…")).toBe(true);
+    expect(game).toContain("— chess ");
+    expect(withoutWireLine(game)).toBe(
+      "♟ Chess — I'd like a game. I'm white. 10 min. my moves: 1. e4",
+    );
+  });
+
+  // THE CUT THAT LANDS INSIDE THE ID, which was parked as narrow and measured to be reachable: over
+  // 48 realistic engine-game ledgers (a Stockfish name, a clock, four to six shown moves) EIGHT
+  // leaked, because words of 104–108 characters put the 120th code point inside the six-hex id — so
+  // there is no `<id> <payload>` left to split and the marker fragment survived on the row and in
+  // the push. These two are those bodies. A pet cannot reach it with the shipped skins (its words
+  // top out around 41 and the window is 107–119), so it was a chess-only leak that the pet's own
+  // strip walked past.
+  it("takes off a line whose ID the cut landed inside", () => {
+    expect(
+      withoutWireLine(
+        "♟ Chess — I'm playing Stockfish 3190. 3 min. moves: 20… Qxd5+ … 23. Bxf6 — chess 7f3a…",
+      ),
+    ).toBe("♟ Chess — I'm playing Stockfish 3190. 3 min. moves: 20… Qxd5+ … 23. Bxf6");
+    expect(
+      withoutWireLine(
+        "♟ Chess — I'm playing Stockfish 1320. 3 min + 2 s. moves: … 22… Nbxd7 — chess 7f3a1c…",
+      ),
+    ).toBe("♟ Chess — I'm playing Stockfish 1320. 3 min + 2 s. moves: … 22… Nbxd7");
+    // Both features, since the rule is now spelled once for both.
+    expect(withoutWireLine("Nori is here. — pet 7f3a…")).toBe("Nori is here.");
+    expect(withoutWireLine("Nori is here. — pet 7f3a1c …")).toBe("Nori is here.");
+    // And an id-shaped cut is the ONLY thing that branch takes: prose keeps its words, even where
+    // what follows the marker is longer than an id could be.
+    expect(withoutWireLine("we walked the — pet shop…")).toBe("we walked the — pet shop…");
+    expect(withoutWireLine("I told him — pet the cat, not the d…")).toBe(
+      "I told him — pet the cat, not the d…",
+    );
+  });
+
+  // THE LAST OCCURRENCE, which is this module's headline claim and was pinned by nothing:
+  // `indexOf` here survived all 2012 tests, and on a body that says the marker words twice it
+  // leaks the WHOLE wire — "I told him — pet the cat" is prose, and the real line follows it.
+  it("cuts at the LAST marker, not the first", () => {
+    expect(withoutWireLine("I told him — pet the cat — pet 7f3a1c v1 s.cat, via teams-lite")).toBe(
+      "I told him — pet the cat",
+    );
+  });
+
+  // ONE CASE RULE, THE SAME BOTH SIDES: lowercase, because a real id is `toString(16)` and Rust's
+  // `is_lower_hex` decides it identically. Both cut rules survived losing their `/i` unpinned, and
+  // case-insensitivity here could never admit a real ledger — it could only widen the prose paths
+  // the two cut branches already state.
+  it("cuts a lowercase id and no other case", () => {
+    expect(withoutWireLine("Nori is here. — pet 7F3A…")).toBe("Nori is here. — pet 7F3A…");
+    expect(withoutWireLine("Nori · fed 3 — pet 7F3A1C v1 s.cat 1756…")).toBe(
+      "Nori · fed 3 — pet 7F3A1C v1 s.cat 1756…",
+    );
+    // And the lowercase pair the same fixtures otherwise are IS cut, so this is a case rule rather
+    // than a rule that stopped working.
+    expect(withoutWireLine("Nori is here. — pet 7f3a…")).toBe("Nori is here.");
+    expect(withoutWireLine("Nori · fed 3 — pet 7f3a1c v1 s.cat 1756…")).toBe("Nori · fed 3");
+  });
+
+  it("cuts nothing else, ever", () => {
+    // An agent's own signature is not machinery to a reader: it says who wrote the answer.
+    expect(withoutWireLine("done — claude, via teams-lite")).toBe("done — claude, via teams-lite");
+    // Prose that happens to carry the words. Each strip re-validates the tail before cutting, so
+    // a naive `split` truncating somebody's sentence cannot happen.
+    expect(withoutWireLine("I told him — pet the cat, not the dog")).toBe(
+      "I told him — pet the cat, not the dog",
+    );
+    expect(withoutWireLine("on my way — see you")).toBe("on my way — see you");
+    expect(withoutWireLine("")).toBe("");
+  });
+});
+
 describe("previewLine", () => {
   it("prefixes 'You:' when the last message was from me", () => {
     const c = conversation({ last_message_preview: "on my way", last_message_from_me: true });
@@ -930,6 +1095,54 @@ describe("previewLine", () => {
       last_message_from_me: true,
     });
     expect(previewLine(c)).toBe("You: ♟ 1. e4");
+  });
+
+  // A COMPANION signs its message the same way, and a spawn is an ordinary `send` — so it is a
+  // chat's newest message and lands on this row. Left in, the row read
+  // "Lucas: Nori · fed 3 — pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c, via teams-lite".
+  it("shows the words of a pet message and not the marker that carries them", () => {
+    const mine = conversation({
+      last_message_preview: "Nori is here. — pet 7f3a1c v1 s.cat, via teams-lite",
+      last_message_from_me: true,
+    });
+    expect(previewLine(mine)).toBe("You: Nori is here.");
+    const theirs = conversation({
+      kind: "group",
+      last_message_preview:
+        "Nori · fed 3 · played 1 — pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c, via teams-lite",
+      last_message_sender: "Lucas Silva",
+    });
+    expect(previewLine(theirs)).toBe("Lucas: Nori · fed 3 · played 1");
+  });
+
+  // SURFACE 1 AGAINST A REAL TRUNCATED PREVIEW. `Conversation.last_message_preview` IS the
+  // 120-character `preview_from_html` output, so this is the shape every row really meets once
+  // somebody has played with a pet or made a move.
+  it("shows the words when the preview CUT the line mid-wire", () => {
+    const pet = conversation({
+      last_message_preview: backendPreview(playedWithPet()),
+      kind: "group",
+      last_message_sender: "Lucas Silva",
+    });
+    expect(previewLine(pet)).toBe("Lucas: Nori · fed 1 · played 1 · napped 1");
+    const game = conversation({
+      last_message_preview: backendPreview(clockedGameOneMove()),
+      last_message_from_me: true,
+    });
+    expect(previewLine(game)).toBe(
+      "You: ♟ Chess — I'd like a game. I'm white. 10 min. my moves: 1. e4",
+    );
+  });
+
+  // AND NOTHING ELSE IS EVER CUT. The strip re-validates the tail before cutting, so prose that
+  // happens to carry the words keeps every one of them — a row that quietly truncated a
+  // colleague's sentence would be worse than one showing a marker.
+  it("leaves prose that merely contains the words alone", () => {
+    const c = conversation({
+      last_message_preview: "I told him — pet the cat, not the dog",
+      last_message_from_me: true,
+    });
+    expect(previewLine(c)).toBe("You: I told him — pet the cat, not the dog");
   });
 
   // AN AGENT'S REPLY IS NAMED AFTER THE AGENT. It goes out through the user's own account, so
@@ -1065,6 +1278,61 @@ describe("channelPreviewLine", () => {
   it("names the agent instead of the account the reply went out under", () => {
     const c = channel({ last_message_preview: "Rebased and green.", last_message_from_me: true });
     expect(channelPreviewLine(c, "Claude")).toBe("Claude: Rebased and green.");
+  });
+
+  // A channel holds no board and no companion, but a colleague running teams-lite may still have
+  // posted either into one — and a marker is no more readable here than in a chat.
+  it("shows the words of a chess or a pet message and not the marker", () => {
+    const game = channel({
+      last_message_preview: "♟ 1. e4 — chess 7f3a1c 1 e4, via teams-lite",
+      last_message_sender: "Alice Wonderland",
+    });
+    expect(channelPreviewLine(game)).toBe("Alice: ♟ 1. e4");
+    const pet = channel({
+      last_message_preview: "Nori · fed 3 — pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c, via teams-lite",
+      last_message_sender: "Alice Wonderland",
+    });
+    expect(channelPreviewLine(pet)).toBe("Alice: Nori · fed 3");
+    // And nothing else: prose that merely carries the words keeps all of them.
+    const prose = channel({
+      last_message_preview: "I told him — pet the cat, not the dog",
+      last_message_sender: "Alice Wonderland",
+    });
+    expect(channelPreviewLine(prose)).toBe("Alice: I told him — pet the cat, not the dog");
+  });
+
+  // BOTH SURFACES against the cut that lands inside the ID — the leak measured on 8 of 48 real
+  // engine-game ledgers. One assertion per surface, because the strip is reached through a
+  // different function on each and the whole class of defect this branch kept finding is a rule
+  // that held on one reader and not another.
+  it("shows the words when the cut landed inside the id", () => {
+    const leaking = "♟ Chess — I'm playing Stockfish 3190. 3 min. moves: 20… Qxd5+ … 23. Bxf6 — chess 7f3a…";
+    const words = "♟ Chess — I'm playing Stockfish 3190. 3 min. moves: 20… Qxd5+ … 23. Bxf6";
+    expect(
+      previewLine(conversation({ last_message_preview: leaking, last_message_from_me: true })),
+    ).toBe(`You: ${words}`);
+    expect(
+      channelPreviewLine(
+        channel({ last_message_preview: leaking, last_message_sender: "Alice Wonderland" }),
+      ),
+    ).toBe(`Alice: ${words}`);
+  });
+
+  // SURFACE 2 AGAINST A REAL TRUNCATED PREVIEW, for the reason surface 1 has one: a channel row
+  // reads the same `preview_from_html` output, so the cut line reaches it identically.
+  it("shows the words when the preview CUT the line mid-wire", () => {
+    const pet = channel({
+      last_message_preview: backendPreview(playedWithPet()),
+      last_message_sender: "Alice Wonderland",
+    });
+    expect(channelPreviewLine(pet)).toBe("Alice: Nori · fed 1 · played 1 · napped 1");
+    const game = channel({
+      last_message_preview: backendPreview(clockedGameOneMove()),
+      last_message_sender: "Alice Wonderland",
+    });
+    expect(channelPreviewLine(game)).toBe(
+      "Alice: ♟ Chess — I'd like a game. I'm white. 10 min. my moves: 1. e4",
+    );
   });
 });
 

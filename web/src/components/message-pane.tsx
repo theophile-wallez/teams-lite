@@ -40,8 +40,11 @@ import { defaultAgentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
 import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
 import { recordingsInConversation, type CallRecording } from "~/lib/call-recording";
 import { chessGamesInThread, type ChessGame } from "~/lib/chess-thread";
+import { petsInThread } from "~/lib/pet-thread";
+import { petWireIn } from "~/lib/pet-wire";
 import { CallRecordingCard } from "./call-recording-card";
 import { ChessGamesStrip } from "./chess-games-strip";
+import { PetLayer } from "./pet-layer";
 import { useAppState, useController } from "./controller-context";
 import { ConversationMenu } from "./conversation-menu";
 import { useCallOwnsComposer } from "./call-stage-context";
@@ -124,12 +127,112 @@ const HIGHLIGHT_MS = 1600;
 /** One row of the virtualized history: a single chat message, a whole channel thread
  *  (its root post plus its collapsible replies), or the agent's reply before the message
  *  it is being written into has reached us. */
-type HistoryRow =
+export type HistoryRow =
   | { kind: "message"; key: string; message: ChatMessage; prev?: ChatMessage; next?: ChatMessage }
   | { kind: "thread"; key: string; thread: Thread }
   | { kind: "agent"; key: string; run: AgentRun }
   | { kind: "recording"; key: string; recording: CallRecording }
   | { kind: "chess"; key: string; game: ChessGame };
+
+/**
+ * The rows a CHAT's history is drawn as, and the map a deep link scrolls with.
+ *
+ * Pure and exported so the two absorptions below are held by a test rather than by reading: what a
+ * board swallows and what a creature swallows are decisions about the reader's own history, and
+ * getting either wrong shows them a machine-readable line where somebody's words should be.
+ *
+ * TWO features are carried by ordinary messages here, and they are absorbed DIFFERENTLY:
+ *
+ *  - A GAME becomes a row: every message of it is absorbed into the board that draws it, so a
+ *    sixty-move game adds nothing to the thread's length and the board does not move under the
+ *    reader as it is played.
+ *  - A COMPANION becomes NO ROW AT ALL, because the creature is drawn by the OVERLAY over the
+ *    whole history (components/pet-layer.tsx) rather than in the flow of it. So a pet ledger
+ *    message is simply left out here, and {@link petRowNeighbours} is what gives its id somewhere
+ *    to point.
+ *
+ * **A PET IS ABSORBED BY WIRE PRESENCE, and that is the one place this must not copy chess.** A
+ * game is absorbed from the games the derivation RESOLVED, so a game whose own root has paged out
+ * of the loaded history is absorbed by nothing and its ledger renders as a bubble — several hundred
+ * characters of wire in the conversation. Asking the message itself (`petWireIn`) cannot have that
+ * failure, and it covers what no derivation would hand back either: a pet that has GONE HOME, whose
+ * record still exists while nothing on screen draws it.
+ */
+export function chatHistoryRows(
+  messages: ChatMessage[],
+  chessGames: ChessGame[],
+): { rows: HistoryRow[]; rowOfMessage: Map<string, number> } {
+  const rowOfMessage = new Map<string, number>();
+  const rows: HistoryRow[] = [];
+  const absorbedBy = new Map<string, ChessGame>();
+  for (const game of chessGames) {
+    for (const id of game.absorbed) absorbedBy.set(id, game);
+  }
+  messages.forEach((message, i) => {
+    const game = absorbedBy.get(message.id);
+    if (game) {
+      // The board sits where the game STARTED, and every later message of it points at
+      // that row — so a deep link from a notification lands on the board rather than on a
+      // row that is not drawn.
+      if (message.id === game.challengeMessageId) {
+        rows.push({ kind: "chess", key: `chess:${game.id}`, game });
+      }
+      rowOfMessage.set(message.id, rows.length - 1);
+      return;
+    }
+    // A PET ledger adds no row: the overlay draws the creature. Its id is mapped afterwards, by
+    // `petRowNeighbours`, once the rows around it are final.
+    if (petWireIn(message) !== null) return;
+    // The row INDEX, not the message index: with a game absorbing several messages into
+    // one row the two are no longer the same number, and a deep link taken from the
+    // message index would land on whatever row happens to sit there.
+    rowOfMessage.set(message.id, rows.length);
+    rows.push({
+      kind: "message",
+      key: message.id,
+      message,
+      // `prev`/`next` stay the neighbouring MESSAGES rather than the neighbouring rows:
+      // they feed the same-author run and the time mark, and a board between two messages
+      // does not make them two different people.
+      prev: messages[i - 1],
+      next: messages[i + 1],
+    });
+  });
+  return { rows, rowOfMessage };
+}
+
+/**
+ * The row each absorbed PET ledger message points at: its NEIGHBOUR IN TIME.
+ *
+ * A game is mapped to its own board, because a board is a row. A pet has no row of its own — the
+ * overlay draws it — so left unmapped its id is in `rowOfMessage` nowhere, and a reader who taps a
+ * push notification about it scrolls to NOTHING. That case is real rather than theoretical: a spawn
+ * is a `send`, so it notifies like any other message (see src/push_policy.rs, which takes the wire
+ * off that notification's body). So the id points at the first row whose message is NEWER, and at
+ * the last row when the pet message is the newest thing in the thread — a tap then lands beside
+ * where the pet message sits rather than nowhere.
+ *
+ * It runs over the FINAL rows, after a recording has been spliced in and after the map is rebuilt,
+ * because both of those move indices the neighbour rule has already resolved.
+ */
+export function petRowNeighbours(
+  rows: readonly HistoryRow[],
+  messages: readonly ChatMessage[],
+): Map<string, number> {
+  const at = new Map<string, number>();
+  for (const message of messages) {
+    // WIRE PRESENCE, the same question `chatHistoryRows` skipped the row on.
+    if (petWireIn(message) === null) continue;
+    const after = rows.findIndex(
+      (row) => row.kind === "message" && row.message.compose_time > message.compose_time,
+    );
+    const index = after === -1 ? rows.length - 1 : after;
+    // A thread holding nothing but pet ledgers has no row to point at, and pointing at one that
+    // is not there is worse than a tap that stays where it is.
+    if (index >= 0) at.set(message.id, index);
+  }
+  return at;
+}
 
 /**
  * The right pane: conversation title, the scrolling message history (virtualized,
@@ -321,6 +424,13 @@ export function MessagePane(props: { onBack?: () => void }) {
     [threads, messages],
   );
 
+  // Every companion this thread holds. A pet IS its messages (see lib/pet-thread.ts), so this is a
+  // pass over the history for the reason `timeMarks` and `chessGames` are: the pane re-renders on
+  // every scroll that mounts a row and on every streamed agent frame, while a creature changes only
+  // when the messages do. A CHANNEL is excluded exactly as chess is — its history is drawn as
+  // THREADS, and where a creature walks over one of those is a different surface's question.
+  const pets = useMemo(() => (threads ? [] : petsInThread(messages)), [threads, messages]);
+
   // Deep-linking to a reply inside a collapsed thread: expand that thread so the
   // scroll effect can find and center the target node.
   useEffect(() => {
@@ -341,48 +451,16 @@ export function MessagePane(props: { onBack?: () => void }) {
   // back. Once it has, the run rides that message's row instead (see `renderMsg`), so
   // the reply is one thing in the history and never two.
   const { rows, rowOfMessage } = useMemo(() => {
-    const rowOfMessage = new Map<string, number>();
-    const rows: HistoryRow[] = [];
+    // A CHAT's rows are `chatHistoryRows`, which is where both absorptions live and where they
+    // are tested. A CHANNEL's are its threads, and it holds neither a board nor a creature.
+    const chat = threads ? null : chatHistoryRows(messages, chessGames);
+    const rowOfMessage = chat?.rowOfMessage ?? new Map<string, number>();
+    const rows: HistoryRow[] = chat?.rows ?? [];
     if (threads) {
       threads.forEach((thread, i) => {
         rowOfMessage.set(thread.lead.id, i);
         for (const reply of thread.replies) rowOfMessage.set(reply.id, i);
         rows.push({ kind: "thread", key: thread.rootId, thread });
-      });
-    } else {
-      // Every message of a game is ABSORBED into that game's own row, so a sixty-move game
-      // adds nothing to the thread's length and the board does not move under the reader as it
-      // is played.
-      const absorbedBy = new Map<string, ChessGame>();
-      for (const game of chessGames) {
-        for (const id of game.absorbed) absorbedBy.set(id, game);
-      }
-      messages.forEach((message, i) => {
-        const game = absorbedBy.get(message.id);
-        if (game) {
-          // The board sits where the game STARTED, and every later message of it points at
-          // that row — so a deep link from a notification lands on the board rather than on a
-          // row that is not drawn.
-          if (message.id === game.challengeMessageId) {
-            rows.push({ kind: "chess", key: `chess:${game.id}`, game });
-          }
-          rowOfMessage.set(message.id, rows.length - 1);
-          return;
-        }
-        // The row INDEX, not the message index: with a game absorbing several messages into
-        // one row the two are no longer the same number, and a deep link taken from the
-        // message index would land on whatever row happens to sit there.
-        rowOfMessage.set(message.id, rows.length);
-        rows.push({
-          kind: "message",
-          key: message.id,
-          message,
-          // `prev`/`next` stay the neighbouring MESSAGES rather than the neighbouring rows:
-          // they feed the same-author run and the time mark, and a board between two messages
-          // does not make them two different people.
-          prev: messages[i - 1],
-          next: messages[i + 1],
-        });
       });
     }
     if (agentRun && !rowOfMessage.has(agentRun.message_id)) {
@@ -416,6 +494,12 @@ export function MessagePane(props: { onBack?: () => void }) {
           for (const id of row.game.absorbed) rowOfMessage.set(id, index);
         }
       });
+    }
+    // LAST, over the rows as they will really be drawn: a pet ledger has no row of its own, so
+    // its id points at a neighbour — and both the splice above and the rebuild move the indices
+    // that rule resolves against. A rebuild that ran after it would drop every one of them.
+    if (!threads) {
+      for (const [id, index] of petRowNeighbours(rows, messages)) rowOfMessage.set(id, index);
     }
     return { rows, rowOfMessage };
   }, [threads, messages, agentRun, conversationRecordings, chessGames]);
@@ -944,7 +1028,16 @@ export function MessagePane(props: { onBack?: () => void }) {
           // three: where the controls sit is the header's business, and the menu's is what
           // is in them.
           <div className="ml-auto shrink-0">
-            <ConversationMenu conversationId={openId} games={chessGames} />
+            {/* The pets and the history they were folded out of travel as a PAIR, from the one memo
+                below — `petPublishFor` reads our own ledger back out of that history and fails
+                closed when the two disagree, so a menu that read either half for itself would draw
+                a live Spawn row that publishes nothing. */}
+            <ConversationMenu
+              conversationId={openId}
+              games={chessGames}
+              pets={pets}
+              messages={messages}
+            />
           </div>
         )}
       </header>
@@ -959,6 +1052,14 @@ export function MessagePane(props: { onBack?: () => void }) {
             at once. It takes no room from the conversation (see chess-games-strip.tsx) and it is
             drawn only where there is a live game to name. */}
         <ChessGamesStrip conversationId={openId} games={chessGames} />
+        {/* THE COMPANIONS WALKING OVER THIS CONVERSATION. Like the strip above it this takes no
+            room — the history keeps its own height and its own scroll, so nothing moves under the
+            reader when a creature appears — and like the strip it mounts NOTHING when there is
+            nothing to draw, which here also covers the reader having turned them off and having
+            asked for less motion (see pet-layer.tsx). It is deliberately gated on real pet data
+            rather than on the route: the preference is read inside `start()`, which runs in an
+            effect, and children render before any effect does. */}
+        <PetLayer conversationId={openId} pets={pets} messages={messages} games={chessGames} />
         <div
           ref={viewportRef}
           onScroll={onScroll}

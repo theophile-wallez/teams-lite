@@ -1,0 +1,90 @@
+{
+  "name": "cat",
+  "label": "Cat",
+  "author": "welltilln (MIT)",
+  "palette": {
+    ".": null,
+    "B": "#1A1A1A",
+    "b": "#2E2E2E",
+    "G": "#4A4A4A",
+    "g": "#6A6A6A",
+    "W": "#F0F0F0",
+    "P": "#FF9EAD",
+    "N": "#1A1A2E"
+  },
+  "size": { "w": 13, "h": 13 },
+  "anchor": { "x": 6, "y": 13 },
+  "traits": {
+    "walkSpeed": 1.35,
+    "messages": {
+      "working": "hunting bugs…",
+      "done": "meow ✓",
+      "error": "hiss!",
+      "seat": "mine now."
+    }
+  },
+  "frames": {
+    "idle": [
+      ".B.........B.",
+      "BB.........BB",
+      "BBBbBBBBBbBBB",
+      ".BBBNgGgNBBB.",
+      ".BBBggPggBBB.",
+      ".BBBBBBBbBBB.",
+      ".BWWWBBBBBB..",
+      ".BWWWbBBBBB..",
+      ".BBBBBBBBBB..",
+      "..BBBBBBBB...",
+      "..BBBBBBBB...",
+      "..BB....BB...",
+      "..BB....BB..."
+    ],
+    "held": [
+      ".B.........B.",
+      "BB.........BB",
+      "BBBbBBBBBbBBB",
+      ".BBBWGBGWBBB.",
+      ".BBBggPggBBB.",
+      ".BBBBBBBbBBB.",
+      ".BWWWBBBBBB..",
+      ".BWWWbBBBBB..",
+      ".BBBBBBBBBB..",
+      "..BBBBBBBB...",
+      "..BBBBBBBB...",
+      ".............",
+      "............."
+    ],
+    "walk": [
+      [
+        ".B.........B.",
+        "BB.........BB",
+        "BBBbBBBBBbBBB",
+        ".BBBNgGgNBBB.",
+        ".BBBggPggBBB.",
+        ".BBBBBBBbBBB.",
+        ".BWWWBBBBBB..",
+        ".BWWWbBBBBB..",
+        ".BBBBBBBBBB..",
+        "..BBBBBBBB...",
+        "..BBBBBBBB...",
+        ".......BB....",
+        "..BB....BB..."
+      ],
+      [
+        ".B.........B.",
+        "BB.........BB",
+        "BBBbBBBBBbBBB",
+        ".BBBNgGgNBBB.",
+        ".BBBggPggBBB.",
+        ".BBBBBBBbBBB.",
+        ".BWWWBBBBBB..",
+        ".BWWWbBBBBB..",
+        ".BBBBBBBBBB..",
+        "..BBBBBBBB...",
+        "..BBBBBBBB...",
+        "..BB.........",
+        "..BB....BB..."
+      ]
+    ]
+  }
+}

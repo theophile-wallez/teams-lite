@@ -35,6 +35,7 @@
  */
 
 import type { ChatMessage } from "./protocol";
+import { withoutSignedLine } from "./wire-line";
 
 /** Which side of the board. `w` and `b` are chess.js's own spelling, so the two halves of
  *  this feature never need a translation between them. */
@@ -141,6 +142,9 @@ const SIGNATURE = /<p>\s*<em>\s*([^<]*?)\s*<\/em>\s*<\/p>\s*$/i;
  *  narrow on purpose, so an agent's `— claude, via teams-lite` and a colleague's own prose
  *  can never be read as a game. */
 const CHESS_LINE = /^—\s*chess\s+([0-9a-f]{6})\s+(.+?),\s*via teams-lite$/i;
+
+/** The words a chess line opens with — the parameter `withoutSignedLine` finds it by. */
+const CHESS_MARKER = "— chess ";
 
 /** SAN's own shape, and nothing about legality: a piece letter, a file, or castling, then
  *  the squares, the capture, the promotion and the check marks. What is LEGAL is chess.js's
@@ -513,11 +517,16 @@ export function chessMessageText(wire: ChessWire): string {
   return `${chessMessageWords(wire.body)}\n${chessWireLine(wire)}`;
 }
 
+
 /** The trailing marker taken off a sidebar preview. Left in, the chat list would read
- *  `♟ 1. e4 — chess 7f3a1c 1 e4, via teams-lite`. */
+ *  `♟ 1. e4 — chess 7f3a1c 1 e4, via teams-lite`.
+ *
+ *  **The rule lives in `wire-line.ts`, in ONE spelling for both features that sign a body this way**
+ *  — this is that rule pointed at chess's own marker and grammar, and its Rust twin
+ *  (`push_policy::without_wire_line`) is parameterised the same way. It matters here rather than
+ *  being tidy: a v2 ledger crosses the preview's 120-character ceiling at the challenger's FIRST OWN
+ *  MOVE (139 characters against 112 for the challenge alone), so every clocked game leaked a
+ *  truncated wire onto its chat row from move one until the cut branch existed. */
 export function chessPreviewText(preview: string): string {
-  const at = preview.lastIndexOf("— chess ");
-  if (at < 0) return preview;
-  if (!CHESS_LINE.test(preview.slice(at).trim())) return preview;
-  return preview.slice(0, at).trim();
+  return withoutSignedLine(preview, CHESS_MARKER, CHESS_LINE);
 }

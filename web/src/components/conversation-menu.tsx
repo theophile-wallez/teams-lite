@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   CallIcon,
+  CatIcon,
   ChessPawnIcon,
   CpuIcon,
   Download04Icon,
@@ -45,7 +47,15 @@ import {
   type ChessColor,
   type ChessTimeControl,
 } from "~/lib/chess-wire";
-import { convLabel, isGroupChat } from "~/lib/protocol";
+import { convLabel, isGroupChat, type ChatMessage } from "~/lib/protocol";
+import {
+  petPublishFor,
+  petSpawnIsOffered,
+  petSpawnIsTravelling,
+  type PetSpawnReceipt,
+} from "~/lib/pet-act";
+import { PET_DEFAULT_SKIN, PET_SKINS } from "~/lib/pet-skin";
+import { petSlotKey, type Pet } from "~/lib/pet-thread";
 import { sealCanBeUsed, sealMenuLabel } from "~/lib/seal";
 import { cn } from "~/lib/utils";
 import {
@@ -135,6 +145,25 @@ const ITEM_ICON = "size-4 shrink-0 text-text-dim";
  *   write. The **read-only groups** are what applies otherwise, and the backend pins that every
  *   group reads, so no group here can post to Grafana, Sentry or Linear.
  *
+ * THE COMPANION, whose spawn is the one press in this whole feature that no creature can carry:
+ *
+ * - **A pet is per conversation and per person, which is exactly this menu's shape** — so taking one
+ *   belongs here beside the game of chess, and not in Settings, where the consent to post in THIS
+ *   thread could not be read off the thread. It also reaches the one place the layer never does: a
+ *   conversation with no messages at all, where the overlay deliberately mounts nothing.
+ * - **It is ONE PRESS and it is never armed.** A spawn posts one message everybody in the thread
+ *   sees, and the reader takes it back from the creature's own menu — so asking twice, which is
+ *   reserved for what nothing undoes (Remove, a deletion, the merge), would teach them that this
+ *   app's confirmations mean nothing. What the press costs is stated above it instead.
+ * - **The section is UNFOLDED, unlike the chess challenge**, and the reason is that it removes
+ *   itself: it is drawn only while the reader has no creature here, so the one press they came for
+ *   is the last thing this section ever asks of them. The challenge's own fold exists because that
+ *   row is in every chat for ever; a companion setup form that a spawn deletes for good is not
+ *   furniture in the same way, and the feature is unreachable from anywhere else.
+ * - **It needs NO gate of its own.** A spawn is `publishPetLedger`, i.e. the `send` that is already
+ *   an `OUTWARD_METHODS` entry — the rule a channel post's title and a pasted picture already
+ *   follow: a thing riding an existing gated call is part of that call and not a second action.
+ *
  * Two things stay OUTSIDE the closed menu, because a signal inside one says nothing:
  *
  * - **the attention DOT** the chess control carried. Its whole job is to say the game wants
@@ -182,7 +211,22 @@ function PickButton(props: {
   );
 }
 
-export function ConversationMenu(props: { conversationId: string; games: ChessGame[] }) {
+export function ConversationMenu(props: {
+  conversationId: string;
+  games: ChessGame[];
+  /**
+   * Every companion this thread holds, and the history they were folded out of — BOTH from the
+   * pane's own memo (`petsInThread`), which is where `games` comes from and for its reason.
+   *
+   * They arrive as a pair on purpose. `petPublishFor` reads our own ledger back out of the history
+   * the pets were derived from and FAILS CLOSED when the two disagree, so a `pets` prop beside a
+   * `messages` read from the store inside this component would be two sources that can differ by a
+   * frame — and the whole cost of that is a Spawn row drawn, enabled, pressed, and doing nothing at
+   * all, silently. Two props from one render of one component cannot disagree.
+   */
+  pets: Pet[];
+  messages: ChatMessage[];
+}) {
   const controller = useController();
   const conversation = useAppState((s) =>
     s.conversations.find((c) => c.id === props.conversationId),
@@ -221,6 +265,25 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
    * across an open and close of the menu like every other pick here — a preference, not a step.
    */
   const [engineTime, setEngineTime] = useState<ChessTimeControl | null>(null);
+  // THE ART the next companion is taken in. Kept across an open and close of the menu exactly as the
+  // colour, the clock and the strength are, because it is a preference rather than a step.
+  const [petSkinName, setPetSkinName] = useState(PET_DEFAULT_SKIN);
+  /**
+   * WHAT THE LAST SPAWN PRESS LEFT BEHIND — the pet it was about, which is the one id this menu
+   * cannot look up, and the CONVERSATION it was made in.
+   *
+   * A refusal is reported at `petError[petSlotKey(conversation, pet)]` (see `publishPetLedger`), and
+   * a FIRST spawn's pet is a freshly minted id — so it is kept from the publish this component
+   * computed rather than guessed at from the pets, which by definition do not hold it yet. A
+   * RE-spawn keys on the record's own id, which is the same read.
+   *
+   * The conversation is on it because THIS COMPONENT IS MOUNTED UNKEYED (`message-pane.tsx`, inside
+   * `{openId && …}`, and `MessagePane` is unkeyed too): walking to another chat re-renders the same
+   * instance with a new `conversationId`, so a bare pet id would say "a spawn is travelling" in every
+   * conversation the reader opened afterwards — a Spawn row disabled with no sentence, for the life of
+   * the page. It is retired by what it names rather than by a reset (see `petSpawnIsTravelling`).
+   */
+  const [spawnedPet, setSpawnedPet] = useState<PetSpawnReceipt>(null);
   const [chessError, setChessError] = useState<string | null>(null);
   const [engineBusy, setEngineBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -294,6 +357,85 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
   const liveGames = holdsChess ? chess.games : [];
   const liveGame = liveGames[0] ?? null;
   const chessWantsUs = holdsChess && chess.wantsUs;
+
+  // ---- the companion --------------------------------------------------------
+  //
+  // Whether the row is drawn at all is `petSpawnIsOffered`'s (lib/pet-act.ts), which is where its
+  // four refusals are argued and tested. The two window-level flags are read HERE because they are
+  // this window's own — the layer reads exactly the same pair, and a second answer to "would a
+  // creature be drawn?" is how a spawn posts a message its own presser never sees.
+  //
+  // `petsShown` reads its hopeful default until `start()` has read the browser's own preference,
+  // which is what makes the LAYER gate on real pet data rather than on the route. It costs this row
+  // nothing: it is inside a closed menu until the reader presses the trigger, and a press is many
+  // effects later than the first committed render.
+  const petsShown = useAppState((s) => s.petsShown);
+  const reduceMotion = useReducedMotion();
+  const spawnOffered = petSpawnIsOffered({
+    conversation,
+    pets: props.pets,
+    shown: petsShown,
+    reduce: reduceMotion === true,
+  });
+  // A publish already in flight in this conversation. The ENTRY is the signal and never its `act`,
+  // which is null for a spawn exactly as it is for a despawn and a skin change: those three have no
+  // optimistic draw, so a second press inside a round trip would be a dead control with no sentence
+  // and no cue (the rule pet-menu.tsx's own rows hold, in its words).
+  const petPending = useAppState((s) => s.petPending[props.conversationId]);
+  const petBusy = petPending !== undefined;
+  // The refusal, under the pet the press was about — the same slot the creature's own menu reads, so
+  // the two cannot disagree about a spawn that did not go out. Read only where the receipt was
+  // WRITTEN: keying it on the receipt's own conversation without that check would draw one chat's
+  // refusal in another.
+  const spawnError = useAppState((s) =>
+    spawnedPet && spawnedPet.conversation === props.conversationId
+      ? s.petError[petSlotKey(spawnedPet.conversation, spawnedPet.pet)]
+      : undefined,
+  );
+  /**
+   * A SPAWN THAT LEFT AND WHOSE LEDGER HAS NOT COME BACK YET — the second window this row is out for,
+   * decided by `petSpawnIsTravelling`, where the whole argument for it lives and is tested.
+   *
+   * Three things about it are this component's own, and each was a defect once:
+   *
+   *   - it is scoped to the CONVERSATION the press was made in, because this component is mounted
+   *     unkeyed and would otherwise carry the receipt into every other chat;
+   *   - it is retired by a ledger of ours ARRIVING, `gone` or not, because the press on a `gone`
+   *     record is an EDIT — the arm that emits before it answers, and the one that never needed a
+   *     window;
+   *   - it needs NO reset anywhere, which is why nothing resets it — and a reset is not merely
+   *     redundant, it is a BUG: one fired on a conversation change, which re-opened the window on the
+   *     RETURN path (press in A, walk to B where the row is correctly live, come back to A before the
+   *     echo, and the row is live again with the send still travelling). `setSpawnedPet` therefore
+   *     appears exactly once in this file, and a test counts it.
+   *
+   * Three things it does NOT cover, all the same root — the receipt is ONE page-local slot — and each
+   * recorded rather than fixed, because each is smaller than the window this closes: a spawn in
+   * ANOTHER conversation OVERWRITES this one's receipt, so A's row is live again on return (only a
+   * `Record<string, string>` closes that); a receipt whose conversation the reader LEAVES dies with
+   * the menu, since the chat list makes `openId` falsy and unmounts it, which is fine as it stands;
+   * and the write is where it is because the window starts at the PRESS — moving it after the await
+   * is near-equivalent today only because the release and the write land in one React batch.
+   *
+   * `petPublishFor` cannot help, and it is worth saying why: it is pure over `pets`/`messages`, and
+   * inside this window those are byte-identical to "I have no companion here" — there is nothing for
+   * it to fail closed on. Making `publishPetLedger` hold the pending slot across the echo is the
+   * root-cause fix and was deliberately NOT taken: the slot would need a release path that is not the
+   * promise, which is more machinery for the same result. TWO OPEN PAGES still share neither slot, so
+   * a second window's row stays live for the whole window whatever this gate does — inherent to a
+   * page-local pending, and chess has the same property.
+   */
+  const spawnTravelling = petSpawnIsTravelling({
+    receipt: spawnedPet,
+    conversation: props.conversationId,
+    pets: props.pets,
+    refused: spawnError !== undefined,
+  });
+  // A companion that has gone home comes BACK rather than being minted again — `petPublishFor`'s
+  // spawn branch re-uses the record's own id and its whole history — so the row says which of the
+  // two the press is, because "the same creature" is the whole difference to a reader.
+  const petComesBack = props.pets.some((pet) => pet.owner.isSelf && pet.gone);
+  const petSkinLabel = (PET_SKINS.find((skin) => skin.name === petSkinName) ?? PET_SKINS[0]!).label;
 
   // ---- the local agent ------------------------------------------------------
   const mode = agentModeFor(agent, props.conversationId);
@@ -382,6 +524,35 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
     if (!ok) setChessError("The engine did not download. Check the machine's network and try again.");
   };
 
+  /**
+   * Take a companion — or bring one back — in the art the picker offered.
+   *
+   * The publish is computed HERE rather than inside the store because its `pet` is the answer to
+   * "which slot does a refusal land in", and for a first spawn that is an id nothing else has ever
+   * seen. `petPublishFor` decides everything else, including the re-spawn: this component neither
+   * mints an id nor reads one off a ledger.
+   *
+   * A null publish does NOTHING and says nothing: it is the guard behind a press that was legal when
+   * the menu opened (the reader took a creature in another window meanwhile), never this surface's
+   * own decision about what to draw.
+   */
+  const spawnPet = async () => {
+    const publish = petPublishFor({
+      press: { kind: "spawn", skin: petSkinName },
+      pets: props.pets,
+      messages: props.messages,
+      now: Date.now(),
+    });
+    if (!publish) return;
+    setSpawnedPet({ conversation: props.conversationId, pet: publish.pet });
+    // CLOSED ON SUCCESS, held open on a refusal — the rule the challenge and the engine's own press
+    // follow. It is NOT what keeps a second press out of the window between the send answering and
+    // the ledger arriving: a close only raises the effort, since reopening the menu draws the row
+    // again. `spawnTravelling` is what holds it shut, and it is why this component keeps
+    // `spawnedPet` across a close.
+    if (await controller.publishPetLedger(props.conversationId, publish)) setOpen(false);
+  };
+
   const challenge = async () => {
     // Random is resolved HERE, into the colour the challenge really carries: the wire never
     // says "random", because a colour nothing decided is a game whose two clients could
@@ -429,6 +600,14 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
             setChallenging(false);
             setEngineOpen(false);
             setChessError(null);
+            // AND `spawnedPet` IS DELIBERATELY *NOT* DROPPED HERE, which is the one place this menu
+            // breaks its own "a closed menu forgets" rule. The close is the very event the spawn
+            // window OPENS on — see `spawnTravelling` — so clearing it on close erased the only
+            // memory of a spawn that had just gone out, and the row came back live. What it costs is
+            // that a refusal's sentence survives a close; that is the pet MENU's own behaviour for
+            // the same slot (`petError` is store state and nothing there resets it either), and the
+            // row it sits under is the row that RETRIES it — the next press clears the slot before
+            // it asks. The SKIN is kept as well, exactly as the colour and the clock are.
           }
         }}
       >
@@ -817,6 +996,72 @@ export function ConversationMenu(props: { conversationId: string; games: ChessGa
                     </>
                   )}
                 </>
+              )}
+            </>
+          )}
+
+          {/* THE COMPANION. It is the only way into the feature — every other control it has is on a
+              creature that already exists — so it is drawn unfolded, and only while the reader has
+              none of their own here (see `petSpawnIsOffered` for all four refusals). One press
+              publishes; nothing is armed. */}
+          {spawnOffered && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>Companion</DropdownMenuLabel>
+              {/* THE ART, in the same shape as the colour, the clock and the strength — three
+                  presses through the one `PickButton` this menu picks everything with, because four
+                  rows of presses must not be four slightly different controls. */}
+              <div className="flex flex-wrap items-center gap-1 px-2.5 pb-1.5">
+                {PET_SKINS.map((skin) => (
+                  <PickButton
+                    key={skin.name}
+                    // `pet-spawn-skin-…` and not `pet-skin-…`, which is the creature's OWN menu's
+                    // row for changing the art it wears (pet-menu.tsx). The two are mutually
+                    // exclusive by state — one is drawn only while the reader has a pet here and the
+                    // other only while they have none — so one spelling would resolve to whichever
+                    // menu happened to be open, which is a test that passes for the wrong reason.
+                    testid={`pet-spawn-skin-${skin.name}`}
+                    picked={petSkinName === skin.name}
+                    onPick={() => setPetSkinName(skin.name)}
+                    label={skin.label}
+                  />
+                ))}
+              </div>
+              {/* What the press costs, before it is pressed. A spawn reaches everybody in the thread
+                  and it is the reader's own creature from then on, which are the two facts they
+                  decide with. */}
+              <p className="px-2.5 pb-1.5 text-[11px] leading-snug text-text-faint">
+                {petComesBack
+                  ? "Your companion comes back with everything it has done — the same creature, in the art you pick. This posts under your name, and everybody in this conversation sees it."
+                  : "This posts one message under your name, and everybody in this conversation sees it. Your companion lives in that message, walks over this conversation and ages. Only teams-lite draws it."}
+              </p>
+              <DropdownMenuItem
+                data-testid="pet-spawn"
+                // One press, and never armed: it is taken back from the creature's own menu, and
+                // asking twice belongs to what nothing undoes. It is OUT for two windows rather than
+                // one — a publish in flight anywhere in this conversation, and a spawn of ours whose
+                // ledger has not reached this page yet (see `spawnTravelling`, which is the longer of
+                // the two and the one a second press turns into a duplicate arrival message).
+                disabled={petBusy || spawnTravelling}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  void spawnPet();
+                }}
+              >
+                <HugeiconsIcon icon={CatIcon} className={ITEM_ICON} strokeWidth={1.8} />
+                {petComesBack
+                  ? `Bring your ${petSkinLabel.toLowerCase()} back`
+                  : `Take a ${petSkinLabel.toLowerCase()}`}
+              </DropdownMenuItem>
+              {spawnError && (
+                // The sentence the reader acts on, at the press that failed — the composer's own
+                // rule. The status line keeps the raw failure for whoever reads a screenshot.
+                <p
+                  data-testid="pet-spawn-error"
+                  className="px-2.5 pb-1.5 text-[11px] leading-snug text-destructive"
+                >
+                  {spawnError}
+                </p>
               )}
             </>
           )}

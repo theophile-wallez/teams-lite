@@ -1286,6 +1286,141 @@ export async function chessSquareHasPiece(page: Page, square: string): Promise<b
   return (await page.locator(`[data-square="${square}"] [data-piece]`).count()) > 0;
 }
 
+// ---- the CREATURE a conversation keeps ---------------------------------------
+//
+// A pet IS its messages (web/src/lib/pet-thread.ts), so there is no pet state anywhere for a spec
+// to arrange: everything is a ledger message in the thread, and the only two ways one appears are
+// the reader's own press and the COLLEAGUE's install — which is a machine this suite does not have.
+// That is what the `{kind:"pet"}` hook stands in for.
+
+/** The thread the creatures live in. Its own fixture, because a pet is a message that STAYS. */
+export const PET_THREAD_NAME = "Pet Corner";
+
+/** Its id — what the composer's own sentinel says, and what a live event has to be aimed at. */
+export const PET_THREAD_ID = "19:pet-demo@thread.v2";
+
+/**
+ * The colleague's own half: they take a creature (`colleague`), do something to the reader's
+ * (`act`), pat it (`pat`), or answer nothing at all (`silent`).
+ *
+ * `silent` has to be armed BEFORE the reader's first spawn to be worth anything — the colleague
+ * answers a spawn 350 ms later — so a spec that wants to be alone with one pet arms it first.
+ *
+ * ALWAYS finish with `resetPet`. One mock process serves the whole run and a pet is a message, so a
+ * creature left behind is a sprite in every later spec's history and a row in its menu.
+ */
+export async function setPetHook(
+  page: Page,
+  body: {
+    colleague?: boolean;
+    act?: "feed" | "play" | "nap";
+    pat?: boolean;
+    silent?: boolean;
+    conversation?: string;
+  } = {},
+): Promise<{ pet: string | null; acted: boolean; patted: boolean }> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "pet", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+  return (await res.json()) as { pet: string | null; acted: boolean; patted: boolean };
+}
+
+/** Put the colleague back the way the mock declares it, and the pet thread back to its seed. */
+export async function resetPet(page: Page): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "pet", reset: true },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** One creature's canvas — anybody's, or the one a pet id names. */
+export function petSprite(page: Page, petId?: string): Locator {
+  return page.locator(
+    petId ? `[data-testid="pet-sprite"][data-pet="${petId}"]` : '[data-testid="pet-sprite"]',
+  );
+}
+
+/**
+ * The READER'S OWN creature, found by the one thing on screen that says whose a pet is.
+ *
+ * A canvas carries no words, so the trigger in each lane is a NAME — "You" for the reader's own and
+ * a colleague's first name for theirs (pet-menu.tsx). It is matched on that rather than on DOM
+ * order, because the order the lanes are laid out in is the FOLD's and a colleague's creature can
+ * perfectly well be first: a spec that took `.first()` would silently drive somebody else's pet.
+ */
+export function ownPetTrigger(page: Page): Locator {
+  return page.locator('[data-testid="pet-menu-trigger"]', { hasText: "You" });
+}
+
+/**
+ * TAKE a companion from the conversation's own menu, and wait for it to be walking.
+ *
+ * The art is picked first because that is the shape the menu has — three `PickButton`s over one
+ * row — and the press is ONE press, never armed. It returns the reader's own pet id.
+ *
+ * NOTE what it does NOT do: silence the colleague. The mock answers a first spawn by taking a
+ * creature of its own ~350 ms later, so a caller that needs to be alone with one pet arms
+ * `setPetHook(page, { silent: true })` BEFORE this.
+ */
+export async function spawnPet(page: Page, skin = "cat"): Promise<string> {
+  await openConversationMenu(page);
+  await page.locator(`[data-testid="pet-spawn-skin-${skin}"]`).click();
+  await page.locator('[data-testid="pet-spawn"]').click();
+  // THE MENU CLOSES ITSELF on a successful spawn (`setOpen(false)` in conversation-menu.tsx), so
+  // this WAITS for that rather than pressing the trigger — and the wait is also the only thing that
+  // pins it. Pressing was wrong twice over: a press that lands while the menu is mid-close RE-OPENS
+  // it, and then nothing ever detaches. That failed only in a FULL run, where the timing differs.
+  await page
+    .locator('[data-testid="conversation-menu-content"]')
+    .waitFor({ state: "detached", timeout: 15_000 });
+  // The row publishes a `send`, so the creature appears only when its own ledger comes back.
+  const trigger = ownPetTrigger(page);
+  await trigger.waitFor({ state: "attached", timeout: 15_000 });
+  const id = await trigger.getAttribute("data-pet");
+  expect(id).toBeTruthy();
+  return id as string;
+}
+
+/**
+ * The SIDEBAR ROW of a conversation, scrolling the list until it is in the DOM.
+ *
+ * The chat list is virtualized, so a row far enough down is simply not rendered — and Pet Corner is
+ * deliberately the OLDEST fixture in the mock, with its sidebar time FROZEN there (a fixture that
+ * moved to the top the moment a spec posted into it would move the row under every other spec's
+ * index). So it is always below the fold, whatever the reader has just done in it, and a spec that
+ * wants to read its PREVIEW has to walk down to it. This is `preview.ts`'s own walk, scoped to one
+ * list.
+ */
+export async function conversationRow(page: Page, name: string): Promise<Locator> {
+  const rows = page.locator('[data-testid="conversation-row"]');
+  const match = rows.filter({ hasText: name });
+  const scroller = page.locator('[data-testid="sidebar-scroll"]');
+  for (let screens = 0; screens < 30; screens++) {
+    if ((await match.count()) > 0) return match.first();
+    const moved = await scroller.evaluate((node) => {
+      const was = node.scrollTop;
+      node.scrollTop = was + node.clientHeight * 0.8;
+      return node.scrollTop > was;
+    });
+    if (!moved) break;
+    await page.waitForTimeout(150);
+  }
+  await expect(match).toHaveCount(1);
+  return match.first();
+}
+
+/** Open one creature's own menu — its trigger is the small named pill in that pet's lane. */
+export async function openPetMenu(page: Page, petId?: string): Promise<void> {
+  const trigger = page.locator(
+    petId
+      ? `[data-testid="pet-menu-trigger"][data-pet="${petId}"]`
+      : '[data-testid="pet-menu-trigger"]',
+  );
+  await trigger.first().click();
+  await expect(page.locator('[data-testid="pet-menu"]')).toBeVisible();
+}
+
 /** Filter out benign console noise so `consoleErrors` only holds real problems. */
 export function realErrors(errors: string[]): string[] {
   return errors.filter(

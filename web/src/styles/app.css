@@ -1142,3 +1142,36 @@ file-tree-container {
    * double-tap zoom that would fire on the tap-tap this board is played with. */
   touch-action: manipulation !important;
 }
+
+/* ── A PET'S SPEECH BUBBLE ────────────────────────────────────────────────────
+ *
+ * The element is the sprite engine's own (vendor/desksprite.ts creates it, places it and takes it
+ * away again) and its LOOK is deliberately not: upstream injected a stylesheet with a dark bubble
+ * of its own in it, and a second palette three centimetres from this app's is the mistake
+ * § Project shape bans for icons, in another vocabulary. So the engine sets the geometry and no
+ * colour at all, and this is the whole of the dressing.
+ *
+ * It is a POPOVER's surface rather than a chip's, because that is what a bubble over a
+ * conversation is — one raised thing said above the words — and it therefore needs no token of its
+ * own in theme.css: every value below is one this app already publishes, the radius included.
+ * `--elev-pop` inverts its own mechanism in the dark theme (the ring becomes an
+ * inset hairline), so one rule reads in both.
+ *
+ * The CEILING is the only number here that is a decision, and it needs its two companions: the
+ * engine writes `white-space: nowrap` inline (one line above one creature), so a long
+ * `traits.messages` line would run off the side of the conversation — `max-width` alone would not
+ * stop it, since nothing clips it. Truncating is right rather than wrapping: the engine measures
+ * the bubble ONCE per line and positions it from that number, so a box that grew a second row
+ * would sit at the height of a one-row box. */
+.pet-sprite-bubble {
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: var(--radius-lg);
+  background-color: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--elev-pop);
+  padding: 0.125rem 0.5rem;
+  font-size: 11px;
+  line-height: 1.5;
+}

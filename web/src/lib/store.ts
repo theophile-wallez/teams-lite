@@ -28,6 +28,7 @@ import {
   replyToPayload,
   messageIsHeld,
   shouldNotify,
+  withoutWireLine,
   trimHistoryPage,
   mergeCalendarWindow,
   mailAddressSpellsAPerson,
@@ -92,6 +93,18 @@ import {
 import { NO_CHESS_ENGINE, type ChessEngineState } from "./chess-engine";
 import { NO_CHESS_SOUNDS, type ChessSoundsState } from "./chess-sound";
 import { chessGamesInThread, chessSlotKey, type ChessGame } from "./chess-thread";
+import { petMessageHtml, petMessageText } from "./pet-wire";
+import { petSlotKey, PET_PAT_KEY } from "./pet-thread";
+// The publish is a TYPE here and nothing more, so the skins pet-act reaches for are not dragged into
+// the store's own chunk: what a press writes is decided in pet-act.ts, and this only posts it.
+import type { PetPublish } from "./pet-act";
+import type { PetFoldAct } from "./pet-state";
+import {
+  DEFAULT_PETS_SHOWN,
+  PETS_SHOWN_STORAGE_KEY,
+  coercePetsShown,
+  petsShownValue,
+} from "./pet-visibility";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import type { AgentPersonaPatch } from "./agent-persona";
 import {
@@ -431,6 +444,56 @@ export type AppState = {
       at: number;
     }
   >;
+  /** Why the last PET act did not leave, in the same one sentence (see {@link sendFailureMessage}).
+   *
+   *  KEYED BY PET (`petSlotKey`), for the reason a chess error is keyed by game: a conversation holds
+   *  a creature per person, so one slot would draw the sentence about a refused feed under every pet
+   *  in the thread — including the ones the press had nothing to do with. The pet it is keyed by is
+   *  the one the reader PRESSED ON (`PetPublish.pet`), which for a feed on a colleague's creature is
+   *  theirs rather than ours: that is where the reader is looking. */
+  petError: Record<string, string>;
+  /** The publish this page has in flight in a conversation, with the act it draws before the message
+   *  comes back — or no entry, which is what lets the next press go out.
+   *
+   *  A pet reacts to a feed AT ONCE, because a creature that waits for a round trip before it stops
+   *  being hungry reads as one that ignored you — and the act is TAKEN BACK if the publish fails,
+   *  which is the rule `removeSentWords` follows for the words.
+   *
+   *  **THE GRAIN IS THE CONVERSATION, AND THAT IS THE WHOLE POINT OF THE SLOT.** A reader's ledger is
+   *  ONE message for the whole conversation, so every press they make contends on that one message —
+   *  a feed on a colleague's pet, a nap on their own, a removal. Each publish is built from the
+   *  record as the page currently holds it, so two in flight at once both start from N acts, both
+   *  write N+1, and the later edit wins: one act SILENTLY GONE from a record that is the only copy
+   *  there is. Keyed per PET this is invisible, because two presses on two pets are two edits of one
+   *  message and no per-pet check sees a conflict. So `publishPetLedger` takes this slot and refuses
+   *  a second publish while it is held, which serializes the writes; the pet is kept beside the act
+   *  so the layer can still draw it on the right creature. `petError` stays keyed per PET, because a
+   *  refusal belongs to the creature the press was about. Chess is protected by the same rule one
+   *  layer up — `use-chess-game.ts` will not move "with anything of theirs already in flight" — and
+   *  this holds it in the one place every surface goes through.
+   *
+   *  **IT IS RELEASED ON SUCCESS AS WELL AS ON FAILURE**, which is where it differs from
+   *  `chessPending`: the backend's `edit` handler writes the local row and emits the `message` event
+   *  BEFORE it answers `{edited: true}` (src/bin/server.rs), so by the time the promise resolves the
+   *  derived ledger already states the act and a pending copy of it would be counted twice. What the
+   *  ordering really buys is a BOUND rather than a proof: the event and the response travel to this
+   *  page over the same socket but not necessarily through the same queue, so what is left is a
+   *  window of at most a frame or two in which the act may show nowhere — over a stat that decays
+   *  two points an hour, nothing a reader can see, and nothing that landed can be lost.
+   *
+   *  **AND THAT ORDERING IS THE `edit` HANDLER'S ALONE — IT DOES NOT TRANSFER TO A SPAWN.** A spawn
+   *  is the one publish here that is a `send`, and the `send` arm neither writes the local row nor
+   *  emits anything: it answers `{sent: true}` and the message reaches this page only on the trouter
+   *  echo. Nothing in this store inserts optimistically either. So releasing the slot on success
+   *  leaves a real window in which the creature is nowhere on this page — 150 ms against the mock,
+   *  one round trip against the tenant, unbounded while the live feed is reconnecting — and a second
+   *  press inside it MINTS A SECOND id and SENDS AGAIN, which the fold absorbs whole: two visible
+   *  arrival messages, one drawing no creature, and `despawn` edits the first, so nothing in this
+   *  feature can reach the other again. Reading this paragraph as "the message is always back by the
+   *  time the promise resolves" is what produced that bug. The window is held shut by the one control
+   *  that can spawn (`spawnTravelling` in components/conversation-menu.tsx) rather than by this slot,
+   *  which would need a release path that is not the promise. */
+  petPending: Record<string, { pet: string; act: PetFoldAct | null }>;
   /** The move the reader has set to play the MOMENT their opponent's lands — a premove.
    *
    *  It is the app's state rather than the board's because it outlives a remount: the reader
@@ -579,6 +642,10 @@ export type AppState = {
   /** Whether curated interaction sounds play (client-only preference). Gates the
    *  cuelume engine globally — imperative cues and `data-cuelume-*` alike. */
   soundsEnabled: boolean;
+  /** Whether THIS WINDOW draws the conversations' companions (client-only preference, beside
+   *  the sounds and for its reasons — see lib/pet-visibility.ts). False means the overlay is not
+   *  mounted at all; it never means a pet was put down, which is its own menu's Remove. */
+  petsShown: boolean;
   /** Non-secret app settings (the GitLab host + whether each integration's token
    *  is stored + Ghost mode), loaded from the backend on start. Drives which links
    *  get rich previews, and whether reading a chat is declared to Teams. */
@@ -955,6 +1022,8 @@ function initialState(): AppState {
     chessPending: {},
     chessPremove: {},
     chessArchive: {},
+    petError: {},
+    petPending: {},
     chessEngine: NO_CHESS_ENGINE,
     chessSounds: NO_CHESS_SOUNDS,
     scheduledMessages: [],
@@ -981,6 +1050,7 @@ function initialState(): AppState {
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
     soundsEnabled: DEFAULT_SOUNDS_ENABLED,
+    petsShown: DEFAULT_PETS_SHOWN,
     settings: {
       gitlab_host: "gitlab.com",
       gitlab_token_set: false,
@@ -1284,6 +1354,7 @@ export class TeamsController {
 
     this.applyPersistedAppearance();
     this.applyPersistedSounds();
+    this.applyPersistedPetsShown();
     this.applyPersistedChannelPins();
     this.applyPersistedChatPrefs();
     this.applyPersistedChatUnreads();
@@ -1560,8 +1631,14 @@ export class TeamsController {
         })
       ) {
         // The message's own text, read the way its type says it must be (a `Text`
-        // body is plain, not HTML) — so a notification never eats what it quotes.
-        notifyMessage(m.sender, copyableMessageText(m), m.conversation_id);
+        // body is plain, not HTML) — so a notification never eats what it quotes — and
+        // WITHOUT the machine-readable line a game or a companion signs itself with. This
+        // is the sharpest reader of that line and the last one to get the rule: it is
+        // built from the BODY rather than from a 120-character preview, so a colleague's
+        // spawn popped a notification carrying the whole record. The strip is the sidebar's
+        // own (`withoutWireLine`), and `copyableMessageText` itself is left alone: COPY
+        // hands the reader the message as it really is.
+        notifyMessage(m.sender, withoutWireLine(copyableMessageText(m)), m.conversation_id);
         // Subtle inbound cue, riding the same gate as the desktop notification —
         // so the conversation you're looking at never chimes at you.
         playCue("droplet");
@@ -6739,6 +6816,117 @@ export class TeamsController {
     this.set({ chessPending: rest });
   }
 
+  // ---- a companion in a conversation -------------------------------------
+
+  /**
+   * Publish a pet's record — one message per person, rewritten in place.
+   *
+   * WHAT to publish is decided by `petPublishFor` (lib/pet-act.ts) and nothing about that decision is
+   * repeated here: four surfaces press these controls, and a store that made its own choice about
+   * what a feed writes would be a fifth answer. This is the imperative half — the RPC, the optimistic
+   * draw and the rollback — and it needs no gate of its own, because `send` and `edit` are already
+   * `OUTWARD_METHODS` entries and a pet's acts ride them exactly as a mention rides a send.
+   *
+   * **THE FIRST ACT SENDS AND EVERY LATER ONE EDITS.** Taking a creature is a new message, because it
+   * is how a pet reaches the thread at all; every act after that rewrites the same message, so months
+   * of feeding cost the conversation ONE message rather than hundreds. `messageId` comes from the
+   * DERIVATION rather than from anything this store remembers, so a page that reloaded, a second
+   * window and a phone all edit the right message.
+   *
+   * **THE EDIT CARRIES `content_html` AND THE PLAIN-TEXT TWIN.** An edit that carried only text would
+   * have the ledger line ESCAPED — the trailing italic block stops matching, and every reader loses
+   * the creature while its message is still there. That is why `content_html` exists on the edit RPC
+   * at all (chess needed it first), and the text travels beside it for a client that shows no HTML.
+   *
+   * An act is drawn before it lands and TAKEN BACK if the publish fails, and the failure is reported
+   * at the pet the reader pressed rather than swallowed into a cue — the composer's own rule, because
+   * a feed that did not leave is otherwise invisible.
+   *
+   * **ONE PUBLISH AT A TIME PER CONVERSATION, and that is a correctness rail rather than a nicety.**
+   * Every press a reader makes rewrites the SAME message — their one ledger for the whole thread —
+   * and `petPublishFor` builds each one from the record as this page currently holds it. Two in
+   * flight therefore both start from N acts, both write N+1, and the later edit wins: one act
+   * silently gone from the only copy of it there is, whether the two presses were two feeds or a
+   * removal racing a feed on a colleague's pet. So a second publish is REFUSED while
+   * `petPending[conversationId]` is held — the same rule `use-chess-game.ts` applies one layer up
+   * ("nothing of theirs already in flight"), held here because every surface goes through this.
+   * It refuses silently: the press never left, so there is nothing to report, and a control should
+   * not be offered while that slot is taken.
+   */
+  async publishPetLedger(conversationId: string, publish: PetPublish): Promise<boolean> {
+    if (this.get().petPending[conversationId]) return false;
+    const key = petSlotKey(conversationId, publish.pet);
+    const { [key]: _wasError, ...otherErrors } = this.get().petError;
+    this.set({
+      petError: otherErrors,
+      petPending: {
+        ...this.get().petPending,
+        [conversationId]: { pet: publish.pet, act: publish.pending ?? null },
+      },
+    });
+    try {
+      const text = petMessageText(publish.ledger, publish.label);
+      const html = petMessageHtml(publish.ledger, publish.label);
+      if (publish.messageId) await this.backend.edit(conversationId, publish.messageId, text, html);
+      else await this.backend.send(conversationId, text, undefined, html);
+    } catch (e) {
+      // Both surfaces, and each has its reader: the status line keeps the RAW failure for whoever
+      // reads a screenshot, the pet gets the sentence the reader acts on — under THAT pet, which is
+      // what the key is for. The act never left, so nothing may keep drawing it.
+      this.set({
+        status: `pet ${publish.messageId ? "edit" : "send"} failed: ${errText(e)}`,
+        petError: { ...this.get().petError, [key]: sendFailureMessage(e) },
+        petPending: this.petPendingWithout(conversationId),
+      });
+      playCue("error");
+      return false;
+    }
+    // Released on SUCCESS too, because from here the LEDGER holds it: the backend emits the edited
+    // message before it answers, so a pending copy of the act would be counted twice (see
+    // `petPending`).
+    this.set({ petPending: this.petPendingWithout(conversationId) });
+    return true;
+  }
+
+  /**
+   * PAT a pet — a reaction on its ledger message, toggling.
+   *
+   * It is here rather than at the two surfaces that press it because of the FAILURE, not the call:
+   * `reactToMessage` reports only into `status` and a cue, which is eleven pixels at the foot of a
+   * sidebar, and a pat is the ONE thing a reader with no creature of their own can do — so swallowed,
+   * their only control fails silently. The sentence therefore lands in `petError` under the same key
+   * a refused feed uses (`petSlotKey`), which is what puts it under the creature the press was about
+   * and nowhere else. Two surfaces read that slot: the menu draws the words, and the trigger in the
+   * pet's own lane turns, which is where a reader who tapped the sprite is looking.
+   *
+   * It takes NO pending slot, and that is the difference from `publishPetLedger`: a reaction writes
+   * no record, so it cannot lose an act to a race, and a toggle a reader presses twice is a toggle.
+   */
+  async patPet(conversationId: string, pet: { id: string; messageId: string }): Promise<boolean> {
+    const key = petSlotKey(conversationId, pet.id);
+    const { [key]: _wasError, ...otherErrors } = this.get().petError;
+    this.set({ petError: otherErrors });
+    try {
+      await this.backend.react(conversationId, pet.messageId, { key: PET_PAT_KEY });
+    } catch (e) {
+      this.set({
+        status: `pat failed: ${errText(e)}`,
+        petError: { ...this.get().petError, [key]: sendFailureMessage(e) },
+      });
+      playCue("error");
+      return false;
+    }
+    return true;
+  }
+
+  /** The conversations with a publish in flight, minus this one. */
+  private petPendingWithout(
+    conversationId: string,
+  ): Record<string, { pet: string; act: PetFoldAct | null }> {
+    const { [conversationId]: _done, ...rest } = this.get().petPending;
+    return rest;
+  }
+
   // ---- appearance (Light / Dark / System) ---------------------------------
 
   private systemPrefersDark(): boolean {
@@ -6846,6 +7034,36 @@ export class TeamsController {
     this.set({ soundsEnabled: enabled });
     setCuesEnabled(enabled);
     if (enabled) playCue("ready");
+  }
+
+  // ---- companions (the pets a conversation draws) ---------------------------
+
+  /** Load whether this window draws the companions. Best-effort and SSR-safe, like every other
+   *  client-only preference here: a storage that cannot be read leaves the default (shown). */
+  private applyPersistedPetsShown(): void {
+    let shown = DEFAULT_PETS_SHOWN;
+    try {
+      shown = coercePetsShown(localStorage.getItem(PETS_SHOWN_STORAGE_KEY));
+    } catch {
+      /* ignore — a preference that cannot be read is not a reason to draw nothing */
+    }
+    this.set({ petsShown: shown });
+  }
+
+  /** Commit and persist whether this window draws the companions. It reaches nothing outside
+   *  this browser: the pets live in the thread's own messages, so turning them off here leaves
+   *  every one of them where it was for everybody else (see lib/pet-visibility.ts).
+   *
+   *  The value is `petsShownValue`'s and never spelled here, so the write and the read that
+   *  loads it back cannot drift apart — a format written in one place and parsed in another is
+   *  a preference that forgets, silently, on the next reload. */
+  setPetsShown(shown: boolean): void {
+    try {
+      localStorage.setItem(PETS_SHOWN_STORAGE_KEY, petsShownValue(shown));
+    } catch {
+      /* ignore — a failed persist just doesn't survive reload */
+    }
+    this.set({ petsShown: shown });
   }
 }
 

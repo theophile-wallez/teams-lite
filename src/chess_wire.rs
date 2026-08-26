@@ -17,6 +17,13 @@
 //! The marker is deliberately narrow — six lowercase hex characters and the exact trailing clause —
 //! so an agent's own `— claude, via teams-lite` and a colleague's prose can never be read as a game.
 
+/// What a chess line opens with, and the ONE spelling of it in this crate.
+///
+/// The store reads it to answer which messages hold a game, and `push_policy` reads it to keep a
+/// wire line out of a notification — so a second spelling here would leave one of those two
+/// recognising a line the other had stopped recognising. `web/src/lib/chess-wire.ts` writes it.
+pub const MARKER: &str = "— chess ";
+
 /// Where the chess line starts, when this text ends with one — the byte offset of its em dash.
 ///
 /// The text may be a message BODY (where the line sits inside `<p><em>…</em></p>`) or a flattened
@@ -24,7 +31,6 @@
 /// of the text. Every occurrence is considered and the LAST qualifying one wins, which is what makes
 /// this answer the same question for a body and for a preview.
 pub fn chess_line_at(text: &str) -> Option<usize> {
-    const MARKER: &str = "— chess ";
     let mut found = None;
     let mut from = 0;
     while let Some(offset) = text[from..].find(MARKER) {

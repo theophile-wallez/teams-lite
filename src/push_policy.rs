@@ -78,15 +78,126 @@ impl<'a> Placement<'a> {
 /// itself is careful not to carry.
 const SEALED_BODY: &str = "New message";
 
-/// The trailing marker a CHESS message signs itself with, cut off a preview.
+/// The trailing marker a CHESS or a PET message signs itself with, cut off a preview.
 ///
-/// The shape is the one `web/src/lib/chess-wire.ts` writes and `chessPreviewText` strips on the
-/// page: the words, then `— chess <game> <state>, via teams-lite`. It lives in
-/// [`crate::chess_wire`] because the store reads the same marker to answer WHICH messages hold a
-/// game (see [`crate::store::Store::chess_messages`]), and two spellings of it would leave a push
-/// carrying a line the other reader had learned to recognise.
+/// ONE function for both, because the two lines are ONE SHAPE: the words, then
+/// `— <keyword> <6 lowercase hex> <payload>, via teams-lite`. `web/src/lib/chess-wire.ts` and
+/// `pet-wire.ts` write them and `chessPreviewText` / `stripPetLine` strip them on the page; a
+/// second spelling of the same rule here would drift from the first at the next feature that signs
+/// a body this way. The six lowercase hex characters are what keep an agent's own
+/// `— claude, via teams-lite` and a colleague's prose out of this.
+///
+/// **IT RE-VALIDATES THE TAIL BEFORE CUTTING**, never just cuts at the marker: a naive
+/// `split(marker)` truncates a real message that happens to contain the words.
+///
+/// A tail that ENDS IN AN ELLIPSIS is cut too, and that half is not a nicety. A preview is the
+/// body's first 120 characters (`teams_read::preview_from_html`), and one message now holds a
+/// whole record — a pet's acts, a game's plies — so the line is cut mid-wire long before its own
+/// `, via teams-lite` is reached. Computed rather than guessed, over the bodies these two features
+/// really write: an act token costs 23 characters WITH its separator, so a pet crosses 120 at
+/// **its third act of MIXED kind** — measured through `petMessageWords` + `petLedgerLine` over all
+/// three shipped skins, **140 for the cat, 142 for the duck, 150 for the blue boy**. Three FEEDS of
+/// the same creature is shorter, because its words are, and it lands on BOTH sides of the ceiling:
+/// 118 for the cat, exactly 120 (so uncut) for the duck, and **128 for the blue boy, which DOES
+/// cross** — so the truncated path is reachable at three feeds too, and "two acts never cross" is
+/// the only safe reading of the shorter shape. The ceiling is crossed by the BODY rather than by an
+/// act count, and WHERE depends on the art's own label and skin name as much as on the acts. (An
+/// earlier note here said 141 and 119: that is the cat's own wire token with a FOUR-character
+/// label — the `Nori` fixture — rather than any skin that ships.) A clocked v2 game
+/// crosses it at **the challenger's first own move** — 61 characters of words plus a space plus a
+/// 77-character line is **139**, against 112 for the challenge alone — which is why every clocked
+/// game leaked a truncated wire onto its chat row from move one. Those words are the TEN-MINUTE
+/// challenge's own (`♟ Chess — I'd like a game. I'm white. 10 min.` plus the score sheet), so
+/// another clock spelling moves the number by a few characters; what does not move is that one ply
+/// crosses and the challenge alone does not. With the complete ending required,
+/// this function would do nothing at all for either. (The first note here said 137, which is that
+/// 139 with the `♟ ` prefix left out of the count.)
+///
+/// **THIS BRANCH'S PROOF IS WEAKER THAN THE WHOLE LINE'S**, and saying so is the point: the hex id
+/// keeps prose out of the branch ABOVE, and here what is left structurally is the marker, a
+/// six-character all-hex word and a space. English has such words (`facade`, `decade`, `deface`,
+/// `beaded`), so `"…— pet facade beats…"` would be cut. And an author's own trailing ellipsis is
+/// indistinguishable from the preview's cut marker, so the rule also fires on an UNTRUNCATED
+/// message that simply ends in one. Both paths are nil-probability rather than impossible, and
+/// neither loses a message: what one costs is a trailing clause.
+fn without_wire_line(preview: &str, marker: &str) -> String {
+    let Some(at) = preview.rfind(marker) else {
+        return preview.to_string();
+    };
+    let Some(rest) = preview[at..].trim().strip_prefix(marker) else {
+        return preview.to_string();
+    };
+    if !is_wire_tail(rest) {
+        return preview.to_string();
+    }
+    preview[..at].trim().to_string()
+}
+
+/// One id character: lowercase hex, which is the whole of what keeps prose out of the rules below.
+fn is_lower_hex(c: char) -> bool {
+    c.is_ascii_hexdigit() && !c.is_ascii_uppercase()
+}
+
+/// Whether what follows the marker is a wire line — a WHOLE one, or one a preview CUT.
+///
+/// THREE shapes, and the third was a measured leak rather than a hypothetical. A cut landing INSIDE
+/// the six-hex id leaves no `<id> <payload>` to split at all, so the rules below found nothing and
+/// the marker fragment survived on the row and in the push. Measured over 48 realistic engine-game
+/// ledgers (a Stockfish name, a clock and four to six shown moves): **8 leaked**, because words of
+/// 104–108 characters put the 120th code point inside the id. For a PET it is structurally
+/// unreachable with the shipped skins — its words top out around 41 and the window is 107–119 — so
+/// this was a CHESS leak on a feature that ships, and the test for it used to assert the leak as
+/// expected, which pinned the defect instead of the rule.
+///
+/// The id-cut rule is `<1..=6 hex><optional space>…` and nothing else: the marker, then only hex,
+/// then the cut. **It widens the nil-probability prose path stated on `without_wire_line` by some
+/// 60x rather than by "one notch", and the honest statement is ANY HEX-INITIAL WORD**: it fires at
+/// k=1, so a word whose FIRST character is `a`–`f` or a digit is enough — roughly 30% of English
+/// words by initial letter against roughly 0.5% for a full six-hex word. So
+/// `"…thanks ever — pet b…"` is cut, and `cage`, `carrier`, `bed`, `dish`, `brush`, `collar`,
+/// `food` and `bowl` all reach it: a colleague could plainly write "— pet food is in the second
+/// drawer", and the improbable part is the CUT landing inside that 1–6 character window rather
+/// than the words. The cost is unchanged and is what makes it acceptable — a trailing clause,
+/// never a message.
+///
+/// Two footnotes, both measured. The OPTIONAL SPACE sub-branch is unreachable from a real preview
+/// in either language, because `preview_from_html` runs `truncated.trim_end()` before it appends
+/// the `…` — so `— pet 7f3a1c …` is a shape the truncator cannot emit and its fixture is testing
+/// the rule rather than a preview. And the residual window is now **one code point wide**: a cut
+/// landing exactly after the marker's space (`— pet…`, zero hex) is not cut, which is narrower
+/// than before and NOT closed — "the marker, then only hex, then the cut" does not say so on its
+/// own.
+fn is_wire_tail(rest: &str) -> bool {
+    // THE ID ITSELF WAS CUT: only hex, then the preview's own cut marker, and no payload at all.
+    if let Some(hex) = rest.strip_suffix('…') {
+        let hex = hex.strip_suffix(' ').unwrap_or(hex);
+        if (1..=6).contains(&hex.len()) && hex.chars().all(is_lower_hex) {
+            return true;
+        }
+    }
+    // `<6 hex> <anything>, via teams-lite` — or the same with the PAYLOAD cut short.
+    let Some((id, payload)) = rest.split_once(' ') else {
+        return false;
+    };
+    id.len() == 6
+        && id.chars().all(is_lower_hex)
+        && (payload.ends_with(", via teams-lite") || payload.ends_with('…'))
+}
+
+/// A game of CHESS: `— chess 7f3a1c v2 w open tc.600+0, via teams-lite`.
+///
+/// The marker comes from [`crate::chess_wire`] rather than being spelled again here, because the
+/// STORE reads that same marker to answer WHICH messages hold a game
+/// (see [`crate::store::Store::chess_messages`]): two spellings of it would leave a push carrying a
+/// line the other reader had learned to recognise. What is NOT shared is the strip itself — this one
+/// re-validates a tail a PREVIEW cut, which a body-shaped reader never sees.
 fn without_chess_line(preview: &str) -> String {
-    crate::chess_wire::without_chess_line(preview)
+    without_wire_line(preview, crate::chess_wire::MARKER)
+}
+
+/// A COMPANION: `— pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c, via teams-lite`.
+fn without_pet_line(preview: &str) -> String {
+    without_wire_line(preview, "— pet ")
 }
 
 pub fn notification_for(
@@ -122,13 +233,16 @@ pub fn notification_for(
     // sidebar), so a sealed chat would otherwise fall through the empty-body gate below and stay
     // silent — a message the reader never hears about at all.
     let sealed = message.seal != crate::store::MessageSeal::None;
-    // A CHESS message carries a machine-readable line the reader must never be shown, and a push
-    // is the one surface that gets its words from this side: the page strips it out of a sidebar
-    // preview itself (`chessPreviewText`), and there is no page here. It matters more than it did:
-    // a move used to be its own short line, and a game's whole record now lives in ONE message
-    // that is rewritten as it is played — so an unstripped push would be a screenful of wire with
-    // the sentence it is about pushed off the end of it.
-    let words = truncate(&without_chess_line(&teams_read::preview_for_message(message)), MAX_BODY_CHARS);
+    // A CHESS message and a PET message each carry a machine-readable line the reader must never
+    // be shown, and a push is the one surface that gets its words from this side: the page strips
+    // them out of a sidebar preview itself (`chessPreviewText`, `stripPetLine`), and there is no
+    // page here. It matters more than it did: an act used to be its own short line, and a whole
+    // record — a game's plies, a pet's acts — now lives in ONE message that is rewritten as it is
+    // played with, so an unstripped push would be a screenful of wire with the sentence it is
+    // about pushed off the end of it. Both, because a chat holds both: a message is one or the
+    // other and never both, so the order the two run in decides nothing.
+    let preview = teams_read::preview_for_message(message);
+    let words = truncate(&without_pet_line(&without_chess_line(&preview)), MAX_BODY_CHARS);
     // Two ways a sealed message says nothing about its words, and they must land on the same
     // sentence: the user has not asked for them, or this machine cannot READ them — a message
     // sealed under a passphrase nobody here holds has no words to publish. Falling through to the
@@ -531,6 +645,146 @@ mod tests {
         assert_eq!(
             without_chess_line("— chess not-a-game 1 e4, via teams-lite"),
             "— chess not-a-game 1 e4, via teams-lite"
+        );
+    }
+
+    /// A push about a COMPANION says what happened, never the line that carries it.
+    ///
+    /// The same rule as the game above, and it needs its own test because it is its own marker: a
+    /// pet's record is one message rewritten on every act, so a colleague's spawn — which is a
+    /// `send`, and notifies like any other message — arrives here with the whole wire on it.
+    #[test]
+    fn a_push_about_a_companion_carries_no_wire() {
+        // The body `petMessageHtml` writes, flattened the way the backend flattens two blocks.
+        assert_eq!(
+            without_pet_line("Nori is here.\n— pet 7f3a1c v1 s.cat, via teams-lite"),
+            "Nori is here."
+        );
+        assert_eq!(
+            without_pet_line(
+                "Nori · fed 3 · played 1 — pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c, via teams-lite"
+            ),
+            "Nori · fed 3 · played 1"
+        );
+        // And nothing else is ever cut: an agent's own signature, a colleague's prose about a pet,
+        // a bare em dash, and an id that is not one.
+        assert_eq!(
+            without_pet_line("done — claude, via teams-lite"),
+            "done — claude, via teams-lite"
+        );
+        assert_eq!(
+            without_pet_line("I told him — pet the cat, not the dog"),
+            "I told him — pet the cat, not the dog"
+        );
+        assert_eq!(without_pet_line("on my way — see you"), "on my way — see you");
+        assert_eq!(
+            without_pet_line("— pet not-a-pet v1 s.cat, via teams-lite"),
+            "— pet not-a-pet v1 s.cat, via teams-lite"
+        );
+
+        // AND THE NOTIFICATION REALLY GOES THROUGH IT. The two `without_*` assertions above hold
+        // whether or not `notification_for` calls either one, which is the one way this could pass
+        // over the whole defect: this is the body a colleague's spawn arrives with, and a spawn is
+        // a `send`, so it notifies like any other message.
+        let mut message = chat_message();
+        message.content =
+            "<p>Nori is here.</p><p><em>— pet 7f3a1c v1 s.cat, via teams-lite</em></p>".to_string();
+        let notification = notification_for(&message, &chat(), SELF_MRI, false, NOW, false)
+            .expect("a colleague's spawn notifies");
+        assert_eq!(notification.body, "Nori is here.");
+    }
+
+    /// A record too long for a preview is CUT MID-WIRE, and that cut is still no wire.
+    ///
+    /// `teams_read::preview_from_html` keeps the body's first 120 characters and marks the cut with
+    /// an ellipsis, and three acts of MIXED kind already take a pet's body past that (141) — so
+    /// requiring the line's own `, via teams-lite` would have left every push about a played-with
+    /// pet carrying a wire dump, and every clocked game leaking from its first move. The ellipsis
+    /// is the preview's own proof that it truncated, which is why nothing whole is touched by this:
+    /// the two prose lines below end in one and are left alone, because neither carries the marker
+    /// with an id behind it.
+    #[test]
+    fn a_push_about_a_record_too_long_to_preview_carries_no_wire() {
+        assert_eq!(
+            without_pet_line(
+                "Nori · fed 3 — pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c 175606001…"
+            ),
+            "Nori · fed 3"
+        );
+        assert_eq!(
+            without_chess_line("♟ 1. e4 2. Nf3 — chess 7f3a1c v2 w tc.600+0 at.17560600123…"),
+            "♟ 1. e4 2. Nf3"
+        );
+        // A colleague's own sentence that was truncated keeps every word of what survived.
+        assert_eq!(
+            without_pet_line("I told him — pet the cat, not the d…"),
+            "I told him — pet the cat, not the d…"
+        );
+        assert_eq!(without_pet_line("we should talk about the deploy…"), "we should talk about the deploy…");
+
+        // A CUT LANDING INSIDE THE ID, which this used to assert as a LEAK — the test pinned the
+        // defect rather than the rule. Measured over 48 engine-game ledgers, 8 of them landed here
+        // (words of 104–108 put the 120th code point inside the six-hex id), so it was reachable on
+        // a feature that ships rather than the 22-character curiosity it was written off as.
+        assert_eq!(without_pet_line("Nori is here. — pet 7f3a…"), "Nori is here.");
+        assert_eq!(without_pet_line("Nori is here. — pet 7f3a1c …"), "Nori is here.");
+        // The two real ones, from the measured leak. The `…` is the preview's own cut marker.
+        assert_eq!(
+            without_chess_line(
+                "♟ Chess — I'm playing Stockfish 3190. 3 min. moves: 20… Qxd5+ … 23. Bxf6 — chess 7f3a…"
+            ),
+            "♟ Chess — I'm playing Stockfish 3190. 3 min. moves: 20… Qxd5+ … 23. Bxf6"
+        );
+        assert_eq!(
+            without_chess_line(
+                "♟ Chess — I'm playing Stockfish 1320. 3 min + 2 s. moves: … 22… Nbxd7 — chess 7f3a1c…"
+            ),
+            "♟ Chess — I'm playing Stockfish 1320. 3 min + 2 s. moves: … 22… Nbxd7"
+        );
+        // And an id-shaped cut is still the ONLY thing cut on that branch: prose keeps its words,
+        // even where the words after the marker are longer than an id could be.
+        assert_eq!(
+            without_pet_line("I told him — pet the cat, not the d…"),
+            "I told him — pet the cat, not the d…"
+        );
+        assert_eq!(without_pet_line("we walked the — pet shop…"), "we walked the — pet shop…");
+
+        // ONE CASE RULE, THE SAME AS THE PAGE'S: lowercase, because a real id is `toString(16)`.
+        // `is_lower_hex` survived widening to any hex unpinned, and the page's own `ID_CUT`
+        // survived losing its `/i` — so the two could have disagreed, which on prose is a row and
+        // a push saying different things about the same words.
+        assert_eq!(without_pet_line("Nori is here. — pet 7F3A…"), "Nori is here. — pet 7F3A…");
+        assert_eq!(
+            without_pet_line("Nori · fed 3 — pet 7F3A1C v1 s.cat 1756…"),
+            "Nori · fed 3 — pet 7F3A1C v1 s.cat 1756…"
+        );
+    }
+
+    /// THE PAGE MIRRORS THIS PREVIEW'S OWN CEILING, and a wrong mirror is otherwise SILENT.
+    ///
+    /// `web/src/lib/protocol.test.ts` ports `preview_from_html` in order to build a fixture whose
+    /// wire line the cut has really broken — a hand-typed fixture is an untruncated one, which is
+    /// exactly what the old strip passed straight through. A second spelling of a Rust function is
+    /// a thing that drifts, and measured: moving that mirror's cap from 120 to 130 failed NOTHING.
+    /// 60 and 200 were caught, so the guard band was an accident of two numbers — below ~120 the
+    /// marker leaves the string and above 141 the pet fixture stops being truncated, and anything
+    /// between hides. And if `MAX_CHARS` moves HERE while the mirror does not, nothing fails at all.
+    ///
+    /// So the ceiling is MEASURED through `preview_from_html` itself and the page's own spec is
+    /// scanned for the number that comes out. That is the cross-process pattern this crate already
+    /// uses — `update::tests` on the workflow YAML, `agent::tests` on a unit file — and for its
+    /// reason: that file is on the other side of a process boundary, so a change to either side is
+    /// invisible to the other.
+    #[test]
+    fn the_page_mirrors_this_previews_own_ceiling() {
+        let cut = teams_read::preview_from_html(&format!("<p>{}</p>", "a".repeat(400)));
+        assert!(cut.ends_with('…'), "a truncated preview marks its own cut");
+        let length = cut.chars().count();
+        let spec = include_str!("../web/src/lib/protocol.test.ts");
+        assert!(
+            spec.contains(&format!("toBe({length})")),
+            "web/src/lib/protocol.test.ts must pin its `backendPreview` mirror at {length} code \
+             points (the ceiling plus the ellipsis); move MAX_CHARS and the mirror moves with it"
         );
     }
 }

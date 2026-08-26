@@ -43,6 +43,17 @@ import { useChessClock } from "./use-chess-clock";
 /** How many chips are drawn before the rest become a count. */
 export const CHESS_STRIP_CHIPS = 3;
 
+/**
+ * How much of the history's top this strip covers, in CSS px, while a game is live.
+ *
+ * It lives HERE, beside the classes it measures — `h-11` on a chip plus the container's own
+ * `py-1.5` either side — because a number kept anywhere else is a second opinion about the size of
+ * this element. It has one reader: the pet overlay, which shares this rectangle and must start
+ * below the strip rather than inside it (see components/pet-layer.tsx). It was 44 there once, which
+ * is the CHIP alone, and the two overlays' own bounded-count labels then landed on each other.
+ */
+export const CHESS_STRIP_HEIGHT_PX = 56;
+
 export function ChessGamesStrip(props: { conversationId: string; games: ChessGame[] }) {
   const live = activeChessGames(props.games);
   if (live.length === 0) return null;

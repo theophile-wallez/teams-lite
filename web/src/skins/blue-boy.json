@@ -1,0 +1,89 @@
+{
+  "name": "blue-boy",
+  "label": "Blue boy",
+  "author": "welltilln (MIT)",
+  "palette": {
+    ".": null,
+    "H": "#3D2714",
+    "h": "#5A3D22",
+    "S": "#FDBDA0",
+    "s": "#E09070",
+    "e": "#1A1A2E",
+    "W": "#F0F0F8",
+    "B": "#1E5FCC",
+    "b": "#1547A8",
+    "T": "#CC2233",
+    "t": "#AA1020",
+    "o": "#FFFFFF"
+  },
+  "size": { "w": 14, "h": 14 },
+  "anchor": { "x": 7, "y": 14 },
+  "frames": {
+    "idle": [
+      "...HHHHHHHHH..",
+      "..HHhhHHHhhH..",
+      "..HHhSSSSShH..",
+      "..HHSeeSSeeS..",
+      "..HHSSSsSSSS..",
+      "..HHSSsWWsSH..",
+      "...HHSSSSsH...",
+      "...WBBTtTBBW..",
+      "..BBBbTtTbBBB.",
+      "..BBBBTtTBBBB.",
+      "..bBBBBBBBBBb.",
+      "..bBBBBBBBBBb.",
+      "...bbb..bbb...",
+      "...bbb..bbb..."
+    ],
+    "held": [
+      "...HHHHHHHHH..",
+      "S.HHhhHHHhhHS.",
+      "SSHHhSSSSShSS.",
+      "..HHSeeSSeeS..",
+      "..HHooSooSSS..",
+      "..HHoesoesSH..",
+      "...HHSSSSsH...",
+      "...WBBTtTBBW..",
+      "..BBBbTtTbBBB.",
+      "..BBBBTtTBBBB.",
+      "..bBBBBBBBBBb.",
+      "..bBBBBBBBBBb.",
+      "..............",
+      ".............."
+    ],
+    "walk": [
+      [
+        "...HHHHHHHHH..",
+        "..HHhhHHHhhH..",
+        "..HHhSSSSShH..",
+        "..HHSeeSSeeS..",
+        "..HHSSSsSSSS..",
+        "..HHSSsWWsSH..",
+        "...HHSSSSsH...",
+        "...WBBTtTBBW..",
+        "..BBBbTtTbBBB.",
+        "..BBBBTtTBBBB.",
+        "..bBBBBBBBBBb.",
+        "..bBBBBBBBBBb.",
+        "........bbb...",
+        "...bbb..bbb..."
+      ],
+      [
+        "...HHHHHHHHH..",
+        "..HHhhHHHhhH..",
+        "..HHhSSSSShH..",
+        "..HHSeeSSeeS..",
+        "..HHSSSsSSSS..",
+        "..HHSSsWWsSH..",
+        "...HHSSSSsH...",
+        "...WBBTtTBBW..",
+        "..BBBbTtTbBBB.",
+        "..BBBBTtTBBBB.",
+        "..bBBBBBBBBBb.",
+        "..bBBBBBBBBBb.",
+        "...bbb........",
+        "...bbb..bbb..."
+      ]
+    ]
+  }
+}

@@ -12386,11 +12386,22 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
                         .unwrap_or_else(|| m.clone());
                     ctx_msgs.emit("message", message_json(&row, &self_name, &self_mri, Some(&store)));
                     // Reach the devices no socket reaches: a phone whose Home Screen app
-                    // is closed learns about this message only through Web Push. Only on
-                    // a FRESH insert — a reaction arriving on an old message is not news
-                    // worth a lock screen, and the backend that already stored this one
-                    // has already pushed it (the delivery is claimed either way, in
-                    // `push_deliveries`).
+                    // is closed learns about this message only through Web Push.
+                    //
+                    // `inserted` is NOT "a fresh insert", and reading it that way is how
+                    // § Chess came to claim an edit never reaches this path: the upsert
+                    // returns true whenever the CONTENT really changed, so an EDIT passes
+                    // this gate too — which matters now that a whole record (a game's
+                    // plies, a pet's acts) lives in one message that is rewritten as it is
+                    // played with. What it really excludes is a frame that changed nothing
+                    // this store did not already hold: a REACTION on an old message, which
+                    // is not news worth a lock screen. What makes an edit DELIVER nothing
+                    // is one level down — `push_live_message` claims the delivery on
+                    // `<conversation>/<message>` in `push_deliveries`, so only the first
+                    // frame for a given message ever goes out (that same claim is what
+                    // stops the other backend on this store pushing it twice), and a Teams
+                    // edit keeps its original `compose_time`, so `push_policy::is_stale`
+                    // refuses one past `MAX_AGE_MS` however long ago the claim was pruned.
                     if inserted {
                         push_live_message(&ctx_msgs, store, &row, is_channel, from_me, &self_mri);
                         // …and answer it, when the user summoned a local agent with it.
@@ -15073,7 +15084,10 @@ mod tests {
         assert!(emit_at < push_at, "the broadcast must not sit inside the insert-only branch");
         assert!(
             task[emit_at..].contains("if inserted {"),
-            "a push (and an agent answer) must still happen only on a fresh insert"
+            "a push (and an agent answer) must stay behind `inserted` — which is \"the content \
+             really changed\" and NOT \"a fresh insert\": an edit passes it too, and what stops one \
+             DELIVERING is the per-message claim in `push_deliveries`. What this gate excludes is a \
+             frame that changed nothing, i.e. a reaction on a message already stored"
         );
     }
 
