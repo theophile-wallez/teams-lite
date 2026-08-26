@@ -12,6 +12,15 @@ import { test, expect, gotoApp, openConversationNamed } from "./helpers";
 test.describe("a quote goes to what it quotes", () => {
   const QUOTE = '[data-testid="message-quote"]';
   const JUMPABLE = `${QUOTE}[data-quote-jumpable="true"]`;
+  const FORWARDED = '[data-testid="quote-forwarded"]';
+  // A FORWARD that is offered as a control — the thing the last test below forbids. It is
+  // spelled as a forward that is jumpable rather than as "no jumpable quote on the page",
+  // because the page-wide count was a claim about the whole THREAD and one mock process
+  // serves the whole run: `agent.spec.ts` deliberately takes the "Forwarded Messages"
+  // conversation for its own agent reply — a native reply, so its quote names a real
+  // message and IS jumpable — which made this test fail in every full-suite run while
+  // passing whenever it was re-run on its own.
+  const FORWARDED_JUMPABLE = `${JUMPABLE}:has(${FORWARDED})`;
 
   test("clicking a reply's quote scrolls to the quoted message and highlights it", async ({
     page,
@@ -67,8 +76,12 @@ test.describe("a quote goes to what it quotes", () => {
 
     // The blocks are there and labelled — they are just not controls.
     await expect(page.locator(QUOTE).first()).toBeVisible();
-    await expect(page.locator('[data-testid="quote-forwarded"]').first()).toBeVisible();
-    await expect(page.locator(JUMPABLE)).toHaveCount(0);
+    await expect(page.locator(FORWARDED).first()).toBeVisible();
+    // The `:has()` half of the locator below really matches something, so the count that
+    // follows is a fact about the forwards rather than about a selector that resolves to
+    // nothing: an assertion nothing can fail is worse than no assertion at all.
+    expect(await page.locator(`${QUOTE}:has(${FORWARDED})`).count()).toBeGreaterThan(0);
+    await expect(page.locator(FORWARDED_JUMPABLE)).toHaveCount(0);
   });
 
   test("a quoted body is clamped to three lines", async ({ page }) => {
