@@ -431,7 +431,12 @@ function tick(): void {
   // A hidden document stops the loop — upstream's own rule. `visibilitychange` re-arms it, which is
   // why nothing here has to poll to find out the tab came back.
   if (document.hidden) return;
-  for (const sprite of [...live]) if (!sprite.step()) live.delete(sprite);
+  // `leave` AND NOT `live.delete`: leaving is where the document's `visibilitychange` listener is
+  // taken off, and a sprite retired by its own step is retired for exactly the same reason a
+  // destroyed one is. Deleting it directly left that listener attached with `live` empty, for the
+  // life of the page — latent today, because the one host never passes `reducedMotion` and that is
+  // the only way a step answers false, and a leak the moment anything does.
+  for (const sprite of [...live]) if (!sprite.step()) leave(sprite);
   arm();
 }
 
@@ -547,6 +552,12 @@ export function createSprite(options: SpriteOptions): SpriteHandle {
   // The sprite's own footprint, out of the skin's declared size — never a constant.
   const width = skin.size.w * PX;
   const height = skin.size.h * PX;
+  // ONCE, beside the other two invariants, because `render` runs sixty times a second per sprite and
+  // again on every drag move: three pets asked the canvas for its context 180 times a second for an
+  // answer that cannot change for the element's lifetime. A null one (a canvas the browser refuses)
+  // is still handled in `render` — it draws no frame and the element is still placed, which is what
+  // the transform above it is for.
+  const ctx = canvas.getContext("2d");
   // Both of these are resolved ONCE. Upstream re-read its traits every step so a runtime skin swap
   // would change pace immediately; a skin is captured per sprite here and cannot be swapped, so a
   // per-frame re-read would be the same answer sixty times a second — and `walkFrames` would re-filter
@@ -692,7 +703,6 @@ export function createSprite(options: SpriteOptions): SpriteHandle {
     const sy = 1 - body.squash * 0.35;
     canvas.style.transform = `translate(${x}px, ${y}px) scale(${sx}, ${sy})`;
 
-    const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const rows = rowsNow(walking);
@@ -897,9 +907,23 @@ export function createSprite(options: SpriteOptions): SpriteHandle {
    * What it costs is that a right-click while dragging now DROPS the pet instead of keeping it in
    * hand, which is the lesser of the two: a clean drop with nothing published, against a write the
    * reader's next click would have made.
+   *
+   * **AND THAT THIRD ENDING MAY NOT BE KEYED ON THE POINTER ID, which is what made it a no-op for the
+   * one input it was needed for.** A mouse keeps ONE `pointerId` for its whole life, so a second press
+   * by it really is the same pointer pressing twice with no release between — but every TOUCH gets a
+   * FRESH id, so a touch whose `pointerup`/`pointercancel` never arrived (the page hidden mid-drag,
+   * the touch ending outside the document) could never be recognised: the pet stayed `held` for ever,
+   * stopped walking, kept its `grabbing` cursor and three document listeners, and no later touch could
+   * free it. A new PRIMARY press is the same proof for both, and it is exactly as narrow: a finger that
+   * really is still down makes the next one NON-primary, so a genuine second finger cannot end a live
+   * hold. Nothing is published either way — a `pointerdown` is not a release, so `threw` is false and
+   * `released` is false, and neither callback is reached.
    */
   function dragEnd(event: PointerEvent): void {
-    if (destroyed || pose !== "held" || !isDragPointer(event)) return;
+    if (destroyed || pose !== "held") return;
+    // WHOSE ending this is. A real release must be the grabbing pointer's own; a lost-release PRESS is
+    // proof from any primary pointer, for the reason above.
+    if (!isDragPointer(event) && !(event.type === "pointerdown" && event.isPrimary)) return;
     if (event.type === "pointerup" && event.button !== 0) return;
     const released = event.type === "pointerup";
     // PATCH 4: the distance from the GRAB decides which of the two the reader meant. It is measured

@@ -2515,7 +2515,22 @@ the way the runner writes one (nested sections, a progress line rewritten in pla
 256-colour SGR), the RUNNING job's log grows by a line on every read — which is what makes
 "following" reviewable with no CI anywhere — a `manual` job answers an empty one, and the
 `{kind:"gitlab_mr"}` hook arms `truncate_job_log` and `refuse_job_log` (a spec MUST clear it, since
-one mock process serves the whole run). `cd web && bun run preview -- --out /tmp/log --job-log`
+one mock process serves the whole run).
+
+**THAT GROWTH IS UNBOUNDED, AND IT HAD TO BECOME SO: a SATURATING fixture is a flake that blames the
+code under test.** It was capped at the fixture's own length — about five reads past its start — while
+the page POLLS a live job, so the polls exhausted it before a test reached its own "the log grew"
+assertion. Whichever job-log test then asserted growth failed, and WHICH one is decided by timing:
+measured over the whole suite, pristine master loses `gitlab.spec.ts:1860` and a branch that changed
+nothing about this page lost `:1952`. An arbitrary loser is the signature. `mockRunningTrace` appends
+DISTINCT lines carrying no section marker past the end, so a section the fixture already closed stays
+closed and the nested-fold assertions are untouched. **The other half was in the spec**, and it is
+worth naming as a shape rather than as three edits: `expect(locator.count()).resolves.toBeX(…)` reads
+the count ONCE and does not retry, so all three uses of it in this file were bare races against the
+re-render their own click causes. `expect.poll(() => locator.count())` is the form; a suite-wide scan
+found no fourth.
+
+`cd web && bun run preview -- --out /tmp/log --job-log`
 captures the card, the page in both themes, every section folded, the filter in both themes, a
 phone's width, a cut log, a job that has not run, a live one and a refused read. **No real log has
 been drawn from the instance yet**: the reads are measured above and the surface is pinned against
@@ -5197,9 +5212,20 @@ each pinned:
   and it answers ordinary messages in the ordinary shape. Whose ply is whose, what the clocks read and
   who won stay the page's ONE derivation, because a second spelling of any of that in Rust would be a
   second answer to "what happened in this game", drifting at the next token anybody adds.
-- **The marker has one Rust spelling** (`chess_wire::chess_line_at`), and `push_policy` reads it
-  through the same function — the line a push must never show a reader and the line the store filters
-  on are the same line.
+- **The marker has one Rust spelling** (`chess_wire::MARKER`), and `push_policy` reads it through the
+  same constant — the line a push must never show a reader and the line the store filters on are the
+  same line. **The FINDER is shared with the pet** (`src/wire_line.rs`, the twin of
+  `web/src/lib/wire-line.ts`): both features sign `— <keyword> <6 lowercase hex> <payload>, via
+  teams-lite`, so the grammar after the keyword is one shape and the keyword is the whole of what tells
+  them apart — a copy per feature is a second chance to narrow one of them and not the other.
+- **AND THERE IS NO SECOND STRIP IN THIS MODULE, which is a defect this closed rather than a rule it
+  always had.** `chess_wire::without_chess_line` was public, was called by nothing but its own tests,
+  and had DIVERGED from the live strip: `push_policy` grew the cut rules a PREVIEW needs and stopped
+  calling it, so the obviously-named helper still required a WHOLE line while its docstring named the
+  caller that no longer called it. Whoever reached for it next would have got the pre-fix behaviour —
+  the leak the strip exists to stop. It is gone, and a source scan keeps it gone. Taking a line off a
+  preview is `push_policy`'s alone, because a body-shaped reader and a preview-shaped reader are two
+  questions and merging them answers neither.
 - **The LIVE games win over the snapshot, per game id** (`chessSeriesGames`). The archive is read
   once; a game that finished a moment ago is settled in the thread and still running in there, so
   merged the other way round a resignation would leave the score unchanged until a reload.
@@ -5662,7 +5688,10 @@ ordinary Teams messages. `web/src/lib/pet-wire.ts` is the line a pet message sig
 IS right now, `pet-act.ts` decides what a press publishes, `pet-skin.ts` holds the art,
 `pet-visibility.ts` the one preference, `web/src/vendor/desksprite.ts` is the vendored engine that
 animates a sprite, `web/src/components/pet-layer.tsx` is the overlay and `pet-menu.tsx` the control
-in each creature's own lane.
+in each creature's own lane. The backend's only half is the one question a page cannot answer for a
+history it has not loaded — WHICH of a conversation's stored messages carry a record at all
+(`src/pet_wire.rs`, read by `Store::pet_messages` and by `push_policy`; see § THE DERIVATION HAS TO BE
+COMPLETE below, which is where that read stops being an optimisation and becomes a rail).
 
 **IT IS CHESS'S OWN ARCHITECTURE, AND IT TAKES IT ONE STEP FURTHER.** Teams has no private data
 channel, so anything that must reach another machine is a message in the conversation — which is
@@ -5803,6 +5832,19 @@ at `PET_LOW` exactly and three put it above (`PET_PATS_COUNTED` is 3), so a crea
 reactions on its message can never again be one `petNeedsSomething` speaks up about for affection.
 That is the deliberate shape: a bond somebody keeps reaffirming is not a problem.
 
+**AND WHAT DECIDES THOSE THREE ACTS IS A RECORD, `gone` OR NOT — one answer, in `petPublishFor`.** A
+reader who has sent their own creature home may still feed, play with and nap a FRIEND's: the record
+stays after a despawn precisely so its acts still count, so `petPublishFor` asks for `mine` and never
+for `!mine.gone` on those three, and `pet-act.test.ts` pins it by name. `pet-menu.tsx`'s own
+`hasOwnPet` asked for `isSelf && !gone`, which made this app give TWO answers to "may I act?" for
+exactly that reader: the rows were hidden behind a sentence that was false — they have one on record —
+while the THROW gesture in the same lane published the very act the rows were hiding, since a gesture
+takes `petPublishFor`'s answer directly. The wire's answer is the one that decides, so the MENU was the
+half that moved. **Hoisting the `gone` rule to cover all four presses is the mirror-image mistake and
+was tried**: `despawn` and `skin` really do need a creature that is HERE, and one rule for all four
+silently takes away the feeding a departed owner is entitled to. The asymmetry is stated on `despawn`
+itself so the next reader does not tidy it away.
+
 **WHICH PET IS OURS IS ANSWERED BY `owner.isSelf` AND BY NOTHING ELSE.** The page never learns the
 user's own MRI — the backend resolves that question and hands the page the answer (§ Push
 notifications) — which is exactly why `Pet.owner.isSelf` exists, off the ledger message's own
@@ -5857,6 +5899,13 @@ conversation the press was made in and the pet it minted:
   conversation it names and by any ledger of ours arriving. An effect clearing it on a conversation
   change closed the outbound half and RE-OPENED the return half — back in the first chat before the
   echo, the row says "Take a cat" again. It is pinned as exactly one `setSpawnedPet(` write.
+- **THE RECEIPT IT REPLACES TAKES ITS SENTENCE WITH IT** (`forgetPetError`), which is the one
+  `petError` key nothing else can reach. Every other key belongs to a creature that is on screen, so
+  its own menu and trigger keep reading it and a later press clears it — a FIRST SPAWN's key is a
+  freshly minted id held only by this receipt, and the retry mints ANOTHER one. So the moment the
+  receipt moved, the old slot became a string no surface would ever draw again, one more on every
+  refused attempt. It is dropped at the press and only there, because that is the one moment both ids
+  exist at once: `publishPetLedger` knows the new key and can never know the old.
 - **What it deliberately does not cover, stated rather than fixed:** an echo that NEVER arrives leaves
   the row disabled with no sentence until a reload (`petError` is the only slot that produces words),
   which is the right trade against a duplicate nothing can delete; an answer merely LOST rather than
@@ -5888,6 +5937,96 @@ that is argued rather than assumed: the challenge row is in every chat for ever,
 drawn only until the reader has a creature, so one press deletes it for good — and the feature is
 reachable from nowhere else. What that costs is stated too: a reader who never takes a companion
 carries the section in every conversation's menu for ever.
+
+**AND THE TWO WINDOW FLAGS THAT REFUSAL READS ARE THE LAYER'S OWN, LIVE.** The fourth refusal says a
+window that would DRAW no creature offers none, which only holds if the row and the overlay answer
+"would one be drawn?" the same way — and they did not. `ConversationMenu` read motion/react's
+`useReducedMotion` while `PetLayer` read `usePrefersReducedMotion` (lib/platform.ts), and the former
+latches its value into a `useState` initialiser it never updates while this component is mounted
+UNKEYED for the life of the page. So both directions were wrong the moment the query moved: Reduce
+Motion ON unmounted the overlay and left the row saying "Take a cat" — a message everybody in the
+thread receives whose own presser is shown nothing, which is exactly what the refusal exists to
+prevent — and OFF left the row hidden until a reload, which is the stranding `usePrefersReducedMotion`
+was written to end. `pet.spec.ts` pins both directions WITH NO CREATURE IN THE THREAD, because that is
+the whole of what made the old assertion vacuous: `mine && !mine.gone` is another of the four
+refusals, so a check made after a spawn passes whatever the flag says, and the test passed with the
+gate deleted.
+
+### THE DERIVATION HAS TO BE COMPLETE, or the SPAWN posts a creature the reader already owns
+
+**THIS IS THE ONE PLACE "a pet IS its messages" IS NOT ENOUGH ON ITS OWN, and what it cost was the
+sharpest failure this feature had.** The history loads a PAGE at a time — `teams_read::DEFAULT_PAGE_SIZE`
+is 40, and `web/mock/server.ts` mirrors it — and every act EDITS its author's one ledger, so that
+message keeps the `seq` and the `compose_time` it was FIRST posted at. Forty messages later, which is
+a couple of days in a real chat, the record is out of the loaded window while the creature is very
+much alive. Everything downstream then agreed, wrongly: nothing was drawn, so there was no menu to
+reach it with; `hasOwnPet` was false, so Feed, Play and Nap were replaced by "Feeding and playing take
+a companion of your own"; and `petSpawnIsOffered` found no `mine`, so the conversation's own menu
+offered **Take a cat**. That press is a `send`. It mints a fresh id, posts a SECOND arrival message
+everybody in the thread reads, and `petsInThread`'s one-ledger-per-author rule absorbs that record
+WHOLE — so the creature they had just taken vanished, `despawn` edits the first message, and nothing
+in the feature can ever reach the other again. `petPublishFor`'s own `if (mine && !base) return null`
+fails closed on two histories that disagree and cannot help here: inside this window `pets` and
+`messages` are byte-identical to "I have no companion", so there is nothing for it to fail on.
+
+`pet_messages` is the read that closes it, and it is `chess_messages`' shape for a different reason —
+which is the one thing to keep in mind before touching either:
+
+- **CHESS's whole-history read buys a head-to-head SCORE, and its paging exposure is COSMETIC.** A
+  board whose root has paged out renders as a bubble (surface 5 below), which is ugly and reversible.
+  So there the read stands BESIDE the derivation and the two are merged per game id.
+- **HERE IT FEEDS THE DERIVATION ITSELF**, because the failure is a duplicate outward message and an
+  unreachable creature. `withPetArchive` (pet-thread.ts) merges what the backend answered into the
+  loaded history and `petsInThread` runs over the union, so the fold, the layer, both menus and every
+  publish take one answer.
+
+Seven rules hold it, and each is pinned by a test:
+
+- **IT DECIDES NOTHING ABOUT A PET.** `src/pet_wire.rs` reads the MARKER and nothing else, which is
+  `chess_wire`'s own rule and its reason: whose creature is whose, what has been done to it and
+  whether it has gone home are the page's ONE derivation, and a second spelling here would drift at
+  the next token anybody adds. So the answer is ordinary messages in the ordinary shape.
+- **THE GRAMMAR IS SHARED WITH CHESS AND THE KEYWORD IS NOT** (`src/wire_line.rs`, the twin of
+  `web/src/lib/wire-line.ts`). Both lines are `— <keyword> <6 lowercase hex> <payload>, via teams-lite`
+  after their own marker, so a copy of that grammar per feature is a second chance to narrow one and
+  not the other. `chess_wire` and `pet_wire` are now each a marker plus two thin calls.
+- **IT IS AN ORDINARY OPEN READ**, ungated exactly as `chess_messages` is: it makes no network request
+  (a pet IS its messages, so the store already holds them) and it publishes nothing a page cannot
+  already read — these are rows of the user's own history.
+- **THE SQL PREFILTER IS THE WHOLE MARKER, and here that is correctness rather than tidiness — because
+  the `LIMIT` runs BEFORE the Rust filter.** `chess_messages` says a `LIKE` "decides nothing" and can be
+  widened freely, which is true of what comes BACK and false of what is READ: `ORDER BY seq DESC LIMIT n`
+  keeps the n newest rows the SQL matched, and a pet ledger is OLD by construction. So every row the
+  prefilter over-matches eats a slot ahead of it — and `'%pet %'` matches "the pet shop" and every reply
+  quoting a ledger, which over a long thread would push the reader's own record out of the answer and
+  reopen the very window this read closes. `'%— pet %'` needs the em dash and the space. `MAX_PET_MESSAGES`
+  is 500 as the belt beside it, and the ceiling is STATED: past 500 such messages in one conversation an
+  old record can fall out. Chess has the same interaction with a rarer word and a 1 200 bound, so it sits
+  far from its own ceiling — worth knowing before either number moves.
+- **IT IS ASKED ONCE PER CONVERSATION AND ONLY WHILE COMPANIONS ARE ON.** A reader who turned the
+  switch off draws no creature and is offered no spawn, so they cannot reach the bug and need not pay
+  for the read — the split `loadChessArchive` makes for a reader who plays no chess. What the switch
+  cannot cover is the FIRST conversation they open, and that is stated rather than papered over:
+  `petsShown` holds its hopeful `true` until `start()` has read the browser's own preference in an
+  effect, which is the same window the layer already states for itself, so an opted-out reader costs one
+  store read and nothing after it. `petsShown` is in the effect's DEPENDENCIES too, so turning
+  companions on gets the creature with no reload.
+- **IT IS A MERGE, NOT A REPLACEMENT.** The archive is a snapshot and the live feed writes into the
+  loaded history, so anything already loaded wins BY ID and only what is missing is added. The common
+  case returns the SAME ARRAY, which is not tidiness: this feeds the memo that feeds the fold, and a
+  fresh array per render would re-fold the whole history on every scroll that mounts a row.
+- **THE MERGED LIST IS WHAT BOTH SURFACES ARE HANDED**, not just the fold. `ConversationMenu` and
+  `PetLayer` take `petHistory`, because `petPublishFor` reads our own ledger back out of the history by
+  id — a layer given the loaded page alone would publish nothing and say nothing for every press.
+- **A READ THAT FAILS LEAVES THE LOADED PAGE, which is exactly what shipped**, and draws no sentence:
+  there is nothing the reader could do about it, and a spawn refused on the strength of a failed read
+  would take the one way into the feature away from somebody who really has no companion here.
+
+**What it does NOT reach, stated where it is paid: a SEALED conversation.** Those bodies are
+ciphertext in the column the SQL prefilter matches, so a sealed thread still folds from the loaded page
+alone and can still be offered a duplicate spawn. Reading every row of every conversation to cover it
+would decrypt a whole history on every pane that mounts, which is the trade `chess_messages` already
+refuses for a score and refuses here for the same cost.
 
 ### EVERY NUMBER A PET HAS IS DERIVED, and none is sent
 
@@ -6065,7 +6204,15 @@ says what it prevents:
   rather than by stopping the loop for its neighbours. It is deliberately NOT narrowed further than
   "every pose but a throw in flight, under reduced motion", because `pauseFor` counts down in TICKS:
   a pet standing at the end of its band is counting, and one dropped for standing still would never
-  resume. What a really still pet costs is one clear and a few dozen `fillRect`s a frame.
+  resume. What a really still pet costs is one clear and a few dozen `fillRect`s a frame. **A sprite
+  retired that way LEAVES rather than being deleted from the set**, because leaving is where the
+  document's `visibilitychange` listener is taken off: `live.delete(sprite)` in the tick bypassed the
+  one teardown path and left that listener attached with the set empty, for the life of the page. It is
+  latent as it ships — this app's layer never passes `reducedMotion`, which is the only way a step
+  answers false — and a leak the moment anything does, which is exactly the kind of thing a vendored
+  engine gets handed by its second caller. **And the 2D context is fetched ONCE per sprite** rather than
+  inside `render`: three pets asked the canvas for it 180 times a second, plus once per drag move, for
+  an answer that cannot change for the element's lifetime.
 - **PATCH 2 — THE BOX RATHER THAN THE WINDOW.** Upstream read `global.innerHeight`, which is the
   wrong number for a creature living in a strip over a conversation, so the caller owns the resize
   and this engine watches no window. **AND THE FLOOR MOVES BOTH WAYS, which is the half that was
@@ -6126,11 +6273,20 @@ argued where it stands:
   `button`, passed both guards and PUBLISHED. A mouse released outside the browser window delivers no
   `pointerup` at all, which is the commoner route. The detector is a document `pointerdown` in the
   CAPTURE phase (a listener added on an ancestor during a descendant's handler IS invoked for that
-  same event on the way up, so a bubble listener would cancel the grab that registered it), narrowed
-  to a press by the GRABBING pointer so the deliberate two-finger behaviour survives untouched. A
-  TOUCH grab that ends with neither `pointerup` nor `pointercancel` can still never be cleared,
-  because a fresh touch gets a fresh id — parked, because it is stuck-pet rather than unmeant-write:
-  `onThrow` stays armed and unreachable, since every path into `dragEnd` requires the dead id.
+  same event on the way up, so a bubble listener would cancel the grab that registered it).
+  **AND IT MAY NOT BE KEYED ON THE POINTER ID, which made it a NO-OP for the one input it was needed
+  for.** Narrowed to a press by the GRABBING pointer it works for a MOUSE and only for a mouse: a mouse
+  keeps ONE `pointerId` for its whole life, so a second press by it really is the same pointer pressing
+  twice with no release between — but every TOUCH gets a FRESH id, so a touch whose `pointerup` and
+  `pointercancel` both never arrived (the page hidden mid-drag, the touch ending outside the document)
+  could never be recognised: the pet stayed `held` for ever, stopped walking, kept its `grabbing`
+  cursor and three document listeners, and no later touch could free it. It was PARKED here as
+  "stuck-pet rather than unmeant-write" and that reading was too kind — a stuck pet is a creature the
+  reader can no longer play with at all, in a feature whose whole point is that they can. A new PRIMARY
+  press is the same proof for BOTH inputs and is exactly as narrow: a finger that really is still down
+  makes the next one NON-primary, so the deliberate two-finger behaviour survives untouched. Nothing is
+  published either way — a `pointerdown` is not a `pointerup`, so `released` and `threw` are both false
+  and neither callback is reached.
 - **AND AN ACCIDENTAL PRESS STILL PUBLISHES SOMETHING — say so plainly, because it is the trade and
   not a bug that was fixed.** The canvas takes `pointer-events: auto` and claims `pointerdown`, so a
   tap the reader aimed at a bubble a creature had wandered over reaches the pet and pats it: an
@@ -6214,9 +6370,30 @@ English has such words (`facade`, `decade`, `deface`, `beaded`), so `"…— pet
 cut. **And an author's own trailing `…` is indistinguishable from the preview's cut marker**, so the
 rule fires on an untruncated message that simply ends in one. Both are nil-probability rather than
 impossible and neither loses a message: what one costs is a trailing clause. Do not read the hex as
-"keeping prose out" of this branch — it keeps prose out of the branch above it. One cut is NOT caught
-and is stated rather than assumed: landing inside the id, or straight after it with no space yet,
-leaves no `<id> <payload>` to split, so the ~13-character marker fragment survives.
+"keeping prose out" of this branch — it keeps prose out of the branch above it.
+
+**FOUR SHAPES COUNT AS ONE LINE, AND THE CUT WALKS UP THE LINE AS THE RECORD GROWS — so each of the
+last three was a real leak found one window after the last.** A whole line; one whose PAYLOAD the cut
+broke; one whose ID it landed inside (measured on chess: words of 104–108 characters put the 120th
+code point in the id, and **8 of 48 realistic engine-game ledgers landed there**, leaking the marker
+fragment onto the row — and the test for it used to assert that leak as expected, which pinned the
+defect instead of the rule); and one where the cut landed **inside the MARKER ITSELF**.
+
+**THAT FOURTH ONE IS THE ONE NO SEARCH FOR THE MARKER CAN FIND, which is why it survived the other
+three.** With the 120th code point inside `— chess ` there is no marker in the preview at all, so
+`rfind`/`lastIndexOf` answered nothing, none of the three rules was ever asked, and `♟ … 23. Bxf6 —
+ches` reached the row and the push — the exact thing the whole strip exists to stop. It is the id cut's
+own arithmetic one window later, because the marker sits immediately after the words: where an id cut
+needs 105–110 characters of words, a marker cut needs 111–118. `cut_marker_at` / `cutMarkerAt` is that
+window in both languages, and the residual is NOW genuinely narrow — a preview cut exactly after the
+marker's own trailing space is a shape `preview_from_html` cannot emit, since it trims before it
+appends the `…`. **An earlier note here and on `is_wire_tail` called that residual "one code point
+wide"; it was the whole length of the marker.**
+
+**The marker rule's own cost is the smallest of the three and is stated with it**: the shortest prefix
+it matches is the em dash ALONE, so it fires with no keyword evidence at all on a preview cut
+immediately after one — and what it takes is that dangling dash and nothing else (`"Hello there —…"` →
+`"Hello there"`), against the id rule above it which can take a whole word.
 
 **AND THE ARITHMETIC IS PINNED ACROSS THE PROCESS BOUNDARY, because a wrong mirror is SILENT.** The
 page's tests build a truncated fixture through `backendPreview`, a TypeScript port of
@@ -6241,7 +6418,13 @@ exists: a spawn is a `send`, so it notifies like any other message. So `petRowNe
 to the row that FOLLOWS it in time — and to the last row when the pet message is the newest thing in
 the thread — with a comment saying why a pet maps to a NEIGHBOUR where a game maps to its own board.
 It runs over the FINAL rows, after a recording has been spliced in and the map rebuilt, because both
-move indices a neighbour rule has already resolved.
+move indices a neighbour rule has already resolved. **And it is HANDED the ledgers rather than finding
+them again**: it re-scanned every message for the wire, which was a THIRD full pass of two regexes over
+the whole history — `petsInThread` is the first and `chatHistoryRows` the second — on a memo that
+re-runs whenever the messages, a recording or a live agent run moves, plus a linear row scan per
+ledger. `chatHistoryRows` had already asked that exact question one pass earlier, so it answers it.
+Two passes is the floor and is right: the fold's memo and the rows' memo have different dependencies,
+so merging them would re-fold every creature whenever an agent frame arrived.
 
 **One shape is deliberately LEFT as chess has it**, and both failure directions are safe: an absorbed
 ledger is still the `prev`/`next` NEIGHBOUR of the messages around it and `messageTimeMarks` runs over
@@ -6261,16 +6444,39 @@ not drift is the PATTERN, so `PET_ACT`, `PET_SKIN` and `PET_ACTS_KEPT` are expor
 `mock-pet-wire.test.ts` asserts the mock holds those very sources. That distinction was proved real
 rather than theoretical: a mock timestamp loosened to `\d+` still matches `1756060012345.f.7f3a1c`
 with all three captures correct, so every assertion that only fed it real bytes would have passed
-against a drifted mock — acceptance is not equality. Two more shapes of the mock are worth knowing:
+against a drifted mock — acceptance is not equality. **The one number that cannot be caught that way
+is a NO-OP on both sides**: `WORDS_ACTS` clamps how many counts the words show, and with one count per
+act kind and three kinds neither copy removes anything, so nothing a spec reads could ever see them
+disagree. The mock's own comment said as much and asked for the page's constant to be exported and
+asserted here; it now is, which turns a dead line in two places — with only one of them explained —
+into a pinned one. A fourth act kind is what makes the number real, and it will fail loudly instead.
+Two more shapes of the mock are worth knowing:
 its responder asks whether the COLLEAGUE is already in this conversation before it asks anything about
 the reader's press, because a ledger is a STATE and the reader's message still declares a spawn on
 their fortieth act — the other order made the colleague meet the reader's pet and then never answer a
 single thing done to its own, which is the bug the chess opponent shipped in another vocabulary; and
 it decides WHICH act it owes inside its own timeout rather than at wake time, because two reader
 presses inside one delay both read "nothing answered yet" and both answer the first one — which is
-what `mockChessPlayNow` re-reads its position inside a timeout for. The `{kind:"pet"}` hook arms a
-silent colleague, a colleague's spawn, a colleague's act and a pat, and **a spec MUST reset it**: one
-mock process serves the whole run, and a pet is a MESSAGE that stays in the history.
+what `mockChessPlayNow` re-reads its position inside a timeout for. The mock also answers
+`pet_messages` over the WHOLE thread rather than over the page the app loaded, which is the one thing
+that read exists for — so a spec can spawn, bury the ledger under 45 live messages, load the app fresh
+and still be refused a duplicate spawn.
+
+The `{kind:"pet"}` hook arms a silent colleague, a colleague's spawn, a colleague's act and a pat, and
+**a spec MUST reset it**: one mock process serves the whole run, and a pet is a MESSAGE that stays in
+the history. **THE THREAD IT AIMS AT IS THE FIXTURE'S AND IS NOT AN ARGUMENT**, and that is what makes
+the reset honest: it took a `conversation` while `resetMockPet` truncated `MOCK_PET_THREAD` alone, so a
+spec aiming the colleague anywhere else would have left a ledger message behind for the whole run —
+which is the exact hazard the reset exists for. Nothing ever passed one, so the parameter is gone
+rather than the reset widened; widening it again means widening the reset in the same change, because an
+aimable hook and a fixture-only reset are one rule and holding half of it is the bug.
+
+**THE CHESS HOOK HAS THE IDENTICAL SHAPE AND KEEPS IT, and that is recorded rather than claimed as
+precedent.** `mockChessChallenge` and `mockChessPlayNow` really do take a conversation — `preview.ts`
+aims one, at `PET_THREAD_ID` among others — while `resetMockChess` truncates `MOCK_CHESS_THREAD` alone,
+so a game seeded elsewhere outlives its reset. What bounds it is the CALLER and not the hook: every one
+is a capture script, and a capture starts its own mock and exits with it. The E2E suite is where this
+would bite — one mock process for 565 tests — and no spec aims either hook.
 
 `cd web && bun run preview -- --out /tmp/pet --pet` captures nineteen states, and most of them had
 never been drawn in a browser at all: the spawn row the menu offers in both themes, one creature and
@@ -6278,7 +6484,7 @@ two of them re-cutting each other's lanes in both themes, the speech bubble in b
 own menu and its armed Remove in both themes, a colleague's creature, the RED trigger a refused press
 leaves and that trigger cropped, the whole thing at a phone's width where the pet, its trigger and
 the header's own trigger are three targets in one column, and Settings › Companions. `pet.spec.ts`
-pins every rule the page owns in fifteen tests, and `pet-wire.test.ts`, `pet-state.test.ts`,
+pins every rule the page owns in sixteen tests, and `pet-wire.test.ts`, `pet-state.test.ts`,
 `pet-thread.test.ts`, `pet-act.test.ts`, `pet-skin.test.ts`, `pet-visibility.test.ts`,
 `pet-layer.test.tsx` and `desksprite.test.ts` the pure ones.
 
@@ -6318,6 +6524,12 @@ caught, nothing shipped, and the harness now restores from git on every exit pat
   whole life were drawn there — and what they revealed is in this section rather than in a note: the
   floor that never fell, the trigger 4px off screen, the menu over its own creature, the creature on
   its own trigger, and the phone dead zone.
+- **AND `pet_messages` HAS NOT BEEN ANSWERED BY A REAL STORE.** The read is pinned in `store::tests`
+  and in `pet_wire::tests` over bodies this app really writes, and the whole chain is driven against
+  the mock (spawn, bury the ledger under 45 messages, load fresh, be refused a duplicate) — so what is
+  untested is the pairing: one open of a conversation whose pet ledger really has aged 40 messages
+  back, in the user's own app. It is the one item on this list whose failure mode is SAFE either way:
+  a read that answers nothing leaves the loaded page, which is exactly what shipped before it.
 
 ## Renaming a person, and giving them a face (LOCAL, and gated)
 
@@ -6552,6 +6764,13 @@ user's. What changes is only what is asked.
     (`src/chess_wire.rs`, read by `Store::chess_messages` and by `push_policy`), for the
     head-to-head score. It reads the MARKER and never the game: the wire keeps one spelling, on
     the page.
+  - A COMPANION is the same shape and the same split (`src/pet_wire.rs`, read by
+    `Store::pet_messages` and by `push_policy` — see § A COMPANION in a conversation). Its one
+    backend read is that same question and it is a CORRECTNESS rail rather than a score: a pet's
+    ledger message pages out of the loaded history while the creature is alive, and the app then
+    offered a spawn that posts an arrival message for a creature the reader already owns. The two
+    features share the finder rather than a copy of the grammar (`src/wire_line.rs`, whose page twin
+    is `web/src/lib/wire-line.ts`), because both lines are one shape after their own keyword.
   - There was a terminal UI (OpenTUI + Solid, in `ui/`) until 2026-08-03. It is gone,
     and the web app is the only client: do not re-add a second front-end, and read a
     comment that names one as history rather than as a place to keep in sync.

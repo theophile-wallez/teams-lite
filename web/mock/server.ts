@@ -5448,6 +5448,29 @@ const MOCK_RUNNING_LINES = [
  *  process serves the whole run. */
 let mockRunningLogLines = 5;
 
+/**
+ * The running job's log at a given length — the fixture's own lines, then plain ones past the end.
+ *
+ * **IT IS UNBOUNDED, AND THAT IS A FLAKE FIX RATHER THAN REALISM.** It used to be
+ * `slice(0, Math.min(n, MOCK_RUNNING_LINES.length))`, so growth stopped after about five reads — and
+ * the page POLLS a live job, so a handful of polls exhausted the fixture while a test was still
+ * setting up. Whichever job-log test then asserted "the log grew" failed, and WHICH one is decided by
+ * timing: measured on this suite, pristine master loses `gitlab.spec.ts:1860` and a branch that
+ * changed nothing here lost `:1952`. An arbitrary loser is the signature of a saturating counter, not
+ * of a bug in the code under test.
+ *
+ * The extra lines are DISTINCT and carry NO section marker, so a section the fixture already closed
+ * stays closed and the nested-fold assertions are untouched — which is the one thing appending must
+ * not disturb.
+ */
+function mockRunningTrace(lines: number): string {
+  const shown = MOCK_RUNNING_LINES.slice(0, lines);
+  for (let extra = MOCK_RUNNING_LINES.length; extra < lines; extra++) {
+    shown.push(` ✓ src/lib/generated-${extra}.test.ts (1 test) 1ms`);
+  }
+  return shown.join("\n");
+}
+
 /** When set, the JOB LOG read fails with this sentence. Its own switch beside the diff's, for the
  *  same reason: this page IS that read, so a refusal has to be reachable on its own. */
 let mockGitLabJobLogRefusal: string | null = null;
@@ -5477,7 +5500,7 @@ function mockJobLog(mr: MockMergeRequest, jobId: number): Record<string, unknown
     job.status === "failed"
       ? MOCK_FAILED_TRACE
       : job.status === "running"
-        ? `${MOCK_RUNNING_LINES.slice(0, Math.min(mockRunningLogLines++, MOCK_RUNNING_LINES.length)).join("\n")}\n`
+        ? `${mockRunningTrace(mockRunningLogLines++)}\n`
         : job.status === "success"
           ? `${MOCK_RUNNING_LINES.join("\n")}\n${ESC}[32;1mJob succeeded${ESC}[0;m\n`
           : // `manual`, `created`, `skipped`: GitLab answers 200 with an empty body, and the page
@@ -7407,6 +7430,23 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const t = store.get(id) ?? channelStore.get(id);
       const held = (t?.messages ?? [])
         .filter((m) => !m.deleted && mockChessWire(m.content) !== null)
+        .map((m) => nicknamed(m));
+      return { messages: held };
+    }
+
+    // Every message of one conversation that carries a COMPANION's record — the same read as
+    // `chess_messages` above, and an ordinary one on the real backend too (src/store.rs).
+    //
+    // It answers the WHOLE thread rather than the page the app has loaded, which is the one thing this
+    // read exists for — and here that is a CORRECTNESS rail rather than a score: a pet's ledger keeps
+    // the `seq` it was first posted at, so it pages out while the creature is alive, and the app then
+    // offered a SPAWN that posts a second arrival message for a creature the reader already owns. So a
+    // spec can seed a ledger, keep it off the loaded page, and still be refused a duplicate.
+    case "pet_messages": {
+      const id = requireString(params, "conversation");
+      const t = store.get(id) ?? channelStore.get(id);
+      const held = (t?.messages ?? [])
+        .filter((m) => !m.deleted && mockPetWire(m) !== null)
         .map((m) => nicknamed(m));
       return { messages: held };
     }
@@ -11780,12 +11820,27 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // a state every later spec has to reason about. THE RESET TAKES `silent` WITH IT, which matters
     // because `silent` has to be armed BEFORE the reader's first spawn to be worth anything: reset
     // first, then arm, or the colleague answers the spawn the spec was trying to be alone with.
+    //
+    // **THE THREAD IS THE FIXTURE'S AND NOT AN ARGUMENT, which is what makes that reset honest.** It
+    // took a `conversation` once, while `resetMockPet` truncated `MOCK_PET_THREAD` alone — so a spec
+    // aiming the colleague anywhere else left a ledger message behind for the whole run, which is the
+    // exact hazard the reset exists for. Nothing ever passed one, so the parameter is gone rather than
+    // the reset widened. Widening it again means widening the reset IN THE SAME CHANGE: an aimable hook
+    // and a fixture-only reset are one rule, and holding only half of it is the bug.
+    //
+    // **THE CHESS HOOK BESIDE IT HAS EXACTLY THIS SHAPE AND KEEPS IT, deliberately — say so rather
+    // than claim it as precedent.** `mockChessChallenge` and `mockChessPlayNow` DO take a conversation
+    // (`web/scripts/preview.ts` aims one, and at `PET_THREAD_ID` among others) while `resetMockChess`
+    // truncates `MOCK_CHESS_THREAD` alone, so a game seeded elsewhere outlives its reset. What bounds
+    // that is the CALLER rather than the hook: every one of them is a capture script, and a capture
+    // starts its own mock and exits with it, so nothing outlives the process. The E2E suite — one mock
+    // for 565 tests — is where this matters, and no spec aims either hook.
     if (body.kind === "pet") {
       if (body.reset === true) {
         resetMockPet();
         return Response.json({ ok: true, reset: true }, { status: 200 });
       }
-      const convId = typeof body.conversation === "string" ? body.conversation : MOCK_PET_THREAD;
+      const convId = MOCK_PET_THREAD;
       if (typeof body.silent === "boolean") mockPetSilent = body.silent;
       const pet = body.colleague === true ? mockPetSpawn(convId) : null;
       // The kind is checked against the vocabulary rather than passed through: an act naming

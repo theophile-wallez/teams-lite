@@ -35,6 +35,13 @@ pub mod chess_sound;
 /// The one marker this side of a game of chess reads: which messages carry one. The wire itself is
 /// the page's (see AGENTS.md § Chess in a conversation).
 pub mod chess_wire;
+/// The same, for a COMPANION — and here it is a correctness rail rather than a score, because a pet's
+/// ledger message pages out of the loaded history while the creature is alive (see AGENTS.md § A
+/// companion in a conversation).
+pub mod pet_wire;
+/// WHERE a signed line sits in a text, for both of the features above: the grammar after the keyword
+/// is one shape, and the keyword is what tells them apart.
+pub mod wire_line;
 pub mod custom_emoji;
 pub mod gitlab;
 pub mod gitlab_approval;

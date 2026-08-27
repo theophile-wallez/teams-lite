@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PET_PAT_KEY, petOf, petSlotKey, petsInThread } from "./pet-thread";
+import { PET_PAT_KEY, petOf, petSlotKey, petsInThread, withPetArchive } from "./pet-thread";
 import { newPetLedger, petMessageHtml, withPetAct, type PetLedger } from "./pet-wire";
 import type { ChatMessage, Reaction } from "./protocol";
 
@@ -272,5 +272,64 @@ describe("petOf", () => {
     const pets = petsInThread([nobody]);
     expect(pets).toHaveLength(1);
     expect(petOf(pets, "")).toBeUndefined();
+  });
+});
+
+describe("withPetArchive", () => {
+  // THE FOLD IS COMPLETE OR IT IS DESTRUCTIVE, and this is the merge that makes it complete.
+  //
+  // A pet IS its messages, and the history loads a page at a time (40) while every act EDITS its
+  // author's one ledger — so that message keeps the `seq` it was first posted at and pages out while
+  // the creature is alive. The loaded page alone then said "you have no companion here": none drawn,
+  // no menu to reach it with, and the conversation's own menu offering a SPAWN, whose press SENDS a
+  // second arrival message everybody in the thread reads and which `petsInThread`'s one-ledger-per-
+  // author rule absorbs and ignores WHOLE — so the creature vanished and nothing could reach it again.
+  it("folds a creature whose ledger has PAGED OUT of the loaded history", () => {
+    const mine = ledgerMessage(newPetLedger("aaa111", "cat"), ME, { seq: 1, id: "ledger" });
+    const loaded = [plainMessage("much later"), plainMessage("later still")];
+
+    // What shipped: the loaded page alone knows nothing about the reader's own creature.
+    expect(petsInThread(loaded).some((pet) => pet.owner.isSelf)).toBe(false);
+
+    const whole = withPetArchive(loaded, [mine]);
+    const pets = petsInThread(whole);
+    const own = pets.find((pet) => pet.owner.isSelf);
+    expect(own?.id).toBe("aaa111");
+    // And the message every later act EDITS comes back with it, or the fold would have a creature
+    // with nowhere to write to.
+    expect(own?.messageId).toBe("ledger");
+  });
+
+  it("puts an archived ledger back in `seq` order, which is what names the FIRST one", () => {
+    // `petsInThread` reads "the first ledger this author wrote" off the order, and a second is absorbed
+    // and ignored whole — so an archived record dropped in at the wrong end would hand the record, and
+    // with it the message every act edits, to the wrong message.
+    const first = ledgerMessage(newPetLedger("aaa111", "cat"), ME, { seq: 1, id: "first" });
+    const second = ledgerMessage(newPetLedger("bbb222", "dog"), ME, { seq: 9, id: "second" });
+    const merged = withPetArchive([second], [first]);
+    expect(merged.map((m) => m.id)).toEqual(["first", "second"]);
+    expect(petsInThread(merged)[0]?.messageId).toBe("first");
+  });
+
+  it("lets the LOADED copy win, because the archive is a snapshot", () => {
+    // The live feed writes into the loaded history, so an act that landed a moment ago is fresh there
+    // and stale in here. Matched by id, exactly as `chessSeriesGames` merges the same pair.
+    const stale = ledgerMessage(newPetLedger("aaa111", "cat"), ME, { seq: 1, id: "ledger" });
+    const fed = withPetAct(newPetLedger("aaa111", "cat"), { at: BIRTH + 1, kind: "feed", target: "aaa111" });
+    const fresh = ledgerMessage(fed, ME, { seq: 1, id: "ledger" });
+    const merged = withPetArchive([fresh], [stale]);
+    expect(merged).toHaveLength(1);
+    expect(petsInThread(merged)[0]?.acts).toHaveLength(1);
+  });
+
+  // THE SAME ARRAY, and that is not tidiness: this feeds the memo that feeds the fold, the layer and
+  // every publish, so a fresh array per render would re-fold the whole history on every scroll that
+  // mounts a row.
+  it("returns the loaded history UNCHANGED when there is nothing to add", () => {
+    const mine = ledgerMessage(newPetLedger("aaa111", "cat"), ME, { seq: 1, id: "ledger" });
+    const loaded = [mine, plainMessage("said")];
+    expect(withPetArchive(loaded, undefined)).toBe(loaded);
+    expect(withPetArchive(loaded, [])).toBe(loaded);
+    expect(withPetArchive(loaded, [mine])).toBe(loaded);
   });
 });

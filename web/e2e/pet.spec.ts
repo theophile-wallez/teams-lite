@@ -488,8 +488,88 @@ test.describe("a companion in a conversation", () => {
     await expect(petSprite(page)).toHaveCount(0);
   });
 
+  /**
+   * A CREATURE WHOSE LEDGER HAS PAGED OUT IS STILL THE READER'S, AND THEY ARE OFFERED NO SECOND ONE.
+   *
+   * The whole feature rests on "a pet IS its messages", and the history loads a PAGE at a time — 40,
+   * mirrored by the mock. Every act EDITS its author's one ledger, so that message keeps the `seq` it
+   * was first posted at: forty messages later, which is a couple of days in a real chat, the record is
+   * no longer in the loaded window while the creature is very much alive.
+   *
+   * What that used to do is the sharpest thing in this file. The fold saw no pet of the reader's own, so
+   * nothing was drawn, there was no menu to reach it with, Feed/Play/Nap were replaced by "Feeding and
+   * playing take a companion of your own" — and the conversation's own menu OFFERED A SPAWN. That press
+   * SENDS: a second arrival message everybody in the thread reads, and a record `petsInThread`'s
+   * one-ledger-per-author rule absorbs and ignores WHOLE, so the creature they had just taken vanished
+   * and nothing in the feature could ever reach it again.
+   *
+   * `pet_messages` is the read that closes it (src/store.rs), merged in by `withPetArchive`. THE RELOAD
+   * IS THE TEST: it is what makes the app ask for a fresh page, and 45 filler messages after the spawn
+   * is what keeps the ledger out of the newest 40.
+   */
+  test("a ledger that has PAGED OUT still draws its creature, and offers no second one", async ({
+    page,
+  }) => {
+    const rpcs = recordRpcs(page);
+    await openPetThread(page, { silent: true });
+    const pet = await spawnPet(page);
+    // 45, so the newest 40 cannot hold the ledger whatever else the thread gained.
+    await fillHistory(page, PET_THREAD_ID, 45);
+
+    // A FRESH LOAD is the test: it is what makes the app ask for a page of history again, and this
+    // one cannot contain the ledger. `gotoApp` rather than `page.reload()`, because it waits for the
+    // socket and the mock sentinel — a reload alone races the app's own start.
+    await gotoApp(page);
+    await openConversationNamed(page, PET_THREAD_NAME);
+
+    // THE CREATURE IS STILL DRAWN, which is only possible from the archive: its ledger is not in the
+    // page the app just loaded.
+    await expect(petSprite(page, pet)).toHaveCount(1);
+    // And the read really is where it came from — asserted on the socket, because a page that drew the
+    // pet for any other reason would pass the line above.
+    expect(rpcs()).toContain("pet_messages");
+
+    // AND NO SPAWN IS OFFERED, which is the half that used to post the duplicate.
+    await openConversationMenu(page);
+    await expect(page.locator('[data-testid="pet-spawn"]')).toHaveCount(0);
+    await closeConversationMenu(page);
+
+    // The creature's own menu offers the three acts too, because the reader's record was found: this is
+    // the same answer read from the other side, and it was "Feeding and playing take a companion of
+    // your own" for a reader who plainly had one.
+    await openPetMenu(page, pet);
+    await expect(page.locator('[data-testid="pet-feed"]')).toBeVisible();
+    await expect(page.locator('[data-testid="pet-no-pet-note"]')).toHaveCount(0);
+    await page.keyboard.press("Escape");
+  });
+
   test("prefers-reduced-motion draws nothing, and offers no creature to take", async ({ page }) => {
     await openPetThread(page, { silent: true });
+
+    /**
+     * THE SPAWN ROW IS ASSERTED WITH NO PET IN THE THREAD, IN BOTH DIRECTIONS, AND THAT ORDER IS THE
+     * WHOLE POINT.
+     *
+     * `petSpawnIsOffered` has four refusals and `mine && !mine.gone` is one of them, so a check made
+     * after a spawn passes whatever the reduce flag says — the row is correctly absent because the
+     * reader already HAS a creature. Asserted that way this test passed with the gate deleted, which
+     * is how `conversation-menu.tsx` came to read motion/react's mount-only `useReducedMotion` while
+     * the layer read the live `usePrefersReducedMotion`: two answers to "would a creature be drawn?",
+     * and a spawn posts a message everybody in the thread sees. Here reduce is the ONLY refusal in
+     * play, so the row's absence and its RETURN are both about the flag alone.
+     */
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await openConversationMenu(page);
+    await expect(page.locator('[data-testid="pet-spawn"]')).toHaveCount(0);
+    await closeConversationMenu(page);
+
+    // And BACK, with no reload — the direction the reader was stranded by, and the one a mount-only
+    // hook cannot answer at all: the row returns, so there is an in-app path to a companion again.
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await openConversationMenu(page);
+    await expect(page.locator('[data-testid="pet-spawn"]')).toHaveCount(1);
+    await closeConversationMenu(page);
+
     await spawnPet(page);
     await expect(page.locator(layer)).toHaveCount(1);
 
@@ -510,15 +590,14 @@ test.describe("a companion in a conversation", () => {
     // in the thread; this browser draws none of it.
     await expect(page.locator(layer)).toHaveCount(0);
     await expect(petSprite(page)).toHaveCount(0);
-    // And the conversation's menu offers none either: a spawn nobody can see would post a message
-    // its own presser never meets.
+    // And the conversation's menu offers none either — which HERE is the pet's own record refusing it
+    // as well, and is why the flag's own two directions are asserted above with no creature in the
+    // thread at all. A spawn nobody can see would post a message its own presser never meets.
     await openConversationMenu(page);
     await expect(page.locator('[data-testid="pet-spawn"]')).toHaveCount(0);
     await closeConversationMenu(page);
 
-    // AND BACK, which is the half the reader was stranded by: turning Reduce Motion off returns the
-    // creature and the row with no reload. Asserting only the first direction would pass against the
-    // mount-only hook for one of the two flips.
+    // AND BACK: turning Reduce Motion off returns the creature with no reload.
     await page.emulateMedia({ reducedMotion: "no-preference" });
     await expect(page.locator(layer)).toHaveCount(1);
     await expect(petSprite(page)).toHaveCount(1);

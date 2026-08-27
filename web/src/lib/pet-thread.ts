@@ -76,8 +76,20 @@ export type Pet = {
    *  nothing else. A reaction carries no timestamp and no MRI to the page (§ WHO reacted), so this
    *  is the whole of what a pat can be: a standing term, identical on every machine. */
   pats: number;
-  /** Every message id this pet's record occupies, so the pane can take their raw lines off the
-   *  history — the ledger, and any later one from the same author that was ignored. */
+  /**
+   * Every message id this pet's record occupies — the ledger, and any later one from the same author
+   * that was ignored.
+   *
+   * **NOTHING IN THE APP READS IT, and saying so is the point.** It is `ChessGame.absorbed`'s field,
+   * and for chess it really is what the pane takes a game's messages out of the history with — but a
+   * pet is absorbed by WIRE PRESENCE instead (`petWireIn` per message in `chatHistoryRows`), on purpose
+   * and for a stated reason: asked of the derivation, a ledger whose record paged out is absorbed by
+   * nothing and renders its raw line as a bubble. So this is what the FOLD decided, kept because five
+   * tests hold the fold to it — a second ledger landing on its author's first draft whatever pet id it
+   * names, and the loser of two people claiming one id — and not a list any surface consumes. An
+   * earlier version of this line credited it with the pane's absorption, which is the one thing it is
+   * deliberately not.
+   */
   absorbed: string[];
 };
 
@@ -111,6 +123,47 @@ export function petOf(pets: Pet[], mri: string): Pet | undefined {
  *  walk adds. Spelled off {@link Pet} so the two cannot drift apart, and NEVER nullable: a draft is
  *  only ever created from a ledger, and a ledger always states its author's own pet. */
 type Draft = Omit<Pet, "acts">;
+
+/**
+ * The loaded history with any pet ledger the backend holds and this page has NOT loaded merged in.
+ *
+ * **THE DERIVATION IS COMPLETE OR IT IS DANGEROUS, and this is what makes it complete.** A pet IS its
+ * messages, which is the property the whole feature rests on — but the history loads a page at a time
+ * (`teams_read::DEFAULT_PAGE_SIZE`, 40) and every act EDITS its author's one ledger message, so that
+ * message keeps the `seq` and the `compose_time` it was FIRST posted at. Forty messages later — a
+ * couple of days in a real chat — the record has paged out while the creature is very much alive, and
+ * the page then folded no pet of the reader's own: none drawn, no menu to reach it with, Feed/Play/Nap
+ * replaced by "Feeding and playing take a companion of your own", and the conversation's own menu
+ * OFFERING A SPAWN. That press SENDS: a second arrival message everybody in the thread reads, whose
+ * record `petsInThread`'s one-ledger-per-author rule absorbs and ignores WHOLE — so the creature they
+ * had just taken vanished and nothing in the feature could ever reach it again.
+ *
+ * Chess has the same paging exposure and it is COSMETIC there (a board whose root paged out renders as
+ * a bubble — see message-pane.tsx), which is why its own whole-history read exists for a SCORE. Here it
+ * is the rail, so it feeds the derivation itself.
+ *
+ * **IT IS A MERGE AND NOT A REPLACEMENT**, because the archive is a snapshot: the live feed writes into
+ * `messages`, so an act that landed a moment ago is in the loaded history and stale in here. Anything
+ * already loaded therefore wins by id, and only what is missing is added — the reading
+ * `chessSeriesGames` takes of the same pair.
+ *
+ * **THE COMMON CASE RETURNS THE SAME ARRAY**, which is not tidiness: this feeds a `useMemo` that feeds
+ * the pet fold, the layer and every publish, and a fresh array on every render would re-fold the whole
+ * history on every scroll that mounts a row.
+ */
+export function withPetArchive(
+  messages: ChatMessage[],
+  archive: readonly ChatMessage[] | undefined,
+): ChatMessage[] {
+  if (!archive || archive.length === 0) return messages;
+  const loaded = new Set(messages.map((message) => message.id));
+  const missing = archive.filter((message) => !loaded.has(message.id));
+  if (missing.length === 0) return messages;
+  // Sorted rather than prepended, even though what paged out is older by construction: the order is
+  // what `petsInThread` reads "the first ledger this author wrote" off, and a wrong one would hand the
+  // record — and with it the message every later act EDITS — to the wrong message.
+  return [...missing, ...messages].sort((a, b) => a.seq - b.seq);
+}
 
 /**
  * The pets this message list holds, in the order their ledgers first appeared.

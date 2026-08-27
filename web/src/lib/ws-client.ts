@@ -769,6 +769,20 @@ export class Backend {
     return this.request<{ messages: ChatMessage[] }>("chess_messages", { conversation });
   }
 
+  /**
+   * Every message of one conversation that carries a COMPANION's record — the same read as
+   * {@link chessMessages}, for a sharper reason (see src/store.rs on `pet_messages`).
+   *
+   * There the read buys a SCORE; here it is a correctness rail. Every act EDITS its author's one
+   * ledger message, so that message keeps the `seq` it was first posted at and pages out of the loaded
+   * window while the creature is alive — at which point the app drew no pet of the reader's own, hid
+   * Feed, Play and Nap, and OFFERED THEM A SPAWN: a second arrival message everybody in the thread
+   * reads, and one every reader's fold absorbs and ignores whole, so the creature became unreachable.
+   */
+  petMessages(conversation: string): Promise<{ messages: ChatMessage[] }> {
+    return this.request<{ messages: ChatMessage[] }>("pet_messages", { conversation });
+  }
+
   // ---- the chess ENGINE ----------------------------------------------------------------
   //
   // Stockfish is 7.3 MB the BACKEND fetches, verifies against a digest it pins and caches on this

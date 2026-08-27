@@ -119,10 +119,18 @@ export const PET_ACT = /^(\d{1,15})\.([fpz])\.([0-9a-f]{6})$/;
  *  copy of the charset, because two spellings of one charset drift the moment one is loosened. */
 export const PET_SKIN = /^s\.([a-z0-9][a-z0-9-]{0,23})$/;
 
+/** An act's own letter on the wire — the group `PET_ACT` matches, spelled as a type so the two maps
+ *  below are provably total and neither needs a runtime guard for a letter it cannot be handed. */
+type PetActWire = "f" | "p" | "z";
+
 /** The wire spelling of each act, and the only place the two vocabularies meet. One letter,
- *  because a sixty-act line is one message and `feed` costs three characters more each time. */
-const ACT_TO_WIRE: Record<PetActKind, string> = { feed: "f", play: "p", nap: "z" };
-const WIRE_TO_ACT: Record<string, PetActKind> = { f: "feed", p: "play", z: "nap" };
+ *  because a sixty-act line is one message and `feed` costs three characters more each time.
+ *
+ *  **BOTH DIRECTIONS ARE TOTAL, which is what makes the read need no fail-closed branch of its own.**
+ *  `PET_ACT`'s kind group is `[fpz]` and carries no `i` flag, so a token that parsed at all names one
+ *  of these three — a `!kind` guard there would be a rail nothing can reach, reading as a live one. */
+const ACT_TO_WIRE: Record<PetActKind, PetActWire> = { feed: "f", play: "p", nap: "z" };
+const WIRE_TO_ACT: Record<PetActWire, PetActKind> = { f: "feed", p: "play", z: "nap" };
 
 /**
  * How many of an author's own acts a ledger keeps.
@@ -136,9 +144,17 @@ const WIRE_TO_ACT: Record<string, PetActKind> = { f: "feed", p: "play", z: "nap"
  */
 export const PET_ACTS_KEPT = 30;
 
-/** How many of the author's own acts the WORDS count. The line below them holds every one, so this
- *  is only what a stock Teams client and a sidebar preview show. */
-const WORDS_ACTS = 3;
+/**
+ * How many of the author's own acts the WORDS count. The line below them holds every one, so this
+ * is only what a stock Teams client and a sidebar preview show.
+ *
+ * **EXPORTED for the reason `PET_ACT` and `PET_SKIN` are: `web/mock/server.ts` re-spells these words
+ * on purpose and the clamp is a NO-OP at three act kinds**, on both sides — one count per kind, and
+ * three kinds. So neither copy is observable today, and a fourth kind would move the two apart
+ * silently, in the direction a spec reads. `mock-pet-wire.test.ts` asserts the pair, which is what
+ * turns a dead line into a pinned one.
+ */
+export const WORDS_ACTS = 3;
 
 /** A pet id: six lowercase hex characters. Short enough to read inside a sentence, wide enough
  *  (16.7M) that two pets in one conversation cannot collide in practice. Chess's own id, and for
@@ -194,18 +210,25 @@ export function withPetAct(ledger: PetLedger, act: PetAct): PetLedger {
  * the whole ledger.
  */
 export function parsePetLedger(pet: string, payload: string): PetLedger | null {
-  const rest = payload === LEDGER_VERSION ? "" : payload.slice(LEDGER_VERSION.length + 1);
+  // THE VERSION IS CHECKED BEFORE ANYTHING IS SLICED OFF IT — the order `mockParsePetLedger` already
+  // writes. Computing the payload first and then deciding whether it is one is a value derived from a
+  // string this function is about to refuse.
   if (payload !== LEDGER_VERSION && !payload.startsWith(`${LEDGER_VERSION} `)) return null;
+  const rest = payload.slice(LEDGER_VERSION.length);
 
   const ledger: PetLedger = { pet, skin: "", gone: false, acts: [] };
   for (const token of rest.split(/\s+/).filter(Boolean)) {
     if (/^\d/.test(token)) {
       const act = PET_ACT.exec(token);
       // Fail-closed: an ordered token this build cannot read means the record is not the record
-      // this build thinks it is, and half a creature is worse than none.
+      // this build thinks it is, and half a creature is worse than none. There is no SECOND refusal
+      // for the kind, and there must not be one: `PET_ACT`'s own group is `[fpz]` with no `i` flag,
+      // so a token that reached here names one of the three by construction (see `PetActWire`) — a
+      // guard for it would read as a live rail while being unreachable, and the `.toLowerCase()`
+      // that used to stand beside it lowercased a letter the regex had already refused in any other
+      // case.
       if (!act) return null;
-      const kind = WIRE_TO_ACT[(act[2] ?? "").toLowerCase()];
-      if (!kind) return null;
+      const kind = WIRE_TO_ACT[act[2] as PetActWire];
       ledger.acts.push({ at: Number(act[1]), kind, target: (act[3] ?? "").toLowerCase() });
       continue;
     }

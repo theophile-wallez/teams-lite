@@ -1308,6 +1308,10 @@ export const PET_THREAD_ID = "19:pet-demo@thread.v2";
  *
  * ALWAYS finish with `resetPet`. One mock process serves the whole run and a pet is a message, so a
  * creature left behind is a sprite in every later spec's history and a row in its menu.
+ *
+ * **THE THREAD IS `PET_THREAD_ID` AND IS NOT AN ARGUMENT.** It took one, and `resetPet` only ever put
+ * that fixture back — so a spec aiming elsewhere left a ledger in another conversation for the whole
+ * run. Widening it means widening the reset in the same change.
  */
 export async function setPetHook(
   page: Page,
@@ -1316,7 +1320,6 @@ export async function setPetHook(
     act?: "feed" | "play" | "nap";
     pat?: boolean;
     silent?: boolean;
-    conversation?: string;
   } = {},
 ): Promise<{ pet: string | null; acted: boolean; patted: boolean }> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {

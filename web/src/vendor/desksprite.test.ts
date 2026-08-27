@@ -287,10 +287,10 @@ describe("the rails on onThrow", () => {
   });
 
   it("ends a drag only on the grabbing pointer's MAIN button", () => {
-    // The whole GUARD line, `!` included: `pose !== "held" || isDragPointer(event)` reads as sensible
-    // and inverts the rail, so an assertion on the bare call would pass over it.
+    // The whole GUARD line, `!` included: an assertion on the bare call would pass over the inversion.
+    expect(dragEnd).toContain('if (destroyed || pose !== "held") return;');
     expect(dragEnd).toContain(
-      'if (destroyed || pose !== "held" || !isDragPointer(event)) return;',
+      'if (!isDragPointer(event) && !(event.type === "pointerdown" && event.isPrimary)) return;',
     );
     expect(dragEnd).toContain('if (event.type === "pointerup" && event.button !== 0) return;');
   });
@@ -302,6 +302,21 @@ describe("the rails on onThrow", () => {
     expect(endDrag).toContain('doc.removeEventListener("pointerdown", dragEnd, LOST_RELEASE)');
     // CAPTURE, or the grab's own press cancels the grab it just made.
     expect(source).toContain("const LOST_RELEASE = { capture: true } as const;");
+  });
+
+  it("recovers a lost release for a TOUCH, which the pointer id alone cannot", () => {
+    // The rail was `!isDragPointer(event)` alone, and for a touch that is a no-op: a mouse keeps ONE
+    // `pointerId` for its whole life, so a second press by it really is proof its release was lost —
+    // but every TOUCH gets a fresh id, so a touch whose `pointerup`/`pointercancel` never arrived (the
+    // page hidden mid-drag, the touch ending outside the document) left the pet `held` for ever, with
+    // its `grabbing` cursor and three document listeners, and no later touch could free it.
+    //
+    // `isPrimary` is what makes a new press the same proof for both AND keeps it as narrow: a finger
+    // that really is still down makes the next one NON-primary, so a genuine second finger cannot end
+    // a live hold.
+    expect(dragEnd).toContain('event.type === "pointerdown" && event.isPrimary');
+    // And a lost-release press publishes NOTHING: it is not a `pointerup`, so neither name is true.
+    expect(dragEnd).toContain('const released = event.type === "pointerup";');
   });
 
   it("moves a pet only for the pointer that grabbed it", () => {

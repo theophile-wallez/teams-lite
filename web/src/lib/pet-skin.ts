@@ -1,7 +1,8 @@
 /**
  * A PET'S ART, AS DATA — and that is why this feature ships no pixels at all.
  *
- * A skin is a palette of single characters, a size, a foot anchor, and frames whose rows are
+ * A skin is a palette of single characters, a size, a foot anchor the vendored engine no longer reads
+ * (see {@link PetSkin.anchor}), and frames whose rows are
  * strings: about two kilobytes of text, in this repo, imported like any other module. Compare the
  * chess ENGINE (§ Playing STOCKFISH), which is 7.3 MB fetched on a press and then verified against
  * a pinned digest, and every rail that comes with bytes off the internet — a constant URL, a
@@ -71,7 +72,18 @@ export type PetSkin = {
   palette: Record<string, string | null>;
   /** The bounding box every frame must fit inside, in pixels. */
   size: { w: number; h: number };
-  /** The foot point, from the top-left. The engine seats a sprite by `anchor.y`. */
+  /**
+   * The foot point, from the top-left — **desksprite's own field, which NOTHING IN THIS BUILD READS.**
+   *
+   * It is here because the format is theirs (see the header) and all three shipped skins carry it, so
+   * dropping it would be a fourth adaptation of welltilln's art rather than the three that are
+   * declared. Upstream used it to SEAT a sprite at its desk; the desk went with `deskSeatX` when the
+   * engine was vendored, and `spriteFloor` seats a pet on its box's own floor out of `size.h` instead
+   * (`grep anchor web/src/vendor/desksprite.ts` finds nothing). `validatePetSkin` therefore checks it
+   * for nothing — say so here rather than let whoever authors a fourth skin tune a number no frame
+   * moves by, which is what an earlier version of this line ("the engine seats a sprite by
+   * `anchor.y`") sent them off to do.
+   */
   anchor: { x: number; y: number };
   /** A slot is one frame (`string[]`) — except `walk`, which is a list of them. */
   frames: Record<string, string[] | string[][]>;

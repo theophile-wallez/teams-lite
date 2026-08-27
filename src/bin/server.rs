@@ -151,6 +151,18 @@ const MAX_SCHEDULED_LISTED: i64 = 200;
 /// games in one thread, well past anybody's series, and it bounds a read that would otherwise grow
 /// with the history for ever.
 const MAX_CHESS_MESSAGES: i64 = 1_200;
+
+/// How many pet-carrying messages one conversation's own creatures are folded out of.
+///
+/// A pet is ONE message per person, ever, however long the conversation runs, so the real answer is a
+/// thread's participant count. What the headroom above it is for is the `LIMIT`'s own ordering: it
+/// keeps the NEWEST matching rows while a pet ledger is OLD by construction (its message keeps the
+/// `seq` it was first posted at), so anything else the SQL prefilter matches — a reply quoting a
+/// ledger, prose that really writes `— pet ` — eats a slot ahead of it. The prefilter is the whole
+/// marker for that reason (see [`teams_lite::store::Store::pet_messages`]) and this is the belt
+/// beside it. Past 500 such messages in one conversation an old record can fall out of the answer and
+/// the duplicate-spawn window reopens for it, which is a stated ceiling rather than an unknown.
+const MAX_PET_MESSAGES: i64 = 500;
 const IC3_SCOPE: &str = "https://ic3.teams.office.com/Teams.AccessAsUser.All";
 const UA: &str = teams_lite::USER_AGENT;
 /// Give the UI ample time to connect after the server becomes ready. Authentication
@@ -6422,6 +6434,31 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let me = ctx.identity().await?;
             let store = ctx.store()?;
             let msgs = store.chess_messages(&conversation, MAX_CHESS_MESSAGES)?;
+            let messages: Vec<Value> = msgs
+                .iter()
+                .map(|m| message_json(m, &me.name, &me.mri, Some(&store)))
+                .collect();
+            Ok(json!({ "messages": messages }))
+        }
+
+        // Every message of one conversation that carries a COMPANION's record — the same read as
+        // `chess_messages` above, for a sharper reason (see [`teams_lite::store::Store::pet_messages`]).
+        //
+        // An ORDINARY READ, ungated for the reason that one is: it makes no network request (a pet IS
+        // its messages, so the store already holds every one of them) and it publishes nothing a page
+        // cannot already read — these are rows of the user's own history, in the shape the history
+        // itself answers with.
+        //
+        // It decides NOTHING about a pet. Whose creature is whose, what has been done to it and whether
+        // it has gone home are the page's one derivation (see src/pet_wire.rs); this answers which rows
+        // hold a record, which is the one question a page cannot answer for the history it has not
+        // loaded — and here that question is what stops a second spawn from posting an arrival message
+        // for a creature the reader already owns.
+        "pet_messages" => {
+            let conversation = param_str(params, "conversation")?;
+            let me = ctx.identity().await?;
+            let store = ctx.store()?;
+            let msgs = store.pet_messages(&conversation, MAX_PET_MESSAGES)?;
             let messages: Vec<Value> = msgs
                 .iter()
                 .map(|m| message_json(m, &me.name, &me.mri, Some(&store)))

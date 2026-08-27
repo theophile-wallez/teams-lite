@@ -1884,7 +1884,10 @@ test.describe.serial("the GitLab merge-request page", () => {
     // because a child left visible under a folded parent is a row with nothing to place it.
     await step.click();
     await expect(step).toHaveAttribute("data-folded", "true");
-    await expect(lines.count()).resolves.toBeLessThan(before);
+    // `expect.poll` AND NOT `expect(lines.count()).resolves`, which reads the count ONCE and does not
+    // retry — a bare race against the re-render this click causes, and one of three in this file that
+    // made the job-log tests lose a test at random on a full run.
+    await expect.poll(() => lines.count()).toBeLessThan(before);
     await expect(page.locator('[data-testid="gitlab-job-log"]')).not.toContainText("Pnpm section");
     await expect(page.locator('[data-testid="gitlab-job-log"]')).not.toContainText("AssertionError");
     // And what is OUTSIDE the fold is untouched.
@@ -1931,7 +1934,8 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(rows).toHaveCount(1);
     await page.locator('[data-testid="gitlab-job-log-number"]').first().click();
     await expect(page.locator('[data-testid="gitlab-job-log-search"]')).toHaveValue("");
-    await expect(rows.count()).resolves.toBeGreaterThan(2);
+    // The third and last of the non-retrying count assertions in this file — see the fold above.
+    await expect.poll(() => rows.count()).toBeGreaterThan(2);
   });
 
   test("a job that has not run says so, rather than drawing a blank page", async ({ page }) => {
@@ -1964,9 +1968,12 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-job-log-live"]')).toBeVisible();
     const rows = page.locator('[data-testid="gitlab-job-log-line"]');
     const first = await rows.count();
-    // The mock's running log grows by a line on every read, so the poll shows itself.
+    // The mock's running log grows by a line on every read, so the poll shows itself — and BOTH halves
+    // of that sentence had to be made true. The growth was capped at the fixture's own length, so the
+    // page's own live poll exhausted it before this click (`mockRunningTrace` is unbounded now); and
+    // this asserted the count ONCE with no retry, racing the re-render the click causes.
     await page.locator('[data-testid="gitlab-job-log-reload"]').click();
-    await expect(rows.count()).resolves.toBeGreaterThan(first);
+    await expect.poll(() => rows.count()).toBeGreaterThan(first);
     // A FINISHED job is not followed: nothing about its log can change again.
     await page.locator('[data-testid="gitlab-job-back"]').click();
     await openJobLog(page, "🔎 lint");

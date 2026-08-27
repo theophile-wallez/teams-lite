@@ -178,25 +178,36 @@ describe("petRowNeighbours", () => {
     expect(petRowNeighbours([], [petMessage({ id: "pet" })]).size).toBe(0);
   });
 
-  it("answers for a PET LEDGER and for nothing else", () => {
-    const rows = [rowFor("a", 10), rowFor("b", 30)];
+  // THE DISCRIMINATION MOVED, SO THIS ASSERTION MOVED WITH IT — and it is pinned on both sides of the
+  // handoff. `petRowNeighbours` used to re-scan the whole history for the wire, which was a third full
+  // pass of two regexes over every message (`petsInThread` is the first, `chatHistoryRows` the second)
+  // on a memo that re-runs whenever a recording or a live agent run moves. The walk that already asked
+  // the question hands its answer over, so what is pinned here is that IT still tells a ledger from a
+  // game, from prose that merely carries the words, and from an ordinary message — and that the list it
+  // hands over is exactly what the neighbour rule is given.
+  it("hands `petRowNeighbours` the ledgers, and a ledger is the only thing in that list", () => {
     const acted = withPetAct(newPetLedger("7f3a1c", "cat"), {
       at: 1756060012345,
       kind: "feed",
       target: "7f3a1c",
     });
-    const at = petRowNeighbours(rows, [
-      message({ id: "said", compose_time: 20 }),
+    const messages = [
+      message({ id: "said", compose_time: 10 }),
       message({
         id: "game",
         compose_time: 20,
         content: "<p>♟ 1. e4</p><p><em>— chess 7f3a1c 1 e4, via teams-lite</em></p>",
       }),
       // Prose that merely carries the words is nobody's ledger.
-      message({ id: "prose", compose_time: 20, content: "<p>I told him — pet the cat</p>" }),
-      petMessage({ id: "pet", compose_time: 20 }, acted),
-    ]);
-    expect([...at.keys()]).toEqual(["pet"]);
+      message({ id: "prose", compose_time: 25, content: "<p>I told him — pet the cat</p>" }),
+      petMessage({ id: "pet", compose_time: 30 }, acted),
+    ];
+    const { rows, petMessages } = chatHistoryRows(messages, []);
+    expect(petMessages.map((it) => it.id)).toEqual(["pet"]);
+    // The other three are rows, so the walk really did tell them apart rather than skipping none.
+    expect(rows.map((row) => row.key)).toEqual(["said", "game", "prose"]);
+    // And the neighbour rule answers for exactly that list.
+    expect([...petRowNeighbours(rows, petMessages).keys()]).toEqual(["pet"]);
   });
 
   it("keeps every ledger of several, each at its own neighbour", () => {

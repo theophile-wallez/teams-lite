@@ -350,9 +350,15 @@ describe("the layer's rulings, scanned", () => {
     expect(layer).toContain("if (props.pending) return;");
   });
 
-  it("draws no Feed, Play or Nap for a reader with no creature — not a disabled one", () => {
+  it("draws no Feed, Play or Nap for a reader with no RECORD — not a disabled one", () => {
     expect(menu).toContain("hasOwnPet ? (");
-    expect(menu).toContain("it.owner.isSelf && !it.gone");
+    // A RECORD, `gone` or not — and the `&& !it.gone` that used to be here is the bug, not the rule.
+    // A departed owner may still feed a friend's creature (the record stays after a despawn precisely
+    // so its acts still count), and `petPublishFor` asks for `mine` and never for `!mine.gone` on those
+    // three presses. So this menu hid the rows and told them "Feeding and playing take a companion of
+    // your own" — false — while the THROW gesture in the same lane published the very act it hid.
+    expect(menu).toContain("props.pets.some((it) => it.owner.isSelf)");
+    expect(menu).not.toContain("it.owner.isSelf && !it.gone");
   });
 
   it("re-states a lane instead of REBUILDING the creature in it", () => {

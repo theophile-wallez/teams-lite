@@ -28,6 +28,7 @@ import {
   PET_ACT,
   PET_ACTS_KEPT,
   PET_SKIN,
+  WORDS_ACTS,
   petMessageHtml,
   petMessageWords,
   serializePetLedger,
@@ -182,6 +183,12 @@ describe("the ledger line the mock writes", () => {
     // by a mock that says 30, which is the one assertion here guarding a BOUND.
     expect(CODE).toContain(`MOCK_PET_ACTS_KEPT = ${PET_ACTS_KEPT};`);
     expect(CODE).toContain(`MOCK_PET_PAT_KEY = ${JSON.stringify(PET_PAT_KEY)}`);
+    // AND HOW MANY COUNTS THE WORDS SHOW, which is the one number here that is a NO-OP on both sides
+    // today: there is one count per act kind and three kinds, so neither clamp removes anything and
+    // nothing could observe a divergence. A fourth kind is what makes it real, and this is the
+    // assertion the mock's own comment asked for when `WORDS_ACTS` was still unexported — a dead line
+    // in two places with only one of them explained.
+    expect(CODE).toContain(`MOCK_PET_WORDS_ACTS = ${WORDS_ACTS};`);
   });
 
   it("writes the WORDS the page writes, under the label the page DERIVES", () => {

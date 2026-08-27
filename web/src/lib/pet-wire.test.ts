@@ -190,4 +190,29 @@ describe("the strip", () => {
   it("leaves a message with no line at all alone", () => {
     expect(stripPetLine("just a message")).toBe("just a message");
   });
+
+  // THE FOURTH SHAPE: a cut landing inside the MARKER ITSELF, which no search for the marker can find.
+  //
+  // A preview is the body's first 120 code points, so the cut walks up the line as the record grows —
+  // and the marker sits immediately after the words, so the window that puts the cut inside IT is the
+  // one right after the window that puts it inside the id. With no marker in the text `lastIndexOf`
+  // answered −1, none of the three rules ran, and the fragment reached the row and the push. Its Rust
+  // twin is pinned by `push_policy::tests::a_cut_inside_the_marker_itself_is_no_wire_either`.
+  it("cuts a fragment of the MARKER the preview broke", () => {
+    for (const cut of ["— pet", "— pe", "— p", "—"]) {
+      expect(stripPetLine(`Nori · fed 3 ${cut}…`)).toBe("Nori · fed 3");
+    }
+  });
+
+  // AND NOTHING WHOLE IS TOUCHED, which is what keeps that widening honest: a fragment is only ever cut
+  // where the preview says it truncated. The shortest prefix is the em dash alone, so what it can cost
+  // is one dangling dash from a preview that really was cut — never a word, and never a whole message.
+  it("leaves an em dash alone unless the preview says it CUT there", () => {
+    expect(stripPetLine("on my way — see you")).toBe("on my way — see you");
+    expect(stripPetLine("that was the plan —")).toBe("that was the plan —");
+    // A fragment of the OTHER feature's keyword is not this one's.
+    expect(stripPetLine("♟ … 23. Bxf6 — ches…")).toBe("♟ … 23. Bxf6 — ches…");
+    // And a word that merely STARTS like the keyword is not a fragment of it.
+    expect(stripPetLine("we walked the — pest…")).toBe("we walked the — pest…");
+  });
 });

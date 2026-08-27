@@ -260,12 +260,20 @@ export function petPublishFor(args: {
     }
     case "despawn": {
       // Nothing to send home. Our own record says the creature has already gone.
+      //
+      // **THIS RULE IS `despawn`'s AND `skin`'s AND NOT THE THREE ACTS', which is the one asymmetry
+      // here worth naming.** A departed owner may still feed, play with and nap a FRIEND's creature —
+      // the record stays after a despawn precisely so its acts still count (`Pet.gone`) — so the three
+      // above ask for `mine` and never for `!mine.gone`. Hoisting this into one rule for all four was
+      // tried and it silently took that away; `pet-menu.tsx`'s own `hasOwnPet` had the same mistake in
+      // the opposite place, hiding those three rows from exactly that reader.
       if (mine.gone) return null;
       const ledger: PetLedger = { ...base, gone: true };
       return { pet: ledger.pet, ledger, messageId: mine.messageId, label: labelOf(ledger) };
     }
     case "skin": {
-      // There is no art to change on a creature that is not here.
+      // There is no art to change on a creature that is not here. (See the note on `despawn` for why
+      // this is not one rule shared with the three acts above it.)
       if (mine.gone) return null;
       if (!skinCanTravel(press.skin)) return null;
       // A press that would write the same bytes is a press that says nothing: `serializePetLedger`

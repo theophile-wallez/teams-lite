@@ -14,8 +14,15 @@
 //! which is what lets a head-to-head score be counted over the whole history rather than over the
 //! page that happens to be loaded.
 //!
-//! The marker is deliberately narrow — six lowercase hex characters and the exact trailing clause —
-//! so an agent's own `— claude, via teams-lite` and a colleague's prose can never be read as a game.
+//! **AND THE FINDING ITSELF IS [`crate::wire_line`]'s, because the GRAMMAR IS SHARED WITH THE PET.**
+//! Both features sign `— <keyword> <6 lowercase hex> <payload>, via teams-lite`, so what is left here
+//! is the keyword — which is exactly the thing that tells them apart. This module was that finder plus
+//! a `without_chess_line` that nothing but its own tests called: `push_policy` had already grown its
+//! own preview-shaped strip and stopped using it, so the public one drifted (it still required a WHOLE
+//! line, where the live one re-validates a tail a preview cut) while its docstring named the caller
+//! that no longer called it. Whoever reached for the obviously-named helper would have got the
+//! pre-fix behaviour — the leak the strip exists to stop. The strip lives in one place now, and it is
+//! `push_policy`'s.
 
 /// What a chess line opens with, and the ONE spelling of it in this crate.
 ///
@@ -25,51 +32,16 @@
 pub const MARKER: &str = "— chess ";
 
 /// Where the chess line starts, when this text ends with one — the byte offset of its em dash.
-///
-/// The text may be a message BODY (where the line sits inside `<p><em>…</em></p>`) or a flattened
-/// preview (where it follows a newline), so a line runs to the next `<`, the next newline, or the end
-/// of the text. Every occurrence is considered and the LAST qualifying one wins, which is what makes
-/// this answer the same question for a body and for a preview.
 pub fn chess_line_at(text: &str) -> Option<usize> {
-    let mut found = None;
-    let mut from = 0;
-    while let Some(offset) = text[from..].find(MARKER) {
-        let at = from + offset;
-        let rest = &text[at + MARKER.len()..];
-        let end = rest.find(['<', '\n']).unwrap_or(rest.len());
-        if is_chess_line(rest[..end].trim()) {
-            found = Some(at);
-        }
-        from = at + MARKER.len();
-    }
-    found
+    crate::wire_line::line_at(text, MARKER)
 }
 
 /// Whether this text carries a chess line at all — the store's own filter.
+///
+/// Asked THROUGH [`chess_line_at`] rather than beside it, so this module has no public function whose
+/// only caller is its own test — which is the smell the deleted strip above was an instance of.
 pub fn carries_chess_line(text: &str) -> bool {
     chess_line_at(text).is_some()
-}
-
-/// The text with a trailing chess line taken off, or the text unchanged.
-///
-/// What it is FOR is a push notification: the line is machine-readable and the reader must never be
-/// shown it (see [`crate::push_policy`]). The page strips it from a sidebar preview itself
-/// (`chessPreviewText`), and a push has no page.
-pub fn without_chess_line(text: &str) -> String {
-    match chess_line_at(text) {
-        Some(at) => text[..at].trim().to_string(),
-        None => text.to_string(),
-    }
-}
-
-/// `<6 lowercase hex> <anything>, via teams-lite`, and nothing else counts.
-fn is_chess_line(line: &str) -> bool {
-    let Some((game, state)) = line.split_once(' ') else {
-        return false;
-    };
-    let is_game =
-        game.len() == 6 && game.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
-    is_game && state.ends_with(", via teams-lite")
 }
 
 #[cfg(test)]
@@ -84,7 +56,7 @@ mod tests {
         assert!(carries_chess_line(body));
         let preview = "♟ 1. e4\n— chess 7f3a1c 1 e4, via teams-lite";
         assert!(carries_chess_line(preview));
-        assert_eq!(without_chess_line(preview), "♟ 1. e4");
+        assert_eq!(chess_line_at(preview), Some("♟ 1. e4\n".len()));
     }
 
     /// And nothing else is ever read as a game: an agent's own signature, a colleague's prose, a
@@ -100,16 +72,31 @@ mod tests {
             "— chess 7f3a1c",
         ] {
             assert!(!carries_chess_line(text), "{text} was read as a game");
-            assert_eq!(without_chess_line(text), text);
         }
     }
 
     /// A body holding a QUOTE of an earlier chess message still carries its own line, and the one
-    /// that is cut is the message's own — the last of them.
+    /// that counts is the message's own — the last of them.
     #[test]
     fn the_last_qualifying_line_is_the_one_that_counts() {
         let text = "— chess 7f3a1c 1 e4, via teams-lite\nand then — chess bbb222 2 e5, via teams-lite";
         let at = chess_line_at(text).expect("a line");
         assert_eq!(&text[at..], "— chess bbb222 2 e5, via teams-lite");
+    }
+
+    /// **THE STRIP IS `push_policy`'s AND THERE IS NO SECOND ONE HERE.** A `without_chess_line` used
+    /// to sit in this module, called by nothing but its own tests while the live strip grew the two
+    /// cut rules a preview needs — a public helper with a stale rule and a docstring naming a caller
+    /// that had stopped calling it. This scans the source so it cannot come back by accident.
+    #[test]
+    fn this_module_holds_no_strip_of_its_own() {
+        let src = include_str!("chess_wire.rs");
+        // The needle is ASSEMBLED, because this file is what is being scanned: written whole it is
+        // itself the thing the scan looks for, and the test fails on its own assertion.
+        let needle = concat!("fn ", "without_chess_line");
+        assert!(
+            !src.contains(needle),
+            "a chess strip belongs in push_policy, which is the one that re-validates a cut tail",
+        );
     }
 }

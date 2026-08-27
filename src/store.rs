@@ -5258,6 +5258,62 @@ impl Store {
         Ok(v)
     }
 
+    /// Every message of one conversation that carries a COMPANION's record, oldest -> newest.
+    ///
+    /// **IT IS [`Self::chess_messages`]'S SHAPE FOR A DIFFERENT REASON, and the difference is the whole
+    /// point of it.** There the read buys a head-to-head SCORE; here it is a correctness rail. Every
+    /// act EDITS its author's one ledger message, so that message keeps the `seq` it was first posted
+    /// at — and once the thread has moved 40 messages on (`teams_read::DEFAULT_PAGE_SIZE`) it is no
+    /// longer in the loaded window while the creature is still alive. The page then folded no pet of
+    /// the reader's own: none drawn, no Feed/Play/Nap, and a SPAWN offered — which posts a SECOND
+    /// arrival message everybody in the thread reads and which every reader's fold absorbs and ignores
+    /// whole, so the creature they had just taken became unreachable for good.
+    ///
+    /// **IT DECIDES NOTHING ABOUT A PET** ([`crate::pet_wire`] says why): whose creature is whose, what
+    /// has been done to it and whether it has gone home are the page's ONE derivation. So the answer is
+    /// ordinary messages in the ordinary shape, and the reader that already exists is what reads them.
+    ///
+    /// **THE PREFILTER IS THE WHOLE MARKER, AND THAT IS A CORRECTNESS RULE HERE RATHER THAN A
+    /// NICETY — because the `LIMIT` runs BEFORE the Rust filter does.** `chess_messages` above says a
+    /// `LIKE` "decides nothing" and can be widened freely, which is true of what comes BACK and not of
+    /// what is READ: `ORDER BY seq DESC LIMIT n` keeps the n newest rows the SQL matched, so anything
+    /// the prefilter over-matches eats a slot, and a pet ledger is OLD by construction (its message
+    /// keeps the `seq` it was first posted at). A bare `'%pet %'` matches "the pet shop" and every
+    /// reply quoting one, so a long thread could push the reader's own record out of the answer and
+    /// reopen the very window this read closes. `'%— pet %'` needs the em dash and the space, which no
+    /// ordinary sentence carries. Chess's own `'%chess %'` has the same shape with a rarer word and a
+    /// 1 200 bound, so it is far from its ceiling — but the interaction is the same one and worth
+    /// knowing before either number moves. The pattern is INTERPOLATED from [`crate::pet_wire::MARKER`]
+    /// rather than written out, so the prefilter and the re-check can never name different markers; it
+    /// is a `const` in this crate and holds no quote, so there is nothing here a parameter would buy.
+    ///
+    /// The other two notes on the filter above hold unchanged. It is still a PREFILTER and decides
+    /// nothing: the marker is re-checked on the body itself, through the one Rust spelling of it
+    /// ([`crate::pet_wire`]), so a message merely containing those characters is not in the answer. And
+    /// a SEALED conversation's bodies are ciphertext in this column, so a sealed thread falls back to
+    /// the loaded page alone. That fallback is the ONE place this rail does not reach, and it is stated
+    /// where it is paid: a sealed conversation whose pet ledger has paged out can still be offered a
+    /// duplicate spawn.
+    pub fn pet_messages(&self, conversation_id: &str, limit: i64) -> Result<Vec<Message>> {
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM messages
+             WHERE conversation_id = ?1 AND deleted = 0 AND {NOT_STILL_HELD}
+               AND content LIKE '%{marker}%'
+             ORDER BY seq DESC LIMIT ?2",
+            marker = crate::pet_wire::MARKER,
+        );
+        let keyring = self.seal_keyring()?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![conversation_id, limit], msg_reader(&keyring))?;
+        let mut v: Vec<Message> = rows
+            .collect::<rusqlite::Result<Vec<Message>>>()?
+            .into_iter()
+            .filter(|m| crate::pet_wire::carries_pet_line(&m.content))
+            .collect();
+        v.reverse(); // oldest -> newest, which is the order the derivation walks
+        Ok(v)
+    }
+
     /// The `limit` messages immediately older than `before_seq`, ordered oldest -> newest.
     /// Used when the UI scrolls up; if it returns fewer than `limit`, the caller should
     /// check `has_more_older` and fetch the next page from the network.
@@ -5800,6 +5856,92 @@ mod tests {
         assert!(found[0].seq < found[1].seq);
         // And nothing about another conversation's games.
         assert!(store.chess_messages("19:other@thread.v2", 100).unwrap().is_empty());
+    }
+
+    /// WHICH MESSAGES HOLD A COMPANION — and here the read is a CORRECTNESS rail, not a score.
+    ///
+    /// A pet's ledger message keeps the `seq` it was first posted at, so it pages out of the loaded
+    /// history while the creature is alive — and the app then folded no pet of the reader's own, drew
+    /// none, hid Feed/Play/Nap, and OFFERED A SPAWN, which posts a second arrival message for a
+    /// creature they already own and which every fold absorbs and ignores whole. So the fixture holds
+    /// everything that must NOT be read as a pet beside the two that must, and a `gone` record — which
+    /// is the one this read most has to find, since it is what "bring your companion back" is drawn
+    /// from.
+    #[test]
+    fn the_pet_read_finds_a_record_and_nothing_that_merely_mentions_one() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = "19:pet@thread.v2";
+        let ledger = "<p>Nori · fed 2</p>\
+                      <p><em>— pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c, via teams-lite</em></p>";
+        let gone_body = "<p>Pixel has gone home.</p>\
+                         <p><em>— pet a91e04 v1 s.duck gone, via teams-lite</em></p>";
+        let rows = [
+            (1, ledger),
+            // A record whose creature has GONE. Its acts still count and the spawn row reads
+            // "bring your companion back" off it, so a read that missed one would offer a fresh pet.
+            (2, gone_body),
+            // And everything that is not a record. The last one is the prefilter's own case: a
+            // colleague writing the marker's exact characters in a sentence.
+            (3, "<p>shall we keep a pet in here?</p>"),
+            (4, "<p>done</p><p><em>— claude, via teams-lite</em></p>"),
+            (5, "<p>♟ 1. e4</p><p><em>— chess bbb222 1 e4, via teams-lite</em></p>"),
+            (6, "<p>— pet food is in the second drawer</p>"),
+            (7, "<p>Nori</p><p><em>— pet 7F3A1C v1 s.cat, via teams-lite</em></p>"),
+        ];
+        for (seq, content) in rows {
+            let mut row = message_for_test(conversation, "8:orgid:ada", content);
+            row.id = format!("m{seq}");
+            row.seq = seq;
+            store.insert_message(&row).unwrap();
+        }
+        // A record somebody DELETED is not a record: its body is a placeholder, and `petWireIn`
+        // refuses it on the page for the same reason.
+        let mut deleted = message_for_test(conversation, "8:orgid:ada", ledger);
+        deleted.id = "m8".to_string();
+        deleted.seq = 8;
+        store.insert_message(&deleted).unwrap();
+        store.mark_message_deleted(conversation, "m8").unwrap();
+
+        let found = store.pet_messages(conversation, 100).unwrap();
+        let ids: Vec<&str> = found.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["m1", "m2"], "only the two messages that carry a record");
+        // Oldest first, which is the order the page's derivation walks.
+        assert!(found[0].seq < found[1].seq);
+        // And nothing about another conversation's creatures.
+        assert!(store.pet_messages("19:other@thread.v2", 100).unwrap().is_empty());
+    }
+
+    /// THE LIMIT KEEPS THE NEWEST MATCHING ROWS, WHICH IS WHY THE PREFILTER IS THE WHOLE MARKER.
+    ///
+    /// A pet ledger is OLD by construction, so every row the SQL over-matches eats a slot ahead of it:
+    /// with a bare `'%pet %'` prefilter, prose saying "the pet shop" would push the reader's own record
+    /// out of a bounded answer and reopen the duplicate-spawn window. This drives the bound down to 1 —
+    /// where the ordering is the whole of the behaviour — and holds the answer to the RECORD.
+    #[test]
+    fn the_pet_read_is_not_crowded_out_by_prose_that_merely_says_pet() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = "19:pet@thread.v2";
+        let mut ledger = message_for_test(
+            conversation,
+            "8:orgid:ada",
+            "<p>Nori is here.</p><p><em>— pet 7f3a1c v1 s.cat, via teams-lite</em></p>",
+        );
+        ledger.id = "ledger".to_string();
+        ledger.seq = 1;
+        store.insert_message(&ledger).unwrap();
+        for seq in 2..=20 {
+            let mut row = message_for_test(
+                conversation,
+                "8:orgid:grace",
+                "<p>the pet shop on the corner shuts at six</p>",
+            );
+            row.id = format!("m{seq}");
+            row.seq = seq;
+            store.insert_message(&row).unwrap();
+        }
+        let found = store.pet_messages(conversation, 1).unwrap();
+        let ids: Vec<&str> = found.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["ledger"], "the record survives a thread full of the word");
     }
 
     /// EVERY read of a message body goes through the seal, and this is what keeps it that way.

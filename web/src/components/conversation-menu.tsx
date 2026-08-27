@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   CallIcon,
@@ -55,6 +54,7 @@ import {
   type PetSpawnReceipt,
 } from "~/lib/pet-act";
 import { PET_DEFAULT_SKIN, PET_SKINS } from "~/lib/pet-skin";
+import { usePrefersReducedMotion } from "~/lib/platform";
 import { petSlotKey, type Pet } from "~/lib/pet-thread";
 import { sealCanBeUsed, sealMenuLabel } from "~/lib/seal";
 import { cn } from "~/lib/utils";
@@ -369,13 +369,21 @@ export function ConversationMenu(props: {
   // which is what makes the LAYER gate on real pet data rather than on the route. It costs this row
   // nothing: it is inside a closed menu until the reader presses the trigger, and a press is many
   // effects later than the first committed render.
+  // **AND THE REDUCED-MOTION READ IS THE LAYER'S OWN, LIVE.** It was motion/react's `useReducedMotion`
+  // here while `PetLayer` read `usePrefersReducedMotion` (lib/platform.ts), so the two answered
+  // differently the moment the query MOVED — the mount-only hook latches its value into a `useState`
+  // initialiser it never updates, and this component is mounted unkeyed for the life of the page. Both
+  // directions were wrong: turning Reduce Motion ON unmounted the layer and left this row saying "Take
+  // a cat", which is a message everybody in the thread receives whose own presser is shown nothing (the
+  // fourth refusal in `petSpawnIsOffered` exists for exactly that), and turning it OFF left the row
+  // hidden until a reload, which is the stranding `usePrefersReducedMotion` was added to end.
   const petsShown = useAppState((s) => s.petsShown);
-  const reduceMotion = useReducedMotion();
+  const reduceMotion = usePrefersReducedMotion();
   const spawnOffered = petSpawnIsOffered({
     conversation,
     pets: props.pets,
     shown: petsShown,
-    reduce: reduceMotion === true,
+    reduce: reduceMotion,
   });
   // A publish already in flight in this conversation. The ENTRY is the signal and never its `act`,
   // which is null for a spawn exactly as it is for a despawn and a skin change: those three have no
@@ -544,6 +552,14 @@ export function ConversationMenu(props: {
       now: Date.now(),
     });
     if (!publish) return;
+    // THE RECEIPT THIS ONE REPLACES TAKES ITS SENTENCE WITH IT. A refused first spawn leaves a
+    // `petError` slot under a pet id nothing else has ever seen (see `PetSpawnReceipt`), and the retry
+    // mints a FRESH one — so without this the old slot is a string no surface can draw again, one more
+    // on every attempt. It is dropped here and only here, because this is the one moment both ids exist
+    // at once: `publishPetLedger` knows the new key and can never know the old.
+    if (spawnedPet && spawnedPet.pet !== publish.pet) {
+      controller.forgetPetError(spawnedPet.conversation, spawnedPet.pet);
+    }
     setSpawnedPet({ conversation: props.conversationId, pet: publish.pet });
     // CLOSED ON SUCCESS, held open on a refusal — the rule the challenge and the engine's own press
     // follow. It is NOT what keeps a second press out of the window between the send answering and

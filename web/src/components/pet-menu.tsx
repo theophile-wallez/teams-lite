@@ -108,11 +108,19 @@ export function PetMenu(props: {
 
   const pet = props.pet;
   const ours = pet.owner.isSelf;
-  // Whether the reader HAS a creature of their own — which is what decides the three acts, on this
-  // pet and on every other. It is read off `owner.isSelf` and never off an identity: the page is
-  // never handed the user's own MRI (the backend resolves that question — § Push notifications),
-  // which is exactly why `Pet.owner.isSelf` exists.
-  const hasOwnPet = props.pets.some((it) => it.owner.isSelf && !it.gone);
+  // Whether the reader HAS A RECORD of their own — which is what decides the three acts, on this pet
+  // and on every other. It is read off `owner.isSelf` and never off an identity: the page is never
+  // handed the user's own MRI (the backend resolves that question — § Push notifications), which is
+  // exactly why `Pet.owner.isSelf` exists.
+  //
+  // **A RECORD, `gone` OR NOT, and that was `&& !it.gone` — which is the one reader these three rows
+  // must not be hidden from by accident.** A departed owner may still feed, play with and nap a
+  // FRIEND's creature: the record stays after a despawn precisely so its acts still count
+  // (`Pet.gone`), and `petPublishFor` asks for `mine` and never for `!mine.gone` on those three. So
+  // this menu told them "Feeding and playing take a companion of your own" — which was false, since
+  // they have one on record — while the THROW gesture in the same lane published the very act the rows
+  // were hiding. Two answers to "may I act?", and the wire's is the one that decides.
+  const hasOwnPet = props.pets.some((it) => it.owner.isSelf);
   // A publish is in flight ANYWHERE in this conversation. The reader's ledger is one message for
   // the whole thread, so a feed on a colleague's pet and a nap on their own contend on it.
   const busy = pending !== undefined;

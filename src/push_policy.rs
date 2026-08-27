@@ -120,17 +120,49 @@ const SEALED_BODY: &str = "New message";
 /// indistinguishable from the preview's cut marker, so the rule also fires on an UNTRUNCATED
 /// message that simply ends in one. Both paths are nil-probability rather than impossible, and
 /// neither loses a message: what one costs is a trailing clause.
+/// **AND THE FOURTH SHAPE IS A CUT INSIDE THE MARKER ITSELF, which no search for the marker can
+/// find.** With the 120th code point landing in `— chess ` there is no marker in the preview at all,
+/// so `rfind` answers `None` and the fragment survives onto the row and into the push — the exact leak
+/// the three rules below exist to stop. It is reachable by the same arithmetic that reaches the id
+/// cut, one window later: the marker sits immediately after the words, so where an id cut needs words
+/// of 105–110 characters, a marker cut needs 111–118. An earlier note on [`is_wire_tail`] called the
+/// residual gap "one code point wide"; it was the whole length of the marker.
 fn without_wire_line(preview: &str, marker: &str) -> String {
-    let Some(at) = preview.rfind(marker) else {
-        return preview.to_string();
-    };
-    let Some(rest) = preview[at..].trim().strip_prefix(marker) else {
-        return preview.to_string();
-    };
-    if !is_wire_tail(rest) {
-        return preview.to_string();
+    // The two anchor at OPPOSITE ends — `rfind` finds a marker anywhere, a cut fragment is only ever
+    // the last thing in the preview — so the marker-cut rule is asked even when a marker was found
+    // and its tail was not a line. A body saying "— pet food is in the drawer" whose own wire line is
+    // then cut mid-marker holds both.
+    if let Some(at) = preview.rfind(marker)
+        && let Some(rest) = preview[at..].trim().strip_prefix(marker)
+        && is_wire_tail(rest)
+    {
+        return preview[..at].trim().to_string();
     }
-    preview[..at].trim().to_string()
+    match cut_marker_at(preview, marker) {
+        Some(at) => preview[..at].trim().to_string(),
+        None => preview.to_string(),
+    }
+}
+
+/// Where a trailing fragment of the MARKER ITSELF starts — `♟ …23. Bxf6 — ches…`.
+///
+/// The fragment must be a PROPER prefix of the marker: a whole one is [`without_wire_line`]'s own
+/// branch and every shape [`is_wire_tail`] covers under it. Longest first, so `— pet` wins over `—`
+/// and the cut takes the whole fragment rather than leaving `pet` behind as a word.
+///
+/// **THE SHORTEST PREFIX IS THE EM DASH ALONE, and what that costs is the point of saying it.** It
+/// fires on any preview whose cut lands immediately after an em dash, with no keyword evidence at all
+/// — and it is in because the em dash is genuinely where a cut can land, being the marker's own first
+/// code point. What it takes is that dangling em dash and nothing else: `"Hello there —…"` becomes
+/// `"Hello there"`. That is a SMALLER cost than the id-cut rule above, which can take a whole word,
+/// and it is the same trade this module already accepts — a trailing clause, never a message.
+fn cut_marker_at(preview: &str, marker: &str) -> Option<usize> {
+    let stem = preview.strip_suffix('…')?;
+    // The byte offset that ENDS each prefix, the full marker excluded — `skip(1)` drops the empty one.
+    let ends: Vec<usize> = marker.char_indices().map(|(at, _)| at).skip(1).collect();
+    ends.into_iter()
+        .rev()
+        .find_map(|end| stem.strip_suffix(&marker[..end]).map(str::len))
 }
 
 /// One id character: lowercase hex, which is the whole of what keeps prose out of the rules below.
@@ -160,13 +192,17 @@ fn is_lower_hex(c: char) -> bool {
 /// than the words. The cost is unchanged and is what makes it acceptable — a trailing clause,
 /// never a message.
 ///
-/// Two footnotes, both measured. The OPTIONAL SPACE sub-branch is unreachable from a real preview
+/// One footnote, measured. The OPTIONAL SPACE sub-branch is unreachable from a real preview
 /// in either language, because `preview_from_html` runs `truncated.trim_end()` before it appends
 /// the `…` — so `— pet 7f3a1c …` is a shape the truncator cannot emit and its fixture is testing
-/// the rule rather than a preview. And the residual window is now **one code point wide**: a cut
-/// landing exactly after the marker's space (`— pet…`, zero hex) is not cut, which is narrower
-/// than before and NOT closed — "the marker, then only hex, then the cut" does not say so on its
-/// own.
+/// the rule rather than a preview.
+///
+/// **THE RESIDUAL WINDOW USED TO BE THE WHOLE MARKER WIDE, not the "one code point" an earlier note
+/// here claimed.** A cut landing inside `— chess ` leaves no marker for `rfind` to find, so none of
+/// the three rules here was ever asked and the fragment reached the row. [`cut_marker_at`] is that
+/// window, and with it the residual really is one code point: a preview cut exactly after the
+/// marker's own trailing space — `— pet ` whole, zero hex, no `…`-bearing fragment left to match — is
+/// a shape `preview_from_html` cannot emit, since it trims before it appends the cut marker.
 fn is_wire_tail(rest: &str) -> bool {
     // THE ID ITSELF WAS CUT: only hex, then the preview's own cut marker, and no payload at all.
     if let Some(hex) = rest.strip_suffix('…') {
@@ -196,8 +232,13 @@ fn without_chess_line(preview: &str) -> String {
 }
 
 /// A COMPANION: `— pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c, via teams-lite`.
+///
+/// The marker comes from [`crate::pet_wire`] for the reason the chess one comes from
+/// [`crate::chess_wire`]: the STORE reads that same marker to answer which messages hold a pet
+/// ([`crate::store::Store::pet_messages`]), so a literal here would be a second spelling — and one of
+/// the two readers would eventually stop recognising a line the other still did.
 fn without_pet_line(preview: &str) -> String {
-    without_wire_line(preview, "— pet ")
+    without_wire_line(preview, crate::pet_wire::MARKER)
 }
 
 pub fn notification_for(
@@ -757,6 +798,74 @@ mod tests {
         assert_eq!(
             without_pet_line("Nori · fed 3 — pet 7F3A1C v1 s.cat 1756…"),
             "Nori · fed 3 — pet 7F3A1C v1 s.cat 1756…"
+        );
+    }
+
+    /// A CUT LANDING INSIDE THE MARKER ITSELF, which no search for the marker can find.
+    ///
+    /// The fourth shape, and the one that was still leaking: with the 120th code point inside
+    /// `— chess ` there is no marker in the preview at all, so `rfind` answered `None`, none of the
+    /// three rules above was ever asked, and the fragment reached the row and the push — the exact
+    /// thing this whole function exists to stop. It is the id cut's own arithmetic one window later:
+    /// the marker sits immediately after the words, so where an id cut needs words of 105–110
+    /// characters, this needs 111–118.
+    ///
+    /// The COST is asserted beside it, because the shortest prefix is the em dash alone: a preview cut
+    /// immediately after one loses that dash and nothing else, which is a smaller price than the
+    /// id-cut rule above already pays (it can take a whole word).
+    #[test]
+    fn a_cut_inside_the_marker_itself_is_no_wire_either() {
+        // Every prefix of the chess marker, from the whole keyword down to the em dash.
+        for (cut, want) in [
+            ("♟ … 23. Bxf6 — chess…", "♟ … 23. Bxf6"),
+            ("♟ … 23. Bxf6 — ches…", "♟ … 23. Bxf6"),
+            ("♟ … 23. Bxf6 — ch…", "♟ … 23. Bxf6"),
+            ("♟ … 23. Bxf6 — c…", "♟ … 23. Bxf6"),
+            ("♟ … 23. Bxf6 —…", "♟ … 23. Bxf6"),
+        ] {
+            assert_eq!(without_chess_line(cut), want, "{cut}");
+        }
+        for (cut, want) in [
+            ("Nori · fed 3 — pet…", "Nori · fed 3"),
+            ("Nori · fed 3 — pe…", "Nori · fed 3"),
+            ("Nori · fed 3 — p…", "Nori · fed 3"),
+            ("Nori · fed 3 —…", "Nori · fed 3"),
+        ] {
+            assert_eq!(without_pet_line(cut), want, "{cut}");
+        }
+
+        // NOTHING WHOLE IS TOUCHED, which is the half that keeps the widening honest: a fragment is
+        // only ever cut where the preview says it truncated. A colleague's own em dash mid-sentence
+        // survives, and so does one at the end of a message the preview did NOT cut.
+        assert_eq!(without_pet_line("on my way — see you"), "on my way — see you");
+        assert_eq!(without_chess_line("we lost — again"), "we lost — again");
+        assert_eq!(without_pet_line("that was the plan —"), "that was the plan —");
+        // A fragment of the OTHER feature's keyword is not this one's: `— ches…` is no pet.
+        assert_eq!(without_pet_line("♟ … 23. Bxf6 — ches…"), "♟ … 23. Bxf6 — ches…");
+        // And a word that merely STARTS like the keyword is not a fragment of it.
+        assert_eq!(without_pet_line("we walked the — pest…"), "we walked the — pest…");
+        assert_eq!(without_chess_line("this — chest…"), "this — chest…");
+
+        // AND THE NOTIFICATION REALLY GOES THROUGH IT, which is the one way the whole rule could be
+        // right and unreached: the body is what a mid-marker cut of a real record looks like.
+        // THE FIXTURE'S OWN LENGTH IS WHAT PUTS THE CUT INSIDE THE MARKER, so it is computed rather
+        // than eyeballed. `preview_from_html` joins blocks with one newline, so the marker's six code
+        // points start one after the words: for the 120th to land inside it and not past it, the words
+        // have to be 114–118 long. 116 puts the cut three characters in (`— p…`).
+        let words = format!("Nori has had a long afternoon and it is all in the record{}", ".".repeat(59));
+        assert_eq!(words.chars().count(), 116, "the fixture's length is the whole of what it tests");
+        let mut message = chat_message();
+        message.content = format!(
+            "<p>{words}</p><p><em>— pet 7f3a1c v1 s.cat 1756060012345.f.7f3a1c, via teams-lite</em></p>",
+        );
+        let preview = teams_read::preview_from_html(&message.content);
+        assert!(preview.ends_with("— p…"), "the fixture's own cut has to land inside the marker: {preview}");
+        let notification = notification_for(&message, &chat(), SELF_MRI, false, NOW, false)
+            .expect("a colleague's act notifies");
+        assert!(
+            !notification.body.contains('—'),
+            "no fragment of the marker may reach a lock screen: {}",
+            notification.body,
         );
     }
 

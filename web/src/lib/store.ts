@@ -452,6 +452,25 @@ export type AppState = {
    *  the one the reader PRESSED ON (`PetPublish.pet`), which for a feed on a colleague's creature is
    *  theirs rather than ours: that is where the reader is looking. */
   petError: Record<string, string>;
+  /**
+   * Every PET-carrying message one conversation's WHOLE STORED HISTORY holds, keyed by conversation —
+   * merged into the loaded history before the creatures are folded out of it (`withPetArchive`).
+   *
+   * It is `chessArchive`'s shape for a sharper reason, and the difference decides where it is read.
+   * There the whole-history read buys a head-to-head SCORE, so it is a second opinion beside the
+   * derivation; here it feeds the derivation ITSELF, because a pet's ledger message keeps the `seq` it
+   * was first posted at and pages out of the loaded window while the creature is alive — at which point
+   * the app drew no pet of the reader's own and OFFERED THEM A SPAWN, which posts an arrival message
+   * for a creature they already own and can no longer reach. `withPetArchive` argues it in full.
+   *
+   * It holds MESSAGES rather than folded pets, unlike `chessArchive`'s games, for that same reason: the
+   * fold has to run over the union, and a fold of the archive alone would be a second set of creatures
+   * to reconcile with the first.
+   *
+   * Empty until a conversation asks, which is what keeps it off the path of a reader who has turned
+   * companions off.
+   */
+  petArchive: Record<string, ChatMessage[]>;
   /** The publish this page has in flight in a conversation, with the act it draws before the message
    *  comes back — or no entry, which is what lets the next press go out.
    *
@@ -1023,6 +1042,7 @@ function initialState(): AppState {
     chessPremove: {},
     chessArchive: {},
     petError: {},
+    petArchive: {},
     petPending: {},
     chessEngine: NO_CHESS_ENGINE,
     chessSounds: NO_CHESS_SOUNDS,
@@ -6917,6 +6937,55 @@ export class TeamsController {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Read every PET-carrying message this conversation's WHOLE STORED HISTORY holds.
+   *
+   * `pet_messages` is an ordinary open read that makes no network request — a pet IS its messages, so
+   * the store already holds every one of them — and what comes back is merged into the loaded history
+   * before the fold runs (`withPetArchive`, which argues why the fold must be complete rather than
+   * merely helpful).
+   *
+   * **IT IS ASKED PER CONVERSATION AND ONLY WHILE COMPANIONS ARE ON.** A reader who turned the switch
+   * off draws no creature, is offered no spawn and therefore cannot reach the bug this closes — the
+   * split `loadChessArchive` makes for a reader who plays no chess. Once per conversation, because the
+   * asker is a pane that re-renders on every scroll. What the switch does not buy is the FIRST
+   * conversation they open: `petsShown` holds its hopeful `true` until `start()` has read the browser's
+   * preference in an effect, so that one costs a store read (no network) and nothing after it does.
+   *
+   * **A READ THAT FAILS LEAVES NOTHING BEHIND, and that costs exactly what it did before.** A backend
+   * too old to know the method, or one that could not answer, falls back to the loaded page — the
+   * behaviour this replaces. It is not retried and no sentence is drawn: there is nothing the reader
+   * could do about it, and a spawn refused on the strength of a read that failed would take the one way
+   * into the feature away from somebody who really has no companion here.
+   */
+  async loadPetArchive(conversationId: string): Promise<void> {
+    if (!this.get().petsShown) return;
+    if (this.get().petArchive[conversationId]) return;
+    try {
+      const { messages } = await this.backend.petMessages(conversationId);
+      this.set({ petArchive: { ...this.get().petArchive, [conversationId]: messages } });
+    } catch {
+      // See above: the loaded page alone is the honest fallback, and it is what shipped.
+    }
+  }
+
+  /**
+   * Drop the sentence about one pet without publishing anything — the one slot nothing else can reach.
+   *
+   * `petError` is keyed per PET so a refusal is drawn under the creature the press was about, and every
+   * other key is reachable for ever: the pet is on screen, so its own menu and trigger keep reading it
+   * and a later press clears it. A FIRST SPAWN's key is not, because its pet id is freshly minted and
+   * held only by the receipt in `ConversationMenu` — and the RETRY mints ANOTHER one, so the moment
+   * that receipt moves the old slot is a string no surface will ever draw again, growing by one on
+   * every refused attempt. The component owns both ids at that instant, so it is the only thing that
+   * can name the slot to drop; this is the write it needs.
+   */
+  forgetPetError(conversationId: string, petId: string): void {
+    const key = petSlotKey(conversationId, petId);
+    const { [key]: had, ...rest } = this.get().petError;
+    if (had !== undefined) this.set({ petError: rest });
   }
 
   /** The conversations with a publish in flight, minus this one. */

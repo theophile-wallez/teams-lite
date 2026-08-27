@@ -508,6 +508,19 @@ function PetSprite(props: {
     // store would refuse a second publish SILENTLY, and a gesture cannot be drawn disabled the way
     // a menu row can, so it is refused here where the intent is readable. What says so to the
     // reader is the menu in the same lane, whose rows are visibly out while a publish travels.
+    //
+    // **A THROW BY SOMEBODY WITH NO RECORD OF THEIR OWN PUBLISHES NOTHING AND SAYS NOTHING, and that
+    // is a stated cost rather than a gap that was fixed.** `petPublishFor` refuses it — an act is a
+    // line in its author's OWN ledger and they have none, which is the same refusal that hides Feed,
+    // Play and Nap from their menu — and a drag cannot carry the sentence a row is replaced by. What
+    // they have is the PAT, which a press already gives them, and the sentence itself is one press away
+    // on the trigger in this lane.
+    //
+    // What must NOT differ between the gesture and the rows is WHO may act, and it did for exactly one
+    // reader: somebody whose own pet had GONE HOME. `hasOwnPet` asked for `isSelf && !gone` while
+    // `petPublishFor` asks for `mine` — so the menu hid the three rows and this gesture published them.
+    // The wire's answer is the one that decides (a departed owner's acts still count), so the menu was
+    // the half that moved.
     throwRef.current = () => {
       if (props.pending) return;
       props.publish({ kind: "play", pet: props.pet.id });

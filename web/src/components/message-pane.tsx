@@ -40,7 +40,7 @@ import { defaultAgentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
 import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
 import { recordingsInConversation, type CallRecording } from "~/lib/call-recording";
 import { chessGamesInThread, type ChessGame } from "~/lib/chess-thread";
-import { petsInThread } from "~/lib/pet-thread";
+import { petsInThread, withPetArchive } from "~/lib/pet-thread";
 import { petWireIn } from "~/lib/pet-wire";
 import { CallRecordingCard } from "./call-recording-card";
 import { ChessGamesStrip } from "./chess-games-strip";
@@ -161,9 +161,16 @@ export type HistoryRow =
 export function chatHistoryRows(
   messages: ChatMessage[],
   chessGames: ChessGame[],
-): { rows: HistoryRow[]; rowOfMessage: Map<string, number> } {
+): { rows: HistoryRow[]; rowOfMessage: Map<string, number>; petMessages: ChatMessage[] } {
   const rowOfMessage = new Map<string, number>();
   const rows: HistoryRow[] = [];
+  /** The pet ledgers this walk left out, HANDED BACK rather than found again.
+   *
+   *  `petRowNeighbours` needs exactly this list and used to re-scan every message for it — a third
+   *  full pass of two regexes over the whole history (`petsInThread` is the first, this walk the
+   *  second), on a memo that re-runs whenever the messages, a recording or a live agent run moves.
+   *  This walk has already asked the question, so it answers it. */
+  const petMessages: ChatMessage[] = [];
   const absorbedBy = new Map<string, ChessGame>();
   for (const game of chessGames) {
     for (const id of game.absorbed) absorbedBy.set(id, game);
@@ -181,8 +188,11 @@ export function chatHistoryRows(
       return;
     }
     // A PET ledger adds no row: the overlay draws the creature. Its id is mapped afterwards, by
-    // `petRowNeighbours`, once the rows around it are final.
-    if (petWireIn(message) !== null) return;
+    // `petRowNeighbours`, once the rows around it are final — off the list this walk collects here.
+    if (petWireIn(message) !== null) {
+      petMessages.push(message);
+      return;
+    }
     // The row INDEX, not the message index: with a game absorbing several messages into
     // one row the two are no longer the same number, and a deep link taken from the
     // message index would land on whatever row happens to sit there.
@@ -198,7 +208,7 @@ export function chatHistoryRows(
       next: messages[i + 1],
     });
   });
-  return { rows, rowOfMessage };
+  return { rows, rowOfMessage, petMessages };
 }
 
 /**
@@ -217,12 +227,13 @@ export function chatHistoryRows(
  */
 export function petRowNeighbours(
   rows: readonly HistoryRow[],
-  messages: readonly ChatMessage[],
+  /** The ledgers `chatHistoryRows` LEFT OUT, from that walk's own answer — not the whole history to be
+   *  scanned again. It asked the same question one pass earlier, and asking it twice was two regexes
+   *  per message of a re-run memo for a list one of them already had. */
+  petMessages: readonly ChatMessage[],
 ): Map<string, number> {
   const at = new Map<string, number>();
-  for (const message of messages) {
-    // WIRE PRESENCE, the same question `chatHistoryRows` skipped the row on.
-    if (petWireIn(message) === null) continue;
+  for (const message of petMessages) {
     const after = rows.findIndex(
       (row) => row.kind === "message" && row.message.compose_time > message.compose_time,
     );
@@ -424,12 +435,42 @@ export function MessagePane(props: { onBack?: () => void }) {
     [threads, messages],
   );
 
-  // Every companion this thread holds. A pet IS its messages (see lib/pet-thread.ts), so this is a
-  // pass over the history for the reason `timeMarks` and `chessGames` are: the pane re-renders on
-  // every scroll that mounts a row and on every streamed agent frame, while a creature changes only
-  // when the messages do. A CHANNEL is excluded exactly as chess is — its history is drawn as
-  // THREADS, and where a creature walks over one of those is a different surface's question.
-  const pets = useMemo(() => (threads ? [] : petsInThread(messages)), [threads, messages]);
+  /**
+   * THE HISTORY THE COMPANIONS ARE READ OUT OF: the loaded page, plus any pet ledger the BACKEND holds
+   * that this page has not loaded.
+   *
+   * A pet IS its messages, and the history loads a page at a time — so the loaded page ALONE is not a
+   * complete answer to "have I got a creature here?", and the incomplete answer was destructive rather
+   * than merely wrong: a ledger 40 messages back drew no pet, offered no way to reach it, and had the
+   * conversation's own menu offer a SPAWN, whose press posts an arrival message for a creature the
+   * reader already owns and can never reach again. `withPetArchive` argues the whole of it, and
+   * `pet_messages` is the read.
+   *
+   * It is asked ONCE per conversation and only while companions are ON (`loadPetArchive`), and a read
+   * that fails leaves the loaded page — which is exactly what shipped.
+   *
+   * `petsShown` is in the DEPENDENCIES as well as in the guard, so a reader who turns companions on
+   * gets their creature without a reload. What the guard does NOT buy is the very first conversation
+   * such a reader opens: `petsShown` reads its hopeful `true` until `start()` has read the browser's
+   * own preference in an effect, which is the same window the layer states for itself — so an opted-out
+   * reader costs one store read (network-free) and no more.
+   */
+  const petsShown = useAppState((s) => s.petsShown);
+  const petArchive = useAppState((s) => (s.openId ? s.petArchive[s.openId] : undefined));
+  useEffect(() => {
+    if (!openId || threads || !petsShown) return;
+    void controller.loadPetArchive(openId);
+  }, [controller, openId, threads, petsShown]);
+  // A CHANNEL is excluded exactly as chess is — its history is drawn as THREADS, and where a creature
+  // walks over one of those is a different surface's question.
+  const petHistory = useMemo(
+    () => (threads ? [] : withPetArchive(messages, petArchive)),
+    [threads, messages, petArchive],
+  );
+  // Every companion this thread holds — a pass over that history for the reason `timeMarks` and
+  // `chessGames` are: the pane re-renders on every scroll that mounts a row and on every streamed agent
+  // frame, while a creature changes only when the messages do.
+  const pets = useMemo(() => petsInThread(petHistory), [petHistory]);
 
   // Deep-linking to a reply inside a collapsed thread: expand that thread so the
   // scroll effect can find and center the target node.
@@ -498,8 +539,8 @@ export function MessagePane(props: { onBack?: () => void }) {
     // LAST, over the rows as they will really be drawn: a pet ledger has no row of its own, so
     // its id points at a neighbour — and both the splice above and the rebuild move the indices
     // that rule resolves against. A rebuild that ran after it would drop every one of them.
-    if (!threads) {
-      for (const [id, index] of petRowNeighbours(rows, messages)) rowOfMessage.set(id, index);
+    for (const [id, index] of petRowNeighbours(rows, chat?.petMessages ?? [])) {
+      rowOfMessage.set(id, index);
     }
     return { rows, rowOfMessage };
   }, [threads, messages, agentRun, conversationRecordings, chessGames]);
@@ -1031,12 +1072,15 @@ export function MessagePane(props: { onBack?: () => void }) {
             {/* The pets and the history they were folded out of travel as a PAIR, from the one memo
                 below — `petPublishFor` reads our own ledger back out of that history and fails
                 closed when the two disagree, so a menu that read either half for itself would draw
-                a live Spawn row that publishes nothing. */}
+                a live Spawn row that publishes nothing. It is `petHistory` and NOT `messages` for
+                that same reason: the archive is half of what says the reader has a creature here, so
+                a menu handed the loaded page alone would offer a spawn the pets were folded against
+                (see `withPetArchive`). */}
             <ConversationMenu
               conversationId={openId}
               games={chessGames}
               pets={pets}
-              messages={messages}
+              messages={petHistory}
             />
           </div>
         )}
@@ -1059,7 +1103,11 @@ export function MessagePane(props: { onBack?: () => void }) {
             asked for less motion (see pet-layer.tsx). It is deliberately gated on real pet data
             rather than on the route: the preference is read inside `start()`, which runs in an
             effect, and children render before any effect does. */}
-        <PetLayer conversationId={openId} pets={pets} messages={messages} games={chessGames} />
+        {/* `petHistory` and not `messages`, for the reason the menu above takes it: an act EDITS the
+            reader's own ledger by id, and that message may have paged out of the loaded window while
+            the creature is alive — so a layer handed the loaded page alone would publish nothing and
+            say nothing for every press on it. */}
+        <PetLayer conversationId={openId} pets={pets} messages={petHistory} games={chessGames} />
         <div
           ref={viewportRef}
           onScroll={onScroll}
