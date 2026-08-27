@@ -29,9 +29,11 @@
  * exactly what scaling about the feet bought. It also buys nothing: `bandBounds` already keeps the
  * whole creature inside the box by subtracting the sprite's own width, so nothing can walk out.
  *
- * **THE ARENA CLEARS THE THREE BANDS THIS RECTANGLE ALREADY OWES, IN TWO CONSTANTS** — the chess
- * strip above, and the composer's fade with `JumpToLatest`'s reach inside it below (see
- * {@link PET_LAYER_TOP_PX} and {@link PET_LAYER_BOTTOM_PX}).
+ * **THE ARENA CLEARS THE BAND ABOVE IT AND STANDS ON THE ONE BELOW.** The chess strip is insetted
+ * ({@link PET_LAYER_TOP_PX}), because a chip there is a live target and this overlay is the later
+ * paint at the same `z-10`; the composer is NOT ({@link PET_LAYER_BOTTOM_PX}), because a companion's
+ * whole point is walking on the conversation box, and the 56px that used to be reserved there was
+ * reserved against a fade this arena already paints over.
  *
  * **THE CANVAS IS NOT DEVICE-PIXEL-RATIO AWARE, and that is a refusal rather than an oversight.**
  * The engine sizes its own backing store to the skin's declared pixel count and draws each art
@@ -118,14 +120,30 @@ export const PET_LAYER_MAX = 3;
 export const PET_LAYER_TOP_PX = CHESS_STRIP_HEIGHT_PX;
 
 /**
- * The band at the BOTTOM that is already owned, in CSS px.
+ * The band at the BOTTOM that is already owned, in CSS px: NONE. A creature's floor is the
+ * composer's own top edge, so it really walks ON the conversation box.
  *
- * `composer-fade` is `h-14` (56px) and dissolves anything below `z-20`, so a pet standing inside
- * it would fade out from the feet up. `JumpToLatest` is a 36px square at `bottom-3` — 48px of
- * reach, inside the same band — so one number clears both, and a pet's floor is the fade's own
- * top edge.
+ * It was 56px, and the argument for that number was WRONG about the thing it named. `composer-fade`
+ * is `h-14` (56px) hanging off the composer's top edge, and it was read as dissolving anything below
+ * `z-20` — so a pet was held a whole fade's height clear of the bar to keep it from fading out from
+ * the feet up. But the fade is a POSITIONED element at `z-index: auto` and this arena is at `z-10`,
+ * and they share one stacking context: a positive z-index paints in a later step than `auto`, so the
+ * creature was already above the fade and the whole band bought nothing. What it COST was the
+ * feature's own point — a companion hovering 62px over the box it is supposed to be standing on
+ * (56px of inset plus the engine's own 6px `FLOOR_MARGIN`). The error row beside it in
+ * `message-pane.tsx` has always said the true threshold in as many words ("both stack above it
+ * (z-10)"); `JumpToLatest`'s own `z-20` comment is the loose one that this followed.
+ *
+ * **WHAT IS REALLY IN THAT BAND, said rather than insetted away: `JumpToLatest`.** It is a 36px
+ * square at `bottom-3` — 48px of reach in the RIGHTMOST lane only — at `z-20`, so it draws over a
+ * creature rather than under one, and it is up only while the reader has scrolled away from the
+ * newest message. A floating round control over a 52px animal for the seconds it is visible is worth
+ * far less than the 62px of air it was bought with, and a control winning that hit test is the right
+ * outcome anyway. The trigger PILL is the one thing that is moved for it instead (see `PetSprite`),
+ * because its 44px target would otherwise reach past the floor into the composer's own top edge,
+ * where a press means "focus the message field".
  */
-export const PET_LAYER_BOTTOM_PX = 56;
+export const PET_LAYER_BOTTOM_PX = 0;
 
 /**
  * The biggest a creature may be drawn, on either side, in CSS px.
@@ -140,11 +158,25 @@ export const PET_LAYER_BOTTOM_PX = 56;
 export const PET_MAX_PX = 64;
 
 /**
- * The shortest arena a creature can be drawn in at all, in CSS px — the tallest art this layer
- * admits, the floor margin it stands on, and 24px for the trigger pill under it (`h-6`).
+ * How far the menu's trigger is LIFTED off the arena's floor, in CSS px.
  *
- * The two insets take 112px off a rectangle whose height nothing here controls — a phone in landscape
- * with a grown composer leaves less than that, and an absolutely-positioned box with both edges
+ * It is the overhang of the trigger's own touch target and nothing else: the pill is `h-6` (24px)
+ * ink and `after:-inset-y-2.5` grows its box 10px each side to clear the 44px floor, so a pill sitting
+ * flush on the floor reaches 10px PAST it. That used to land in the middle of a 56px band nothing
+ * else wanted ({@link PET_LAYER_BOTTOM_PX}); with the floor at the composer's own top edge it lands
+ * inside the composer, where this overlay is the later paint at `z-10` and would take a press that
+ * means "focus the message field". Lifting the pill by exactly the overhang stops its target at the
+ * floor and leaves the ink in the same stretch of floor the creature walks.
+ */
+export const PET_TRIGGER_LIFT_PX = 10;
+
+/**
+ * The shortest arena a creature can be drawn in at all, in CSS px — the tallest art this layer
+ * admits, the floor margin it stands on, and the trigger's own reach under it (its 24px `h-6` ink,
+ * lifted by {@link PET_TRIGGER_LIFT_PX}).
+ *
+ * The top inset takes 56px off a rectangle whose height nothing here controls — a phone in landscape
+ * with a grown composer leaves less than this guard wants, and an absolutely-positioned box with both edges
  * pinned then computes a height of ZERO. `spriteFloor` floors at 0, so a pet would be drawn at the
  * arena's top edge and hang its whole body OUT of a box with no height, unclipped, over the
  * composer's fade, with its trigger pinned to the same line. It is GUARDED rather than measured: the
@@ -158,7 +190,7 @@ export const PET_MAX_PX = 64;
  * stated cost rather than a state to report: the arena element stays mounted even here, precisely so
  * it can learn the window has grown.
  */
-export const PET_LAYER_MIN_PX = PET_MAX_PX + FLOOR_MARGIN + 24;
+export const PET_LAYER_MIN_PX = PET_MAX_PX + FLOOR_MARGIN + PET_TRIGGER_LIFT_PX + 24;
 
 /** The drawn size of a skin, in CSS px — the ONE place `size` becomes pixels. */
 export function petSpriteBox(skin: PetSkin): { w: number; h: number } {
@@ -592,6 +624,10 @@ function PetSprite(props: {
           reader is looking at and the control that acts on it are in the same stretch of floor.
           The wrapper passes pointers through; the trigger inside it does not.
 
+          It is LIFTED off the floor by exactly its target's own overhang (`PET_TRIGGER_LIFT_PX`),
+          because the floor is now the composer's own top edge: flush, the pill's 44px box would reach
+          10px into the bar, where this overlay paints later and a press means "focus the field".
+
           `pr-2` is the GUTTER, and it is the same 8px `pets-more` above keeps and the chess strip
           beside it takes as `px-2`. Without it the rightmost lane's pill sat flush against the
           window: measured at exactly 1280.0 on a 1280px viewport and exactly 390.0 on a phone, so
@@ -599,7 +635,10 @@ function PetSprite(props: {
           clipped. It insets every lane rather than only the last, which is the right outcome — a
           gutter that depended on which lane a creature walked in would move the target between
           two pets. */}
-      <span className="pointer-events-none absolute bottom-0 flex justify-end pr-2" style={lane}>
+      <span
+        className="pointer-events-none absolute flex justify-end pr-2"
+        style={{ ...lane, bottom: PET_TRIGGER_LIFT_PX }}
+      >
         <PetMenu
           conversationId={props.conversationId}
           pet={props.pet}

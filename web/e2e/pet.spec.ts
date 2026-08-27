@@ -117,6 +117,17 @@ test.describe("a companion in a conversation", () => {
    */
   const TRIGGER_TARGET_BLEED_PX = 4;
 
+  /**
+   * How far the trigger's 44px target hangs BELOW its own ink: `after:-inset-y-2.5`, 10px.
+   *
+   * The arena's floor is the composer's own top edge (`PET_LAYER_BOTTOM_PX` is 0, so the creature
+   * really walks on the box), so a pill flush on that floor would put those 10px inside the bar —
+   * where this overlay is the later paint at `z-10` and a press means "focus the message field".
+   * `PET_TRIGGER_LIFT_PX` lifts it by exactly this much; the unit test pins the pair of numbers, and
+   * this is the half that measures the real box against the real floor.
+   */
+  const TRIGGER_TARGET_UNDERHANG_PX = 10;
+
   /** Whether the reader is still holding it: the engine writes the cursor from the pose. */
   async function isHeld(sprite: Locator): Promise<boolean> {
     return (
@@ -233,9 +244,40 @@ test.describe("a companion in a conversation", () => {
       await page.setViewportSize({ width, height: 900 });
       await page.waitForTimeout(400);
       const pill = await ownPetTrigger(page).boundingBox();
+      const arena = await page.locator(layer).boundingBox();
       expect(pill).not.toBeNull();
+      expect(arena).not.toBeNull();
       expect(pill!.x + pill!.width).toBeLessThanOrEqual(width - TRIGGER_TARGET_BLEED_PX);
+      // AND IT KEEPS A GUTTER DOWNWARD TOO, which is what the arena standing on the composer costs:
+      // the pill's 44px target hangs 10px below its ink, and the floor is the bar's own top edge, so
+      // flush it would take a press that means "focus the message field".
+      expect(pill!.y + pill!.height + TRIGGER_TARGET_UNDERHANG_PX).toBeLessThanOrEqual(
+        arena!.y + arena!.height + 1,
+      );
     }
+  });
+
+  test("the creature really WALKS ON the conversation box", async ({ page }) => {
+    // The arena used to clear a whole 56px `composer-fade` below it, which — plus the engine's own
+    // 6px `FLOOR_MARGIN` — left a companion hovering 62px over the box it is supposed to stand on.
+    // The fade never needed it: it is a positioned element at `z-index: auto` and this arena is
+    // `z-10` in the same stacking context, so the creature already paints over it.
+    await openPetThread(page, { silent: true });
+    await spawnPet(page);
+    const sprite = petSprite(page).first();
+    await expect.poll(() => spriteGap(page, sprite), { timeout: 10_000 }).toBeLessThan(GAP_PX);
+
+    // The measurement that matters is against the COMPOSER, not against the arena: the arena is
+    // where this app says the floor is, and the bar is where the reader sees it.
+    const feet = await sprite.boundingBox();
+    const shell = await page.locator('[data-testid="composer-shell"]').boundingBox();
+    expect(feet).not.toBeNull();
+    expect(shell).not.toBeNull();
+    const air = shell!.y - (feet!.y + feet!.height);
+    // Standing on it, not hovering over it. `FLOOR_MARGIN` is 6px and a landing squash measures a
+    // pixel or two off while it relaxes; the defect this bounds measured 62.
+    expect(air).toBeGreaterThanOrEqual(0);
+    expect(air).toBeLessThan(GAP_PX);
   });
 
   test("a creature is GRABBED and THROWN with the pointer, and it lands", async ({ page }) => {

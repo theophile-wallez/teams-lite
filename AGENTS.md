@@ -6093,18 +6093,36 @@ surface's own, and `web/e2e/pet.spec.ts` or `pet-layer.test.tsx` pins each:
   a thread with no control anywhere. Theirs is lifted into the drawn set when message order would have
   cut it, and only then: re-ordering where there is already room would move somebody's lane for
   nothing.
-- **THE ARENA CLEARS THE THREE BANDS THIS RECTANGLE ALREADY OWES, IN TWO CONSTANTS.** The top is
+- **THE ARENA CLEARS THE BAND ABOVE IT AND STANDS ON THE ONE BELOW.** The top is
   `CHESS_STRIP_HEIGHT_PX` — the strip's own measurement rather than a number restated here, and this
   cost a defect: a chip is `h-11` and its container adds `py-1.5` either side, so the strip is 56px
   and not the 44 a reading of the chip alone gives, and restated wrong the arena began twelve pixels
   INSIDE a live strip, painted over it as a later sibling at the same `z-10`, and put `pets-more`
-  over the strip's own `+N more` — a bounded-count label drawn over a bounded-count label. The
-  bottom is 56px, where `composer-fade` (`h-14`) dissolves anything below `z-20` and `JumpToLatest`
-  reaches; one number clears both, so a pet's floor is the fade's own top edge. The top inset is
+  over the strip's own `+N more` — a bounded-count label drawn over a bounded-count label. It is
   unconditional rather than measured against a live game, because a pet WALKS and a thrown one arcs:
   an arena that grew and shrank as a game came and went would move the floor under a creature for a
   reason the reader cannot see. What that costs is 56px of height a pet never uses in a conversation
   with no game in it.
+- **THE BOTTOM IS NOTHING, so the creature really WALKS ON the conversation box — and the 56px that
+  used to be there was reserved against a fault this layer never had.** `PET_LAYER_BOTTOM_PX` was
+  `composer-fade`'s own `h-14`, on the reading that the fade dissolves anything below `z-20`, so a pet
+  standing inside it would fade out from the feet up. But that fade is a POSITIONED element at
+  `z-index: auto` and this arena is `z-10` in the same stacking context, and a positive z-index paints
+  in a later step than `auto`: the creature was already over the fade, the band bought nothing, and
+  what it COST was the feature's own point — a companion hovering 62px above the box it is meant to be
+  standing on (56px of inset plus the engine's own 6px `FLOOR_MARGIN`). The error row beside it in
+  `message-pane.tsx` has always stated the true threshold in as many words ("both stack above it
+  (z-10)"); `JumpToLatest`'s own `z-20` comment is the loose one that this followed. **What is really
+  in that band is stated rather than insetted away**: `JumpToLatest` is a 36px square at `bottom-3` in
+  the RIGHTMOST lane only, at `z-20`, so it draws OVER a creature rather than under one and wins that
+  hit test — and it is up only while the reader has scrolled away from the newest message. A floating
+  round control over a 52px animal for those seconds is worth far less than 62px of air. The one thing
+  moved for it is the trigger PILL, which is lifted off the floor by exactly its own target's overhang
+  (`PET_TRIGGER_LIFT_PX`, 10px — `after:-inset-y-2.5`): flush, its 44px box would reach into the
+  composer's top edge, where this overlay is the later paint and a press means "focus the message
+  field". `pet-layer.test.tsx` pins the pair of numbers across the two files that hold them and
+  `pet.spec.ts` measures the real boxes — the feet against the composer's own top edge, and the
+  trigger's target against the arena's floor.
 - **A SIZE IS READ OUT OF THE ART, AND IT THEREFORE NEEDS A CEILING.** The shipped skins DISAGREE —
   `cat` and `duck` are 13x13 (52px at `PX = 4`) where `blue-boy` is 14x14 (56px), measured off
   upstream's own art, which is why nothing here spells a sprite's size as a constant. `PET_MAX_PX`
@@ -6119,7 +6137,8 @@ surface's own, and `web/e2e/pet.spec.ts` or `pet-layer.test.tsx` pins each:
   where a bigger backing store buys nothing. Buying it anyway would mean writing `canvas.width`
   behind the vendored engine and scaling its context: a second answer to "how big is this sprite".
 - **NOTHING IS DRAWN IN AN ARENA WITH NO ROOM FOR A CREATURE** (`PET_LAYER_MIN_PX` — the tallest art
-  admitted, the floor margin, and 24px for the trigger pill). The two insets take 112px off a
+  admitted, the floor margin, and the trigger's own reach under it: its 24px pill, lifted by
+  `PET_TRIGGER_LIFT_PX`). The top inset takes 56px off a
   rectangle whose height nothing here controls, and an absolutely-positioned box with both edges
   pinned then computes a height of ZERO: `spriteFloor` floors at 0, so a pet would be drawn at the
   arena's top edge with its whole body hanging out of a box with no height, unclipped, over the
@@ -6176,6 +6195,10 @@ surface's own, and `web/e2e/pet.spec.ts` or `pet-layer.test.tsx` pins each:
   past the edge and the ink read as clipped. `pr-2` is the gutter — the same 8px `pets-more` keeps
   and the chess strip takes as `px-2` — and it insets EVERY lane rather than only the last, because a
   gutter that depended on which lane a creature walked in would move the target between two pets.
+  **The same target owes a gutter DOWNWARD, and that is what the arena standing on the composer
+  costs**: `after:-inset-y-2.5` grows the box 10px below the ink, and the floor is now the bar's own
+  top edge — so the pill is lifted by exactly that (`PET_TRIGGER_LIFT_PX`), or a press meant for the
+  message field opens a pet's menu instead.
 
 **THE MENU IS STILL ITS OWN TARGET**, because a creature has more done to it than two gestures can
 carry: a pat, a feed, a play, a nap, its art and sending it home. It is one small labelled trigger

@@ -32,6 +32,7 @@ import {
   PET_LAYER_MIN_PX,
   PET_LAYER_TOP_PX,
   PET_MAX_PX,
+  PET_TRIGGER_LIFT_PX,
 } from "./pet-layer";
 
 function pet(over: Partial<Pet> = {}): Pet {
@@ -128,10 +129,23 @@ describe("the arena's own bounds", () => {
     expect(PET_LAYER_TOP_PX).toBeGreaterThan(44);
   });
 
+  it("STANDS ON the composer rather than clearing it — the floor is the box's own top edge", () => {
+    // It was 56px, reserved against `composer-fade`. That fade is a POSITIONED element at
+    // `z-index: auto` and this arena is `z-10` in the same stacking context, so a positive z-index
+    // paints in a later step: the creature was already over the fade and the band bought nothing,
+    // while costing the feature its whole point — 62px of air (56 + the engine's own 6px
+    // `FLOOR_MARGIN`) under a companion that is meant to be walking on the conversation box.
+    expect(PET_LAYER_BOTTOM_PX).toBe(0);
+  });
+
   it("refuses to draw in a box with no room for a creature, its floor and its trigger", () => {
-    expect(PET_LAYER_MIN_PX).toBeGreaterThan(PET_MAX_PX + FLOOR_MARGIN);
-    // The two insets alone can take the whole of a short viewport, which is what the guard is for.
-    expect(PET_LAYER_TOP_PX + PET_LAYER_BOTTOM_PX).toBeGreaterThan(PET_LAYER_MIN_PX);
+    // The trigger is LIFTED off the floor now, so its reach is the lift plus its 24px ink and the
+    // guard has to cover that as well as the tallest art standing on its margin.
+    expect(PET_LAYER_MIN_PX).toBeGreaterThan(PET_MAX_PX + FLOOR_MARGIN + PET_TRIGGER_LIFT_PX);
+    // With the bottom inset gone, the guard is reachable on the TOP one alone — which the assertion
+    // above pins at the chess strip's own 56px, so a wrapper as short as this threshold draws
+    // nothing. That is a landscape phone with the keyboard up.
+    expect(PET_LAYER_TOP_PX).toBeGreaterThan(0);
   });
 });
 
@@ -270,6 +284,18 @@ describe("the layer's rulings, scanned", () => {
     // a legitimate `overflow` outside the comments `code()` has already stripped.
     expect(layer).not.toMatch(/overflow[-:]/);
     expect(menu).not.toMatch(/overflow[-:]/);
+  });
+
+  it("lifts the trigger by exactly its target's OWN overhang, so its box stops at the floor", () => {
+    // The floor is the composer's top edge now (see `PET_LAYER_BOTTOM_PX`), so a pill sitting flush
+    // on it reaches 10px into the bar — where this overlay is the later paint at `z-10` and a press
+    // means "focus the message field" rather than "open the pet's menu". The two halves live in two
+    // files, so both are pinned: the class that grows the target, and the number that lifts it.
+    expect(menu).toContain("after:-inset-y-2.5");
+    expect(PET_TRIGGER_LIFT_PX).toBe(2.5 * 4);
+    // And it is really applied, rather than being a constant nothing reads. The browser half — the
+    // target measured against the arena's own floor — is `pet.spec.ts`'s.
+    expect(layer).toContain("bottom: PET_TRIGGER_LIFT_PX");
   });
 
   it("passes NO `onGrab` to the engine at all — a scroll that starts on a pet fires it", () => {
