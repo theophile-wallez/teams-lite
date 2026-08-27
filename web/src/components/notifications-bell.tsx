@@ -116,7 +116,9 @@ export function NotificationsBell() {
         align="end"
         sideOffset={8}
         data-testid="notifications-panel"
-        className="flex max-h-[70vh] w-[22rem] max-w-[calc(100vw-1.5rem)] flex-col p-0"
+        // No `max-w` of its own. Keeping a menu inside the window is the shared
+        // `DropdownMenuContent`'s rule now, and this panel is where it was first written by hand.
+        className="flex max-h-[70vh] w-[22rem] flex-col p-0"
       >
         <div className="flex items-center justify-between px-3.5 py-2.5">
           <span className="text-sm font-semibold text-foreground">Notifications</span>

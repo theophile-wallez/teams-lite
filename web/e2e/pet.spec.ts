@@ -280,6 +280,64 @@ test.describe("a companion in a conversation", () => {
     expect(air).toBeLessThan(GAP_PX);
   });
 
+  test("the MENU stays inside a phone's window, and its words are not cut off", async ({ page }) => {
+    // A MENU THAT IS WIDER THAN THE WINDOW CANNOT BE RESCUED BY RADIX, and that is the whole of this
+    // defect. Collision detection SHIFTS a panel back into view; it cannot SHRINK one. Nothing bounded
+    // the width, so the prose branch of this menu measured its own intrinsic ~535px against a phone's
+    // 390px window, Radix shifted it as far as the collision padding allowed, and `overflow-hidden`
+    // then CLIPPED the sentence mid-word with no ellipsis and no way to read the rest. It reached a
+    // reader: "Feeding and playing take a companion of your own — an act is written into" and then the
+    // edge of the phone.
+    //
+    // THE STATE IS A COLLEAGUE'S CREATURE WITH NO PET OF THE READER'S OWN, which is why the capture
+    // that already existed never showed it: `--pet`'s phone shot opens the reader's OWN menu, whose
+    // rows are all short. The prose only exists on the branch `hasOwnPet` is false for, and that
+    // branch had been rendered at a phone's width by nothing.
+    await openPetThread(page, { silent: true });
+    await setPetHook(page, { colleague: true });
+    await expect(petSprite(page)).toHaveCount(1);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForTimeout(400);
+    await openPetMenu(page);
+    // The precondition, asserted rather than assumed: this is the WIDE shape. Without it the test
+    // passes against the narrow menu it was never about.
+    await expect(page.locator('[data-testid="pet-no-pet-note"]')).toBeVisible();
+
+    const menu = page.locator('[data-testid="pet-menu"]');
+    const box = await menu.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+
+    // AND THE WORDS FIT THE BOX, which is the sharper half and the one a box measurement alone cannot
+    // give: the content is `overflow-hidden`, so a panel clamped to the window with a child that
+    // refuses to wrap measures perfectly and still hides the end of the sentence.
+    const overflow = await menu.evaluate((node) => node.scrollWidth - node.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+
+    // THE THREE ASSERTIONS ABOVE ARE ALL SATISFIED BY THIS MENU'S OWN `w-72`, so on their own they
+    // pin half the fix and leave the other half — the one that covers every OTHER menu — free to be
+    // deleted with nothing failing. That is the shape of test defect this feature already closed
+    // sixteen times, so both halves are measured separately.
+    //
+    // THE SHARED CLAMP, read as a COMPUTED value rather than as a class name: 366px is 390 less the
+    // 12px of `collisionPadding` on each side, which is what Radix's own
+    // `--radix-dropdown-menu-content-available-width` resolves to. `none` here means the rule in
+    // `ui/dropdown-menu.tsx` is gone and the next menu to carry a sentence is the next menu to run
+    // off the side of a phone.
+    const maxWidth = await menu.evaluate(
+      (node) => getComputedStyle(node as HTMLElement).maxWidth,
+    );
+    expect(maxWidth).toBe("366px");
+
+    // AND THIS MENU IS NOT A SLAB, which is the half the clamp cannot give. Bounded by the window
+    // alone it measures 366 of a phone's 390 — not clipped, and still the entire screen over the
+    // conversation it belongs to. A declared width is what makes it a panel and what makes the
+    // sentence wrap at a measure somebody can read.
+    expect(box!.width).toBeLessThanOrEqual(320);
+  });
+
   test("a creature is GRABBED and THROWN with the pointer, and it lands", async ({ page }) => {
     await openPetThread(page, { silent: true });
     await spawnPet(page);

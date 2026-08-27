@@ -4263,6 +4263,50 @@ if (import.meta.main) {
       await emit({ kind: "pet", silent: true });
       await openConversation(page, PET_THREAD_NAME);
 
+      // A COLLEAGUE'S CREATURE AND NO PET OF THE READER'S OWN, AT A PHONE'S WIDTH — the shape this
+      // run had never drawn, and the one that shipped a defect because of it.
+      //
+      // It is a DIFFERENT MENU rather than a second angle on the reader's own: this is the only
+      // branch here that holds PROSE, and prose is what sets the width of a panel nothing bounds.
+      // The reader's own menu is all short rows and measures 200-odd pixels; the note ran to 519
+      // against a 390px window, so Radix shifted it as far as the collision padding allowed and
+      // `overflow-hidden` cut the sentence mid-word. A reader met "… an act is written into" and
+      // then the edge of their screen.
+      //
+      // IT IS FIRST, BEFORE THE READER EVER PRESSES SPAWN, and that order is the whole reason it
+      // works here. The state needs the reader to hold no record, which after a spawn takes a reset
+      // — and a reset makes their ledger vanish from this page while `petSpawnIsTravelling`'s
+      // receipt still names this conversation, so the spawn row stays out for the rest of the run.
+      // No reader can reach that (a despawn EDITS the record rather than deleting it, so `mine`
+      // never stops existing); it is the harness's problem, and taking the shot before any press
+      // is made is what avoids it. The thread has no game in it yet either, so the menu is read
+      // against the conversation rather than against a wall of chess boards.
+      await emit({ kind: "pet", colleague: true });
+      await page.waitForSelector('[data-testid="pet-sprite"]');
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(800);
+      await openPetMenu(page);
+      await page.waitForSelector('[data-testid="pet-no-pet-note"]');
+      await shot(`${out}-phone-menu-no-pet-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-phone-menu-no-pet-dark.png`);
+      await setTheme("light");
+      await page.keyboard.press("Escape");
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(400);
+
+      // Back to an empty thread for the run proper, and that takes a RELOAD. The reset is
+      // server-side and this page keeps the history it already read — walking to another
+      // conversation and back does not re-read one it holds — so the colleague's ledger, and the
+      // creature folded out of it, survive everything short of loading the app again.
+      await emit({ kind: "pet", reset: true });
+      await emit({ kind: "pet", silent: true });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector('[data-testid="conversation-row"]');
+      await assertMockBackend(page);
+      await openConversation(page, PET_THREAD_NAME);
+      await page.locator('[data-testid="pet-sprite"]').waitFor({ state: "detached" });
+
       // THE OFFER: the conversation's own menu, with the art to pick and what the press costs. It
       // is the only way into the feature, which is why it is unfolded rather than a disclosure.
       await openConversationMenu(page);
@@ -4363,6 +4407,14 @@ if (import.meta.main) {
       await openPetMenu(page, mine);
       await shot(`${out}-phone-menu-light.png`);
       await page.keyboard.press("Escape");
+      await page.waitForTimeout(300);
+
+      // THE CONVERSATION MENU AT THAT WIDTH TOO. It carries eighteen sentences to the pet menu's
+      // one, and the rule that keeps a menu inside the window is the shared primitive's — so what
+      // this shot is for is that the clamp took nothing away from the menu that needed it least.
+      await openConversationMenu(page);
+      await shot(`${out}-phone-conversation-menu-light.png`);
+      await closeConversationMenu(page);
       await page.setViewportSize(VIEWPORT);
       await page.waitForTimeout(400);
 
@@ -4418,8 +4470,9 @@ if (import.meta.main) {
       await emit({ kind: "chess", reset: true });
       await sendControl({ clear: true });
       console.log(
-        `[preview] wrote ${out}-{offer,one,two,menu,armed,bubble,settings}-{light,dark}.png and ` +
-          `${out}-{theirs,refused,refused-trigger,phone,phone-menu}-light.png`,
+        `[preview] wrote ${out}-{offer,one,two,menu,armed,bubble,settings}-{light,dark}.png, ` +
+          `${out}-phone-menu-no-pet-{light,dark}.png and ` +
+          `${out}-{theirs,refused,refused-trigger,phone,phone-menu,phone-conversation-menu}-light.png`,
       );
     });
     process.exit(0);

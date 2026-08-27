@@ -2923,7 +2923,9 @@ user. Two independent mechanisms enforce that split:
   COMPANION walking over a conversation — the spawn row the conversation's menu offers, one creature
   and two of them re-cutting each other's lanes, the speech bubble, the pet's own menu and its armed
   Remove, a colleague's creature, the RED trigger a refused press leaves, the whole thing at a phone's
-  width and Settings › Companions: `bun run preview -- --out /tmp/pet --pet` (see § A COMPANION in a
+  width — where THREE menus are captured rather than one, because the shape that holds PROSE is the
+  one that ran off the side of the screen — and Settings › Companions:
+  `bun run preview -- --out /tmp/pet --pet` (see § A COMPANION in a
   conversation — everything in it goes through the mock's `{kind:"pet"}` hook, which that run resets
   at the end, because a pet is a MESSAGE that stays in the history). For a tracker REFERENCE drawn as a
   chip — in a chat message, in an agent's own answer and in a merge request's
@@ -3259,6 +3261,38 @@ pointer, not hidden by CSS** (`useCoarsePointer` in `web/src/lib/platform.ts`): 
 with `display: none` is still in the menu's own collection, so a keyboard would walk onto a
 stop nobody can see. It reads `false` until it has asked, because the extra row belongs to a
 phone and a pointer's menu is the one that must not gain a dead stop.
+
+**AND NO MENU IS EVER WIDER THAN THE WINDOW, which has to be enforced in the same one place
+because collision detection cannot do it.** Radix SHIFTS a panel back into view; nothing in it
+SHRINKS one. So a menu whose content measures wider than the viewport is shifted as far as the
+collision padding allows and then CLIPPED by the content's own `overflow-hidden` — no ellipsis,
+no scrollbar, no way to read the rest. It reached a reader on a phone: the pet menu's note, 519px
+against a 390px window, cut mid-word at "… an act is written into" and then the edge of the
+screen. Every menu carrying PROSE has to answer this, and three of them had each remembered it by
+hand (`calc(100vw-1.5rem)`, written out three times) while the two that forgot were the two that
+shipped the bug. `max-w-[var(--radix-dropdown-menu-content-available-width)]` on the shared
+`DropdownMenuContent` is the whole of it now — the rule the 44px floor above holds, on the other
+axis. Three things about it:
+
+- **The bound is RADIX'S OWN and not a number restated here.** Floating UI's `size` middleware
+  publishes that variable, and with `shift` enabled on the x axis (which `avoidCollisions` does by
+  default) it is the clipping width less the padding on both sides — measured at 366px on a 390px
+  phone, and anchor-independent, so an `align="end"` trigger mid-screen is not clamped to the space
+  beside it. It tracks `collisionPadding` if that ever moves, and it reads the real clipping box
+  rather than `100vw`, which counts a desktop scrollbar the menu cannot use.
+- **IT IS A BACKSTOP, NEVER THE LAYOUT.** A menu still declares its own width — `w-72` for the
+  conversation menu and now the pet's, `w-[15rem]` for a chat row's, `w-[22rem]` for the
+  notifications panel — because a panel clamped to 366 of a phone's 390 is not clipped and is
+  still a slab across the conversation, and on a desktop the clamp has nothing to do at all, so
+  an unbounded sentence is still one 519px line. A width is what makes prose WRAP at a measure
+  somebody can read. The pet menu was the only menu in the app that declared none, which is why
+  it was the one that broke.
+- **Both halves are pinned separately**, because either assertion alone passes against half the
+  fix: `web/e2e/pet.spec.ts` measures the menu's box inside the window, its `scrollWidth` against
+  its `clientWidth` (the box can fit while the words are cut), the COMPUTED `max-width` (so
+  deleting the shared rule fails rather than resting on `w-72`), and that the panel is not
+  full-width (so deleting `w-72` fails rather than resting on the clamp). Each was verified by
+  mutation in both directions.
 
 ## The chat list mirrors Teams too, and the "…" menu is LOCAL
 
@@ -6501,13 +6535,28 @@ so a game seeded elsewhere outlives its reset. What bounds it is the CALLER and 
 is a capture script, and a capture starts its own mock and exits with it. The E2E suite is where this
 would bite — one mock process for 565 tests — and no spec aims either hook.
 
-`cd web && bun run preview -- --out /tmp/pet --pet` captures nineteen states, and most of them had
+`cd web && bun run preview -- --out /tmp/pet --pet` captures twenty-two states, and most of them had
 never been drawn in a browser at all: the spawn row the menu offers in both themes, one creature and
 two of them re-cutting each other's lanes in both themes, the speech bubble in both themes, the pet's
 own menu and its armed Remove in both themes, a colleague's creature, the RED trigger a refused press
 leaves and that trigger cropped, the whole thing at a phone's width where the pet, its trigger and
-the header's own trigger are three targets in one column, and Settings › Companions. `pet.spec.ts`
-pins every rule the page owns in sixteen tests, and `pet-wire.test.ts`, `pet-state.test.ts`,
+the header's own trigger are three targets in one column, and Settings › Companions.
+
+**AND A PHONE GETS THREE MENUS RATHER THAN ONE, because at that width the shapes differ in the one
+way that matters: the reader's OWN menu, the CONVERSATION's, and a colleague's creature with NO pet
+of the reader's own.** That last one is the only branch here that holds PROSE, and prose is what
+sets the width of a panel nothing bounds — so photographing the reader's own menu, which is all
+short rows, is what let the clipped note ship (§ A HOLD is how a phone reaches a menu). It is taken
+FIRST, before any spawn press: reaching it after one takes a reset, and a reset makes the reader's
+ledger vanish from the page while `petSpawnIsTravelling`'s receipt still names that conversation, so
+the spawn row stays out for the rest of the run. No reader can reach that — a despawn EDITS the
+record rather than deleting it, so `mine` never stops existing — which makes it the harness's
+problem and the order the answer to it. The reset that follows needs a RELOAD, because this page
+keeps a history it has already read and walking to another conversation and back does not re-read
+one it holds.
+
+`pet.spec.ts`
+pins every rule the page owns in eighteen tests, and `pet-wire.test.ts`, `pet-state.test.ts`,
 `pet-thread.test.ts`, `pet-act.test.ts`, `pet-skin.test.ts`, `pet-visibility.test.ts`,
 `pet-layer.test.tsx` and `desksprite.test.ts` the pure ones.
 

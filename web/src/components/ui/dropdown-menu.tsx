@@ -18,6 +18,28 @@ const COARSE_ROW = "[@media(pointer:coarse)]:min-h-11";
  * `collisionPadding` keeps a wide menu that gets shifted back into view (a
  * trigger near a window edge) from ending up flush against that edge — Radix
  * pads by 0 by default, which reads as the panel being glued to the window.
+ *
+ * **NO MENU MAY BE WIDER THAN THE WINDOW, and that has to be enforced HERE because
+ * collision detection cannot do it.** Radix SHIFTS a panel back into view; it has no
+ * way to SHRINK one. So a menu whose content measures wider than the viewport is
+ * shifted as far as the padding allows and then CLIPPED by the `overflow-hidden`
+ * below — with no ellipsis, no scrollbar and no way to read the rest. It reached a
+ * reader on a phone: the pet menu's own note, cut mid-word at 519px against a 390px
+ * window ("… an act is written into" and then the edge of the screen).
+ *
+ * Every menu that carries PROSE has to answer this, and before this line three of
+ * them had each remembered it by hand (`calc(100vw-1.5rem)`, written out three
+ * times) while the two that forgot were the two that shipped the bug. It is one
+ * rule in one place now, for the reason {@link DropdownMenuItem}'s 44px floor is:
+ * every menu in the app carries it.
+ *
+ * The bound is RADIX'S OWN, not a number restated here. Floating UI's `size`
+ * middleware publishes `--radix-dropdown-menu-content-available-width`, and with
+ * `shift` enabled on the x axis (which `avoidCollisions` does by default) that is
+ * the clipping width less the collision padding on both sides — measured at 366px
+ * on a 390px phone, anchor-independent. So it tracks `collisionPadding` if that
+ * ever moves, and it reads the real clipping box rather than `100vw`, which counts
+ * a desktop scrollbar the menu cannot actually use.
  */
 export const DropdownMenuContent = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.Content>,
@@ -29,7 +51,7 @@ export const DropdownMenuContent = React.forwardRef<
       sideOffset={sideOffset}
       collisionPadding={collisionPadding}
       className={cn(
-        "z-50 min-w-[9rem] overflow-hidden rounded-xl bg-popover p-1 shadow-pop",
+        "z-50 min-w-[9rem] max-w-[var(--radix-dropdown-menu-content-available-width)] overflow-hidden rounded-xl bg-popover p-1 shadow-pop",
         "origin-[var(--radix-dropdown-menu-content-transform-origin)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
         "data-[side=bottom]:slide-in-from-top-1 data-[side=top]:slide-in-from-bottom-1 data-[side=left]:slide-in-from-right-1 data-[side=right]:slide-in-from-left-1",
         className,

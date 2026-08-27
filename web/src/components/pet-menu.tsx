@@ -206,7 +206,19 @@ export function PetMenu(props: {
           <span data-testid="pet-wants-dot" aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
         )}
       </DropdownMenuTrigger>
-      <DropdownMenuContent data-testid="pet-menu" align="end" side="top" className="min-w-[13rem]">
+      {/* A DECLARED WIDTH, which every other menu in this app has and this one did not — and that
+          absence is what put 519px of menu on a 390px phone. Radix sizes an unbounded panel to its
+          widest child, so the one row here that is a SENTENCE rather than a label set the width of
+          the whole thing and ran off the side of the screen. The shared primitive now clamps any
+          menu to the window, so the words can no longer be cut off; this is the other half of that,
+          because a menu clamped to 366 of a phone's 390 is a slab across the conversation, and on a
+          desktop — where the clamp has nothing to do — the sentence was still one 519px line. A
+          width makes it WRAP, at a measure somebody can read.
+
+          `w-72` is the conversation menu's own width, deliberately rather than a new number: this
+          menu is opened from that one, a reader meets them a press apart, and two panels over one
+          thread at two widths is two answers to how wide a menu here is. */}
+      <DropdownMenuContent data-testid="pet-menu" align="end" side="top" className="w-72">
         <DropdownMenuLabel className="normal-case tracking-normal">{label}</DropdownMenuLabel>
 
         {/* THE PAT IS A REACTION, so it is the one thing here that needs no ledger and takes no
