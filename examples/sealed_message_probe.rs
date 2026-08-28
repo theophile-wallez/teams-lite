@@ -316,6 +316,8 @@ async fn post(http: &reqwest::Client, session: &teams::Session, body: &str) -> R
         session,
         "",
         SANDBOX_THREAD,
+        // No thread: every probe posts to the sandbox chat, which has no threads to post into.
+        None,
         "",
         None,
         Some(body),

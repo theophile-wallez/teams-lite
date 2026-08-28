@@ -295,6 +295,10 @@ type CapturedSend = {
    *  reply. What a spec asserts on to prove the title really left the composer as a
    *  property of the message rather than as words inside its body. */
   subject?: string;
+  /** The CHANNEL THREAD the post belongs to — absent on a new post and on every chat
+   *  message. What a spec asserts on to prove a reply really goes INTO the announcement's own
+   *  thread rather than opening a second one beside it. */
+  thread_root?: string;
 };
 
 /** One @mention as the composer sends it (mirrors the Rust `teams_send::Mention`). */
@@ -6091,6 +6095,49 @@ function parseSendSubject(input: Record<string, unknown>): string | undefined {
   return subject;
 }
 
+/**
+ * How long a thread root may be here.
+ *
+ * It is NOT `teams_send::MAX_THREAD_ROOT_CHARS` (32), and deliberately: a real Teams message id
+ * is its arrival time in epoch milliseconds, so 13 digits is the shape the backend bounds — while
+ * this mock's own ids are `<conversation>#<seq>`, which is far longer. Restating the backend's
+ * number here refused every fixture's own thread, which is the mock lying about the rule rather
+ * than mirroring it. What is mirrored is that the value IS bounded and cannot reach a URL.
+ */
+const MOCK_MAX_THREAD_ROOT_CHARS = 128;
+
+/**
+ * The CHANNEL THREAD a send is a post in, refused exactly as
+ * `teams_send::parse_thread_root` refuses it: only a channel has threads, only a message id
+ * can be one (it reaches the request PATH on the real backend), and a post in a thread
+ * carries no title.
+ *
+ * A mock that accepted what the backend refuses would hide the bug instead of failing a test.
+ * The mock's own ids are `<conversation>#<seq>` rather than epoch stamps, so the DIGIT rule is
+ * relaxed to "no character that could reach a URL" — the shape is what is being mirrored, and
+ * pinning the tenant's own id format here would refuse every fixture.
+ */
+function parseSendThreadRoot(
+  input: Record<string, unknown>,
+  conversation: string,
+): string | undefined {
+  const value = input.thread_root;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error("thread_root must be a string");
+  const root = value.trim();
+  if (root.length === 0) return undefined;
+  if (!conversation.endsWith("@thread.tacv2")) {
+    throw new Error("only a channel has threads to post into");
+  }
+  if (input.subject !== undefined && input.subject !== null) {
+    throw new Error("a post in a thread carries no title — the thread's title is its first post's");
+  }
+  if (root.length > MOCK_MAX_THREAD_ROOT_CHARS || /[/?;=\s]/.test(root)) {
+    throw new Error("a thread root is a message id");
+  }
+  return root;
+}
+
 /** Build the AMS inline-image HTML Teams returns after a successful upload. */
 function sentImageContent(image: SendImage): string {
   nextSentImage += 1;
@@ -7372,6 +7419,8 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const scheduledTime = parseScheduledTime(input.scheduled_time);
       // A channel post's TITLE, refused exactly as the backend refuses it.
       const subject = parseSendSubject(input);
+      // Which channel THREAD it is a post in, refused exactly as the backend refuses it.
+      const threadRoot = parseSendThreadRoot(input, id);
       if (TEST_HOOKS) {
         capturedSends.push({
           conversation: id,
@@ -7382,12 +7431,13 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           ...(mentions.length > 0 ? { mentions } : {}),
           ...(scheduledTime !== undefined ? { scheduled_time: scheduledTime } : {}),
           ...(subject !== undefined ? { subject } : {}),
+          ...(threadRoot !== undefined ? { thread_root: threadRoot } : {}),
         });
         if (testSendError) throw new Error(testSendError);
         if (testSendDelayMs > 0) {
           return new Promise((resolve) => {
             setTimeout(() => {
-              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject);
+              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject, threadRoot);
               resolve({ sent: true });
             }, testSendDelayMs);
           });
@@ -7397,7 +7447,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // the tenant really answers with (measured). What keeps it out of the conversation is
       // the page's own rule and the backend's read, so echoing it is what makes those two
       // testable at all.
-      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject);
+      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject, threadRoot);
       return { sent: true };
     }
 
@@ -9524,6 +9574,7 @@ function scheduleSendEcho(
   mentions?: OutboundMention[],
   scheduledTime?: number,
   subject?: string,
+  threadRoot?: string,
 ): void {
   setTimeout(() => {
     const t = threadFor(convId);
@@ -9552,6 +9603,13 @@ function scheduleSendEcho(
       // `thread_subject` on every inbound message. Echoing it is what makes the whole
       // rendering half testable — the heading a thread is drawn with is this field.
       ...(subject ? { thread_root_id: `${convId}#${seq}`, thread_subject: subject } : {}),
+      // A post in a THREAD comes back inside that thread: the real backend POSTs it to the
+      // thread's own address (`;messageid=<root>`) and the service then tags the message with
+      // that `rootMessageId`, which the read path decodes into this field. Echoing it is what
+      // makes the whole rendering half testable — a mock that filed the reply as a new thread
+      // would let the very defect this feature fixes pass every test. A titled post is its OWN
+      // root, so the two can never both apply (`parseSendThreadRoot` refuses the pair).
+      ...(threadRoot ? { thread_root_id: threadRoot } : {}),
       // A message posted to a SEALED chat comes back OPENED, with its words intact. That is what
       // the real backend answers with and it is not a shortcut: the encryption boundary is the
       // backend, which seals on the way out and decrypts on every read, so what a page ever sees

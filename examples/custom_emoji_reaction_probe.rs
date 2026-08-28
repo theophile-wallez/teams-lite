@@ -61,6 +61,8 @@ async fn main() -> Result<()> {
         &session,
         &ic3,
         SANDBOX,
+        // No thread: every probe posts to the sandbox chat, which has no threads to post into.
+        None,
         "reaction probe — this message gets a custom emoji reaction",
         None,
         None,

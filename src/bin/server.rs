@@ -4773,6 +4773,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // OUTWARD_METHODS entry, and the title is part of the message it posts, not a
             // second action. A reply is refused one here (see `parse_subject`).
             let subject = teams_send::parse_subject(params)?;
+            // Which CHANNEL THREAD this post belongs to, where it answers one. It decides the
+            // POST's address rather than anything in the body (see
+            // `teams_send::parse_thread_root`), so it needs no gate of its own either: it
+            // narrows WHERE the message this method already posts lands, and the consent is
+            // the same click on Send.
+            let thread_root = teams_send::parse_thread_root(params, &conv)?;
 
             // Custom emoji: read the pack's art for each code in the outbound body, so
             // the `:shipit:` codes become Teams' own inline emoji markup with the bytes
@@ -4817,6 +4823,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     let emoji_art = emoji_art.clone();
                     let mentions = mentions.clone();
                     let subject = subject.clone();
+                    let thread_root = thread_root.clone();
                     let seal_key = seal_key.clone();
                     async move {
                         let ic3 = tokens.get(IC3_SCOPE).await?;
@@ -4838,6 +4845,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &session,
                             &ic3,
                             &conv,
+                            thread_root.as_deref(),
                             &text,
                             reply_to.as_ref(),
                             if rewritten_html.is_empty() {
@@ -11295,6 +11303,12 @@ async fn agent_send(
     let http = ctx.http.clone();
     let tokens = ctx.tokens.clone();
     let conversation = command.conversation_id.clone();
+    // An answer belongs IN the thread it answers. A trigger written as a reply inside a
+    // channel thread carries that thread's root, and posting to the channel instead would open
+    // a second, untitled thread beside the question — which is the defect answering an
+    // announcement by hand had. Empty in a chat, and empty for a post that IS its own root
+    // (there is nothing to reply into that the channel itself is not).
+    let thread_root = command.thread_root_id.clone();
     let html = html.to_string();
     // The agent's answer is sealed like every other message in a sealed chat — the user asked
     // for exactly that split: the agent READS the thread in the clear (its prompt carries the
@@ -11310,6 +11324,7 @@ async fn agent_send(
         let conversation = conversation.clone();
         let html = html.clone();
         let reply_to = reply_to.clone();
+        let thread_root = thread_root.clone();
         let seal_key = seal_key.clone();
         async move {
             let ic3 = tokens.get(IC3_SCOPE).await?;
@@ -11318,6 +11333,7 @@ async fn agent_send(
                 &session,
                 &ic3,
                 &conversation,
+                Some(thread_root.as_str()).filter(|root| !root.is_empty()),
                 "",
                 Some(&reply_to),
                 Some(&html),
@@ -15347,6 +15363,52 @@ mod tests {
         );
     }
 
+    /// A POST IN A THREAD is addressed at that thread, on both paths that post one.
+    ///
+    /// Teams files a channel reply by ADDRESS — the conversation id plus `;messageid=<root>`,
+    /// which is the resource the service itself names in `conversationLink` — and NOT by a
+    /// quote in the body. So a reply POSTed to the channel opens a second, untitled thread
+    /// beside the announcement it answers, which is exactly the defect this closed: the
+    /// reader's answer sat on its own at the foot of the channel.
+    ///
+    /// Scanned rather than exercised because both paths need a tenant, and there is no sandbox
+    /// CHANNEL to aim one at (§ A channel post has a TITLE says the same of a titled post).
+    /// What each half can be held to is that the value REACHES `send_message`, since reading
+    /// it and dropping it on the floor is the same silent loss.
+    #[test]
+    fn a_reply_in_a_channel_thread_is_posted_at_that_thread() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        // The user's own reply, over the `send` RPC.
+        let handler = code.split("\"send\" => {").nth(1).expect("the send handler");
+        let handler = handler.split("\"edit\" => {").next().expect("it ends at the next arm");
+        assert!(
+            handler.contains("parse_thread_root(params, &conv)"),
+            "the send handler must read `thread_root` at the trust boundary: it becomes part \
+             of the request path, and only a channel has threads."
+        );
+        assert!(
+            handler.contains("thread_root.as_deref()"),
+            "the thread has to reach `send_message`, or the reply is posted to the channel \
+             and opens a second thread beside the one it answers."
+        );
+
+        // And the AGENT's own answer, which is a reply too: a trigger written inside a thread
+        // must not be answered in a new one.
+        let agent = code.split("async fn agent_send(").nth(1).expect("agent_send");
+        let agent = agent.split("\nasync fn ").next().expect("it ends at the next fn");
+        assert!(
+            agent.contains("command.thread_root_id"),
+            "an agent's answer must carry the thread its trigger was written in."
+        );
+        assert!(
+            agent.contains("filter(|root| !root.is_empty())"),
+            "an EMPTY root is not a thread: a chat has none, and a post that IS its own root \
+             has nothing to reply into that the channel itself is not."
+        );
+    }
+
     /// An EDIT must carry the post's TITLE, and read it from THIS machine's store.
     ///
     /// Measured against the tenant (2026-08-23, `examples/channel_subject_probe.rs`): the
@@ -16411,6 +16473,8 @@ mod lifecycle_tests {
         let command = |persona: Option<agent_persona::Persona>| agent_policy::Command {
             conversation_id: "19:c@thread.v2".into(),
             message_id: "1000".into(),
+            // A chat: no thread to post into.
+            thread_root_id: String::new(),
             prompt: "coucou".into(),
             answering: None,
             sender: "Théophile".into(),
@@ -16483,6 +16547,7 @@ mod lifecycle_tests {
             conversation_id: "19:c@thread.v2".into(),
             // The trigger is `m2`, so it is dropped from the transcript — it is the request.
             message_id: "m2".into(),
+            thread_root_id: String::new(),
             prompt: "who broke it?".into(),
             answering: None,
             sender: "Théophile WALLEZ".into(),
@@ -16522,6 +16587,7 @@ mod lifecycle_tests {
         let command = agent_policy::Command {
             conversation_id: "19:c@thread.v2".into(),
             message_id: "1000".into(),
+            thread_root_id: String::new(),
             prompt: "hi".into(),
             answering: None,
             sender: "Ada".into(),

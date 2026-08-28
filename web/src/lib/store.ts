@@ -84,6 +84,7 @@ import {
   type WriteLock,
   UNKNOWN_WRITE_LOCK,
 } from "./protocol";
+import { threadReplyQuotes, threadRootOf } from "./threads";
 import {
   chessMessageHtml,
   chessMessageText,
@@ -232,7 +233,17 @@ import {
   setCuesEnabled,
 } from "./sounds";
 
-export type PendingReply = { message: ChatMessage; marker: string | null };
+export type PendingReply = {
+  message: ChatMessage;
+  marker: string | null;
+  /** The CHANNEL THREAD this reply is a post in, or `null` in a chat, which has no threads.
+   *
+   *  Resolved ONCE, where the reply starts, because three surfaces ask it and two answers
+   *  would disagree: the send addresses the thread with it (`teams_send::parse_thread_root`),
+   *  the thread's own card lights up while it is the one being answered, and the composer's
+   *  banner says the reader is posting IN a thread rather than quoting a message. */
+  threadRoot: string | null;
+};
 
 /** The recording in flight, as the UI reads it.
  *
@@ -4989,7 +5000,13 @@ export class TeamsController {
   }
 
   startReply(message: ChatMessage): void {
-    this.set({ replyingTo: { message, marker: null } });
+    // A CHANNEL is threaded and a chat is not, so a reply means two different things and the
+    // difference is settled here rather than at each of the three surfaces that read it (see
+    // `PendingReply.threadRoot`).
+    const inChannel = this.get().channels.some((c) => c.id === message.conversation_id);
+    this.set({
+      replyingTo: { message, marker: null, threadRoot: inChannel ? threadRootOf(message) : null },
+    });
   }
 
   /** Set the status-bar text (transient feedback such as "Copied"). */
@@ -6556,9 +6573,15 @@ export class TeamsController {
 
     const submittedDraft = this.draftCache.get(id) ?? this.get().draft;
     const reply = this.get().replyingTo;
-    const replyTo: ReplyTo | undefined = reply
-      ? replyToPayload(reply.message, "", clean)
-      : undefined;
+    // Which thread this post lands in, decided when the reply started (`startReply`). A reply
+    // into a channel thread QUOTES only when it answers another reply: a quote of the
+    // announcement above the first answer in the announcement's own thread says one thing
+    // twice, and Teams draws none there either (see lib/threads.ts). In a chat, where there
+    // are no threads, a reply stays the quote it always was.
+    const threadRoot = reply?.threadRoot ?? undefined;
+    const quotes = !reply ? false : !reply.threadRoot || threadReplyQuotes(reply.message);
+    const replyTo: ReplyTo | undefined =
+      reply && quotes ? replyToPayload(reply.message, "", clean) : undefined;
 
     try {
       await this.backend.send(
@@ -6570,6 +6593,7 @@ export class TeamsController {
         mentions,
         scheduledAt,
         subject,
+        threadRoot,
       );
     } catch (e) {
       // Both surfaces, and each has its reader. The status line keeps the RAW failure,

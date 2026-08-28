@@ -1,4 +1,11 @@
-import { test, expect, emitLive, gotoApp, openConversationAt } from "./helpers";
+import {
+  test,
+  expect,
+  emitLive,
+  gotoApp,
+  openConversationAt,
+  openConversationNamed,
+} from "./helpers";
 
 /** How much history the pane has loaded. The message list is virtualized, so the
  *  number of rendered bubbles tracks the viewport, not the backlog — the pane
@@ -351,7 +358,14 @@ test.describe("history (infinite scroll)", () => {
 
   test("says when a block of messages was sent, and not on every message", async ({ page }) => {
     await gotoApp(page);
-    await openConversationAt(page, 0);
+    // NAMED rather than indexed, because the subject of this test is one conversation's own
+    // HISTORY: only a chat seeded by `addConversation` carries the 120-message backlog the
+    // marks are derived from, and the sidebar's order is shared state that any earlier spec's
+    // send moves (see `openConversationNamed`). At index 0 in a FULL run this landed on a
+    // short thread — the agent sandbox is a handful of recent messages, which earns no mark at
+    // all — so the assertion below failed at zero while the feature was intact, and it passed
+    // in isolation and beside any single other spec.
+    await openConversationNamed(page, "Ava Thompson");
     await settled(page);
 
     // The backlog spans several days with the occasional multi-hour silence in it, so

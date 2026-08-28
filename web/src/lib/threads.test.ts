@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { groupThreads } from "./threads";
+import {
+  groupThreads,
+  replyCountLabel,
+  replyHeading,
+  threadReplyQuotes,
+  threadRootOf,
+} from "./threads";
 import type { ChatMessage } from "./protocol";
 
 // A minimal channel post; overrides fill in the thread linkage under test.
@@ -72,5 +78,65 @@ describe("groupThreads", () => {
     expect(threads[0]!.rootId).toBe("x");
     expect(threads[0]!.lead.id).toBe("x");
     expect(threads[0]!.replies).toEqual([]);
+  });
+});
+
+// Where a reply LANDS, and what it says about itself. Teams files a channel reply by the
+// thread's ADDRESS rather than by a quote in the body, so getting this wrong is not a
+// cosmetic mistake: the answer to an announcement opens a second, untitled thread beside it.
+describe("threadRootOf", () => {
+  it("is the thread a post already belongs to", () => {
+    expect(threadRootOf(post("a1", 2, { thread_root_id: "a" }))).toBe("a");
+  });
+
+  it("is the post ITSELF when it carries no root — a post with none IS one", () => {
+    // Both shapes reach this: a root post whose `thread_root_id` equals its own id, and a
+    // post the tenant tagged with nothing at all.
+    expect(threadRootOf(post("a", 1, { thread_root_id: "a" }))).toBe("a");
+    expect(threadRootOf(post("a", 1))).toBe("a");
+  });
+});
+
+describe("threadReplyQuotes", () => {
+  it("does not quote the thread's own root: the thread IS the context", () => {
+    expect(threadReplyQuotes(post("a", 1, { thread_root_id: "a" }))).toBe(false);
+    expect(threadReplyQuotes(post("a", 1))).toBe(false);
+  });
+
+  it("quotes another REPLY, which is the only thing that says which one is answered", () => {
+    expect(threadReplyQuotes(post("a1", 2, { thread_root_id: "a" }))).toBe(true);
+  });
+});
+
+describe("replyHeading", () => {
+  const root = post("a", 1, {
+    thread_root_id: "a",
+    thread_subject: "Token TTL",
+    sender: "Ada Lovelace",
+  });
+
+  it("names the THREAD in a titled channel thread, which is what the reader recognises", () => {
+    expect(replyHeading(root, "a")).toBe("Replying in “Token TTL”");
+  });
+
+  it("names the PERSON everywhere else", () => {
+    // A chat has no threads at all…
+    expect(replyHeading(root, null)).toBe("Replying to Ada Lovelace");
+    // …a reply inside a thread carries no subject (only the root does)…
+    expect(replyHeading(post("a1", 2, { thread_root_id: "a", sender: "Grace" }), "a")).toBe(
+      "Replying to Grace",
+    );
+    // …and an untitled thread has no title to name.
+    expect(replyHeading(post("b", 1, { thread_root_id: "b", sender: "Grace" }), "b")).toBe(
+      "Replying to Grace",
+    );
+  });
+});
+
+describe("replyCountLabel", () => {
+  it("never says 1 replies", () => {
+    expect(replyCountLabel(1)).toBe("1 reply");
+    expect(replyCountLabel(0)).toBe("0 replies");
+    expect(replyCountLabel(7)).toBe("7 replies");
   });
 });

@@ -555,12 +555,20 @@ export class Backend {
     mentions?: OutboundMention[],
     scheduledTime?: number,
     subject?: string,
+    /** The CHANNEL THREAD this is a post in, where it answers one (see `threadRootOf`).
+     *  Absent means a new thread, which is every chat message and every post this app
+     *  sent before a thread could be answered. */
+    threadRoot?: string,
   ): Promise<{ sent: boolean }> {
     return this.writeRequest<{ sent: boolean }>("send", {
       conversation,
       text,
       reply_to: replyTo,
       content_html: contentHtml,
+      // WHICH thread this post lands in. It decides the POST's address on the backend
+      // rather than anything in the body, so a reply to an announcement goes under it
+      // instead of opening a second thread beside it.
+      thread_root: threadRoot || undefined,
       // The post's TITLE, where a channel post has one — `properties.subject` on the
       // message, never words in its body (see lib/post-subject.ts). Absent means untitled,
       // which is every message this app sent before the field existed.

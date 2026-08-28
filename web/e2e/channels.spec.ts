@@ -340,16 +340,23 @@ test.describe("channels", () => {
     // and spans the post instead of sitting in a smaller box inside it.
     await expect(card).toHaveAttribute("data-on-panel", "true");
     const group = page.locator('[data-testid="thread-group"]').filter({ has: card });
-    const [cardBox, groupBox] = [await card.boundingBox(), await group.boundingBox()];
-    expect(cardBox && groupBox).toBeTruthy();
-    // The card is inset from the panel by the panel's own padding alone, equally on
-    // both sides — a card with a box of its own would be inset much further, and a
-    // narrower card would not be centered in it.
-    const leftInset = cardBox!.x - groupBox!.x;
+    const name = group.locator('[data-testid="sender-name"]').first();
+    const [cardBox, groupBox, nameBox] = [
+      await card.boundingBox(),
+      await group.boundingBox(),
+      await name.boundingBox(),
+    ];
+    expect(cardBox && groupBox && nameBox).toBeTruthy();
+    // The card spans the POST's own column: flush with the panel's inner right edge, and
+    // starting where the author's name starts. It used to be measured as EQUAL insets from
+    // the panel on both sides, which was a proxy for "it spans the panel" — and the proxy
+    // stopped being true when a post in a thread gained a face down its left (see
+    // `threadPost`). The two edges it really has to line up with are what is asserted now: a
+    // card with a box of its own would be inset much further from both.
     const rightInset = groupBox!.x + groupBox!.width - (cardBox!.x + cardBox!.width);
-    expect(leftInset).toBeGreaterThan(0);
-    expect(Math.abs(leftInset - rightInset)).toBeLessThan(2);
-    expect(leftInset).toBeLessThan(20);
+    expect(rightInset).toBeGreaterThan(0);
+    expect(rightInset).toBeLessThan(20);
+    expect(Math.abs(cardBox!.x - nameBox!.x)).toBeLessThan(2);
 
     // The card's content is untouched by the flattening: its title, its markdown
     // and its link action all still render.
@@ -367,6 +374,214 @@ test.describe("channels", () => {
       .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
       .toBeGreaterThan(0);
     expect(realErrors(consoleErrors)).toEqual([]);
+  });
+});
+
+// A CHANNEL THREAD is a thread, not a stretch of chat — Teams' and Discord's own shape, and
+// what this surface used to draw instead was a chat inside a box: the reader's own answer on
+// the opposite side of the card from a colleague's, a centred block mark between every reply,
+// and no way into the thread at all, so answering an announcement opened a second untitled
+// thread beside it. See `ThreadGroup` in components/message-pane.tsx for the surface, the
+// `threadPost` prop in message-bubble.tsx for a post, and `teams_send::parse_thread_root` for
+// how a reply is filed under the announcement rather than beside it.
+test.describe("a channel thread", () => {
+  /**
+   * Open the first channel and one thread in it that HOLDS replies, LOCKED ON by its own
+   * root id.
+   *
+   * The history is virtualized, so `…thread-group").first()` is not one card — it re-resolves
+   * to whatever happens to be mounted, and expanding a thread grows its row and moves the set.
+   * A locator built on `data-thread-root` is the same card before and after the click.
+   */
+  async function openThreadWithReplies(page: Page) {
+    await gotoApp(page);
+    await openChannelsTab(page);
+    await page.locator('[data-testid="channel-row"]').first().click();
+    await expect
+      .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    // The newest threads are the ones on screen when a channel opens, so no scroll is needed
+    // and none is made: a scroll is what unmounts the card the test is about.
+    const root = await page
+      .locator('[data-testid="thread-group"]')
+      .filter({ has: page.locator('[data-testid="thread-toggle"]') })
+      .last()
+      .getAttribute("data-thread-root");
+    expect(root).toBeTruthy();
+    const thread = page.locator(`[data-thread-root="${root}"]`);
+    await thread.locator('[data-testid="thread-toggle"]').click();
+    await expect(thread.locator('[data-testid="thread-replies"]')).toBeVisible();
+    return thread;
+  }
+
+  test("draws every post in ONE column, whoever wrote it", async ({ page }) => {
+    await openThreadWithReplies(page);
+    // Open every thread on screen that holds replies, so the measurement covers both sides:
+    // the fixtures put the reader's own posts and colleagues' in the same threads, and which
+    // ONE thread happens to hold both is not something a spec should depend on.
+    const toggles = page.locator('[data-testid="thread-toggle"][aria-expanded="false"]');
+    for (let i = await toggles.count(); i > 0; i -= 1) await toggles.first().click();
+
+    const posts = page.locator('[data-testid="thread-group"] [data-testid="message"]');
+    expect(await posts.count()).toBeGreaterThan(4);
+
+    // A chat says WHO with a SIDE, and inside one thread that reads as two people arguing
+    // across the card rather than as a list of what was said about one announcement. So both
+    // sides are here…
+    const mine = await posts.evaluateAll((els) =>
+      els.map((el) => el.getAttribute("data-mine") === "true"),
+    );
+    expect(mine).toContain(true);
+    expect(mine).toContain(false);
+
+    // …and each LEVEL of the thread is one column, whoever wrote the post in it: the root
+    // posts share an x and the replies share an x, indented under them. Two columns is the
+    // whole geometry — a chat's two SIDES would be one more, decided by authorship.
+    const column = (selector: string) =>
+      page.locator(selector).evaluateAll((els) =>
+        els.map((el) => Math.round(el.getBoundingClientRect().left)),
+      );
+    const replyLefts = await column(
+      '[data-testid="thread-replies"] [data-testid="message"]',
+    );
+    const allLefts = await column('[data-testid="thread-group"] [data-testid="message"]');
+    const rootLefts = allLefts.filter((x) => !replyLefts.includes(x));
+    expect(new Set(rootLefts).size).toBe(1);
+    expect(new Set(replyLefts).size).toBe(1);
+    expect(replyLefts[0]!).toBeGreaterThan(rootLefts[0]!);
+
+    // And no post carries a fill of its own: the thread's card is the surface.
+    const fills = await posts.evaluateAll((els) =>
+      els.map((el) => getComputedStyle(el).backgroundColor),
+    );
+    for (const fill of fills) expect(fill).toBe("rgba(0, 0, 0, 0)");
+  });
+
+  test("names each post's author and its moment, and never both twice", async ({ page }) => {
+    const thread = await openThreadWithReplies(page);
+    const first = thread.locator('[data-testid="message"]').first();
+    // WHO — on the reader's OWN post too, which a chat bubble never labels because its side
+    // says so. Here nothing else does.
+    await expect(first.locator('[data-testid="sender-name"]')).toBeVisible();
+    // …and WHEN, beside the name, with the exact moment on its title so a relative label
+    // still answers which day it was.
+    const when = first.locator('[data-testid="thread-post-time"]');
+    await expect(when).toBeVisible();
+    await expect(when).not.toHaveText("");
+    await expect(when).toHaveAttribute("title", /\d/);
+    const [nameBox, whenBox] = [
+      await first.locator('[data-testid="sender-name"]').boundingBox(),
+      await when.boundingBox(),
+    ];
+    expect(whenBox!.x).toBeGreaterThan(nameBox!.x);
+
+    // And NO centred block mark inside the thread. The marks are a pass over one running
+    // conversation; a channel holds several at once, so one falling between two replies cut
+    // the answers to a single announcement into stamped fragments.
+    await expect(thread.locator('[data-testid="message-time"]')).toHaveCount(0);
+  });
+
+  test("a reply from the thread's own row lands IN that thread", async ({ page }) => {
+    const thread = await openThreadWithReplies(page);
+    const before = await thread.locator('[data-testid="message"]').count();
+
+    // The way in is the thread's own row: there is one composer in this app, so the row aims
+    // that one — and says so, because the box is a screen below the thread it posts into.
+    await thread.locator('[data-testid="thread-reply"]').click();
+    await expect(thread).toHaveAttribute("data-reply-target", "true");
+    await expect(page.locator('[data-testid="reply-banner"]')).toContainText("Replying in");
+
+    const body = `in-thread-${Date.now()}`;
+    await sendFromComposer(page, body);
+    // The WIRE is what proves it: the address of the thread, and no quote — a reply to the
+    // announcement inside the announcement's own thread would state it twice.
+    await expect
+      .poll(async () => (await fetchCapturedSends(page)).some((s) => s.content_html?.includes(body)))
+      .toBe(true);
+    const sent = (await fetchCapturedSends(page))
+      .filter((s) => s.content_html?.includes(body))
+      .pop();
+    expect(sent?.thread_root).toBeTruthy();
+    expect(sent?.reply_to).toBeUndefined();
+
+    // And the echo joins THAT thread rather than opening one of its own at the foot of the
+    // channel, which is the defect the whole feature exists to fix.
+    await expect.poll(() => thread.locator('[data-testid="message"]').count()).toBe(before + 1);
+    await expect(thread.locator('[data-testid="message"]').last()).toContainText(body);
+  });
+
+  test("a reply to another REPLY quotes it, and still lands in the same thread", async ({
+    page,
+  }) => {
+    const thread = await openThreadWithReplies(page);
+    // A long thread holds several conversations, so answering one reply keeps the quote —
+    // it is the only thing that says which of them is being answered.
+    const reply = thread.locator('[data-testid="thread-replies"] [data-testid="message"]').first();
+    await reply.hover();
+    await reply.locator('[data-testid="message-actions"]').click();
+    await page.locator('[data-testid="action-reply"]').click();
+    await expect(page.locator('[data-testid="reply-banner"]')).toContainText("Replying to");
+
+    const body = `answering-a-reply-${Date.now()}`;
+    await sendFromComposer(page, body);
+    await expect
+      .poll(async () => (await fetchCapturedSends(page)).some((s) => s.content_html?.includes(body)))
+      .toBe(true);
+    const sent = (await fetchCapturedSends(page))
+      .filter((s) => s.content_html?.includes(body))
+      .pop();
+    expect(sent?.reply_to).toBeTruthy();
+    expect(sent?.thread_root).toBeTruthy();
+  });
+
+  test("the reply row clears the touch floor and opens a folded thread", async ({ page }) => {
+    await gotoApp(page);
+    await openChannelsTab(page);
+    await page.locator('[data-testid="channel-row"]').first().click();
+    const root = await page
+      .locator('[data-testid="thread-group"]')
+      .filter({ has: page.locator('[data-testid="thread-toggle"]') })
+      .last()
+      .getAttribute("data-thread-root");
+    const thread = page.locator(`[data-thread-root="${root}"]`);
+    // Folded: nobody answers a conversation they cannot read, so the press opens it too.
+    await expect(thread.locator('[data-testid="thread-replies"]')).toHaveCount(0);
+    const row = thread.locator('[data-testid="thread-reply"]');
+    // 44px under a thumb — the floor every target this app draws for one holds.
+    const box = await row.boundingBox();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+    await row.click();
+    await expect(thread.locator('[data-testid="thread-replies"]')).toBeVisible();
+    await expect(thread).toHaveAttribute("data-reply-target", "true");
+  });
+
+  test("a CHAT reply is untouched: a quote, and no thread address", async ({ page }) => {
+    // A chat has no threads, so nothing about this change may reach it — a chat reply is the
+    // quote it has always been, and a `thread_root` there is refused by the backend outright.
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    const message = page.locator('[data-testid="message"]').first();
+    await message.hover();
+    await message.locator('[data-testid="message-actions"]').click();
+    await page.locator('[data-testid="action-reply"]').click();
+    await expect(page.locator('[data-testid="reply-banner"]')).toContainText("Replying to");
+
+    const body = `chat-reply-${Date.now()}`;
+    await sendFromComposer(page, body);
+    await expect
+      .poll(async () => (await fetchCapturedSends(page)).some((s) => s.content_html?.includes(body)))
+      .toBe(true);
+    const sent = (await fetchCapturedSends(page))
+      .filter((s) => s.content_html?.includes(body))
+      .pop();
+    expect(sent?.reply_to).toBeTruthy();
+    expect(sent?.thread_root).toBeUndefined();
+    // And the reader's own message still takes its own side of the room, which is what says
+    // whose it is in a chat.
+    await expect(page.locator('[data-testid="message"]').last()).toHaveAttribute(
+      "data-mine",
+      "true",
+    );
   });
 });
 
@@ -432,7 +647,14 @@ test.describe("a channel post's title", () => {
     const sent = (await fetchCapturedSends(page))
       .filter((send) => send.content_html?.includes(body))
       .pop();
-    expect(sent?.reply_to).toBeTruthy();
+    // A reply in a CHANNEL is a post in a thread, addressed by that thread's root rather
+    // than carrying a quote of it: the quote used to be what made a reply a reply here, and
+    // it filed the answer as a NEW thread at the foot of the channel (see
+    // `teams_send::parse_thread_root`). What the title rule needs either way is that nothing
+    // titled travels with it — and the backend refuses BOTH pairs, so a regression here is a
+    // reply that cannot be sent at all.
+    expect(sent?.thread_root).toBeTruthy();
+    expect(sent?.reply_to).toBeUndefined();
     expect(sent?.subject).toBeUndefined();
 
     // The field was hidden, not emptied: the reader had not finished with it, and the send

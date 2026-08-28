@@ -46,3 +46,51 @@ export function groupThreads(messages: ChatMessage[]): {
   });
   return { threads, replyRootOf };
 }
+
+/**
+ * The CHANNEL THREAD a reply to `message` belongs in: the thread it is already part of,
+ * else the message itself — a post that carries no root IS one.
+ *
+ * This is what a reply in a channel has to carry, because Teams files a channel reply by
+ * ADDRESS rather than by a quote in its body (`teams_send::parse_thread_root`): without it a
+ * reply to an announcement POSTed to the channel itself, which opened a second, untitled
+ * thread at the foot of the history — the reply the reader wrote sitting on its own, beside
+ * the announcement instead of under it.
+ */
+export function threadRootOf(message: ChatMessage): string {
+  return message.thread_root_id || message.id;
+}
+
+/**
+ * Whether a reply into a channel thread also QUOTES the message it answers.
+ *
+ * A reply to the thread's ROOT does not: the thread is the context, and a quote of the
+ * announcement above the first reply in the announcement's own thread states one thing
+ * twice — Teams draws none there either. A reply to another REPLY does, because a long
+ * thread holds several conversations and the quote is the only thing that says which one is
+ * being answered.
+ */
+export function threadReplyQuotes(message: ChatMessage): boolean {
+  return threadRootOf(message) !== message.id;
+}
+
+/**
+ * What the composer's banner says a reply IS, which is not the same sentence in a chat and
+ * in a channel.
+ *
+ * There is ONE composer in this app, so a channel reply is written a screen away from the
+ * thread it lands in — and the banner is the only thing that says which. In a titled thread
+ * it names the title, because that is what the reader recognises the announcement by; a reply
+ * inside an untitled thread, a reply to another reply, and every chat reply name the PERSON,
+ * which is what a quote is about.
+ */
+export function replyHeading(message: ChatMessage, threadRoot: string | null): string {
+  const subject = message.thread_subject?.trim();
+  if (threadRoot && subject) return `Replying in “${subject}”`;
+  return `Replying to ${message.sender}`;
+}
+
+/** How many replies a thread holds, in words — so nothing says "1 replies". */
+export function replyCountLabel(count: number): string {
+  return `${count} ${count === 1 ? "reply" : "replies"}`;
+}

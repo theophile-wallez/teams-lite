@@ -450,6 +450,13 @@ pub struct Command {
     /// The message that asked, so the answer can reply to it natively.
     pub conversation_id: String,
     pub message_id: String,
+    /// The CHANNEL THREAD the trigger was written in, when it was written in one — empty
+    /// for a chat, which has no threads, and for a channel post that IS its thread's root.
+    ///
+    /// An answer belongs in the thread it answers: without this the reply POSTed to the
+    /// channel itself, which opens a SECOND untitled thread beside the one the question was
+    /// asked in — the same defect answering an announcement by hand used to have.
+    pub thread_root_id: String,
     pub compose_time: i64,
     pub sender: String,
     pub sender_mri: String,
@@ -555,6 +562,7 @@ fn trigger_for(
         answering: answering(message),
         conversation_id: message.conversation_id.clone(),
         message_id: message.id.clone(),
+        thread_root_id: message.thread_root_id.clone(),
         compose_time: message.compose_time,
         sender: message.sender.clone(),
         sender_mri: message.sender_mri.clone(),

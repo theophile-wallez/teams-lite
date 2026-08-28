@@ -236,6 +236,11 @@ export type CapturedSend = {
    *  its own here is the point: the title is a property of the message, never words in
    *  its body. */
   subject?: string;
+  /** The CHANNEL THREAD the post belongs to. Present only on a reply into one, and its
+   *  being a field rather than a quote in the body is the point: Teams files a channel reply
+   *  by ADDRESS, so this is the only proof the answer lands under the announcement instead
+   *  of opening a second thread beside it. */
+  thread_root?: string;
 };
 
 /** Configure the mock's next sends. Always reset the control after a failure test,

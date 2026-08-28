@@ -35,6 +35,7 @@ import {
   sealKeyDisagrees,
 } from "~/lib/seal";
 import { copyableMessageText } from "~/lib/protocol";
+import { replyHeading } from "~/lib/threads";
 import { cn } from "~/lib/utils";
 import { ScheduleSendMenu } from "./schedule-send-menu";
 import { ScheduledMessagesDialog } from "./scheduled-messages-dialog";
@@ -416,8 +417,12 @@ export function Composer(props: {
             className="mb-2 flex items-start gap-2 rounded-xl border-l-2 border-primary bg-card px-3 py-2 shadow-chip animate-in fade-in slide-in-from-bottom-1 duration-150 ease-out"
           >
             <div className="min-w-0 flex-1">
+              {/* A channel reply is a POST IN A THREAD written a screen away from that
+                  thread, so the banner names the thread rather than the person (see
+                  `replyHeading`). It is the one thing on screen beside the box that says
+                  where the next Enter lands. */}
               <div className="text-xs font-semibold text-primary">
-                Replying to {replyingTo.message.sender}
+                {replyHeading(replyingTo.message, replyingTo.threadRoot)}
               </div>
               <div className="truncate text-xs text-text-faint">
                 {copyableMessageText(replyingTo.message)}

@@ -158,6 +158,54 @@ pub fn parse_subject(params: &Value) -> Result<Option<String>> {
     Ok(Some(subject))
 }
 
+/// How long a thread root's message id may get. A Teams message id IS its arrival time in
+/// epoch milliseconds (measured — see [`Sent::id`]), so 13 digits is the real shape and this
+/// is the sanity bound above it: what it catches is a client sending something that is not
+/// an id at all into the one place that becomes part of a URL.
+pub const MAX_THREAD_ROOT_CHARS: usize = 32;
+
+/// Read the optional `thread_root` a `send` may carry: the id of the CHANNEL THREAD this
+/// message is a post in.
+///
+/// This is the trust boundary — a client supplies it, and it becomes part of the request
+/// PATH (see [`send_message`]) — so every rule that makes it mean something is enforced
+/// here rather than in the composer that also states them:
+///
+///   * it is DIGITS, bounded. A message id is an epoch-millisecond stamp, so nothing else
+///     can be one; and a value that reached the URL with a `/` or a `?` in it would address
+///     a resource this app never meant to name. It is the rail
+///     `gitlab_mr::UploadRef::parse` holds for an upload's own path.
+///   * only a CHANNEL has threads. A chat's history is flat, so a `thread_root` there would
+///     address a resource the service does not publish — refused rather than posted at.
+///   * a titled post is never a reply into a thread. A thread has one title and it belongs
+///     to its first post, which is the rule [`parse_subject`] already holds from the other
+///     side; this closes it for the client that sends a `subject` with no `reply_to`.
+///
+/// An absent or empty value is `None`, which is what keeps every ordinary post byte-identical
+/// to what this app sent before threads could be answered.
+pub fn parse_thread_root(params: &Value, conversation_id: &str) -> Result<Option<String>> {
+    let Some(value) = params.get("thread_root").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let root = value.as_str().context("thread_root must be a string")?.trim().to_string();
+    if root.is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        crate::teams_read::is_channel_thread_id(conversation_id),
+        "only a channel has threads to post into"
+    );
+    anyhow::ensure!(
+        params.get("subject").is_none_or(Value::is_null),
+        "a post in a thread carries no title — the thread's title is its first post's"
+    );
+    anyhow::ensure!(
+        root.len() <= MAX_THREAD_ROOT_CHARS && root.bytes().all(|b| b.is_ascii_digit()),
+        "a thread root is a message id"
+    );
+    Ok(Some(root))
+}
+
 /// Whether a character would draw a title as two lines.
 ///
 /// `char::is_control` alone is NOT the answer: it covers Cc only, so U+2028 (LINE SEPARATOR)
@@ -439,11 +487,39 @@ pub struct Sent {
     pub client_message_id: String,
 }
 
+/// The chatService URL a message is POSTed to: the conversation, or ONE THREAD inside a
+/// channel when `thread_root` names one.
+///
+/// `19:<channel>@thread.tacv2;messageid=<root>` is the service's OWN address for a thread —
+/// it is what CSA and the live feed put in `conversationLink`, which is where the read path
+/// finds a post's `rootMessageId` (`teams_read::thread_link_root_id`). So a reply posted to
+/// it lands IN that thread instead of starting a new one, which is what a channel reply has
+/// to do: without it, answering an announcement opened a second, untitled thread of its own.
+///
+/// The suffix is written LITERALLY, with only the root percent-encoded, because that is the
+/// spelling the service publishes: `;` and `=` are legal in a path segment and encoding them
+/// would hand Teams an address it never writes itself.
+fn message_post_url(chat: &str, conversation_id: &str, thread_root: Option<&str>) -> String {
+    let conversation = urlencoding::encode(conversation_id);
+    match thread_root {
+        Some(root) => format!(
+            "{chat}/v1/users/ME/conversations/{conversation};messageid={}/messages",
+            urlencoding::encode(root)
+        ),
+        None => format!("{chat}/v1/users/ME/conversations/{conversation}/messages"),
+    }
+}
+
 pub async fn send_message(
     http: &reqwest::Client,
     session: &Session,
     ic3: &str,
     conversation_id: &str,
+    // The CHANNEL THREAD this message is a post in, when it is one (see
+    // `parse_thread_root`). It decides the POST's address and nothing else: the conversation
+    // the pictures upload against, the one a sealed body is bound to and the one the store
+    // files the echo under all stay the base id.
+    thread_root: Option<&str>,
     text: &str,
     reply_to: Option<&ReplyTo>,
     content_html: Option<&str>,
@@ -458,10 +534,7 @@ pub async fn send_message(
         .endpoint("chatService")
         .context("no chatService endpoint in regionGtms")?
         .trim_end_matches('/');
-    let url = format!(
-        "{chat}/v1/users/ME/conversations/{}/messages",
-        urlencoding::encode(conversation_id)
-    );
+    let url = message_post_url(chat, conversation_id, thread_root);
     let cmid = new_client_message_id();
     // In the order the user picked them, one upload at a time: the message body names
     // them in that order, and a failure here happens before the message POST — so
@@ -1987,6 +2060,82 @@ mod tests {
         assert!(parse_subject(&json!({ "subject": "Ship\u{2029}it" })).is_err());
         assert!(parse_subject(&json!({ "subject": "Ship\u{0085}it" })).is_err());
         assert!(parse_subject(&json!({ "subject": 7 })).is_err());
+    }
+
+    /// A CHANNEL is threaded and a chat is not, so the value that decides where a post lands
+    /// is refused at the trust boundary where a client supplies it — and it is the one value
+    /// in a `send` that becomes part of the request PATH.
+    #[test]
+    fn a_thread_root_is_a_message_id_in_a_channel() {
+        const CHANNEL: &str = "19:abc@thread.tacv2";
+        const CHAT: &str = "19:def@thread.v2";
+        // Absent, null, empty: every ordinary post, byte-identical to what this app posted
+        // before a thread could be answered at all.
+        assert_eq!(parse_thread_root(&json!({}), CHANNEL).unwrap(), None);
+        assert_eq!(parse_thread_root(&json!({ "thread_root": null }), CHANNEL).unwrap(), None);
+        assert_eq!(parse_thread_root(&json!({ "thread_root": "  " }), CHANNEL).unwrap(), None);
+        // A real root is trimmed and taken verbatim.
+        assert_eq!(
+            parse_thread_root(&json!({ "thread_root": " 1781257277685 " }), CHANNEL).unwrap(),
+            Some("1781257277685".to_string())
+        );
+        // A CHAT has no threads, so it is refused rather than posted at an address the
+        // service does not publish.
+        assert!(parse_thread_root(&json!({ "thread_root": "1781257277685" }), CHAT).is_err());
+        // Only a message id: anything else would reach the URL, so a path separator, a
+        // query and a suffix of its own are each refused by shape rather than escaped.
+        for bad in ["abc", "17812/messages", "17812?x=1", "17812;messageid=9", "-1", "17.8"] {
+            assert!(
+                parse_thread_root(&json!({ "thread_root": bad }), CHANNEL).is_err(),
+                "{bad} must be refused"
+            );
+        }
+        assert!(parse_thread_root(&json!({ "thread_root": 1781257277685i64 }), CHANNEL).is_err());
+        assert!(
+            parse_thread_root(&json!({ "thread_root": "1".repeat(MAX_THREAD_ROOT_CHARS + 1) }), CHANNEL)
+                .is_err()
+        );
+        // A post in a thread carries no TITLE, which is the rule `parse_subject` holds from
+        // the other side: a thread has one title and it belongs to its first post. Closed
+        // here too, because a client can send a `subject` with no `reply_to` at all.
+        assert!(
+            parse_thread_root(
+                &json!({ "thread_root": "1781257277685", "subject": "Ship it" }),
+                CHANNEL
+            )
+            .is_err()
+        );
+        // A `subject` of null is no title, so the reply into the thread stands.
+        assert_eq!(
+            parse_thread_root(&json!({ "thread_root": "17812", "subject": null }), CHANNEL).unwrap(),
+            Some("17812".to_string())
+        );
+    }
+
+    /// The thread's own address is the one the SERVICE publishes, and it changes nothing
+    /// about an ordinary post.
+    #[test]
+    fn a_post_in_a_thread_is_addressed_at_that_thread() {
+        const CHAT: &str = "https://x.example/v1";
+        // No thread: byte-identical to the URL this app has always POSTed to.
+        assert_eq!(
+            message_post_url(CHAT, "19:abc@thread.tacv2", None),
+            "https://x.example/v1/v1/users/ME/conversations/19%3Aabc%40thread.tacv2/messages"
+        );
+        // A thread: `;messageid=<root>` written LITERALLY, exactly as CSA and the live feed
+        // spell it in `conversationLink` — which is where `thread_link_root_id` reads one
+        // back, so the two halves of this app agree on one address.
+        let threaded = message_post_url(CHAT, "19:abc@thread.tacv2", Some("1781257277685"));
+        assert_eq!(
+            threaded,
+            "https://x.example/v1/v1/users/ME/conversations/19%3Aabc%40thread.tacv2;messageid=1781257277685/messages"
+        );
+        // And the read path takes the root straight back out of it, which is what proves the
+        // spelling rather than a string this test wrote twice.
+        assert_eq!(
+            crate::teams_read::thread_link_root_id(&threaded),
+            Some("1781257277685")
+        );
     }
 
     #[test]

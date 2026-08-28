@@ -191,6 +191,120 @@ screenshots carry the last one.
   state — that is not broken behaviour, and a spec of one's own is proved innocent by running it
   beside the failing one rather than by counting failures.
 
+## A CHANNEL THREAD is a THREAD (a list of posts, and a reply that lands IN it)
+
+A channel's history is drawn as THREADS, and each one is now drawn as a thread rather than as a
+stretch of chat inside a box: the announcement's own title as a heading, the posts under it as a
+LIST — a face, a name, a moment and the words, in ONE column whoever wrote them — and a **Reply**
+that puts the reader's next Enter inside that thread. `web/src/lib/threads.ts` holds the pure
+decisions (which thread a reply lands in, whether it quotes, what the banner says),
+`ThreadGroup` in `web/src/components/message-pane.tsx` draws the card, the `threadPost` prop in
+`message-bubble.tsx` draws one post, and the wire's half is one optional field on the send that
+already existed (`teams_send::parse_thread_root`).
+
+**EVERY PART OF THE OLD SHAPE WAS WRONG FOR WHAT A CHANNEL IS, and the sharpest one was not
+cosmetic.** Measured on the fixtures before this:
+
+- **A reply to an announcement opened a SECOND, UNTITLED THREAD.** Teams files a channel reply by
+  ADDRESS, and this app had no way to send one — a reply was a QUOTE in the body posted to the
+  channel, so the reader's answer landed as an orphan card at the foot of the history, beside the
+  announcement instead of under it. Nothing on screen said so. That is the defect the whole
+  feature exists to close.
+- **The reader's own post floated RIGHT in the accent fill** while a colleague's sat left in a
+  grey one, so two posts in one thread read as two sides of a private argument rather than as a
+  list of what was said about one announcement.
+- **A centred block time mark fell BETWEEN the replies**: a seven-reply thread whose answers came
+  hours apart — which is every thread — was cut into stamped fragments inside its own card.
+- **The reader's own quoted announcement was a BLANK GAP**, because a quote is tinted for the
+  surface it sits on and the on-the-accent tint over a plain card is a block nobody can see.
+
+**THE WIRE IS ONE FIELD, and it is the address rather than anything in the body.**
+`teams_send::send_message` takes a `thread_root`, and the POST goes to
+`…/conversations/19:<channel>@thread.tacv2;messageid=<root>/messages` — the service's OWN address
+for a thread, which is what CSA and the live feed put in `conversationLink` and where the read
+path has always found a post's `rootMessageId` (`teams_read::thread_link_root_id`). The suffix is
+written LITERALLY with only the root percent-encoded, because that is the spelling the service
+publishes; `a_post_in_a_thread_is_addressed_at_that_thread` proves it by reading the root back out
+of the URL through that same function rather than by restating the string.
+
+It needs **no gate of its own**: `send` is already an `OUTWARD_METHODS` entry and the thread rides
+in its params exactly as a picture, a mention and a title do — it narrows WHERE the message this
+method already posts lands, and the consent is the same click on Send.
+
+Eleven rules hold it, and each is pinned by a test:
+
+- **The root is DIGITS, bounded, and only in a CHANNEL** (`parse_thread_root`,
+  `MAX_THREAD_ROOT_CHARS`). It is the one value in a `send` that becomes part of the request PATH,
+  so a `/`, a `?` or a `;messageid=` of its own is refused by SHAPE rather than escaped — the rail
+  `gitlab_mr::UploadRef::parse` already holds for an upload's own path. A Teams message id IS its
+  arrival time in epoch ms (measured), so nothing else can be one. A chat's history is flat, so a
+  `thread_root` there is refused rather than posted at an address the service does not publish.
+- **A post in a thread carries no TITLE, refused from BOTH sides.** `parse_subject` already
+  refused one beside a `reply_to`; `parse_thread_root` refuses one beside a `thread_root`, which is
+  what closes it for a client that sends a `subject` with no quote at all. A thread has one title
+  and it belongs to its first post.
+- **A reply to the thread's ROOT carries NO QUOTE, and a reply to another REPLY does**
+  (`threadReplyQuotes`). The thread is the context, so a quote of the announcement above the first
+  answer in the announcement's own thread states one thing twice — Teams draws none there either.
+  A long thread holds several conversations, so answering one reply keeps the quote: it is the only
+  thing that says which of them is being answered.
+- **The AGENT'S OWN ANSWER lands in the thread it answers.** `agent_policy::Command` carries the
+  trigger's `thread_root_id` and `agent_send` posts at it, or a `@claude` written inside a thread
+  would be answered in a new one — the same defect, from the other path. An EMPTY root is not a
+  thread: a chat has none, and a post that IS its own root has nothing to reply into that the
+  channel itself is not.
+- **Which thread a reply lands in is resolved ONCE, where the reply starts**
+  (`PendingReply.threadRoot`, in `startReply`). Three surfaces read it — the send addresses the
+  thread, the thread's card lights up while it is the one being answered, and the composer's banner
+  says the reader is posting IN a thread — and two answers to "which thread?" is the bug.
+- **A post is drawn as a POST, and that changes the LAYOUT and nothing else.** `threadPost` forces
+  the message left, drops the bubble chrome (the thread's card is the surface), always names the
+  author — the reader's OWN post included, because nothing else in that column says who wrote it —
+  and puts the moment beside the name. **Whose the message is still decides what may be DONE to
+  it**: `mine` keeps Edit and Delete, while a new `anchoredRight` carries every decision that is
+  really "am I drawn on the accent fill" — the row's side, the quote's tint, the reaction chips'
+  edge and which side the "…" stands beside. Conflating the two is what made the reader's own
+  quoted announcement invisible.
+- **A CHANNEL draws NO centred time mark at all** (`timeMarks`, empty for a channel). The mark is a
+  line about one running conversation and a channel holds several at once, so the posts it would
+  fall between belong to different threads. A post carries WHEN beside WHO instead, which is where
+  Teams puts it and the one place it says something about that post rather than about the gap above
+  it.
+- **The card is ONE surface, separated by a fine shadow rather than a border** (`bg-card
+  shadow-card`, which is `--elev-card`: a 1px ring plus a 1–2px drop). The posts inside carry no
+  fill now, so this card is the only thing that says where the thread begins and ends — and a
+  border beside a shadow would be two answers to that.
+- **THE THREAD BEING ANSWERED SAYS SO, because the composer is a screen below it.** There is ONE
+  composer in this app — its `data-conversation-id` is what a sanctioned live driver proves its
+  target with — so the reply row aims that one rather than adding a second, the card takes an
+  accent ring while it is the target (`data-reply-target`), and the row itself reads "Writing a
+  reply below…". The banner names the thread by its TITLE (`replyHeading`), which is what the
+  reader recognises the announcement by.
+- **The reply row is 44px under a thumb and OPENS a folded thread.** Nobody answers a conversation
+  they cannot read, so a press on a folded thread expands it and then aims the composer.
+- **The card states WHICH thread it is** (`data-thread-root`). The history is virtualized, so
+  `…thread-group").first()` re-resolves to whatever happens to be mounted and expanding a thread
+  moves the set — the sentinel discipline the composer's own `data-conversation-id` and the diff
+  pane's `data-path` already follow, and `openThreadWithReplies` (in `web/scripts/preview.ts`, used
+  by the capture and the spec alike) is what locks on to it.
+
+`web/mock/server.ts` mirrors every refusal (`parseSendThreadRoot`) and ECHOES a reply INSIDE the
+thread it was addressed at, which is what the tenant really answers with — a mock that filed the
+reply as a new thread would let the very defect this closes pass every test. Its own bound is
+DELIBERATELY not the backend's number: a real message id is 13 digits while the mock's ids are
+`<conversation>#<seq>`, so restating 32 there refused every fixture's own thread, which is a mock
+lying about the rule rather than mirroring it.
+
+`cd web && bun run preview -- --out /tmp/chan --channels` captures the thread in both themes, the
+thread being answered with the words in the box, and the whole surface at a PHONE's width;
+`web/e2e/channels.spec.ts` pins every rule the page owns and `web/src/lib/threads.test.ts` the pure
+ones. **What is UNVERIFIED against the tenant is the ADDRESS**: there is no sandbox channel, so
+nothing here has POSTed to `;messageid=<root>` and read the reply back inside its thread. What the
+spelling rests on is that it is the id the service PUBLISHES rather than one this app invented —
+measured on the read path, and healed for rows an older build filed under it
+(`Store::reparent_thread_link_messages`) — and the failure mode if it is wrong is a refused send
+with the words still in the composer rather than a reply posted somewhere nobody can see.
+
 ## A channel post has a TITLE (its own field in the composer, a heading above the body)
 
 A post in a CHANNEL carries a title — the line an announcement draws above its words — and a
@@ -2867,11 +2981,12 @@ user. Two independent mechanisms enforce that split:
   from it. For the mail surface: `bun run preview -- --out /tmp/mail --mail`, or
   `openMailTab` / `openFirstMail` / `openMailAt` from the same file. For the calendar:
   `bun run preview -- --out /tmp/cal --calendar`, or `openCalendarTab` /
-  `openCalendarView` / `openFirstEvent`. For the team → channel tree — and a channel post's own TITLE:
-  the composer's field empty and filled, the titled post in both themes and that composer at a
-  phone's width:
+  `openCalendarView` / `openFirstEvent`. For the team → channel tree — a channel post's own TITLE
+  (the composer's field empty and filled, the titled post in both themes and that composer at a
+  phone's width) and a channel THREAD (the card in both themes, the thread the composer is aimed at
+  with the words in the box, and the whole surface at a phone's width):
   `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
-  `toggleTeamSection` from the same file. For the merge-request page — its tab strip at rest
+  `toggleTeamSection` / `openThreadWithReplies` from the same file. For the merge-request page — its tab strip at rest
   and current, the list, the page, its header's own approval and merge in both themes, its own
   sub-header of four pages in both themes and at a
   phone's width, the page that holds nothing yet,
@@ -6797,7 +6912,10 @@ user's. What changes is only what is asked.
   and `scheduled_messages` lists what is waiting — see § Sending a message LATER.
   A CHANNEL post also carries a TITLE, in the send that posts it and in the edit that
   rewrites it (`teams_send::SUBJECT`, over the `Message::thread_subject` the read path has
-  always decoded) — see § A channel post has a TITLE.
+  always decoded) — see § A channel post has a TITLE. And a REPLY in a channel is addressed at
+  the THREAD it answers rather than carrying a quote of it (`teams_send::parse_thread_root`, which
+  is the one value in a `send` that becomes part of the request path) — see § A CHANNEL THREAD is
+  a THREAD.
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - One front-end, talking to the backend only through that WebSocket. Local-first is
   enforced server-side; the front-end touches neither the network nor SQLite directly.

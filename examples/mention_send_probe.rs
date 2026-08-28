@@ -55,6 +55,8 @@ async fn main() -> Result<()> {
         &session,
         "",
         SANDBOX_THREAD,
+        // No thread: every probe posts to the sandbox chat, which has no threads to post into.
+        None,
         "",
         None,
         Some(&html),

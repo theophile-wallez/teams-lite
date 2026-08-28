@@ -52,6 +52,7 @@ import {
 } from "~/lib/rich-text";
 import { projectNamedIn } from "~/lib/tracker-ref";
 import { sealIsLocked, sealLockedAction, sealLockedMessage, sealStateOf } from "~/lib/seal";
+import { formatMessageTime } from "~/lib/message-time";
 import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun, type AgentTranscript } from "~/lib/agent-run";
 import { agentTagsInMessage } from "~/lib/agent-tag";
@@ -80,6 +81,7 @@ import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
 import { FileAttachment, MediaImage, RecordingAttachment } from "./media-image";
 import { GitLabLinkCard } from "./gitlab-link-card";
 import { LinearLinkCard } from "./linear-link-card";
+import { Avatar } from "./avatar";
 import { PersonHoverCard } from "./person-card";
 import { TrackerProjectProvider, useTrackerVocabulary } from "./tracker-refs-context";
 import { Emoji } from "./emoji";
@@ -291,6 +293,20 @@ function MessageBubbleImpl(props: {
    *  otherwise bring its own panel — an app card — renders flush inside it
    *  instead of as a card within a card. */
   onPanel?: boolean;
+  /** This message is a POST IN A CHANNEL THREAD, so it is drawn as a post and not as a
+   *  chat bubble: a face, the author's name and the moment above the words, left-aligned
+   *  whoever wrote it, with no fill and no tail.
+   *
+   *  A channel thread is a LIST of what people said about one announcement — Teams' own
+   *  shape, and Discord's — so the two things a chat bubble uses to say "who" are both
+   *  wrong here: a side cannot say it (every post is in the same column, and the reader's
+   *  own answer belongs beside its neighbours rather than opposite them), and a fill draws
+   *  a card inside the thread's own card.
+   *
+   *  It changes the LAYOUT and nothing else: whose message it is still decides whether Edit
+   *  and Delete are offered, because that is a fact about the message rather than about
+   *  where it is drawn. */
+  threadPost?: boolean;
   /** The agents that could really answer in this thread, in the backend's own order
    *  (`agentCandidatesFor`). Empty — which is every thread nobody opted in — draws no
    *  "Answer with …" row at all. */
@@ -333,6 +349,11 @@ function MessageBubbleImpl(props: {
   // the same way: what changes is only the account the signature names.
   const agent = useMemo(() => agentAuthorship(props.message), [props.message]);
   const mine = props.message.is_self === true && !agent;
+  // Where the message SITS in its row, which is not the same question as whose it is. A chat
+  // anchors the reader's own words on the right; a post in a channel thread is in the one
+  // column every post of that thread is in (see `threadPost`). Every LAYOUT decision below
+  // reads this, and every decision about what the reader may DO to the message reads `mine`.
+  const anchoredRight = mine && !props.threadPost;
   // How this body must be read. A `Text` message is plain text: it carries no Teams
   // markup at all, so there is no quote to split out of it and nothing to parse —
   // the whole body IS the body, shown verbatim.
@@ -592,11 +613,17 @@ function MessageBubbleImpl(props: {
   // so a colleague's sealed message can arrive with a readable attachment beside a body this
   // machine cannot open, and `imageOnly` would then drop the chrome around a row whose whole
   // content is one sentence.
+  //
+  // A POST IN A CHANNEL THREAD is bare for a different reason and unconditionally: the
+  // thread's own card is the surface, so a fill here would frame the same words twice — and
+  // it holds even for a deleted or a locked post, whose placeholder is then one muted line
+  // in the list rather than a ghost bubble inside a card.
   const bare =
-    !isDeleted &&
-    !isLocked &&
-    !agent &&
-    (linkOnly || imageOnly || recordingOnly || cardOnly || emojiOnly);
+    props.threadPost === true ||
+    (!isDeleted &&
+      !isLocked &&
+      !agent &&
+      (linkOnly || imageOnly || recordingOnly || cardOnly || emojiOnly));
 
   // An answer is being written into this message. Two ways to know, and both count:
   // this app is watching the run (`agentRun`), or the message itself says its answer is
@@ -615,10 +642,13 @@ function MessageBubbleImpl(props: {
   // name — an empty label would just be a blank gap above the card. An agent's reply
   // carries its own mark instead, in every thread rather than only in a group: WHO
   // wrote it is the whole point of the label there.
+  //
+  // A POST IN A THREAD always names its author, the reader's own included: nothing else in
+  // that column says who wrote it, and the reader's answer to an announcement is one entry in
+  // a list rather than the one thing on its own side of the room.
   const nameShown =
-    !mine &&
     !agent &&
-    props.showSenderName &&
+    (props.threadPost === true || (!mine && props.showSenderName)) &&
     !props.continuesAbove &&
     props.message.sender.trim() !== "";
   const [menuOpen, setMenuOpen] = useState(false);
@@ -793,7 +823,11 @@ function MessageBubbleImpl(props: {
           : {})}
         className={cn(
           "my-1 rounded-lg px-2.5 py-1.5",
-          mine ? "bg-quote-mine" : "bg-quote-incoming",
+          // The quote is tinted for the surface it sits ON, so it follows where the message is
+          // drawn rather than whose it is: a POST IN A THREAD has no accent fill, and the
+          // on-the-accent tint over a plain card is a block nobody can see (measured — the
+          // reader's own quoted announcement came out as a blank gap above their answer).
+          anchoredRight ? "bg-quote-mine" : "bg-quote-incoming",
           // A block that goes somewhere says so on hover, and takes the focus ring every
           // other control in this app takes.
           quoteJumpable &&
@@ -808,7 +842,7 @@ function MessageBubbleImpl(props: {
             data-testid="quote-forwarded"
             className={cn(
               "flex items-center gap-1 text-xs font-semibold",
-              mine ? "text-sender-name-mine" : "text-sender-name",
+              anchoredRight ? "text-sender-name-mine" : "text-sender-name",
             )}
           >
             <HugeiconsIcon
@@ -824,7 +858,7 @@ function MessageBubbleImpl(props: {
           <div
             className={cn(
               "flex text-xs font-semibold",
-              mine ? "text-sender-name-mine" : "text-sender-name",
+              anchoredRight ? "text-sender-name-mine" : "text-sender-name",
             )}
           >
             {/* The quoted author is a person too — their card is a hover away
@@ -838,7 +872,7 @@ function MessageBubbleImpl(props: {
           html={parsed.quote.html}
           className={cn(
             "text-xs",
-            mine ? "text-quote-text-mine" : "text-quote-text-incoming",
+            anchoredRight ? "text-quote-text-mine" : "text-quote-text-incoming",
             // A quote is a POINTER to a message, not the message: three lines is enough to
             // recognise which one, and a quoted wall of text otherwise pushed the words the
             // author actually wrote off the screen. The clamp is CSS-only, so the full text
@@ -926,14 +960,38 @@ function MessageBubbleImpl(props: {
     <div
       className={cn(
         "group flex w-full",
-        mine ? "justify-end" : "justify-start",
+        anchoredRight ? "justify-end" : "justify-start",
         // Tighten the spacing within a same-author run; keep a wider gap between
         // different authors.
         props.continuesAbove ? "mt-0.5" : "mt-2",
         // Reactions hang below the bubble — grow the gap so they have room.
         chipsShown && REACTION_OVERHANG,
+        // A post in a thread is a face and then the words, so the row is a two-column
+        // one — the gap is the gutter between them.
+        props.threadPost && "gap-2",
       )}
     >
+      {/* WHO wrote this post, drawn where a thread draws it: a face down the left, and the
+          column held open by a spacer on a continuation so a run of posts by one person
+          keeps its words on one line. It is a SIBLING of the message rather than something
+          inside it, because the message element is what carries the gestures, the actions
+          menu's anchor and every testid — none of which the face belongs to. */}
+      {props.threadPost &&
+        (props.continuesAbove ? (
+          <span className="w-7 shrink-0" aria-hidden />
+        ) : (
+          <Avatar
+            seed={props.message.sender_mri || props.message.sender}
+            label={props.message.sender}
+            photo={
+              props.message.sender_mri
+                ? { kind: "user", id: props.message.sender_mri }
+                : undefined
+            }
+            fallback="person"
+            className="mt-0.5 size-7 shrink-0"
+          />
+        ))}
       <motion.div
         data-testid="message"
         data-mine={mine ? "true" : "false"}
@@ -978,6 +1036,11 @@ function MessageBubbleImpl(props: {
           cardOnly && (cardOnPanel ? "w-full" : "w-full max-w-md"),
           imageOnly && "max-w-[76%]",
           recordingOnly && "w-full max-w-sm",
+          // A post in a thread takes the column the face leaves it — LAST, so it wins over
+          // whichever narrower maximum the content above would otherwise have picked. A
+          // post that only holds a link is still one entry of a list, and a card floating at
+          // 28rem inside the thread's own card is the framing `bare` exists to undo.
+          props.threadPost && "min-w-0 flex-1 max-w-none",
           !bare &&
             cn(
               "max-w-[76%] rounded-2xl px-3.5 py-2",
@@ -987,7 +1050,7 @@ function MessageBubbleImpl(props: {
               // it reads as absent rather than as a real message.
               isDeleted || isUnsupported || isLocked
                 ? "border border-dashed border-border bg-transparent text-text-dim shadow-none"
-                : mine
+                : anchoredRight
                 ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
                 : "bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
               // An agent's reply takes the incoming surface and one hairline more, so it
@@ -996,7 +1059,7 @@ function MessageBubbleImpl(props: {
               // Chained messages (same author, adjacent) flatten the touching
               // corners on the author's anchor side — right for mine, left for
               // incoming — so a run reads as one continuous block on that edge.
-              mine
+              anchoredRight
                 ? cn(props.continuesAbove && "rounded-tr-md", props.continuesBelow && "rounded-br-md")
                 : cn(props.continuesAbove && "rounded-tl-md", props.continuesBelow && "rounded-bl-md"),
             ),
@@ -1021,7 +1084,7 @@ function MessageBubbleImpl(props: {
             }}
             className={cn(
               "pointer-events-none absolute top-1/2 z-0 grid size-8 -translate-y-1/2 place-items-center rounded-full bg-primary text-primary-foreground shadow-chip",
-              mine ? "left-full ml-2" : "right-full mr-2",
+              anchoredRight ? "left-full ml-2" : "right-full mr-2",
             )}
           >
             <HugeiconsIcon icon={ArrowTurnBackwardIcon} className="size-4" strokeWidth={1.8} />
@@ -1037,7 +1100,7 @@ function MessageBubbleImpl(props: {
           <PopoverAnchor aria-hidden className="pointer-events-none absolute inset-0" />
           <PopoverContent
             side="top"
-            align={mine ? "end" : "start"}
+            align={anchoredRight ? "end" : "start"}
             className="overflow-hidden"
             // Reacting is a pointer gesture on a hovered message; pulling focus
             // back to the bubble on close would scroll the pane to it.
@@ -1057,10 +1120,34 @@ function MessageBubbleImpl(props: {
         </Popover>
 
         {nameShown && (
-          <div className="mb-0.5 flex text-xs font-semibold text-sender-name">
+          <div
+            className={cn(
+              "mb-0.5 flex text-xs font-semibold text-sender-name",
+              // A post in a thread carries WHEN beside WHO, which is where a thread puts it
+              // and the reason a channel draws no centred block mark at all: the marks are a
+              // pass over one running conversation, and a thread is a conversation of its own
+              // whose neighbours in the history belong to other threads (see
+              // lib/message-time.ts and `messageTimeMarks`).
+              props.threadPost && "items-baseline gap-1.5 text-foreground",
+            )}
+          >
             <PersonHoverCard mri={props.message.sender_mri} name={props.message.sender}>
-              <span data-testid="sender-name">{props.message.sender}</span>
+              <span data-testid="sender-name" className={cn(props.threadPost && "truncate")}>
+                {props.message.sender}
+              </span>
             </PersonHoverCard>
+            {props.threadPost && props.message.compose_time > 0 && (
+              <time
+                data-testid="thread-post-time"
+                dateTime={new Date(props.message.compose_time).toISOString()}
+                // The exact moment is the title, so one reading "Yesterday 14:32" still
+                // answers which day that was — the rule the block mark already holds.
+                title={new Date(props.message.compose_time).toLocaleString()}
+                className="shrink-0 text-[11px] font-normal text-text-faint"
+              >
+                {formatMessageTime(props.message.compose_time)}
+              </time>
+            )}
           </div>
         )}
 
@@ -1189,13 +1276,14 @@ function MessageBubbleImpl(props: {
             ) : null}
 
             {chipsShown ? (
-              <ReactionChips reactions={reactions} mine={mine} onToggle={react} />
+              <ReactionChips reactions={reactions} anchoredRight={anchoredRight} onToggle={react} />
             ) : null}
 
             {/* A message nobody can act on gets no actions surface at all. */}
             {inert ? null : (
               <MessageActionsMenu
                 mine={mine}
+                anchoredRight={anchoredRight}
                 inside={cardOnPanel}
                 open={menuOpen}
                 onOpenChange={setMenuOpen}
@@ -1300,6 +1388,10 @@ function MessageBubbleImpl(props: {
  */
 function MessageActionsMenu(props: {
   mine: boolean;
+  /** Whether the message this hangs off sits on the RIGHT of its row, which is what decides
+   *  which side the trigger stands beside. It is `mine` in a chat and never in a channel
+   *  thread, where every post is in one column (see `MessageBubble`'s `threadPost`). */
+  anchoredRight: boolean;
   /** Place the trigger inside the message box instead of beside it. */
   inside?: boolean;
   open: boolean;
@@ -1353,14 +1445,14 @@ function MessageActionsMenu(props: {
               // Over the message's own first line, so it needs a fill of its own
               // to stay legible against the text it covers.
               ? "right-0 top-0 bg-card shadow-chip"
-              : cn("top-1/2 -translate-y-1/2", props.mine ? "-left-9" : "-right-9"),
+              : cn("top-1/2 -translate-y-1/2", props.anchoredRight ? "-left-9" : "-right-9"),
           )}
         >
           <HugeiconsIcon icon={MoreHorizontalIcon} className="size-4" strokeWidth={1.6} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        align={props.mine ? "start" : "end"}
+        align={props.anchoredRight ? "start" : "end"}
         onCloseAutoFocus={props.onCloseAutoFocus}
         // Wide enough under a THUMB for the six quick reactions at the touch floor: a menu
         // sized for a pointer holds them only by drawing each one 28px across, which is what
@@ -1969,7 +2061,9 @@ function ReactionPicker(props: {
  */
 function ReactionChips(props: {
   reactions: Reaction[];
-  mine: boolean;
+  /** Whether the bubble these hang off sits on the RIGHT of its row, which is the only
+   *  thing this row needs to know: the chips extend outward from the anchored side. */
+  anchoredRight: boolean;
   onToggle: (pick: ReactionPick) => void;
 }) {
   return (
@@ -1980,7 +2074,7 @@ function ReactionChips(props: {
         // inside the bubble; `w-max` lets it extend outward from its anchored
         // side instead of being folded into the bubble's width.
         "absolute top-full z-10 flex w-max -translate-y-1/3 items-center gap-1",
-        props.mine ? "right-2" : "left-2",
+        props.anchoredRight ? "right-2" : "left-2",
       )}
     >
       {props.reactions.map((r) => {

@@ -108,6 +108,8 @@ async fn post_titled(
         session,
         "",
         SANDBOX_THREAD,
+        // No thread: every probe posts to the sandbox chat, which has no threads to post into.
+        None,
         "",
         None,
         Some(&format!("<p>channel subject probe — {note}</p>")),

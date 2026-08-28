@@ -403,6 +403,31 @@ export async function toggleChatSection(
 
 /** Collapse (or expand) the team section at `index`, by its header — the same
  *  toggle a person clicks. */
+/**
+ * Open one CHANNEL THREAD that holds replies, and hand back a locator LOCKED ON to it.
+ *
+ * The history is virtualized, so `…thread-group").first()` re-resolves to whatever happens to
+ * be mounted — and expanding a thread grows its row and moves the set, so the card measured
+ * after the click is not the one clicked. `data-thread-root` is the card's own name for
+ * itself, which is what the app publishes it for.
+ *
+ * The newest threads are the ones on screen when a channel opens, so nothing is scrolled: a
+ * scroll is exactly what unmounts the card.
+ */
+export async function openThreadWithReplies(page: Page) {
+  const root = await page
+    .locator('[data-testid="thread-group"]')
+    .filter({ has: page.locator('[data-testid="thread-toggle"]') })
+    .last()
+    .getAttribute("data-thread-root");
+  if (!root) throw new Error("no channel thread with replies is on screen");
+  const thread = page.locator(`[data-thread-root="${root}"]`);
+  await thread.locator('[data-testid="thread-toggle"]').click();
+  await thread.locator('[data-testid="thread-replies"]').waitFor();
+  await page.waitForTimeout(250); // the replies slide in; capture them settled
+  return thread;
+}
+
 export async function toggleTeamSection(page: Page, index: number): Promise<void> {
   await page
     .locator('[data-testid="team-group"]')
@@ -3803,6 +3828,31 @@ if (import.meta.main) {
       await page.locator('[data-testid="channel-row"]').first().click();
       await page.waitForSelector('[data-testid="message"], [data-testid="system-event"]');
       await shot(`${out}-dark.png`);
+      // A THREAD, which is the shape this surface is: the announcement's title as a heading,
+      // its answers as a list under it — a face, a name and a moment per post, in ONE column
+      // whoever wrote it — and the row that aims the composer at this thread. It used to be a
+      // chat inside a box: the reader's own answer on the opposite side of the card from a
+      // colleague's, and a centred time mark between every reply.
+      const threaded = await openThreadWithReplies(page);
+      await threaded.screenshot({ path: `${out}-thread-dark.png`, animations: "disabled" });
+      await setTheme("light");
+      await threaded.screenshot({ path: `${out}-thread-light.png`, animations: "disabled" });
+      // A phone: the card is the whole width, so the face, the name, the moment and the reply
+      // row are four things in one column — and the heading has to stay a heading in it. Taken
+      // BEFORE the composer is used, or the format bar floats over the subject field.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(250);
+      await shot(`${out}-thread-phone-light.png`);
+      await page.setViewportSize(VIEWPORT);
+      await page.waitForTimeout(250);
+      // …and the thread the composer is AIMED at says so, because the box is a screen below.
+      await threaded.locator('[data-testid="thread-reply"]').click();
+      await typeInComposer(page, "Rolling it back to yesterday's build for now.");
+      await page.waitForTimeout(200);
+      await shot(`${out}-thread-replying-light.png`);
+      await page.keyboard.press("Escape");
+      await clearComposer(page);
+      await setTheme("dark");
       // A channel post has a TITLE and a chat message does not: the composer's own field,
       // empty and then filled, and the post it becomes — the heading drawn as a heading.
       await shot(`${out}-subject-empty-dark.png`, '[data-testid="composer-shell"]');
@@ -3831,6 +3881,8 @@ if (import.meta.main) {
         `[preview] wrote ${out}-tree-light.png, ${out}-open-light.png, ` +
           `${out}-collapsed-light.png, ${out}-placement-light.png, ${out}-card-light.png, ` +
           `${out}-card-dark.png, ${out}-card-actions-dark.png, ${out}-dark.png, ` +
+          `${out}-thread-{light,dark}.png, ${out}-thread-replying-light.png, ` +
+          `${out}-thread-phone-light.png, ` +
           `${out}-subject-{empty-dark,light,phone-light}.png and ` +
           `${out}-titled-post-{light,dark}.png`,
       );

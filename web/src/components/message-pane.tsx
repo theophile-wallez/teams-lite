@@ -13,6 +13,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ChevronLeftIcon,
+  ArrowTurnBackwardIcon,
   ChevronRightIcon,
   Loading02Icon,
   MessageMultiple01Icon,
@@ -61,7 +62,7 @@ import { PresenceBadge } from "./presence-badge";
 import { usePresence } from "./use-presence";
 import { presenceIsUnknown } from "~/lib/presence";
 import { useModifierLabel } from "~/lib/platform";
-import { groupThreads, type Thread } from "~/lib/threads";
+import { groupThreads, replyCountLabel, type Thread } from "~/lib/threads";
 import { Composer } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
 import { TypingIndicator } from "./typing-indicator";
@@ -264,6 +265,10 @@ export function MessagePane(props: { onBack?: () => void }) {
   const pendingScroll = useAppState((s) => s.pendingScroll);
   const scrollToBottomNonce = useAppState((s) => s.scrollToBottomNonce);
   const readReceipts = useAppState((s) => s.readReceipts);
+  // Which thread the composer is aimed at, if any. There is ONE composer and it stands a
+  // screen below the thread it posts into, so the thread itself has to say it is the target
+  // (see `ThreadGroup`). Resolved once, where the reply starts (`PendingReply.threadRoot`).
+  const replyingTo = useAppState((s) => s.replyingTo);
   // The agent run writing in THIS thread, if any. One per conversation, and a transient
   // overlay on the message it is writing into (see lib/agent-run.ts).
   const agentRun = useAppState((s) => (s.openId ? s.agentRuns[s.openId] : undefined));
@@ -416,12 +421,19 @@ export function MessagePane(props: { onBack?: () => void }) {
     return groupThreads(messages);
   }, [isChannel, messages]);
 
-  // Which messages open a block of time, and what each one says (see
-  // lib/message-time.ts). Taken over the history AS DRAWN — one run for a chat, one per
-  // thread for a channel, since a reply's neighbour is the reply above it inside its own
-  // thread — and once per change of the history rather than per rendered bubble.
+  // Which messages open a block of time, and what each one says (see lib/message-time.ts).
+  // Taken over the history AS DRAWN, once per change of it rather than per rendered bubble.
+  //
+  // A CHANNEL gets NONE. The mark is a line about one running conversation — "the day
+  // changed", "an hour passed" — and a channel holds several at once: the posts a mark would
+  // fall between belong to different threads, so inside one thread's own card it cut the
+  // answers to one announcement into stamped fragments (measured on the fixtures: a centred
+  // "Fri 12:03 PM" between EVERY reply of a seven-reply thread, because a thread's answers
+  // are normally hours apart). A post in a thread carries WHEN beside WHO instead, which is
+  // where Teams puts it and the one place it says something about that post rather than about
+  // the gap above it (see `threadPost` in components/message-bubble.tsx).
   const timeMarks = useMemo(
-    () => messageTimeMarks(threads ? threads.map((t) => [t.lead, ...t.replies]) : [messages]),
+    () => (threads ? new Map<string, string>() : messageTimeMarks([messages])),
     [threads, messages],
   );
 
@@ -909,7 +921,7 @@ export function MessagePane(props: { onBack?: () => void }) {
     m: ChatMessage,
     prev?: ChatMessage,
     next?: ChatMessage,
-    opts?: { onPanel?: boolean },
+    opts?: { onPanel?: boolean; threadPost?: boolean },
   ) => {
     const seenBy = readAnchors.get(m.id);
     // When this message was sent, said once above the block it opens rather than on
@@ -946,6 +958,7 @@ export function MessagePane(props: { onBack?: () => void }) {
           <MessageBubble
             message={m}
             showSenderName={isGroup}
+            threadPost={opts?.threadPost}
             continuesAbove={sameAuthor(prev, m) && !mark}
             continuesBelow={sameAuthor(m, next) && !nextMark}
             onPanel={opts?.onPanel}
@@ -1185,6 +1198,8 @@ export function MessagePane(props: { onBack?: () => void }) {
                         thread={row.thread}
                         expanded={expandedThreads.has(row.thread.rootId)}
                         onToggle={() => toggleThread(row.thread.rootId)}
+                        replyTarget={replyingTo?.threadRoot === row.thread.rootId}
+                        onReply={doReply}
                         renderMsg={renderMsg}
                       />
                     ) : row.kind === "recording" ? (
@@ -1256,24 +1271,44 @@ export function MessagePane(props: { onBack?: () => void }) {
   );
 }
 
-/** One channel thread: the root post, an optional subject heading, and a
- *  collapsible "N replies" block (collapsed by default).
+/**
+ * ONE CHANNEL THREAD, drawn as a thread rather than as a stretch of chat: the
+ * announcement's own title as a heading, the posts under it as a LIST — a face, a name, a
+ * moment and the words, in one column whoever wrote them — and a **Reply** that puts the
+ * reader's next Enter inside this thread.
  *
- *  This card is the root post's own surface, so the post renders on it (`onPanel`)
- *  rather than bringing a second one of its own — a whole notifications channel is
- *  made of app cards, and a card inside a card frames the same words twice. */
+ * It used to be a chat inside a box, and every part of that was wrong for what a channel
+ * is. The reader's own answer floated right in the accent fill while a colleague's sat left
+ * in a grey one, so two posts in one thread read as two sides of a private argument; the
+ * history's centred block marks fell BETWEEN the replies, so a thread whose answers came an
+ * hour apart was cut into stamped fragments inside its own card; and nothing offered a way
+ * into the thread at all — the composer below posted a NEW one, so answering an
+ * announcement left an untitled card at the foot of the channel, beside the announcement
+ * instead of under it.
+ *
+ * The card is the thread's own surface — one surface, separated by a fine shadow rather
+ * than by a rule — so every post renders flush on it (`onPanel`, `threadPost`) rather than
+ * bringing a second one of its own: a whole notifications channel is made of app cards, and
+ * a card inside a card frames the same words twice.
+ */
 function ThreadGroup(props: {
   thread: Thread;
   expanded: boolean;
   onToggle: () => void;
+  /** Whether the composer is currently aimed AT this thread. There is one composer in this
+   *  app and it stands a screen below, so the thread being answered has to say so itself —
+   *  otherwise the reader's words are about to land somewhere they cannot see. */
+  replyTarget: boolean;
+  /** Answer this thread: aim the composer at its root and put the caret in the box. */
+  onReply: (message: ChatMessage) => void;
   renderMsg: (
     m: ChatMessage,
     prev?: ChatMessage,
     next?: ChatMessage,
-    opts?: { onPanel?: boolean },
+    opts?: { onPanel?: boolean; threadPost?: boolean },
   ) => ReactNode;
 }) {
-  const { thread, expanded, onToggle, renderMsg } = props;
+  const { thread, expanded, onToggle, replyTarget, onReply, renderMsg } = props;
   const { subject, lead, replies } = thread;
   return (
     // The horizontal padding is the post's own margin: the subject, the root post
@@ -1281,7 +1316,21 @@ function ThreadGroup(props: {
     // heading above it.
     <div
       data-testid="thread-group"
-      className="mb-3 rounded-2xl border border-border-subtle/60 bg-element/20 px-3 py-2.5"
+      // WHICH thread this card is. The history is virtualized, so a card comes and goes as
+      // the reader scrolls and "the first thread with replies" is not a stable thing to hold
+      // on to — the sentinel discipline the composer's own `data-conversation-id` and the
+      // diff pane's `data-path` already follow, for that reason.
+      data-thread-root={thread.rootId}
+      data-reply-target={replyTarget ? "true" : undefined}
+      className={cn(
+        // ONE surface, and it is separated from the page by a fine shadow rather than by a
+        // border: the posts inside it carry no fill of their own now, so this card is the
+        // only thing that says where the thread begins and ends.
+        "mb-3 rounded-2xl bg-card px-3 py-3 shadow-card",
+        // While the composer is aimed here, and only then: one accent, on the one thread
+        // the next Enter lands in.
+        replyTarget && "ring-1 ring-primary/40",
+      )}
     >
       {/* The post's TITLE. It is drawn AS a title — the size and weight Teams gives an
           announcement's headline — because that differentiation is the whole point of the
@@ -1297,7 +1346,7 @@ function ThreadGroup(props: {
           {subject}
         </h3>
       )}
-      {renderMsg(lead, undefined, undefined, { onPanel: true })}
+      {renderMsg(lead, undefined, undefined, { onPanel: true, threadPost: true })}
       {replies.length > 0 && (
         <>
           <button
@@ -1307,22 +1356,58 @@ function ThreadGroup(props: {
             data-testid="thread-toggle"
             // The negative margin pulls the label back to the post's edge while the
             // padding stays a hit area for the hover background.
-            className="-ml-1.5 mt-1 flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
+            className="-ml-1.5 mt-1.5 flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
           >
             <HugeiconsIcon
               icon={ChevronRightIcon}
               className={cn("size-3.5 transition-transform duration-200 ease-out", expanded && "rotate-90")}
               strokeWidth={1.8}
             />
-            {replies.length} {replies.length === 1 ? "reply" : "replies"}
+            {replyCountLabel(replies.length)}
           </button>
           {expanded && (
-            <div className="mt-1 border-l-2 border-border-subtle/60 pl-2 animate-in fade-in slide-in-from-top-1 duration-200 ease-out">
-              {replies.map((r, i) => renderMsg(r, replies[i - 1], replies[i + 1]))}
+            // The replies are INDENTED to the width of the root post's own face, so the
+            // thread reads as answers under an announcement rather than as a second list
+            // beside it — and the hairline down the left is the one rule this card keeps,
+            // because it is a connector rather than a surface edge.
+            <div
+              data-testid="thread-replies"
+              className="mt-1 border-l border-border-subtle pl-2 animate-in fade-in slide-in-from-top-1 duration-200 ease-out"
+            >
+              {replies.map((r, i) =>
+                // `onPanel` for the same reason the root post gets it: the thread's card is
+                // the surface, so a reply that would bring one of its own — a bot answering
+                // with an app card — renders flush instead of as a card inside a card.
+                renderMsg(r, replies[i - 1], replies[i + 1], { onPanel: true, threadPost: true }),
+              )}
             </div>
           )}
         </>
       )}
+      {/* The way IN. Teams and Discord both put a reply box at the foot of the thread; there
+          is one composer in this app (its `data-conversation-id` is what a sanctioned live
+          driver proves its target with), so this row aims that one instead of adding a
+          second. Pressing it on a FOLDED thread opens it too: nobody answers a conversation
+          they cannot read. */}
+      <button
+        type="button"
+        data-testid="thread-reply"
+        aria-label={subject ? `Reply in ${subject}` : "Reply in this thread"}
+        onClick={() => {
+          if (replies.length > 0 && !expanded) onToggle();
+          onReply(lead);
+        }}
+        className={cn(
+          // 44px under a thumb, which is the floor every target this app draws for one holds
+          // (§ A HOLD is how a phone reaches a menu). It spans the card, because a reply box
+          // is what stands here in the surface this is modelled on.
+          "mt-2 flex h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-[13px] text-text-faint transition-colors hover:bg-accent hover:text-foreground",
+          replyTarget && "text-primary",
+        )}
+      >
+        <HugeiconsIcon icon={ArrowTurnBackwardIcon} className="size-4 shrink-0" strokeWidth={1.6} />
+        {replyTarget ? "Writing a reply below…" : "Reply"}
+      </button>
     </div>
   );
 }
