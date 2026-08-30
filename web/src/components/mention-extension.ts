@@ -17,6 +17,7 @@
 
 import { Node, mergeAttributes } from "@tiptap/react";
 import { shortenMentionLabel } from "~/lib/mentions";
+import type { MentionTargetKind } from "~/lib/protocol";
 
 export const MENTION_ITEMTYPE = "http://schema.skype.com/Mention";
 
@@ -35,7 +36,7 @@ declare module "@tiptap/core" {
         to: number;
         /** What the mention names. Absent is a person — the narrowest thing it can be
          *  (see `MentionTargetKind`), which is also what the wire defaults to. */
-        kind?: "person" | "channel";
+        kind?: MentionTargetKind;
       }) => ReturnType;
     };
   }

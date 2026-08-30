@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { agentDisplayName } from "~/lib/agent-message";
 import {
   mentionOptionKey,
+  mentionOptionTarget,
   type AgentCandidate,
   type MentionCandidate,
   type MentionOption,
@@ -59,13 +60,7 @@ export function MentionSuggestions(props: {
             data-active={active}
             data-testid="mention-suggestion"
             data-kind={option.kind}
-            data-mri={
-              option.kind === "person"
-                ? option.person.mri
-                : option.kind === "channel"
-                  ? option.channel.mri
-                  : undefined
-            }
+            data-mri={mentionOptionTarget(option)?.mri}
             data-agent={option.kind === "agent" ? option.agent.backend : undefined}
             data-persona={option.kind === "agent" ? option.agent.persona ?? undefined : undefined}
             // Keep the caret where it is: the click must not blur the editor before

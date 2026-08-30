@@ -23,11 +23,9 @@ import {
 } from "./agent";
 import { agentDisplayName } from "./agent-message";
 import { agentPersonas } from "./agent-persona";
+import { isChannelThreadId, type MentionTargetKind } from "./protocol";
 
-/** What a mention names. Mirrors `teams_send::MentionKind`, and an ABSENT value is a
- *  person for the reason the wire's own default is: a person notifies one colleague,
- *  where a channel notifies everybody following it. */
-export type MentionTargetKind = "person" | "channel";
+export type { MentionTargetKind } from "./protocol";
 
 /** Something a message can @mention: its MRI, and the name to show. */
 export type MentionCandidate = {
@@ -59,29 +57,26 @@ export type OutboundMention = {
  * `teams_send::parse_mentions`:
  *
  *   * only in a CHANNEL. A chat has no channel to name, and the backend refuses one there
- *     whatever a page offers.
+ *     whatever a page offers. That is decided by the ID'S OWN SHAPE rather than by a flag
+ *     the caller passes — this is the one function that says whether the row is offered, so
+ *     it must answer the way the backend does or the page would draw a control whose press
+ *     the backend refuses, which is what this app draws nothing instead of.
  *   * the mri IS the conversation, which is what the backend checks it against. Measured
  *     on this tenant, 176 of 177 real channel mentions name the very thread their message
  *     was posted in — so nothing here is invented, and a mention of ANOTHER channel is a
  *     shape this app neither offers nor accepts.
  *   * the name is the channel's own. A row showing a thread id is a row nobody can pick,
- *     which is the rule that already keeps an unnamed colleague out of the list.
+ *     which is the rule that already keeps an unnamed colleague out of the list — and it is
+ *     also what makes a CHAT answer null with nothing else asked: the caller reads the name
+ *     off the sidebar's channel list, which holds no row for a chat.
  */
 export function channelMentionCandidate(input: {
   conversationId: string | null;
   name: string;
-  isChannel: boolean;
 }): MentionCandidate | null {
   const mri = input.conversationId?.trim() ?? "";
   const name = input.name.trim();
-  if (!input.isChannel || !mri || !name) return null;
-  // The ID'S OWN SHAPE, checked here rather than trusted from the caller: this is the one
-  // function that decides whether the row is offered, and it must answer the way the
-  // backend does or the page would draw a control whose press the backend refuses — which
-  // is what this app draws nothing instead of. `19:…@thread.tacv2` is what a channel is
-  // (`teams_read::is_channel_thread_id`), and a channel POST's own deep-link id carries a
-  // `;messageid=` suffix that is not part of the channel, so only the part before it counts.
-  if (!/^19:[^;]*@thread\.tacv2$/.test(mri.split(";")[0] ?? "")) return null;
+  if (!mri || !name || !isChannelThreadId(mri)) return null;
   return { mri, name, kind: "channel" };
 }
 
@@ -337,6 +332,21 @@ export type MentionOption =
   | { kind: "person"; person: MentionCandidate }
   | { kind: "channel"; channel: MentionCandidate }
   | { kind: "agent"; agent: AgentCandidate };
+
+/**
+ * The mention TARGET behind a row, or null for an agent — which is not one.
+ *
+ * A person and the channel differ in what a picked row NAMES and in nothing else the
+ * caller does with it: both insert one chip, from one mri and one label. So the two
+ * surfaces that act on a row (the list's own `data-mri`, and the pick that inserts the
+ * chip) ask this rather than each unpacking the union themselves — two spellings of
+ * "which candidate is this?" would be two places to forget the channel.
+ */
+export function mentionOptionTarget(option: MentionOption): MentionCandidate | null {
+  if (option.kind === "person") return option.person;
+  if (option.kind === "channel") return option.channel;
+  return null;
+}
 
 /** A stable key for one row, per kind, so two lists never collide on one id. */
 export function mentionOptionKey(option: MentionOption): string {

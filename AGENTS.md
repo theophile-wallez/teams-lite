@@ -4566,10 +4566,20 @@ and the CSS never learned about it.
 `onAccentFill` in `message-bubble.tsx` is the answer, emitted as `[data-on-accent]`, and it
 is neither of the two flags that already existed: `mine` says whose the message is (which
 decides Edit and Delete), `anchoredRight` says which side it sits on, and only this one says
-"is there an accent behind these words". It is the exact condition the `bg-bubble-mine`
-branch is written under — `!bare && !isDeleted && !isUnsupported && !isLocked &&
-anchoredRight` — so it is true of the accent bubble and false of everything else the reader
-wrote: a channel post, a link-only or picture-only message, a deleted or locked ghost.
+"is there an accent behind these words". It is `!bare && !isDeleted && !isUnsupported &&
+!isLocked && anchoredRight` — true of the accent bubble and false of everything else the
+reader wrote: a channel post, a link-only or picture-only message, a deleted or locked ghost.
+
+**AND THE `bg-bubble-mine` BRANCH READS IT rather than restating it**, which is the whole
+value of hoisting the flag and was missing from the first version: the branch still spelled
+its own `anchoredRight`, so the attribute the DOM carried and the fill a reader saw were two
+expressions that happened to agree. They cannot drift now — and drift is the live risk rather
+than a hypothetical one, because that ternary has grown a ghost state three times (`isDeleted`,
+then `isUnsupported`, then `isLocked` when sealing shipped) and `bare` twice (`emojiOnly`,
+`threadPost`). A fourth added to one and not the other puts the chip back to white on white,
+in a state no test covers. Nothing pins this and nothing needs to: inside `!bare` and the
+non-ghost branch the two are the same expression, so the equivalence is what a reader checks
+rather than what a spec asserts.
 
 Four rules hold it:
 
@@ -4639,7 +4649,14 @@ Eight rules hold it, and each is pinned by a test:
   inbound-mention-pasted-back case (`mentionMri`).
 - **THE MRI'S SHAPE MUST MATCH THE KIND IT CLAIMS**, on the page as well: a `19:…@thread.tacv2`
   under the person kind and an `8:…` under the channel kind are both refused down to plain
-  text, because neither pair would notify what it says it does.
+  text, because neither pair would notify what it says it does. **And "what a channel id is"
+  is ONE function on this side** — `protocol::isChannelThreadId`, the page's single spelling of
+  `teams_read::is_channel_thread_id` — asked by the list that OFFERS the row and again by the
+  serializer that turns the chip into a mention. Two spellings disagreeing by a character is
+  not a tidiness argument: the offer would insert a chip the send then refuses, so the channel's
+  name posts as plain words with nobody notified, `sent: true`, silently. It shipped as two
+  regexes that really did differ (one stripped `;messageid=`, one bounded the charset), and a
+  mutation of the shared one now fails a test on EACH side.
 - **It needs NO GATE OF ITS OWN.** `send` is already an `OUTWARD_METHODS` entry and the kind
   rides in its params exactly as a picture, a title and a thread address do — this narrows
   WHAT the message this method already posts names, and the consent is the same click on Send.

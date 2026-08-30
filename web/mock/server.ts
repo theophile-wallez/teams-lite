@@ -6077,7 +6077,7 @@ function parseSendMentions(value: unknown, conversation: string): OutboundMentio
       }
     } else {
       // Only a channel post can mention a channel, and only the one it is posted to.
-      if (!conversation.split(";")[0]!.endsWith("@thread.tacv2")) {
+      if (!mockIsChannelThreadId(conversation)) {
         throw new Error("only a channel post can mention a channel");
       }
       if (o.mri !== conversation) {

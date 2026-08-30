@@ -376,34 +376,33 @@ describe("channelMentionCandidate", () => {
   it("names the channel by its OWN thread id, which is what the backend checks", () => {
     // Measured on this tenant: 176 of 177 real channel mentions name the very thread their
     // message was posted in, so the mri is the conversation and nothing is invented here.
-    expect(channelMentionCandidate({ conversationId, name: "Incidents", isChannel: true })).toEqual(
-      { mri: conversationId, name: "Incidents", kind: "channel" },
-    );
+    expect(channelMentionCandidate({ conversationId, name: "Incidents" })).toEqual({
+      mri: conversationId,
+      name: "Incidents",
+      kind: "channel",
+    });
   });
 
   it("offers nothing where there is no channel to name", () => {
     // A chat has none — and the backend refuses one there whatever a page offers, so this
     // is the page agreeing with that rail rather than a second, softer copy of it.
     expect(
-      channelMentionCandidate({
-        conversationId: "19:abc@thread.v2",
-        name: "Design crew",
-        isChannel: false,
-      }),
+      channelMentionCandidate({ conversationId: "19:abc@thread.v2", name: "Design crew" }),
     ).toBeNull();
     // …and nothing without an id or a name: a row showing a thread id is a row nobody can
-    // pick, which is the rule that already keeps an unnamed colleague out of the list.
-    expect(channelMentionCandidate({ conversationId, name: "  ", isChannel: true })).toBeNull();
-    expect(channelMentionCandidate({ conversationId: null, name: "x", isChannel: true })).toBeNull();
+    // pick, which is the rule that already keeps an unnamed colleague out of the list. The
+    // empty NAME is also how a chat answers null with nothing else asked, since the caller
+    // reads it off the sidebar's channel list — which holds no row for one.
+    expect(channelMentionCandidate({ conversationId, name: "  " })).toBeNull();
+    expect(channelMentionCandidate({ conversationId: null, name: "x" })).toBeNull();
   });
 
-  it("checks the id's own shape rather than trusting the caller's flag", () => {
+  it("decides on the ID'S OWN SHAPE, which is what the backend checks", () => {
     // This is the one function that decides whether the row is offered, so it has to answer
     // the way the backend does: a page that offered a channel mention the backend refuses
     // would be drawing a control whose press reports a refusal.
     for (const id of ["19:abc@thread.v2", "8:orgid:ada", "48:notes", "19:abc@unq.gbl.spaces"]) {
-      expect(channelMentionCandidate({ conversationId: id, name: "General", isChannel: true }))
-        .toBeNull();
+      expect(channelMentionCandidate({ conversationId: id, name: "General" })).toBeNull();
     }
     // A channel POST's own deep-link id is still that channel: the `;messageid=` suffix names
     // a thread root rather than a conversation of its own (`teams_read::base_thread_id`).
@@ -411,7 +410,6 @@ describe("channelMentionCandidate", () => {
       channelMentionCandidate({
         conversationId: `${conversationId};messageid=1784899486984`,
         name: "Incidents",
-        isChannel: true,
       })?.kind,
     ).toBe("channel");
   });

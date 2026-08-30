@@ -625,9 +625,10 @@ function MessageBubbleImpl(props: {
       !agent &&
       (linkOnly || imageOnly || recordingOnly || cardOnly || emojiOnly));
 
-  // Whether this message really PAINTS the accent fill behind its words — the exact
-  // condition the `bg-bubble-mine` branch below is written under, hoisted so the DOM can
-  // state it. Anything tinted FOR that fill has to key on this and never on `data-mine`:
+  // Whether this message really PAINTS the accent fill behind its words. It is what the
+  // `bg-bubble-mine` branch below is written ON — the branch reads this flag rather than
+  // restating it, so the attribute the DOM carries and the fill a reader sees can never
+  // disagree. Anything tinted FOR that fill has to key on this and never on `data-mine`:
   // `mine` says whose the message is (which decides Edit and Delete), `anchoredRight` says
   // which side it sits on, and neither answers "is there an accent behind these words".
   // A post in a channel thread, a link-only message and a picture-only one are all the
@@ -1064,9 +1065,14 @@ function MessageBubbleImpl(props: {
               // sealed under a passphrase this machine does not hold — drops the accent
               // fill for a muted, dashed "ghost" bubble (the same on both sides) so
               // it reads as absent rather than as a real message.
+              // `onAccentFill` rather than `anchoredRight` here, and that is the whole
+              // point of hoisting it: the flag the DOM states and the fill really painted
+              // are then ONE expression, so a fifth ghost state added to the line above
+              // cannot leave `[data-on-accent]` claiming an accent nothing draws — which
+              // is the white-on-white mention chip this branch was fixed for.
               isDeleted || isUnsupported || isLocked
                 ? "border border-dashed border-border bg-transparent text-text-dim shadow-none"
-                : anchoredRight
+                : onAccentFill
                 ? "bg-bubble-mine text-bubble-mine-foreground shadow-chip"
                 : "bg-bubble-incoming text-bubble-incoming-foreground shadow-card",
               // An agent's reply takes the incoming surface and one hairline more, so it

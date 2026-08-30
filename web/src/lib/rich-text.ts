@@ -14,7 +14,12 @@
 // it as HTML eats anything in angle brackets. `parseMessageBody` is the choke point
 // that reads each body the way its `BodyFormat` says it must be read.
 
-import { mediaNeedsProxy, type BodyFormat } from "./protocol";
+import {
+  isChannelThreadId,
+  mediaNeedsProxy,
+  type BodyFormat,
+  type MentionTargetKind,
+} from "./protocol";
 
 /** A semantic element tag we know how to render. */
 export type RichTag =
@@ -97,7 +102,7 @@ export type RichAttrs = {
    *  `mentionType` in `properties.mentions` rather than on the span). It is what
    *  {@link serializeTeamsMessage} turns into that list's own `kind`, and reading it as a
    *  channel by default would notify a whole channel from a message that named one person. */
-  mentionKind?: "person" | "channel";
+  mentionKind?: MentionTargetKind;
   /** Agent tags only: the CLI the prefix summons (`claude`, `opencode`), which is the
    *  mark and the colour the chip wears. */
   backend?: string;
@@ -294,7 +299,7 @@ function isMention(attrs: RawAttrs): boolean {
  *  the backend refuses one anyway. */
 function mentionMri(
   raw: string | undefined,
-  kind: "person" | "channel" | undefined,
+  kind: MentionTargetKind | undefined,
 ): string | undefined {
   if (!raw) return undefined;
   const mri = decodeEntities(raw).trim();
@@ -303,9 +308,12 @@ function mentionMri(
   // it is refused exactly as it always was — that is the inbound mention somebody pasted
   // back in, which names nobody this app can prove, and reading it as a channel mention
   // would turn a paste into a message that notifies a whole channel.
-  if (kind === "channel") {
-    return /^19:[A-Za-z0-9:._-]{1,120}@thread\.tacv2$/.test(mri) ? mri : undefined;
-  }
+  //
+  // The channel half asks `isChannelThreadId`, which is the very function that decided to
+  // OFFER the row (`channelMentionCandidate`): a second spelling here that disagreed by a
+  // character would refuse the chip that list had just inserted, and the send would post
+  // the channel's name as plain words with nobody notified.
+  if (kind === "channel") return isChannelThreadId(mri) ? mri : undefined;
   return /^8:[A-Za-z0-9:._@-]{1,120}$/.test(mri) ? mri : undefined;
 }
 
@@ -1184,7 +1192,7 @@ export type SerializedMention = {
   display_name: string;
   /** What it names, absent for a person. It travels as `mentionType`, so a channel
    *  mention that lost it would post as a colleague: blue text notifying nobody. */
-  kind?: "person" | "channel";
+  kind?: MentionTargetKind;
 };
 
 /** Collects the mentions found while serializing, and hands out their indices. */

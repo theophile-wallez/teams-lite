@@ -796,6 +796,34 @@ export type MessageMention = {
   display_name: string;
 };
 
+/** What a mention this app WRITES may name — the closed half of the open set above,
+ *  mirroring `teams_send::MentionKind`. An ABSENT value is a person for the reason the
+ *  wire's own default is: a person notifies one colleague, where a channel notifies
+ *  everybody following it, so the narrowest reading is the safe one.
+ *
+ *  It lives here rather than beside the composer's own candidate list because three
+ *  surfaces state it — the list, the editor's node and the serializer — and one union
+ *  spelled in three files is three chances to widen one of them alone. */
+export type MentionTargetKind = "person" | "channel";
+
+/**
+ * Whether an id names a CHANNEL — the one shape a channel mention may carry, and the
+ * page's single spelling of `teams_read::is_channel_thread_id`.
+ *
+ * It is ONE function for a measured reason rather than for tidiness. The composer decides
+ * with it whether to OFFER the channel row, and the serializer decides with it whether the
+ * chip that row inserted really becomes a mention — so two spellings that disagreed by a
+ * character would draw a chip the send then quietly posts as plain words, with the channel
+ * named and nobody notified. That is exactly the invisible-ping failure the mention pair
+ * exists to prevent (§ @mentions), and it would be silent: the message posts, `sent: true`.
+ *
+ * A channel POST's own deep-link id carries a `;messageid=` suffix that is not part of the
+ * channel, so only the part before it counts — which is what the Rust predicate does too.
+ */
+export function isChannelThreadId(id: string): boolean {
+  return /^19:[^;]*@thread\.tacv2$/.test(id.split(";")[0] ?? "");
+}
+
 /** A person's directory card, as the `profile` method returns it (mirrors the Rust
  *  `Profile` in src/teams_profiles.rs). Every field but `mri` may be empty — a
  *  guest or a service account has little in the directory — so the card renders

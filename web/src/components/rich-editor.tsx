@@ -29,6 +29,7 @@ import { answerRequest, type AgentAnswer } from "~/lib/agent-answer";
 import { COMPOSER_FIELD_CLASS } from "~/lib/composer-field";
 import {
   mentionOptions,
+  mentionOptionTarget,
   mentionQueryBefore,
   type AgentCandidate,
   type MentionCandidate,
@@ -494,7 +495,8 @@ export function RichEditor(props: {
     // NAMES, which is what decides how many people the send notifies. It travels with the
     // node so the serializer can state it (see `MentionNode`), and the backend checks it
     // against the conversation before anything leaves this machine.
-    const target = option.kind === "channel" ? option.channel : option.person;
+    const target = mentionOptionTarget(option);
+    if (!target) return;
     editor
       .chain()
       .insertMention({

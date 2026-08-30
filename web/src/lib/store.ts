@@ -87,6 +87,7 @@ import {
   type UpdateInfo,
   type UpdateProgress,
   type WriteLock,
+  channelLabel,
   UNKNOWN_WRITE_LOCK,
 } from "./protocol";
 import { threadReplyQuotes, threadRootOf } from "./threads";
@@ -3112,13 +3113,26 @@ export class TeamsController {
    */
   private publishMentionCandidates(id: string, people: MentionCandidate[]): void {
     if (this.get().openId !== id) return;
+    this.set({ mentionCandidates: this.mentionTargetsFor(id, people) });
+  }
+
+  /**
+   * The same list, for the caller that cannot go through the guard above.
+   *
+   * `openConversation` writes `mentionCandidates` inside the batch that SETS `openId`, so
+   * the guard would refuse its own conversation — and a second spelling that simply read the
+   * roster cache is what left a channel with no channel row until the composer's next "@"
+   * re-published it. One place decides what an "@" offers.
+   */
+  private mentionTargetsFor(id: string, people: MentionCandidate[]): MentionCandidate[] {
     const channel = this.get().channels.find((c) => c.id === id);
     const asMention = channelMentionCandidate({
       conversationId: id,
-      name: channel?.name ?? "",
-      isChannel: Boolean(channel),
+      // The name the SIDEBAR draws, through its own one mapping — so the row cannot be
+      // labelled differently from the channel it names two panes away.
+      name: channel ? channelLabel(channel) : "",
     });
-    this.set({ mentionCandidates: asMention ? [asMention, ...people] : people });
+    return asMention ? [asMention, ...people] : people;
   }
 
   // ---- conversations -------------------------------------------------------
@@ -4816,9 +4830,10 @@ export class TeamsController {
       // Show any cached "seen by" positions instantly on re-open; the fetch below
       // (and live `read_receipt` events) then reconcile them.
       readReceipts: cachedReceipts ? [...cachedReceipts.values()] : [],
-      // Whoever this thread can mention, when we already know. Never another
-      // thread's people: this slice belongs to the open conversation alone.
-      mentionCandidates: this.mentionsByConv.get(id) ?? [],
+      // Whoever this thread can mention, when we already know — the CHANNEL itself
+      // included, through the one function that decides that. Never another thread's
+      // people: this slice belongs to the open conversation alone.
+      mentionCandidates: this.mentionTargetsFor(id, this.mentionsByConv.get(id) ?? []),
     });
 
     // Fetch the current read positions best-effort — never blocks the open, and a
