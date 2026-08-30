@@ -1184,6 +1184,37 @@ describe("serializeTeamsMessage — @mentions", () => {
     expect(mentions).toEqual([]);
   });
 
+  it("sends the CHANNEL as a channel mention, and only where it says so", () => {
+    // The pair for a channel is the same pair: an indexed span in the body, and an entry
+    // saying what that index names. What differs is the `kind`, which becomes the service's
+    // own `mentionType` — a channel mention described as a person is blue text notifying
+    // nobody, and that is the one silent failure this whole shape exists to prevent.
+    const channel = "19:eng-incidents@thread.tacv2";
+    const chip =
+      `<span itemscope="" itemtype="http://schema.skype.com/Mention" class="composer-mention" ` +
+      `contenteditable="false" data-mri="${channel}" data-mention-kind="channel">Incidents</span>`;
+    const { html, mentions } = serializeTeamsMessage(`<p>${chip} is on fire</p>`);
+    expect(html).toBe(
+      '<p><span itemscope="" itemtype="http://schema.skype.com/Mention" itemid="0">' +
+        "Incidents</span> is on fire</p>",
+    );
+    expect(mentions).toEqual([
+      { itemid: 0, mri: channel, display_name: "Incidents", kind: "channel" },
+    ]);
+
+    // The mri's SHAPE has to match what the chip claims. A person's mri under the channel
+    // kind, and a channel's under the person kind, are both refused down to plain text:
+    // neither pair would notify what it says it does.
+    const mismatched = [
+      `<span itemscope="" itemtype="http://schema.skype.com/Mention" data-mri="8:orgid:ada" ` +
+        `data-mention-kind="channel">Ada</span>`,
+      `<span itemscope="" itemtype="http://schema.skype.com/Mention" data-mri="${channel}">Incidents</span>`,
+    ];
+    for (const bad of mismatched) {
+      expect(serializeTeamsMessage(`<p>${bad}</p>`).mentions).toEqual([]);
+    }
+  });
+
   it("carries no mentions for an ordinary message", () => {
     expect(serializeTeamsMessage("<p>just words</p>")).toEqual({
       html: "<p>just words</p>",

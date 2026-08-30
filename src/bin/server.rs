@@ -4756,10 +4756,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let images = teams_send::parse_send_images(params)?;
             // Who the message @mentions. The body carries an index per mention and this
             // list says who each index names, so Teams notifies them (see
-            // `teams_send::Mention`). Validated before anything leaves this machine.
+            // `teams_send::Mention`). Validated before anything leaves this machine — and
+            // the CONVERSATION goes in with it, because a CHANNEL mention notifies whoever
+            // follows the channel and is therefore allowed to name only the channel this
+            // very send is addressed at (see `parse_mentions`).
             let mentions = params
                 .get("mentions")
-                .map(teams_send::parse_mentions)
+                .map(|value| teams_send::parse_mentions(value, &conv))
                 .transpose()?
                 .unwrap_or_default();
             // When Teams is to deliver it, if not now. It rides in this method's params

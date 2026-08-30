@@ -89,11 +89,49 @@ pub struct EmojiArt {
 pub struct Mention {
     /// The index the body's span carries. Assigned by the composer in document order.
     pub itemid: u32,
-    /// The mentioned person's MRI — what makes Teams notify them.
+    /// The mentioned person's MRI — what makes Teams notify them. For a CHANNEL mention
+    /// it is the channel's own thread id instead (see {@link MentionKind::Channel}).
     pub mri: String,
     /// The text the span shows. Teams lets the author shorten it ("John De Doe" ->
     /// "John"), so it is not necessarily the person's full directory name.
     pub display_name: String,
+    /// WHAT is being mentioned, which the service reads as `mentionType`.
+    pub kind: MentionKind,
+}
+
+/// What a mention names. It travels as `properties.mentions[].mentionType`, and it is
+/// what decides how many people the send notifies — so it is a closed set here rather
+/// than a string a client supplies.
+///
+/// The read path already decodes four (`person`, `channel`, `team`, `everyone`, plus
+/// whatever else the service publishes) and keeps every one of them; only these two are
+/// ever WRITTEN. A `team` and an `everyone` mention reach further than a channel does and
+/// neither is offered anywhere in this app, so admitting them here would be a rail with
+/// nothing behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MentionKind {
+    /// One colleague. `8:…`, and the only kind an agent's answer may write.
+    #[default]
+    Person,
+    /// The CHANNEL the message is being posted to — which notifies whoever follows it,
+    /// as loudly as each of them asked Teams to be notified. Its mri is the channel's own
+    /// `19:…@thread.tacv2` thread id, and it must be the very conversation this send is
+    /// addressed at (see `parse_mentions`).
+    Channel,
+}
+
+impl MentionKind {
+    /// The spelling the service publishes for this kind, which is what an outbound
+    /// `mentionType` has to be. MEASURED on this tenant's own history: over 767 stored
+    /// mentions the read path decoded `person` (488), `channel` (177), `team` (93) and
+    /// `everyone` (9) — so these are the service's own words rather than ones invented
+    /// here, which is the same footing the channel thread's `;messageid=` address rests on.
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Channel => "channel",
+        }
+    }
 }
 
 /// How many people one message may mention. Far above any real message, and it bounds
@@ -222,25 +260,60 @@ struct MentionParams {
     itemid: u32,
     mri: String,
     display_name: String,
+    /// Absent for a person, which is what a page too old to name one sends — and the one
+    /// default that can only ever notify a single colleague. Reading an absent kind as
+    /// `channel` would let an older page notify a whole channel by accident.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 /// Parse and validate the optional `mentions` list carried by the send RPC.
 ///
-/// Every mention must name a person (never a thread or an app), carry visible text, and
-/// be addressed by an `itemid` no other mention in the same message uses — otherwise
-/// two spans in the body would resolve to one person and one of them would point at
-/// nobody.
-pub fn parse_mentions(value: &Value) -> Result<Vec<Mention>> {
+/// Every mention must name a PERSON or the CHANNEL this message is being posted to, carry
+/// visible text, and be addressed by an `itemid` no other mention in the same message uses
+/// — otherwise two spans in the body would resolve to one target and one of them would
+/// point at nobody.
+///
+/// `conversation` is what the CHANNEL kind is checked against, and that rail is the whole
+/// reason this widening is safe to make. A channel mention notifies everybody who follows
+/// that channel, so the one thing this app must never let a client do is notify a channel
+/// the user is not writing in: the mri has to BE the conversation the send is addressed at.
+/// MEASURED on this tenant's own history — of 177 stored channel mentions 176 name the very
+/// thread their message was posted in, and all 93 `team` and all 9 `everyone` ones do too —
+/// so the rail matches what the service itself publishes rather than narrowing it by
+/// invention. The one outlier is a cross-channel mention this app does not offer and
+/// therefore refuses: the cost is stated rather than papered over.
+pub fn parse_mentions(value: &Value, conversation: &str) -> Result<Vec<Mention>> {
     let list = value.as_array().context("mentions must be a list")?;
     anyhow::ensure!(list.len() <= MAX_MENTIONS, "too many mentions in one message");
     let mut out: Vec<Mention> = Vec::with_capacity(list.len());
     for entry in list {
         let params: MentionParams =
             serde_json::from_value(entry.clone()).context("invalid mention")?;
-        anyhow::ensure!(
-            crate::teams_profiles::is_person_mri(&params.mri),
-            "a mention must name a person"
-        );
+        let kind = match params.kind.as_deref() {
+            None | Some("person") => MentionKind::Person,
+            Some("channel") => MentionKind::Channel,
+            // Never a name this build does not know: `mentionType` decides how many people
+            // the send reaches, so an unrecognised one must not be forwarded to the service
+            // on the chance that it means something narrow.
+            Some(other) => anyhow::bail!("a mention cannot name a {other}"),
+        };
+        match kind {
+            MentionKind::Person => anyhow::ensure!(
+                crate::teams_profiles::is_person_mri(&params.mri),
+                "a mention must name a person"
+            ),
+            MentionKind::Channel => {
+                anyhow::ensure!(
+                    crate::teams_read::is_channel_thread_id(conversation),
+                    "only a channel post can mention a channel"
+                );
+                anyhow::ensure!(
+                    params.mri == conversation,
+                    "a channel mention must name the channel being posted to"
+                );
+            }
+        }
         let display_name = params.display_name.trim().to_string();
         anyhow::ensure!(!display_name.is_empty(), "a mention must show a name");
         anyhow::ensure!(
@@ -255,7 +328,7 @@ pub fn parse_mentions(value: &Value) -> Result<Vec<Mention>> {
             out.iter().all(|m| m.itemid != params.itemid),
             "two mentions share one itemid"
         );
-        out.push(Mention { itemid: params.itemid, mri: params.mri, display_name });
+        out.push(Mention { itemid: params.itemid, mri: params.mri, display_name, kind });
     }
     Ok(out)
 }
@@ -1213,7 +1286,12 @@ fn attach_mentions(body: &mut Value, content: &str, mentions: &[Mention]) -> Res
                 "@type": "http://schema.skype.com/Mention",
                 "itemid": mention.itemid,
                 "mri": mention.mri,
-                "mentionType": "person",
+                // What the mention NAMES, in the service's own spelling (see
+                // `MentionKind::wire`). It was written `"person"` literally, which was
+                // right while a person was the only thing this app could mention and would
+                // now describe a channel mention as a colleague — blue text notifying
+                // nobody, which is the exact silent failure this pair is guarded against.
+                "mentionType": mention.kind.wire(),
                 "displayName": mention.display_name,
             })
         })
@@ -1848,6 +1926,7 @@ mod tests {
             itemid: 0,
             mri: "8:orgid:abc-123".into(),
             display_name: "John".into(),
+            kind: MentionKind::Person,
         }];
         let html = mention_html(0, "John");
         let body = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None, None, None).unwrap();
@@ -1882,6 +1961,7 @@ mod tests {
             itemid: 1,
             mri: "8:orgid:abc".into(),
             display_name: "John".into(),
+            kind: MentionKind::Person,
         }];
         let html = mention_html(0, "John");
         assert!(
@@ -1902,6 +1982,7 @@ mod tests {
             itemid: 0,
             mri: "8:orgid:abc-123".into(),
             display_name: "John".into(),
+            kind: MentionKind::Person,
         }];
         let html = mention_html(0, "John");
         let sent = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None, None, None).unwrap();
@@ -1939,6 +2020,7 @@ mod tests {
             itemid: 0,
             mri: "8:orgid:abc-123".into(),
             display_name: "John".into(),
+            kind: MentionKind::Person,
         }];
         let html = mention_html(0, "John");
         let at = 1_800_000_000_000_i64;
@@ -1980,6 +2062,7 @@ mod tests {
             itemid: 0,
             mri: "8:orgid:abc-123".into(),
             display_name: "John".into(),
+            kind: MentionKind::Person,
         }];
         let html = mention_html(0, "John");
         let at = 1_800_000_000_000_i64;
@@ -2181,7 +2264,7 @@ mod tests {
             { "itemid": 0, "mri": "8:orgid:abc", "display_name": "  John  " },
             { "itemid": 1, "mri": "8:orgid:def", "display_name": "Ada Lovelace" }
         ]);
-        let mentions = parse_mentions(&value).unwrap();
+        let mentions = parse_mentions(&value, CHAT).unwrap();
         assert_eq!(mentions.len(), 2);
         assert_eq!(mentions[0].display_name, "John", "the name is trimmed");
         assert_eq!(mentions[1].mri, "8:orgid:def");
@@ -2209,13 +2292,91 @@ mod tests {
             json!([{ "mri": "8:orgid:abc", "display_name": "John" }]),
         ];
         for value in cases {
-            assert!(parse_mentions(&value).is_err(), "accepted {value}");
+            assert!(parse_mentions(&value, CHAT).is_err(), "accepted {value}");
         }
         // The cap bounds one message.
         let many: Vec<Value> = (0..=MAX_MENTIONS as u32)
             .map(|i| json!({ "itemid": i, "mri": "8:orgid:abc", "display_name": "John" }))
             .collect();
-        assert!(parse_mentions(&Value::Array(many)).is_err());
+        assert!(parse_mentions(&Value::Array(many), CHAT).is_err());
+    }
+
+    /// A CHANNEL mention notifies everybody who follows the channel, so the whole of what
+    /// makes widening this rail acceptable is that it can only ever name the conversation
+    /// the send is already addressed at. Every way of asking for anything else is refused
+    /// here, before the network.
+    #[test]
+    fn a_channel_mention_may_only_name_the_channel_being_posted_to() {
+        const CHANNEL: &str = "19:eng-incidents@thread.tacv2";
+        const OTHER: &str = "19:eng-releases@thread.tacv2";
+
+        // The one accepted shape: the channel's own thread id, in that channel.
+        let ok = json!([{ "itemid": 0, "mri": CHANNEL, "display_name": "[Run] 👨‍💻 Devs", "kind": "channel" }]);
+        let mentions = parse_mentions(&ok, CHANNEL).unwrap();
+        assert_eq!(mentions[0].kind, MentionKind::Channel);
+        assert_eq!(mentions[0].mri, CHANNEL);
+        // …and it reaches the wire as the service's own word for it, never as a person —
+        // which would be blue text notifying nobody.
+        let mut body = json!({});
+        attach_mentions(&mut body, &mention_html(0, "[Run]"), &mentions).unwrap();
+        let written: Value =
+            serde_json::from_str(body["properties"]["mentions"].as_str().unwrap()).unwrap();
+        assert_eq!(written[0]["mentionType"], "channel");
+
+        // ANOTHER channel, from the same post: the mri must be the conversation itself, or
+        // this app would be a way to notify a channel the user is not writing in.
+        assert!(parse_mentions(
+            &json!([{ "itemid": 0, "mri": OTHER, "display_name": "Releases", "kind": "channel" }]),
+            CHANNEL,
+        )
+        .is_err());
+
+        // A CHAT has no channel to mention, whatever it names — including its own id, which
+        // is the shape a page would send if it offered the row in the wrong place.
+        for mri in [CHANNEL, CHAT] {
+            assert!(parse_mentions(
+                &json!([{ "itemid": 0, "mri": mri, "display_name": "General", "kind": "channel" }]),
+                CHAT,
+            )
+            .is_err());
+        }
+
+        // A kind this build does not know is refused rather than forwarded: `mentionType`
+        // decides how many people the send reaches, and `team` and `everyone` are both
+        // WIDER than a channel. The read path keeps them; nothing here writes one.
+        for kind in ["team", "everyone", "tag", "Channel", ""] {
+            assert!(
+                parse_mentions(
+                    &json!([{ "itemid": 0, "mri": CHANNEL, "display_name": "Everyone", "kind": kind }]),
+                    CHANNEL,
+                )
+                .is_err(),
+                "accepted the kind {kind:?}"
+            );
+        }
+
+        // An ABSENT kind is a person — what a page too old to name one sends. Read as a
+        // channel it would notify a whole channel by accident, so the default is the
+        // narrowest thing a mention can be, and a channel's own mri then fails the person
+        // check exactly as it always did.
+        let old = json!([{ "itemid": 0, "mri": "8:orgid:abc", "display_name": "John" }]);
+        assert_eq!(parse_mentions(&old, CHANNEL).unwrap()[0].kind, MentionKind::Person);
+        assert!(parse_mentions(
+            &json!([{ "itemid": 0, "mri": CHANNEL, "display_name": "Devs" }]),
+            CHANNEL,
+        )
+        .is_err());
+    }
+
+    /// The two spellings the service publishes, which is what an outbound `mentionType` has
+    /// to be. A typo here is silent: the message posts, the words are blue, and nobody is
+    /// notified — so the pair is pinned rather than trusted to a `match`.
+    #[test]
+    fn a_mention_kind_reaches_the_wire_in_the_services_own_spelling() {
+        assert_eq!(MentionKind::Person.wire(), "person");
+        assert_eq!(MentionKind::Channel.wire(), "channel");
+        // And a person is what a `Mention` is unless somebody says otherwise.
+        assert_eq!(MentionKind::default(), MentionKind::Person);
     }
 
     #[test]
@@ -2374,6 +2535,7 @@ mod tests {
             itemid: 0,
             mri: "8:orgid:ada".to_string(),
             display_name: "Ada".to_string(),
+            kind: MentionKind::Person,
         }];
         let html = "<p>ping <span itemscope itemtype=\"http://schema.skype.com/Mention\" \
                     itemid=\"0\">Ada</span></p>";

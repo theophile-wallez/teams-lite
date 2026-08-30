@@ -306,6 +306,9 @@ type OutboundMention = {
   itemid: number;
   mri: string;
   display_name: string;
+  /** What it names, absent for a person — the wire's own default, and the narrowest thing
+   *  a mention can be. `"channel"` notifies whoever follows the channel. */
+  kind?: "person" | "channel";
 };
 
 // ---------------------------------------------------------------------------
@@ -1163,7 +1166,18 @@ function seedChannelAlertThread(): void {
     {
       sender: SELF_NAME,
       sender_mri: SELF_MRI,
-      content: "<p>Thanks, I'll watch the rollout.</p>",
+      // A @MENTION in the reader's OWN post in a thread, which the fixtures held none of
+      // — so the one surface where their own words are drawn on the page's own card
+      // rather than on the accent fill could not be captured or asserted, and the chip
+      // shipped as a BLANK GAP: white ink on a 22% white wash, keyed on `data-mine`
+      // instead of on the fill (see `onAccentFill` in message-bubble.tsx). It is the
+      // very defect the quoted announcement had, one element over.
+      content:
+        `<p><span itemscope itemtype="http://schema.skype.com/Mention" itemid="0">` +
+        `${escapeHtml(PEOPLE[0]!.name)}</span> thanks, I'll watch the rollout.</p>`,
+      mentions: [
+        { itemid: 0, mri: PEOPLE[0]!.mri, kind: "person", display_name: PEOPLE[0]!.name },
+      ],
       thread_root_id: rootId,
       // …and one on the reader's OWN post, which in a thread is drawn in the same column
       // as everybody else's: nothing about a reaction here follows authorship.
@@ -6032,10 +6046,15 @@ function parseSendImage(value: unknown): SendImage {
   };
 }
 
-/** Parse the optional `mentions` list the way the real backend does: a person MRI, a
- *  name to show, and an itemid no other mention repeats. A bad entry is an error here
- *  too — a mention that names nobody would be a message pinging nobody. */
-function parseSendMentions(value: unknown): OutboundMention[] {
+/** Parse the optional `mentions` list the way the real backend does: a person MRI or the
+ *  CHANNEL being posted to, a name to show, and an itemid no other mention repeats. A bad
+ *  entry is an error here too — a mention that names nobody would be a message pinging
+ *  nobody, and one that named ANOTHER channel would notify a room the reader is not in.
+ *
+ *  Every refusal mirrors `teams_send::parse_mentions`, `conversation` included: a mock that
+ *  accepted a channel mention the backend refuses would let a spec prove a row that cannot
+ *  really post. */
+function parseSendMentions(value: unknown, conversation: string): OutboundMention[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new Error("invalid mentions param");
   const out: OutboundMention[] = [];
@@ -6044,14 +6063,37 @@ function parseSendMentions(value: unknown): OutboundMention[] {
     if (typeof o.itemid !== "number" || !Number.isInteger(o.itemid) || o.itemid < 0) {
       throw new Error("invalid mention param: itemid");
     }
-    if (typeof o.mri !== "string" || !o.mri.startsWith("8:")) {
-      throw new Error("invalid mention param: mri");
+    // An ABSENT kind is a person, which is what a page too old to name one sends and the
+    // narrowest thing a mention can be. Anything but the two known words is refused rather
+    // than forwarded: `mentionType` decides how many people the send reaches, and `team`
+    // and `everyone` are both wider than a channel.
+    const kind = o.kind === undefined ? "person" : o.kind;
+    if (kind !== "person" && kind !== "channel") {
+      throw new Error("invalid mention param: kind");
+    }
+    if (kind === "person") {
+      if (typeof o.mri !== "string" || !o.mri.startsWith("8:")) {
+        throw new Error("invalid mention param: mri");
+      }
+    } else {
+      // Only a channel post can mention a channel, and only the one it is posted to.
+      if (!conversation.split(";")[0]!.endsWith("@thread.tacv2")) {
+        throw new Error("only a channel post can mention a channel");
+      }
+      if (o.mri !== conversation) {
+        throw new Error("a channel mention must name the channel being posted to");
+      }
     }
     if (typeof o.display_name !== "string" || o.display_name.trim().length === 0) {
       throw new Error("invalid mention param: display_name");
     }
     if (out.some((m) => m.itemid === o.itemid)) throw new Error("duplicate mention itemid");
-    out.push({ itemid: o.itemid, mri: o.mri, display_name: o.display_name });
+    out.push({
+      itemid: o.itemid,
+      mri: o.mri,
+      display_name: o.display_name,
+      ...(kind === "channel" ? { kind } : {}),
+    });
   }
   return out;
 }
@@ -7424,7 +7466,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const rawHtml = input.content_html;
       const contentHtml = typeof rawHtml === "string" && rawHtml.length > 0 ? rawHtml : undefined;
       const images = parseSendImages(input);
-      const mentions = parseSendMentions(input.mentions);
+      const mentions = parseSendMentions(input.mentions, id);
       // When Teams is to deliver it. Refused here exactly as
       // `teams_send::parse_scheduled_time` refuses it: a mock that accepts what the
       // backend would not hides the bug instead of failing a test.
@@ -9635,7 +9677,11 @@ function scheduleSendEcho(
             mentions: mentions.map((m) => ({
               itemid: m.itemid,
               mri: m.mri,
-              kind: "person" as const,
+              // WHAT the mention named, echoed back rather than assumed: it was written
+              // `"person"` literally, so a CHANNEL mention came back as a colleague — and
+              // the reader would then see the one thing the pair exists to prevent, a chip
+              // over an mri that names nobody. The tenant echoes the kind it stored.
+              kind: m.kind ?? ("person" as const),
               display_name: m.display_name,
             })),
           }

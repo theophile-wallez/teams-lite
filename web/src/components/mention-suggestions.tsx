@@ -1,3 +1,5 @@
+import { HashIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef } from "react";
 import { agentDisplayName } from "~/lib/agent-message";
 import {
@@ -57,7 +59,13 @@ export function MentionSuggestions(props: {
             data-active={active}
             data-testid="mention-suggestion"
             data-kind={option.kind}
-            data-mri={option.kind === "person" ? option.person.mri : undefined}
+            data-mri={
+              option.kind === "person"
+                ? option.person.mri
+                : option.kind === "channel"
+                  ? option.channel.mri
+                  : undefined
+            }
             data-agent={option.kind === "agent" ? option.agent.backend : undefined}
             data-persona={option.kind === "agent" ? option.agent.persona ?? undefined : undefined}
             // Keep the caret where it is: the click must not blur the editor before
@@ -76,6 +84,8 @@ export function MentionSuggestions(props: {
           >
             {option.kind === "agent" ? (
               <AgentRow agent={option.agent} />
+            ) : option.kind === "channel" ? (
+              <ChannelRow channel={option.channel} />
             ) : (
               <PersonRow person={option.person} />
             )}
@@ -100,6 +110,30 @@ function PersonRow(props: { person: MentionCandidate }) {
       {/* The row's own text: the avatar beside it renders initials, so the name
           needs a handle of its own for anything reading the list. */}
       <RowName>{props.person.name}</RowName>
+    </>
+  );
+}
+
+/**
+ * The CHANNEL the message can notify — the widest thing an "@" reaches here, and the one
+ * row of this list that is not one person.
+ *
+ * Drawn as a channel and never as a person, for the reason the agent's row below is:
+ * `Avatar` would seed tinted initials from a THREAD id, which is a face for a colleague
+ * who does not exist (the wrong-face rule § A tracker user who is also a colleague states,
+ * and the chess engine's own seat follows). So it takes the mark-in-a-square shape with no
+ * disc behind it, and its own line says what the press costs — whoever follows the channel
+ * is notified, which is the one fact the reader needs BEFORE the press and cannot undo
+ * after.
+ */
+function ChannelRow(props: { channel: MentionCandidate }) {
+  return (
+    <>
+      <span className="grid size-7 shrink-0 place-items-center text-text-dim">
+        <HugeiconsIcon icon={HashIcon} className="size-4" strokeWidth={1.4} aria-hidden />
+      </span>
+      <RowName>{props.channel.name}</RowName>
+      <span className="shrink-0 text-xs text-text-faint">notifies the channel</span>
     </>
   );
 }

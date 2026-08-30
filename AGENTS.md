@@ -217,6 +217,11 @@ cosmetic.** Measured on the fixtures before this:
   hours apart — which is every thread — was cut into stamped fragments inside its own card.
 - **The reader's own quoted announcement was a BLANK GAP**, because a quote is tinted for the
   surface it sits on and the on-the-accent tint over a plain card is a block nobody can see.
+- **AND SO WAS THEIR OWN @MENTION, which shipped**: the quote was fixed by `anchoredRight` and
+  the mention chip's CSS was keyed on `[data-mine]`, which is true of a post drawn on the
+  thread's own white card. The rule is now stated once, over the accent FILL rather than over
+  authorship — see § A CHIP IS TINTED FOR THE SURFACE IT LANDS ON under § @mentions, which is
+  also where the three word-effect rules that were reading the same wrong flag are recorded.
 
 **THE WIRE IS ONE FIELD, and it is the address rather than anything in the body.**
 `teams_send::send_message` takes a `thread_root`, and the POST goes to
@@ -3018,7 +3023,10 @@ user. Two independent mechanisms enforce that split:
   (the composer's field empty and filled, the titled post in both themes and that composer at a
   phone's width) and a channel THREAD (the card in both themes, the thread the composer is aimed at
   with the words in the box, a REACTED thread in both themes — where the chip row is drawn in flow
-  because a post has no bubble edge to straddle — and the whole surface at a phone's width):
+  because a post has no bubble edge to straddle, and where the reader's own @mention is drawn in
+  the tint of the CARD rather than of the accent fill it is not on — the "@" list offering the
+  CHANNEL above the people in both themes with the chip it becomes, and the whole surface at a
+  phone's width):
   `bun run preview -- --out /tmp/chan --channels` (it honours `--dpr`: the pill is 24px and the
   card's foot row is 12px), or `openChannelsTab` /
   `toggleTeamSection` / `openThreadWithReplies` from the same file. For the merge-request page — its tab strip at rest
@@ -4533,6 +4541,124 @@ mention whole. The chip is blue on a light blue wash in the composer and in the 
   indexes the list of the message it came from, so it names nobody we can prove — see
   `serializeTeamsMessage` in `web/src/lib/rich-text.ts`, which is where the outbound
   pair is made.
+
+### A CHIP IS TINTED FOR THE SURFACE IT LANDS ON, never for whose message it is
+
+The on-the-accent tint is white ink on a 22% white wash (`--mention-mine` over
+`--mention-surface-mine`): right on the indigo bubble, and a BLANK GAP anywhere else. It was
+keyed on `[data-mine]`, so the reader's own @mention inside a CHANNEL THREAD — where their
+post is drawn on the thread's own white card like everybody else's — was invisible in their
+own words. Measured on the real tenant, and photographed by the user. It is the quoted
+announcement's own defect one element over: `anchoredRight` was introduced for exactly this
+and the CSS never learned about it.
+
+`onAccentFill` in `message-bubble.tsx` is the answer, emitted as `[data-on-accent]`, and it
+is neither of the two flags that already existed: `mine` says whose the message is (which
+decides Edit and Delete), `anchoredRight` says which side it sits on, and only this one says
+"is there an accent behind these words". It is the exact condition the `bg-bubble-mine`
+branch is written under — `!bare && !isDeleted && !isUnsupported && !isLocked &&
+anchoredRight` — so it is true of the accent bubble and false of everything else the reader
+wrote: a channel post, a link-only or picture-only message, a deleted or locked ghost.
+
+Four rules hold it:
+
+- **THREE MORE RULES were reading the wrong flag** and were moved with it: `.effect-word`,
+  `.sparkle-word` and `.football-word` all take a bright ramp plus a HALO "on anything dark
+  (the indigo mine bubble …)" — their own comment says surface, and `[data-mine]` is not one.
+  On a bare own-message that halo landed on the page's own light surface, which is the blurry
+  text the halo exists to avoid.
+- **The renderer threads NOTHING.** `.mention-chip`'s colours come from CSS keyed on the
+  MESSAGE, so a chip inside a quote, a card or a thread post is tinted by the surface it
+  really sits on with no flag passed through `RichContent` — the reason that seam is pure.
+- **The FIXTURES held no mention in a channel thread**, which is why it shipped: the mock's
+  alert thread now carries one on the reader's OWN post (`seedChannelAlertThread`), because a
+  shape no capture can draw and no spec can find is one that ships broken. It is the reacted
+  post's own lesson, on the same fixture.
+- **The spec MEASURES CONTRAST rather than naming a colour** (`web/e2e/mentions.spec.ts`).
+  The chip's wash is translucent, so what a reader sees is it composited over the card: the
+  test composites it, computes the WCAG ratio and holds it above 3. The blank gap scores
+  **1**, which is what that assertion caught. Both halves are pinned in one test on purpose
+  — the ink on the card AND that the accent bubble's differs — because either alone passes
+  over half the fix: keyed on `data-mine` the two chips are identical, and with the accent
+  rule deleted they are identical the other way. Both directions were proved by mutation.
+
+### AND THE CHANNEL ITSELF CAN BE MENTIONED (`@General`, in a channel)
+
+An "@" in a CHANNEL offers the channel above the people — `#General · notifies the channel`
+— and picking it posts a real channel mention, so whoever follows that channel is notified
+as loudly as each of them asked Teams to be (`store::ChannelAlerts`). It is the widest thing
+one press in this app reaches, which is what every rule below is about.
+`channelMentionCandidate` (`web/src/lib/mentions.ts`) decides whether one is offered,
+`teams_send::MentionKind` is the wire, and `parse_mentions` is the trust boundary.
+
+**EVERY FACT ABOUT THE SHAPE IS MEASURED off this machine's own store**, over the 767
+mentions the read path has decoded — because there is no sandbox CHANNEL and a probe that
+mentioned a real one would notify everybody following it:
+
+- **`mentionType` is the field**, and the spellings are `person` (488), `channel` (177),
+  `team` (93) and `everyone` (9). So `channel` is the service's OWN word rather than one
+  invented here — the same footing the channel thread's `;messageid=` address rests on.
+- **A channel mention's mri is the CHANNEL'S OWN THREAD ID**: 176 of 177 name the very
+  thread their message was posted in, and all 93 `team` and all 9 `everyone` ones do too.
+  So the value is one the app already holds, and no read was added for this feature.
+- **A channel name arrives SPLIT ACROSS SPANS** exactly as a person's does — `[Run]`, `👨‍💻`
+  and `Devs` are three entries naming one thread — so `mergeAdjacentMentions` already draws
+  it as one chip and nothing on the read side changed.
+
+Eight rules hold it, and each is pinned by a test:
+
+- **THE MRI MUST BE THE CONVERSATION BEING POSTED TO.** That single rail is what makes
+  widening an outward-facing boundary acceptable: a channel mention notifies a whole room, so
+  the one thing this app must never let a client do is notify a room the user is not writing
+  in. `parse_mentions` therefore takes the conversation and refuses any other id — which also
+  refuses the one measured outlier, a cross-channel mention this app does not offer. The cost
+  is stated rather than papered over.
+- **Only a CHANNEL can carry one.** A chat has no channel to name, so the backend refuses it
+  there whatever a page offers, and the page draws no row — a control that reports a refusal
+  is what this app draws nothing instead of.
+- **The KIND is a closed set, and an unknown one is REFUSED rather than forwarded.**
+  `mentionType` decides how many people the send reaches, and `team` and `everyone` are both
+  WIDER than a channel: the read path keeps all four, and only `person` and `channel` are ever
+  written. Neither of the two wide ones is offered anywhere, so admitting them would be a rail
+  with nothing behind it.
+- **AN ABSENT KIND IS A PERSON**, on the wire, in the mock, in the composer's node and in the
+  page's parse. It is what a page too old to name one sends, and it is the narrowest thing a
+  mention can be — read as a channel it would notify a whole channel by accident. A channel's
+  own mri with no kind then fails the person check exactly as it always did, which is the
+  inbound-mention-pasted-back case (`mentionMri`).
+- **THE MRI'S SHAPE MUST MATCH THE KIND IT CLAIMS**, on the page as well: a `19:…@thread.tacv2`
+  under the person kind and an `8:…` under the channel kind are both refused down to plain
+  text, because neither pair would notify what it says it does.
+- **It needs NO GATE OF ITS OWN.** `send` is already an `OUTWARD_METHODS` entry and the kind
+  rides in its params exactly as a picture, a title and a thread address do — this narrows
+  WHAT the message this method already posts names, and the consent is the same click on Send.
+- **The ROW IS NOT A PERSON.** `Avatar` would seed tinted initials from a THREAD id, which is
+  a face for a colleague who does not exist — the wrong-face rule § A tracker user who is also
+  a colleague states, and the chess engine's own seat follows. So it takes the
+  mark-in-a-square shape the AGENT row already has (hugeicons' `HashIcon`, no disc), and its
+  own line says what the press COSTS before it is made: the one fact the reader cannot undo
+  after. It is FIRST among the mention targets — one fixed row a reader learns once, above a
+  list of people that grows, which is the argument the providers already make against the
+  personas — and it is found by its own name once anything is typed.
+- **The AGENT can never write one.** `agent_markdown` builds `MentionKind::Person` and that
+  is asserted: notifying a whole channel is the reader's own press, and a model must not
+  reach it by typing a name.
+
+`web/mock/server.ts` mirrors every refusal (`parseSendMentions`, which now takes the
+conversation) and ECHOES the kind it stored rather than assuming `person` — a mock that
+echoed a channel mention as a colleague would show the reader a chip over an mri that names
+nobody, which is the very thing the pair exists to prevent. `cd web && bun run preview --
+--out /tmp/chan --channels` captures the "@" list in both themes and the chip it becomes,
+`web/e2e/channels.spec.ts` pins the row, the refusal in a chat and the wire, and
+`web/src/lib/mentions.test.ts`, `rich-text.test.ts` and `teams_send::tests` the pure ones.
+
+**What is UNVERIFIED against the tenant is the SEND.** No probe has posted a channel mention:
+the sandbox target is a CHAT, there is no sandbox channel, and a probe aimed at a real one
+would notify everybody following it — so what this rests on is that `mentionType: "channel"`
+over the channel's own thread id is the pair the service ITSELF publishes, measured 177 times
+on the read path. The failure mode if it is wrong is the one this app already lives with for a
+mention: the message posts, the words are a chip, and nobody is notified. One channel mention
+in a real channel stays the user's own click, in their own app.
 
 ## Custom emoji
 

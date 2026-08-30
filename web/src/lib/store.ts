@@ -14,7 +14,12 @@
 import { Store } from "@tanstack/store";
 import { Backend, defaultWsUrl } from "./ws-client";
 import type { SendImage } from "./composer-image";
-import { dedupeCandidates, type MentionCandidate, type OutboundMention } from "./mentions";
+import {
+  channelMentionCandidate,
+  dedupeCandidates,
+  type MentionCandidate,
+  type OutboundMention,
+} from "./mentions";
 import {
   appendLiveMessage,
   chatIsMuted,
@@ -3067,7 +3072,7 @@ export class TeamsController {
     if (!id) return;
     const cached = this.mentionsByConv.get(id);
     if (cached) {
-      if (this.get().openId === id) this.set({ mentionCandidates: cached });
+      this.publishMentionCandidates(id, cached);
       return;
     }
     const pending = this.mentionLoads.get(id);
@@ -3077,7 +3082,7 @@ export class TeamsController {
         const res = await this.backend.members(id);
         const people = dedupeCandidates(res.members ?? []);
         this.mentionsByConv.set(id, people);
-        if (this.get().openId === id) this.set({ mentionCandidates: people });
+        this.publishMentionCandidates(id, people);
       } catch {
         // Best-effort: no suggestions rather than an error in the composer.
       } finally {
@@ -3086,6 +3091,34 @@ export class TeamsController {
     })();
     this.mentionLoads.set(id, load);
     return load;
+  }
+
+  /**
+   * Publish a conversation's mention candidates, with the CHANNEL ITSELF at the front where
+   * the conversation is one.
+   *
+   * The channel row is derived HERE rather than cached with the roster, and that placement is
+   * the point: the cache holds what the `members` read answered, while the channel row is
+   * read off the sidebar's own list — which arrives on its own schedule. Cached with the
+   * people it would be decided once, in the one window where `channels` may not have landed
+   * yet (a deep link straight into a channel), and the row would then be missing for the
+   * whole session with nothing to heal it. Deriving it costs one `find` per "@".
+   *
+   * It costs no network read either: a channel mention names the channel's own thread id
+   * (measured — see `channelMentionCandidate`), which is the id this conversation is already
+   * open under, and the name is the one the sidebar draws. It is FIRST because a bare "@"
+   * then offers it above the people — one fixed row a reader learns once, over a list that
+   * grows, which is the argument the providers already make against the personas.
+   */
+  private publishMentionCandidates(id: string, people: MentionCandidate[]): void {
+    if (this.get().openId !== id) return;
+    const channel = this.get().channels.find((c) => c.id === id);
+    const asMention = channelMentionCandidate({
+      conversationId: id,
+      name: channel?.name ?? "",
+      isChannel: Boolean(channel),
+    });
+    this.set({ mentionCandidates: asMention ? [asMention, ...people] : people });
   }
 
   // ---- conversations -------------------------------------------------------

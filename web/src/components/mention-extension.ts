@@ -33,6 +33,9 @@ declare module "@tiptap/core" {
         label: string;
         from: number;
         to: number;
+        /** What the mention names. Absent is a person — the narrowest thing it can be
+         *  (see `MentionTargetKind`), which is also what the wire defaults to. */
+        kind?: "person" | "channel";
       }) => ReturnType;
     };
   }
@@ -60,6 +63,18 @@ export const MentionNode = Node.create({
         // The label IS the node's text, so it is rendered as content, not as an
         // attribute (see renderHTML below).
         renderHTML: () => ({}),
+      },
+      // WHAT this mention names, so the serializer can say so on the wire — a channel
+      // mention described as a person is blue text notifying nobody. It rides the DOM as
+      // an attribute because the editor's own HTML is what a draft round-trips through,
+      // and the default is a person: every mention this app could make before this was
+      // one, and reading an absent value as a channel would notify a whole channel.
+      kind: {
+        default: "person",
+        parseHTML: (element) =>
+          element.getAttribute("data-mention-kind") === "channel" ? "channel" : "person",
+        renderHTML: (attributes) =>
+          attributes.kind === "channel" ? { "data-mention-kind": "channel" } : {},
       },
     };
   },
@@ -100,12 +115,12 @@ export const MentionNode = Node.create({
   addCommands() {
     return {
       insertMention:
-        ({ mri, label, from, to }) =>
+        ({ mri, label, from, to, kind }) =>
         ({ chain }) =>
           chain()
             .focus()
             .insertContentAt({ from, to }, [
-              { type: this.name, attrs: { mri, label } },
+              { type: this.name, attrs: { mri, label, kind: kind ?? "person" } },
               { type: "text", text: " " },
             ])
             .run(),

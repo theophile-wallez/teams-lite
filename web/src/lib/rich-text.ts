@@ -91,6 +91,13 @@ export type RichAttrs = {
    *  written has no `mentions` list beside it yet. It is what
    *  {@link serializeTeamsMessage} turns back into that list on send. */
   mri?: string;
+  /** Mentions only, and only the OUTBOUND ones the composer wrote: what the mention NAMES.
+   *  Absent is a person — every mention this app could make before channels could be
+   *  mentioned was one, and an inbound Teams span carries no kind at all (the service puts
+   *  `mentionType` in `properties.mentions` rather than on the span). It is what
+   *  {@link serializeTeamsMessage} turns into that list's own `kind`, and reading it as a
+   *  channel by default would notify a whole channel from a message that named one person. */
+  mentionKind?: "person" | "channel";
   /** Agent tags only: the CLI the prefix summons (`claude`, `opencode`), which is the
    *  mark and the colour the chip wears. */
   backend?: string;
@@ -285,9 +292,20 @@ function isMention(attrs: RawAttrs): boolean {
  *  person MRI. Only the composer's own markup carries it, and only `8:…` identities are
  *  people — a `19:` thread or a `28:` app is not somebody a person-mention may name, and
  *  the backend refuses one anyway. */
-function mentionMri(raw: string | undefined): string | undefined {
+function mentionMri(
+  raw: string | undefined,
+  kind: "person" | "channel" | undefined,
+): string | undefined {
   if (!raw) return undefined;
   const mri = decodeEntities(raw).trim();
+  // The SHAPE has to match what the chip claims to name, because the two mri families are
+  // not interchangeable and neither is what the other notifies. A `19:` id with no kind on
+  // it is refused exactly as it always was — that is the inbound mention somebody pasted
+  // back in, which names nobody this app can prove, and reading it as a channel mention
+  // would turn a paste into a message that notifies a whole channel.
+  if (kind === "channel") {
+    return /^19:[A-Za-z0-9:._-]{1,120}@thread\.tacv2$/.test(mri) ? mri : undefined;
+  }
   return /^8:[A-Za-z0-9:._@-]{1,120}$/.test(mri) ? mri : undefined;
 }
 
@@ -446,12 +464,22 @@ export function parseRichHtml(html: string): RichNode[] {
       if (!isSelfClosing) spans.push(frameTag ? "frame" : "plain");
       if (frameTag) {
         const itemid = attrs["itemid"];
-        const mri = frameTag === "mention" ? mentionMri(attrs["data-mri"]) : undefined;
+        // What the mention NAMES, as the composer's own node wrote it (see
+        // `MentionNode`). Only ever read back out of THIS app's editor HTML: an inbound
+        // Teams body carries `mentionType` in `properties.mentions` rather than on the
+        // span, so a message from the wire has none here and the serializer's own default
+        // — a person — is the narrow one. Anything but the one word is a person too.
+        const kind =
+          frameTag === "mention" && attrs["data-mention-kind"] === "channel"
+            ? "channel"
+            : undefined;
+        const mri = frameTag === "mention" ? mentionMri(attrs["data-mri"], kind) : undefined;
         const frame: OpenFrame & { attrs: RichAttrs } = {
           tag: frameTag,
           attrs: {
             ...(itemid ? { itemid: decodeEntities(itemid).trim() } : {}),
             ...(mri ? { mri } : {}),
+            ...(kind ? { mentionKind: kind } : {}),
           },
           children: [],
         };
@@ -1154,6 +1182,9 @@ export type SerializedMention = {
   itemid: number;
   mri: string;
   display_name: string;
+  /** What it names, absent for a person. It travels as `mentionType`, so a channel
+   *  mention that lost it would post as a colleague: blue text notifying nobody. */
+  kind?: "person" | "channel";
 };
 
 /** Collects the mentions found while serializing, and hands out their indices. */
@@ -1219,7 +1250,8 @@ function serializeNodes(nodes: RichNode[], sink?: MentionSink): string {
         continue;
       }
       const itemid = sink.mentions.length;
-      sink.mentions.push({ itemid, mri, display_name: displayName });
+      const kind = node.attrs.mentionKind === "channel" ? "channel" : undefined;
+      sink.mentions.push({ itemid, mri, display_name: displayName, ...(kind ? { kind } : {}) });
       out +=
         `<span itemscope="" itemtype="http://schema.skype.com/Mention" ` +
         `itemid="${itemid}">${label}</span>`;

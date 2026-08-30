@@ -490,9 +490,20 @@ export function RichEditor(props: {
         .run();
       return;
     }
+    // A person and the CHANNEL insert the same chip and differ in one field: what it
+    // NAMES, which is what decides how many people the send notifies. It travels with the
+    // node so the serializer can state it (see `MentionNode`), and the backend checks it
+    // against the conversation before anything leaves this machine.
+    const target = option.kind === "channel" ? option.channel : option.person;
     editor
       .chain()
-      .insertMention({ mri: option.person.mri, label: option.person.name, from, to })
+      .insertMention({
+        mri: target.mri,
+        label: target.name,
+        from,
+        to,
+        kind: option.kind === "channel" ? "channel" : "person",
+      })
       .run();
   };
 

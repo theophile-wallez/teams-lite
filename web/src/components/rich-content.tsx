@@ -599,10 +599,12 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
       // mention list. A person we can identify gets their card on hover; a
       // channel/team/tag mention (or an unmapped one) still reads as a mention.
       //
-      // The chip's colours come from CSS rather than from a prop, because whether it
-      // sits in our own bubble is the BUBBLE's business: `[data-mine]` on the message
-      // switches it (see styles/app.css), so the renderer needs no flag threaded
-      // through every node.
+      // The chip's colours come from CSS rather than from a prop, because whether it sits
+      // on an accent-filled bubble is the BUBBLE's business: `[data-on-accent]` on the
+      // message switches it (see styles/app.css), so the renderer needs no flag threaded
+      // through every node. That attribute and never `[data-mine]`: the reader's own words
+      // are drawn on the page's own surface in a channel thread and in every bare message,
+      // and the on-the-accent tint is white — invisible there.
       const mention = mentionTarget(node, ctx.mentions);
       const text = <span className="mention-chip">{children}</span>;
       if (mention?.kind !== "person") return <span key={key}>{text}</span>;

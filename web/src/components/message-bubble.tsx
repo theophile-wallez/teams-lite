@@ -625,6 +625,17 @@ function MessageBubbleImpl(props: {
       !agent &&
       (linkOnly || imageOnly || recordingOnly || cardOnly || emojiOnly));
 
+  // Whether this message really PAINTS the accent fill behind its words — the exact
+  // condition the `bg-bubble-mine` branch below is written under, hoisted so the DOM can
+  // state it. Anything tinted FOR that fill has to key on this and never on `data-mine`:
+  // `mine` says whose the message is (which decides Edit and Delete), `anchoredRight` says
+  // which side it sits on, and neither answers "is there an accent behind these words".
+  // A post in a channel thread, a link-only message and a picture-only one are all the
+  // reader's OWN and all drawn on the page's own surface, so an on-the-accent tint there is
+  // white on white — the invisible quoted announcement that `anchoredRight` was introduced
+  // for, and the invisible @mention chip that this flag was.
+  const onAccentFill = !bare && !isDeleted && !isUnsupported && !isLocked && anchoredRight;
+
   // An answer is being written into this message. Two ways to know, and both count:
   // this app is watching the run (`agentRun`), or the message itself says its answer is
   // unfinished — no signature line yet (`agent.pending`), which is the reply asked for
@@ -997,6 +1008,9 @@ function MessageBubbleImpl(props: {
       <motion.div
         data-testid="message"
         data-mine={mine ? "true" : "false"}
+        // What `.mention-chip` (and anything else tinted for the accent) keys on. See
+        // `onAccentFill`: `data-mine` is about authorship and cannot answer this.
+        data-on-accent={onAccentFill ? "true" : undefined}
         data-message-id={props.message.id}
         data-highlighted={props.highlighted ? "true" : undefined}
         data-link-only={linkOnly ? "true" : undefined}

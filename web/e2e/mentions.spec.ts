@@ -1,4 +1,4 @@
-import { test, expect, fetchCapturedSends, gotoApp } from "./helpers";
+import { test, expect, fetchCapturedSends, gotoApp, openChannelsTab } from "./helpers";
 import type { Page } from "@playwright/test";
 
 /** Open a conversation by name via the command palette — robust to sidebar ordering
@@ -168,6 +168,105 @@ test.describe("@mentions", () => {
       has: page.locator(".mention-chip"),
     });
     await expect(trigger.first()).toHaveAttribute("data-person-mri", "8:orgid:clement");
+  });
+
+  test("a chip is tinted for the SURFACE it lands on, not for whose message it is", async ({
+    page,
+  }) => {
+    // The on-the-accent tint is white ink on a 22% white wash: right on the indigo bubble,
+    // and a BLANK GAP anywhere else. It was keyed on `data-mine`, so the reader's own
+    // @mention inside a channel thread — where their post is drawn on the thread's own white
+    // card like everybody else's — was invisible in their own words. Measured on the real
+    // tenant, and it is the quoted announcement's own defect one element over.
+    //
+    // Both halves are asserted, because either alone passes over half the fix: keyed on
+    // `data-mine` the two chips are identical, and with the accent rule deleted they are
+    // identical the other way. What is compared is the two INKS rather than a colour spelled
+    // out — the rule is that ONE of them changes — plus real contrast on the card, which is
+    // the claim the reader actually made.
+    await gotoApp(page);
+    await openChannelsTab(page);
+    // Engineering · Incidents: the one channel whose thread the mock seeds with a mention in
+    // the reader's own post (see `seedChannelAlertThread`).
+    await page
+      .locator('[data-testid="channel-row"]')
+      .filter({ hasText: "Incidents" })
+      .first()
+      .click();
+    await expect
+      .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    // Found by the alert CARD the thread opens with rather than by the mention, because the
+    // mention is on a REPLY: a folded card holds none.
+    const thread = page
+      .locator('[data-testid="thread-group"]')
+      .filter({ has: page.locator('[data-testid="card-attachment"]') })
+      .last();
+    await thread.locator('[data-testid="thread-toggle"]').click();
+    const post = thread
+      .locator('[data-testid="message"]')
+      .filter({ has: page.locator(".mention-chip") })
+      .first();
+    // The post is the reader's own AND is drawn on no accent fill: that pair is the whole
+    // reason the two attributes cannot be one.
+    await expect(post).toHaveAttribute("data-mine", "true");
+    await expect(post).not.toHaveAttribute("data-on-accent", "true");
+
+    // The chip's own wash is translucent, so what a reader sees is it composited over the
+    // card behind it — which is why a declared colour says nothing here.
+    const onCard = await post.evaluate((el) => {
+      const chip = el.querySelector(".mention-chip");
+      if (!chip) throw new Error("the post holds no mention chip");
+      const parse = (value: string): [number, number, number, number] => {
+        const parts = value.match(/[\d.]+/g)?.map(Number) ?? [];
+        return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0, parts[3] ?? 1];
+      };
+      // The nearest ancestor that really paints something is the surface the wash sits on.
+      let behind: [number, number, number, number] = [255, 255, 255, 1];
+      for (let node = chip.parentElement; node; node = node.parentElement) {
+        const fill = parse(getComputedStyle(node).backgroundColor);
+        if (fill[3] > 0.99) {
+          behind = fill;
+          break;
+        }
+      }
+      const style = getComputedStyle(chip);
+      const wash = parse(style.backgroundColor);
+      const over = (top: number[], under: number[]) =>
+        [0, 1, 2].map((i) => top[i]! * top[3]! + under[i]! * (1 - top[3]!));
+      const surface = over(wash, behind);
+      const ink = over(parse(style.color), surface);
+      // WCAG relative luminance, so "can this be read" is a number rather than an opinion.
+      const lum = (rgb: number[]) => {
+        const [r, g, b] = rgb.map((c) => {
+          const s = c / 255;
+          return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+      };
+      const a = lum(ink);
+      const b = lum(surface);
+      const contrast = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      return { color: style.color, background: style.backgroundColor, contrast };
+    });
+    // The gap scored about 1.1 — white on white. 3 is the floor for text this size, and the
+    // real tint is far above it, so this fails on the defect and on nothing else.
+    expect(onCard.contrast).toBeGreaterThan(3);
+
+    // …and on the accent fill the tint really does change, or the card's own colours would
+    // be blue on blue over indigo.
+    await openByPalette(page, "Mention Demo");
+    const bubble = page
+      .locator('[data-testid="message"][data-on-accent="true"]')
+      .filter({ has: page.locator(".mention-chip") })
+      .last();
+    await expect(bubble).toHaveAttribute("data-mine", "true");
+    const onAccent = await bubble.locator(".mention-chip").first().evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { color: style.color, background: style.backgroundColor };
+    });
+    expect(onAccent.color).not.toBe(onCard.color);
+    expect(onAccent.background).not.toBe(onCard.background);
   });
 
   test("an email address is not a mention", async ({ page }) => {

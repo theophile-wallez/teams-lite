@@ -3892,6 +3892,27 @@ if (import.meta.main) {
       await typeInComposer(page, "One more line, written on a phone.");
       await shot(`${out}-subject-phone-light.png`);
       await page.setViewportSize(VIEWPORT);
+      // The "@" list, where a CHANNEL is offered above the people: the widest thing one press
+      // in this app reaches, so its row says what it costs before it is made — and it is
+      // drawn as a channel rather than as a person, because a face seeded from a thread id is
+      // a colleague who does not exist. Then the chip it becomes in the box, which is the same
+      // chip a person gets: what differs is on the wire (`MentionKind`).
+      await clearComposer(page);
+      await page.locator('[data-testid="composer-subject"]').fill("");
+      await typeInComposer(page, "@");
+      await page.waitForSelector('[data-testid="mention-suggestion"][data-kind="channel"]');
+      await page.waitForTimeout(200);
+      // NOT cropped to the composer: the list floats ABOVE the box, so its own rows are
+      // outside that element's border and a crop to it photographs one clipped row.
+      await shot(`${out}-mention-channel-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-mention-channel-dark.png`);
+      await setTheme("light");
+      await page.locator('[data-testid="mention-suggestion"][data-kind="channel"]').click();
+      await page.keyboard.type(" the rollout is paused.");
+      await page.waitForTimeout(200);
+      await shot(`${out}-mention-channel-chip-light.png`, '[data-testid="composer-shell"]');
+      await clearComposer(page);
       console.log(
         `[preview] wrote ${out}-tree-light.png, ${out}-open-light.png, ` +
           `${out}-collapsed-light.png, ${out}-placement-light.png, ${out}-card-light.png, ` +
@@ -3899,7 +3920,9 @@ if (import.meta.main) {
           `${out}-thread-{light,dark}.png, ${out}-thread-replying-light.png, ` +
           `${out}-thread-phone-light.png, ` +
           `${out}-subject-{empty-dark,light,phone-light}.png, ` +
-          `${out}-thread-reacted-{light,dark}.png and ` +
+          `${out}-thread-reacted-{light,dark}.png, ` +
+          `${out}-mention-channel-{light,dark}.png, ` +
+          `${out}-mention-channel-chip-light.png and ` +
           `${out}-titled-post-{light,dark}.png`,
       );
     }, { deviceScaleFactor: dpr });

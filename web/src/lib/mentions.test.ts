@@ -3,6 +3,7 @@ import type { AgentStatus } from "./agent";
 import type { AgentPersona } from "./agent-persona";
 import {
   agentCandidatesFor,
+  channelMentionCandidate,
   dedupeCandidates,
   defaultAgentCandidatesFor,
   matchAgentCandidates,
@@ -296,6 +297,12 @@ describe("matchAgentCandidates", () => {
   });
 });
 
+const CHANNEL: MentionCandidate = {
+  mri: "19:eng-incidents@thread.tacv2",
+  name: "Incidents",
+  kind: "channel",
+};
+
 describe("mentionOptions", () => {
   const both = (query: string) =>
     mentionOptions({ people: PEOPLE, agents: [CLAUDE, OPENCODE], query });
@@ -329,11 +336,65 @@ describe("mentionOptions", () => {
     ]);
   });
 
-  it("keeps the two kinds of key apart", () => {
+  it("keeps the three kinds of key apart", () => {
     expect(mentionOptionKey({ kind: "agent", agent: CLAUDE })).toBe("agent:claude");
     expect(mentionOptionKey({ kind: "person", person: PEOPLE[0]! })).toBe(
       "person:8:orgid:charlotte",
     );
+    expect(mentionOptionKey({ kind: "channel", channel: CHANNEL })).toBe(
+      "channel:19:eng-incidents@thread.tacv2",
+    );
+  });
+
+  it("draws the CHANNEL as its own kind, never as a person", () => {
+    // The row must not be a person: `Avatar` would seed tinted initials from a THREAD id,
+    // which is a face for a colleague who does not exist. The candidate carries what it is,
+    // so the option does too.
+    const options = mentionOptions({ people: [CHANNEL, ...PEOPLE], agents: [], query: "" });
+    expect(options[0]).toEqual({ kind: "channel", channel: CHANNEL });
+    expect(options.slice(1).every((o) => o.kind === "person")).toBe(true);
+  });
+
+  it("offers the channel FIRST on a bare @, and ranks it by name once anything is typed", () => {
+    // First because the caller puts it first and the matcher is stable: one fixed row a
+    // reader learns once, above a list of people that grows. And it is found by its own
+    // name like everybody else — never by a person's.
+    const list = { people: [CHANNEL, ...PEOPLE], agents: [] as AgentCandidate[] };
+    expect(mentionOptions({ ...list, query: "" })[0]!.kind).toBe("channel");
+    expect(mentionOptions({ ...list, query: "Inc" }).map(mentionOptionKey)).toEqual([
+      "channel:19:eng-incidents@thread.tacv2",
+    ]);
+    expect(
+      mentionOptions({ ...list, query: "Charl" }).every((o) => o.kind === "person"),
+    ).toBe(true);
+  });
+});
+
+describe("channelMentionCandidate", () => {
+  const conversationId = "19:eng-incidents@thread.tacv2";
+
+  it("names the channel by its OWN thread id, which is what the backend checks", () => {
+    // Measured on this tenant: 176 of 177 real channel mentions name the very thread their
+    // message was posted in, so the mri is the conversation and nothing is invented here.
+    expect(channelMentionCandidate({ conversationId, name: "Incidents", isChannel: true })).toEqual(
+      { mri: conversationId, name: "Incidents", kind: "channel" },
+    );
+  });
+
+  it("offers nothing where there is no channel to name", () => {
+    // A chat has none — and the backend refuses one there whatever a page offers, so this
+    // is the page agreeing with that rail rather than a second, softer copy of it.
+    expect(
+      channelMentionCandidate({
+        conversationId: "19:abc@thread.v2",
+        name: "Design crew",
+        isChannel: false,
+      }),
+    ).toBeNull();
+    // …and nothing without an id or a name: a row showing a thread id is a row nobody can
+    // pick, which is the rule that already keeps an unnamed colleague out of the list.
+    expect(channelMentionCandidate({ conversationId, name: "  ", isChannel: true })).toBeNull();
+    expect(channelMentionCandidate({ conversationId: null, name: "x", isChannel: true })).toBeNull();
   });
 });
 

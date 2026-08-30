@@ -397,7 +397,15 @@ html[data-virtual-keyboard-open] .composer-shell {
      chips, which is the very thing `mergeAdjacentMentions` exists to prevent. */
   white-space: nowrap;
 }
-[data-mine="true"] .mention-chip {
+/* The on-the-accent tint is keyed on the ACCENT FILL and never on whose the message is
+   (`data-on-accent`, over `onAccentFill` in message-bubble.tsx). Both halves of it are
+   white — 96% white ink on a 22% white wash — so it is legible on the indigo bubble and
+   invisible anywhere else, and `data-mine` is true on plenty of messages that draw no
+   indigo at all: a post in a channel thread, a link-only message, a picture-only one, a
+   deleted or locked ghost. Read that way, a mention the reader wrote in an announcement
+   was a blank gap in their own words — the same defect `anchoredRight` was introduced for
+   on the quoted announcement, which this rule was simply missed by. */
+[data-on-accent="true"] .mention-chip {
   background-color: var(--mention-surface-mine);
   color: var(--mention-mine);
 }
@@ -636,9 +644,13 @@ html[data-virtual-keyboard-open] .composer-shell {
 
    With no chip to guarantee contrast, a ramp follows the *surface* the word
    lands on rather than the theme alone: the deep ramp on the white incoming
-   bubble, the bright one on anything dark (the indigo "mine" bubble, and both
+   bubble, the bright one on anything dark (the accent-filled bubble, and both
    bubbles in the dark theme) where the letters also carry a halo of their own
-   color. The glyphs are pseudo-elements, so they decorate the word without
+   color. That is read off `[data-on-accent]` — the accent fill itself — and never
+   off `[data-mine]`, which is true of plenty of the reader's own messages that
+   paint no fill at all (a post in a channel thread, a link- or picture-only
+   message, a deleted ghost): there the bright ramp and its halo land on the page's
+   own light surface, which is the blurry text this halo exists to avoid. The glyphs are pseudo-elements, so they decorate the word without
    joining the text on selection or copy. Every animation here is neutralized by
    the global prefers-reduced-motion rule above; since none of them fill forwards,
    the letters and glyphs simply settle into their resting look.
@@ -661,7 +673,7 @@ html[data-virtual-keyboard-open] .composer-shell {
   padding-inline: 0.16em;
   font-weight: 600;
 }
-[data-mine="true"] .effect-word,
+[data-on-accent="true"] .effect-word,
 [data-theme="dark"] .effect-word {
   /* A halo, so the egg glows out of a dark bubble instead of sinking into it. */
   --effect-halo: 45%;
@@ -725,7 +737,7 @@ html[data-virtual-keyboard-open] .composer-shell {
   --effect-5: #0e9488;
   --effect-6: #ea580c;
 }
-[data-mine="true"] .sparkle-word,
+[data-on-accent="true"] .sparkle-word,
 [data-theme="dark"] .sparkle-word {
   --effect-1: #ff8ac4;
   --effect-2: #e879f9;
@@ -804,7 +816,7 @@ html[data-virtual-keyboard-open] .composer-shell {
   /* Wider than the sparkles: a ball is a chunkier glyph. */
   padding-inline: 0.24em;
 }
-[data-mine="true"] .football-word,
+[data-on-accent="true"] .football-word,
 [data-theme="dark"] .football-word {
   --effect-1: #86efac;
   --effect-2: #f1f5f9;

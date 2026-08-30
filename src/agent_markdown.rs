@@ -337,6 +337,10 @@ impl<'a> Resolver<'a> {
             itemid,
             mri: person.mri.clone(),
             display_name: person.name.clone(),
+            // A PERSON, always: an agent's answer may name the people of its own thread and
+            // nothing wider. Notifying a whole channel is the reader's own press in the
+            // composer, and a model must not reach it by writing a name.
+            kind: crate::teams_send::MentionKind::Person,
         });
         Some((
             format!(
@@ -559,6 +563,10 @@ mod tests {
             itemid: 0,
             mri: "8:orgid:ada".into(),
             display_name: "Ada Lovelace".into(),
+            // A PERSON, and this assertion is what pins it: an answer that could write a
+            // CHANNEL mention would notify everybody following the channel from a name the
+            // model typed.
+            kind: crate::teams_send::MentionKind::Person,
         }]);
     }
 

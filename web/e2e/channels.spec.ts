@@ -684,6 +684,85 @@ test.describe("a channel thread", () => {
     expect(shadows[0]).not.toBe(shadows[1]);
   });
 
+  test("the @ list offers the CHANNEL itself, and the send says it is one", async ({ page }) => {
+    // The reader asked for "the alerting group" in the list, which in Teams is a CHANNEL
+    // mention: the widest thing one press here reaches, because it notifies whoever follows
+    // the channel. So the whole of this test is that it is offered where it works, drawn as
+    // what it is, and posted as what it is — a channel mention described as a person is blue
+    // text notifying nobody, which is the silent half of the mention pair.
+    await gotoApp(page);
+    await openChannelsTab(page);
+    const row = page.locator('[data-testid="channel-row"]').first();
+    const channelName = ((await row.locator('[data-testid="channel-name"]').textContent()) ?? "")
+      .trim();
+    await row.click();
+    await expect
+      .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+
+    // A bare "@" offers it FIRST among the mention targets: one fixed row a reader learns
+    // once, above a list of people that grows.
+    const field = page.locator('[data-testid="composer-rich"] .tiptap-message');
+    await field.click();
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("@");
+    const suggestions = page.locator('[data-testid="mention-suggestions"]');
+    await expect(suggestions).toBeVisible();
+    const channelRow = suggestions.locator('[data-testid="mention-suggestion"][data-kind="channel"]');
+    await expect(channelRow).toHaveCount(1);
+    await expect(channelRow).toHaveAttribute("data-mri", /@thread\.tacv2$/);
+    // It says what the press COSTS before it is made, which is the one fact the reader
+    // cannot undo after — and it is NOT drawn as a person: an avatar seeded from a thread id
+    // is a face for a colleague who does not exist.
+    await expect(channelRow).toContainText("notifies the channel");
+    expect(await channelRow.locator("img").count()).toBe(0);
+
+    await channelRow.click();
+    await expect(suggestions).toHaveCount(0);
+    const body = `channel-mention-${Date.now()}`;
+    await page.keyboard.type(` ${body}`);
+    await page.locator('[data-testid="composer-send"]').click();
+
+    await expect
+      .poll(async () => (await fetchCapturedSends(page)).some((s) => s.content_html?.includes(body)), {
+        timeout: 10_000,
+      })
+      .toBe(true);
+    const sent = (await fetchCapturedSends(page))
+      .filter((s) => s.content_html?.includes(body))
+      .pop();
+    // The PAIR, and the kind that makes it a channel mention rather than a colleague: the
+    // body carries an indexed span, the list says what that index names, and the mri is the
+    // conversation itself — which is the one thing the backend checks it against, so a
+    // channel the reader is not writing in can never be notified from here.
+    expect(sent?.mentions).toHaveLength(1);
+    expect(sent?.mentions?.[0]?.kind).toBe("channel");
+    expect(sent?.mentions?.[0]?.mri).toBe(sent?.conversation);
+    expect(sent?.mentions?.[0]?.display_name).toBe(channelName);
+    expect(sent?.content_html).toContain(`itemid="${sent?.mentions?.[0]?.itemid}"`);
+    expect(sent?.content_html).toContain("schema.skype.com/Mention");
+  });
+
+  test("a CHAT never offers the channel row, because there is no channel to name", async ({
+    page,
+  }) => {
+    // The backend refuses a channel mention in a chat whatever a page offers, so this is the
+    // page agreeing with that rail rather than a second, softer copy of it — and a row that
+    // reported a refusal is exactly what this app draws nothing instead of.
+    await gotoApp(page);
+    await openConversationAt(page, 0);
+    const field = page.locator('[data-testid="composer-rich"] .tiptap-message');
+    await field.click();
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("@");
+    await expect(page.locator('[data-testid="mention-suggestions"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="mention-suggestion"][data-kind="channel"]'),
+    ).toHaveCount(0);
+  });
+
   test("a CHAT reply is untouched: a quote, and no thread address", async ({ page }) => {
     // A chat has no threads, so nothing about this change may reach it — a chat reply is the
     // quote it has always been, and a `thread_root` there is refused by the backend outright.

@@ -219,7 +219,13 @@ export type CapturedSend = {
   content_html?: string;
   /** Who the body's mention spans name, by the itemid each span carries. Present only
    *  when the message @mentions somebody. */
-  mentions?: { itemid: number; mri: string; display_name: string }[];
+  mentions?: {
+    itemid: number;
+    mri: string;
+    display_name: string;
+    /** What it names, absent for a person (see `teams_send::MentionKind`). */
+    kind?: "person" | "channel";
+  }[];
   /** Every picture the message carried, in the order the composer sent them. */
   images?: {
     name: string;

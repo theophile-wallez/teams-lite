@@ -48,6 +48,10 @@ async fn main() -> Result<()> {
         itemid: 0,
         mri: session.self_mri.clone(),
         display_name: name.clone(),
+        // A self-mention, so a PERSON. A CHANNEL mention cannot be probed here at all: the
+        // sandbox target is a CHAT (see CLAUDE.md § Sending messages), there is no sandbox
+        // channel, and a probe that mentioned a real one would notify everybody following it.
+        kind: teams_send::MentionKind::Person,
     }];
 
     let sent = teams_send::send_message(

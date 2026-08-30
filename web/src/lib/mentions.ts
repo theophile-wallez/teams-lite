@@ -22,21 +22,59 @@ import {
 import { agentDisplayName } from "./agent-message";
 import { agentPersonas } from "./agent-persona";
 
-/** Somebody a message can @mention: their MRI, and the name to show. */
+/** What a mention names. Mirrors `teams_send::MentionKind`, and an ABSENT value is a
+ *  person for the reason the wire's own default is: a person notifies one colleague,
+ *  where a channel notifies everybody following it. */
+export type MentionTargetKind = "person" | "channel";
+
+/** Something a message can @mention: its MRI, and the name to show. */
 export type MentionCandidate = {
-  /** The person's MRI (`8:orgid:<guid>`) — what makes Teams notify them. */
+  /** The person's MRI (`8:orgid:<guid>`) — what makes Teams notify them. For a CHANNEL
+   *  it is the channel's own `19:…@thread.tacv2` thread id instead. */
   mri: string;
   name: string;
+  /** Absent for a person, which is every candidate the roster answers with. */
+  kind?: MentionTargetKind;
 };
 
-/** A mention as it will be sent: the span index in the body, who it names, and the
- *  text that span shows (which the author may have shortened). Mirrors the Rust
+/** A mention as it will be sent: the span index in the body, who it names, the text that
+ *  span shows (which the author may have shortened), and WHAT it names. Mirrors the Rust
  *  `teams_send::Mention`. */
 export type OutboundMention = {
   itemid: number;
   mri: string;
   display_name: string;
+  kind?: MentionTargetKind;
 };
+
+/**
+ * The CHANNEL itself as something the reader can @mention, or `null` where there is no
+ * channel to name.
+ *
+ * A channel mention notifies whoever follows the channel — as loudly as each of them
+ * asked Teams to be notified (`store::ChannelAlerts`) — so it is the widest thing this
+ * app lets one press reach, and the rules that keep it honest are all here and in
+ * `teams_send::parse_mentions`:
+ *
+ *   * only in a CHANNEL. A chat has no channel to name, and the backend refuses one there
+ *     whatever a page offers.
+ *   * the mri IS the conversation, which is what the backend checks it against. Measured
+ *     on this tenant, 176 of 177 real channel mentions name the very thread their message
+ *     was posted in — so nothing here is invented, and a mention of ANOTHER channel is a
+ *     shape this app neither offers nor accepts.
+ *   * the name is the channel's own. A row showing a thread id is a row nobody can pick,
+ *     which is the rule that already keeps an unnamed colleague out of the list.
+ */
+export function channelMentionCandidate(input: {
+  conversationId: string | null;
+  name: string;
+  isChannel: boolean;
+}): MentionCandidate | null {
+  const mri = input.conversationId?.trim() ?? "";
+  const name = input.name.trim();
+  if (!input.isChannel || !mri || !name) return null;
+  return { mri, name, kind: "channel" };
+}
 
 /** How many suggestions the list shows at once. A menu, not a directory: past this
  *  the user is faster typing another letter than reading. */
@@ -280,14 +318,20 @@ export function matchAgentCandidates(
   );
 }
 
-/** One row of the list an "@" opens: somebody to notify, or an agent to summon. */
+/** One row of the list an "@" opens: somebody to notify, the CHANNEL to notify, or an
+ *  agent to summon. A channel is its own kind rather than a person carrying a flag,
+ *  because the row must not be drawn as a person: an avatar seeded from a thread id is
+ *  tinted initials for a colleague who does not exist, which is the wrong-face rule the
+ *  chess engine's own seat already follows. */
 export type MentionOption =
   | { kind: "person"; person: MentionCandidate }
+  | { kind: "channel"; channel: MentionCandidate }
   | { kind: "agent"; agent: AgentCandidate };
 
 /** A stable key for one row, per kind, so two lists never collide on one id. */
 export function mentionOptionKey(option: MentionOption): string {
   if (option.kind === "person") return `person:${option.person.mri}`;
+  if (option.kind === "channel") return `channel:${option.channel.mri}`;
   // A custom agent is keyed on its own address, not on the provider behind it: several
   // personas share one provider, and keying on that would collapse them into one row.
   const { agent } = option;
@@ -320,7 +364,16 @@ export function mentionOptions(input: {
   );
   return [
     ...agents.map((agent): MentionOption => ({ kind: "agent", agent })),
-    ...people.map((person): MentionOption => ({ kind: "person", person })),
+    // A candidate carries WHAT it is (see `MentionCandidate.kind`), so the CHANNEL keeps
+    // its place in the matched order rather than being sorted to the front here: the
+    // caller puts it first in the list it passes, and `matchMentionCandidates` is stable,
+    // so a bare "@" offers it above the people and one typed letter ranks it by name like
+    // everybody else.
+    ...people.map((candidate): MentionOption =>
+      candidate.kind === "channel"
+        ? { kind: "channel", channel: candidate }
+        : { kind: "person", person: candidate },
+    ),
   ];
 }
 
@@ -332,7 +385,9 @@ export function dedupeCandidates(candidates: readonly MentionCandidate[]): Menti
     if (!candidate.mri) continue;
     const known = out.find((person) => person.mri.toLowerCase() === candidate.mri.toLowerCase());
     if (!known) {
-      out.push({ mri: candidate.mri, name: candidate.name });
+      // The kind travels with it, or the channel's own row would be deduped back into a
+      // person and drawn with a face seeded from a thread id.
+      out.push({ mri: candidate.mri, name: candidate.name, kind: candidate.kind });
       continue;
     }
     if (!known.name && candidate.name) known.name = candidate.name;
