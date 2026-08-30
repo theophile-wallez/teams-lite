@@ -453,7 +453,7 @@ export function RichEditor(props: {
   // The ranked list this render shows. Kept in a ref as well, for `handleKeyDown`.
   const ranked = mention
     ? mentionOptions({
-        people: props.mentionCandidates ?? [],
+        targets: props.mentionCandidates ?? [],
         agents: props.agentCandidates ?? [],
         query: mention.query,
       })

@@ -305,7 +305,7 @@ const CHANNEL: MentionCandidate = {
 
 describe("mentionOptions", () => {
   const both = (query: string) =>
-    mentionOptions({ people: PEOPLE, agents: [CLAUDE, OPENCODE], query });
+    mentionOptions({ targets: PEOPLE, agents: [CLAUDE, OPENCODE], query });
 
   it("puts the agents above the people", () => {
     expect(both("").map(mentionOptionKey).slice(0, 3)).toEqual([
@@ -324,7 +324,7 @@ describe("mentionOptions", () => {
 
   it("caps the whole list, agents included", () => {
     const options = mentionOptions({
-      people: PEOPLE,
+      targets: PEOPLE,
       agents: [CLAUDE, OPENCODE],
       query: "",
       limit: 3,
@@ -350,7 +350,7 @@ describe("mentionOptions", () => {
     // The row must not be a person: `Avatar` would seed tinted initials from a THREAD id,
     // which is a face for a colleague who does not exist. The candidate carries what it is,
     // so the option does too.
-    const options = mentionOptions({ people: [CHANNEL, ...PEOPLE], agents: [], query: "" });
+    const options = mentionOptions({ targets: [CHANNEL, ...PEOPLE], agents: [], query: "" });
     expect(options[0]).toEqual({ kind: "channel", channel: CHANNEL });
     expect(options.slice(1).every((o) => o.kind === "person")).toBe(true);
   });
@@ -359,7 +359,7 @@ describe("mentionOptions", () => {
     // First because the caller puts it first and the matcher is stable: one fixed row a
     // reader learns once, above a list of people that grows. And it is found by its own
     // name like everybody else — never by a person's.
-    const list = { people: [CHANNEL, ...PEOPLE], agents: [] as AgentCandidate[] };
+    const list = { targets: [CHANNEL, ...PEOPLE], agents: [] as AgentCandidate[] };
     expect(mentionOptions({ ...list, query: "" })[0]!.kind).toBe("channel");
     expect(mentionOptions({ ...list, query: "Inc" }).map(mentionOptionKey)).toEqual([
       "channel:19:eng-incidents@thread.tacv2",
@@ -395,6 +395,25 @@ describe("channelMentionCandidate", () => {
     // pick, which is the rule that already keeps an unnamed colleague out of the list.
     expect(channelMentionCandidate({ conversationId, name: "  ", isChannel: true })).toBeNull();
     expect(channelMentionCandidate({ conversationId: null, name: "x", isChannel: true })).toBeNull();
+  });
+
+  it("checks the id's own shape rather than trusting the caller's flag", () => {
+    // This is the one function that decides whether the row is offered, so it has to answer
+    // the way the backend does: a page that offered a channel mention the backend refuses
+    // would be drawing a control whose press reports a refusal.
+    for (const id of ["19:abc@thread.v2", "8:orgid:ada", "48:notes", "19:abc@unq.gbl.spaces"]) {
+      expect(channelMentionCandidate({ conversationId: id, name: "General", isChannel: true }))
+        .toBeNull();
+    }
+    // A channel POST's own deep-link id is still that channel: the `;messageid=` suffix names
+    // a thread root rather than a conversation of its own (`teams_read::base_thread_id`).
+    expect(
+      channelMentionCandidate({
+        conversationId: `${conversationId};messageid=1784899486984`,
+        name: "Incidents",
+        isChannel: true,
+      })?.kind,
+    ).toBe("channel");
   });
 });
 

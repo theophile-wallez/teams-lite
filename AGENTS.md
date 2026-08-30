@@ -190,6 +190,17 @@ screenshots carry the last one.
   set varies between runs. So the suite is red only once some 45 spec files have accumulated shared
   state — that is not broken behaviour, and a spec of one's own is proved innocent by running it
   beside the failing one rather than by counting failures.
+  **A THIRD measurement names the sharpest shape of it: a PAIR of sibling tests, where which one
+  loses is decided by timing.** Measured over two full runs on 2026-08-30, one on pristine master
+  and one on a branch touching neither spec: master lost `mobile.spec.ts:455` (*an incoming
+  message swipes inward to reply*) while the branch lost `:468` (*a sent message swipes*) — two
+  tests four lines apart, sharing one `touchGesture` helper and failing identically on
+  `expect(box).not.toBeNull()`, because both open conversation index 0 and that conversation's
+  identity and loaded window are 578 tests' worth of accumulated sends. Master lost `agent:454`
+  and `history:256` in the same run and the branch lost neither: **5 failures against 3, for a
+  branch that changed nothing either spec reads.** So the honest comparison is a BASELINE RUN of
+  the same suite on master rather than a verdict on one run's list — a single differing member of
+  a sibling pair is this class of flake, not a regression.
 
 ## A CHANNEL THREAD is a THREAD (a list of posts, and a reply that lands IN it)
 

@@ -1,10 +1,12 @@
 // @mentions in the composer: who can be mentioned, which of them a half-typed "@…"
 // means, and how a mention's own text shrinks.
 //
-// An "@" offers two kinds of thing, and they are not the same kind: the PEOPLE this
-// thread can notify, and the AGENTS this machine can summon (see `AgentCandidate`). One
-// travels as a Teams mention pair; the other travels as the plain prefix the backend's
-// own trigger reads.
+// An "@" offers three kinds of thing, and they are not the same kind: the PEOPLE this
+// thread can notify, the CHANNEL itself where the conversation is one (which notifies
+// everybody following it — see `channelMentionCandidate`), and the AGENTS this machine can
+// summon (see `AgentCandidate`). The first two travel as a Teams mention pair and differ in
+// what that pair says they NAME; the third travels as the plain prefix the backend's own
+// trigger reads.
 //
 // Everything here is pure — no editor, no DOM, no network — so the rules that decide
 // whether the suggestion list opens, who it offers and what Backspace does to a mention
@@ -73,6 +75,13 @@ export function channelMentionCandidate(input: {
   const mri = input.conversationId?.trim() ?? "";
   const name = input.name.trim();
   if (!input.isChannel || !mri || !name) return null;
+  // The ID'S OWN SHAPE, checked here rather than trusted from the caller: this is the one
+  // function that decides whether the row is offered, and it must answer the way the
+  // backend does or the page would draw a control whose press the backend refuses — which
+  // is what this app draws nothing instead of. `19:…@thread.tacv2` is what a channel is
+  // (`teams_read::is_channel_thread_id`), and a channel POST's own deep-link id carries a
+  // `;messageid=` suffix that is not part of the channel, so only the part before it counts.
+  if (!/^19:[^;]*@thread\.tacv2$/.test(mri.split(";")[0] ?? "")) return null;
   return { mri, name, kind: "channel" };
 }
 
@@ -134,7 +143,8 @@ function fold(text: string): string {
 }
 
 /**
- * The people a query offers, best match first, capped at {@link MAX_MENTION_SUGGESTIONS}.
+ * The mention targets a query offers, best match first, capped at
+ * {@link MAX_MENTION_SUGGESTIONS}.
  *
  * Ranked by how the match reads, not by string distance: a name that STARTS with what
  * was typed comes before one whose surname does, which comes before a mere substring.
@@ -339,7 +349,8 @@ export function mentionOptionKey(option: MentionOption): string {
 }
 
 /**
- * Everything one "@…" offers: the agents first, then the people.
+ * Everything one "@…" offers: the agents first, then the people — with the CHANNEL at the
+ * front of those, where the caller put it.
  *
  * Agents lead because there are at most two of them, and they are offered EVERYWHERE an
  * "@" is. The backend reads an address wherever it stands (`agent_policy::split_prefix`),
@@ -350,15 +361,19 @@ export function mentionOptionKey(option: MentionOption): string {
  * The total is capped like the people-only list was, so the menu stays a menu.
  */
 export function mentionOptions(input: {
-  people: readonly MentionCandidate[];
+  /** Everything an "@" can NOTIFY, in the order it should be offered — the people, and the
+   *  CHANNEL at the front where there is one. Not `people`: a list that may hold the channel
+   *  is not a list of people, and the name would be the quiet kind of lie this file's own
+   *  `MentionOption` split exists to avoid. */
+  targets: readonly MentionCandidate[];
   agents: readonly AgentCandidate[];
   query: string;
   limit?: number;
 }): MentionOption[] {
   const limit = input.limit ?? MAX_MENTION_SUGGESTIONS;
   const agents = matchAgentCandidates(input.agents, input.query);
-  const people = matchMentionCandidates(
-    input.people,
+  const targets = matchMentionCandidates(
+    input.targets,
     input.query,
     Math.max(0, limit - agents.length),
   );
@@ -369,7 +384,7 @@ export function mentionOptions(input: {
     // caller puts it first in the list it passes, and `matchMentionCandidates` is stable,
     // so a bare "@" offers it above the people and one typed letter ranks it by name like
     // everybody else.
-    ...people.map((candidate): MentionOption =>
+    ...targets.map((candidate): MentionOption =>
       candidate.kind === "channel"
         ? { kind: "channel", channel: candidate }
         : { kind: "person", person: candidate },
