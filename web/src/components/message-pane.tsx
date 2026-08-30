@@ -1290,6 +1290,14 @@ export function MessagePane(props: { onBack?: () => void }) {
  * than by a rule — so every post renders flush on it (`onPanel`, `threadPost`) rather than
  * bringing a second one of its own: a whole notifications channel is made of app cards, and
  * a card inside a card frames the same words twice.
+ *
+ * **THE CHROME IS ONE ROW, and it used to be two.** Measured on the real tenant: an
+ * announcement whose words are a single line spent an accent-filled `3 replies` pill on a
+ * row of its own, then a 44px full-width **Reply** under it — so the reader met the word
+ * "Reply" more often than they met a colleague's words, and every card in the history
+ * carried the app's ONE accent for a disclosure. Both now sit side by side at the foot in
+ * `text-dim` at 12px, each 44px tall under a thumb, and the accent is spent on the one
+ * thing that earns it: the thread the next Enter lands in.
  */
 function ThreadGroup(props: {
   thread: Thread;
@@ -1326,7 +1334,11 @@ function ThreadGroup(props: {
         // ONE surface, and it is separated from the page by a fine shadow rather than by a
         // border: the posts inside it carry no fill of their own now, so this card is the
         // only thing that says where the thread begins and ends.
-        "mb-3 rounded-2xl bg-card px-3 py-3 shadow-card",
+        //
+        // The bottom padding is SHORT because the foot row is 44px tall around 12px of ink:
+        // it already carries ~15px of air under its label, so a full `py-3` under that put
+        // 28px of nothing at the foot of every card in the history.
+        "mb-3 rounded-2xl bg-card px-3 pb-1 pt-3 shadow-card",
         // While the composer is aimed here, and only then: one accent, on the one thread
         // the next Enter lands in.
         replyTarget && "ring-1 ring-primary/40",
@@ -1347,16 +1359,36 @@ function ThreadGroup(props: {
         </h3>
       )}
       {renderMsg(lead, undefined, undefined, { onPanel: true, threadPost: true })}
-      {replies.length > 0 && (
-        <>
+      {replies.length > 0 && expanded && (
+        // The replies are INDENTED to the width of the root post's own face, so the
+        // thread reads as answers under an announcement rather than as a second list
+        // beside it — and the hairline down the left is the one rule this card keeps,
+        // because it is a connector rather than a surface edge.
+        <div
+          data-testid="thread-replies"
+          className="mt-1 border-l border-border-subtle pl-2 animate-in fade-in slide-in-from-top-1 duration-200 ease-out"
+        >
+          {replies.map((r, i) =>
+            // `onPanel` for the same reason the root post gets it: the thread's card is
+            // the surface, so a reply that would bring one of its own — a bot answering
+            // with an app card — renders flush instead of as a card inside a card.
+            renderMsg(r, replies[i - 1], replies[i + 1], { onPanel: true, threadPost: true }),
+          )}
+        </div>
+      )}
+      {/* ONE foot row for everything the card offers, drawn as META rather than as two
+          controls (see this function's own note for what it replaced). */}
+      <div className="mt-1 flex items-center gap-1 text-xs">
+        {replies.length > 0 && (
           <button
             type="button"
             onClick={onToggle}
             aria-expanded={expanded}
             data-testid="thread-toggle"
-            // The negative margin pulls the label back to the post's edge while the
-            // padding stays a hit area for the hover background.
-            className="-ml-1.5 mt-1.5 flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
+            // The negative margin pulls the label back to the post's own left edge while the
+            // padding keeps a 44px box under a thumb — the floor every target this app draws
+            // for one holds (§ A HOLD is how a phone reaches a menu).
+            className="-ml-1.5 flex h-11 items-center gap-1.5 rounded-lg px-1.5 font-medium text-text-dim transition-colors hover:bg-accent hover:text-foreground"
           >
             <HugeiconsIcon
               icon={ChevronRightIcon}
@@ -1365,49 +1397,33 @@ function ThreadGroup(props: {
             />
             {replyCountLabel(replies.length)}
           </button>
-          {expanded && (
-            // The replies are INDENTED to the width of the root post's own face, so the
-            // thread reads as answers under an announcement rather than as a second list
-            // beside it — and the hairline down the left is the one rule this card keeps,
-            // because it is a connector rather than a surface edge.
-            <div
-              data-testid="thread-replies"
-              className="mt-1 border-l border-border-subtle pl-2 animate-in fade-in slide-in-from-top-1 duration-200 ease-out"
-            >
-              {replies.map((r, i) =>
-                // `onPanel` for the same reason the root post gets it: the thread's card is
-                // the surface, so a reply that would bring one of its own — a bot answering
-                // with an app card — renders flush instead of as a card inside a card.
-                renderMsg(r, replies[i - 1], replies[i + 1], { onPanel: true, threadPost: true }),
-              )}
-            </div>
-          )}
-        </>
-      )}
-      {/* The way IN. Teams and Discord both put a reply box at the foot of the thread; there
-          is one composer in this app (its `data-conversation-id` is what a sanctioned live
-          driver proves its target with), so this row aims that one instead of adding a
-          second. Pressing it on a FOLDED thread opens it too: nobody answers a conversation
-          they cannot read. */}
-      <button
-        type="button"
-        data-testid="thread-reply"
-        aria-label={subject ? `Reply in ${subject}` : "Reply in this thread"}
-        onClick={() => {
-          if (replies.length > 0 && !expanded) onToggle();
-          onReply(lead);
-        }}
-        className={cn(
-          // 44px under a thumb, which is the floor every target this app draws for one holds
-          // (§ A HOLD is how a phone reaches a menu). It spans the card, because a reply box
-          // is what stands here in the surface this is modelled on.
-          "mt-2 flex h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-[13px] text-text-faint transition-colors hover:bg-accent hover:text-foreground",
-          replyTarget && "text-primary",
         )}
-      >
-        <HugeiconsIcon icon={ArrowTurnBackwardIcon} className="size-4 shrink-0" strokeWidth={1.6} />
-        {replyTarget ? "Writing a reply below…" : "Reply"}
-      </button>
+        {/* The way IN. There is one composer in this app (its `data-conversation-id` is what a
+            sanctioned live driver proves its target with), so this row aims that one instead
+            of adding a second. Pressing it on a FOLDED thread opens it too: nobody answers a
+            conversation they cannot read. */}
+        <button
+          type="button"
+          data-testid="thread-reply"
+          aria-label={subject ? `Reply in ${subject}` : "Reply in this thread"}
+          onClick={() => {
+            if (replies.length > 0 && !expanded) onToggle();
+            onReply(lead);
+          }}
+          className={cn(
+            "flex h-11 items-center gap-1.5 rounded-lg px-1.5 font-medium transition-colors",
+            // The negative margin only applies where this is the FIRST thing in the row: a
+            // thread with replies has the count at that edge instead.
+            replies.length === 0 && "-ml-1.5",
+            replyTarget
+              ? "text-primary"
+              : "text-text-dim hover:bg-accent hover:text-foreground",
+          )}
+        >
+          <HugeiconsIcon icon={ArrowTurnBackwardIcon} className="size-3.5 shrink-0" strokeWidth={1.8} />
+          {replyTarget ? "Writing a reply below…" : "Reply"}
+        </button>
+      </div>
     </div>
   );
 }

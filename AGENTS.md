@@ -231,7 +231,7 @@ It needs **no gate of its own**: `send` is already an `OUTWARD_METHODS` entry an
 in its params exactly as a picture, a mention and a title do — it narrows WHERE the message this
 method already posts lands, and the consent is the same click on Send.
 
-Eleven rules hold it, and each is pinned by a test:
+Thirteen rules hold it, and each is pinned by a test:
 
 - **The root is DIGITS, bounded, and only in a CHANNEL** (`parse_thread_root`,
   `MAX_THREAD_ROOT_CHARS`). It is the one value in a `send` that becomes part of the request PATH,
@@ -282,6 +282,31 @@ Eleven rules hold it, and each is pinned by a test:
   reader recognises the announcement by.
 - **The reply row is 44px under a thumb and OPENS a folded thread.** Nobody answers a conversation
   they cannot read, so a press on a folded thread expands it and then aims the composer.
+- **THE CHROME IS ONE ROW AT THE FOOT, and the ACCENT is spent on the thread being answered.**
+  Measured on the real tenant after the first version shipped: an announcement whose words are a
+  single line spent an accent-filled `3 replies` pill on a row of its own and then a 44px
+  FULL-WIDTH **Reply** under it, so the reader met the word "Reply" more often than a colleague's
+  words — and every card in the history wore the app's one accent for a DISCLOSURE, which is the
+  same as saying none of them is worth noticing. The count and the reply now sit side by side in
+  `text-dim` at 12px, each still 44px tall under a thumb, and the accent is spent on the one thing
+  that earns it: the card's own ring plus "Writing a reply below…" on the thread the next Enter
+  lands in. `web/e2e/channels.spec.ts` measures the two boxes against each other and then compares
+  the two inks — at rest, and once the thread IS the target — rather than spelling a colour out,
+  because what the rule says is that ONE of them changes.
+- **A REACTED POST DRAWS ITS CHIPS IN FLOW, and that is the other half of "a post is not a
+  bubble".** A bubble's chip row STRADDLES its bottom edge — absolutely positioned, with the row
+  reserving `REACTION_OVERHANG` (28px) below itself — and `threadPost` drops the bubble chrome, so
+  there was no edge to straddle: a 30px pill with a 20px glyph hung alone in that reserved band
+  under a full-width post, a centimetre above the card's own foot row. It read as one enormous
+  free-floating emoji rather than as something somebody did to a post, which is what the user
+  photographed. `ReactionChips`' `inFlow` makes it the post's own last line: 24px over a 16px
+  glyph, at the post's left edge, reserving nothing. Two more things move with it, and each is
+  pinned: the pill carries ONE hairline rather than a border beside a shadow (the neutral one takes
+  `shadow-chip`, OURS takes an accent ring in its place — the bubble chip's own vocabulary of a
+  hairline that differs in COLOUR), and it takes a FILL of its own — `--reaction-chip` is 72%
+  white, which on a card that IS white left the lone circle reading as a bare emoji sitting in the
+  words, so it steps off the card the way `--tracker-ref-surface` already does for a chip drawn on
+  every surface in the app.
 - **The card states WHICH thread it is** (`data-thread-root`). The history is virtualized, so
   `…thread-group").first()` re-resolves to whatever happens to be mounted and expanding a thread
   moves the set — the sentinel discipline the composer's own `data-conversation-id` and the diff
@@ -295,8 +320,16 @@ DELIBERATELY not the backend's number: a real message id is 13 digits while the 
 `<conversation>#<seq>`, so restating 32 there refused every fixture's own thread, which is a mock
 lying about the rule rather than mirroring it.
 
+**THE FIXTURES HELD NO REACTED CHANNEL POST, which is why that defect shipped.** The mock's alert
+thread now carries two — a counted pill the reader is part of and a lone circle they are not, on a
+colleague's reply and on the reader's own post (`seedChannelAlertThread`) — because a shape no
+capture can draw and no spec can find is one that ships broken. `--channels` honours `--dpr` for
+the same reason: the two smallest things on this surface are a 24px pill and a 12px meta row, and a
+1200px page cannot be read at either.
+
 `cd web && bun run preview -- --out /tmp/chan --channels` captures the thread in both themes, the
-thread being answered with the words in the box, and the whole surface at a PHONE's width;
+thread being answered with the words in the box, a REACTED thread in both themes, and the whole
+surface at a PHONE's width (pass `--dpr 3` for the pill and the foot row);
 `web/e2e/channels.spec.ts` pins every rule the page owns and `web/src/lib/threads.test.ts` the pure
 ones. **What is UNVERIFIED against the tenant is the ADDRESS**: there is no sandbox channel, so
 nothing here has POSTed to `;messageid=<root>` and read the reply back inside its thread. What the
@@ -2984,8 +3017,10 @@ user. Two independent mechanisms enforce that split:
   `openCalendarView` / `openFirstEvent`. For the team → channel tree — a channel post's own TITLE
   (the composer's field empty and filled, the titled post in both themes and that composer at a
   phone's width) and a channel THREAD (the card in both themes, the thread the composer is aimed at
-  with the words in the box, and the whole surface at a phone's width):
-  `bun run preview -- --out /tmp/chan --channels`, or `openChannelsTab` /
+  with the words in the box, a REACTED thread in both themes — where the chip row is drawn in flow
+  because a post has no bubble edge to straddle — and the whole surface at a phone's width):
+  `bun run preview -- --out /tmp/chan --channels` (it honours `--dpr`: the pill is 24px and the
+  card's foot row is 12px), or `openChannelsTab` /
   `toggleTeamSection` / `openThreadWithReplies` from the same file. For the merge-request page — its tab strip at rest
   and current, the list, the page, its header's own approval and merge in both themes, its own
   sub-header of four pages in both themes and at a

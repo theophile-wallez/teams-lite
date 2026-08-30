@@ -3790,6 +3790,8 @@ if (import.meta.main) {
   if (args.includes("--channels")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       await openChannelsTab(page);
+      // `--dpr` is honoured here because the two smallest things on this surface are a 24px
+      // reaction pill and a 12px meta row, which a 1200px page cannot be read at.
       await shot(`${out}-tree-light.png`);
       await page.locator('[data-testid="channel-row"]').first().click();
       await page.waitForSelector('[data-testid="message"], [data-testid="system-event"]');
@@ -3825,6 +3827,19 @@ if (import.meta.main) {
       await openMessageActions(page);
       await shot(`${out}-card-actions-dark.png`);
       await page.keyboard.press("Escape");
+      // A REACTED post, which is the one shape of this surface that had never been drawn in
+      // a browser: a post in a thread carries no bubble, so the chip row has no edge to
+      // straddle and is drawn in FLOW under the words instead — 24px over a 16px glyph,
+      // beside a meta line set at 12px. Hung off a bubble it was a 30px pill alone in a
+      // 28px reserved band under a full-width post, which read as one enormous free-floating
+      // emoji (see `ReactionChips`' `inFlow`). Both shapes are here: a counted pill and a
+      // lone circle, on a colleague's post and on the reader's own.
+      await setTheme("light");
+      const reacted = await openThreadWithReplies(page);
+      await reacted.screenshot({ path: `${out}-thread-reacted-light.png`, animations: "disabled" });
+      await setTheme("dark");
+      await reacted.screenshot({ path: `${out}-thread-reacted-dark.png`, animations: "disabled" });
+      // Left DARK, because `${out}-dark.png` below is the channel in that theme.
       await page.locator('[data-testid="channel-row"]').first().click();
       await page.waitForSelector('[data-testid="message"], [data-testid="system-event"]');
       await shot(`${out}-dark.png`);
@@ -3883,10 +3898,11 @@ if (import.meta.main) {
           `${out}-card-dark.png, ${out}-card-actions-dark.png, ${out}-dark.png, ` +
           `${out}-thread-{light,dark}.png, ${out}-thread-replying-light.png, ` +
           `${out}-thread-phone-light.png, ` +
-          `${out}-subject-{empty-dark,light,phone-light}.png and ` +
+          `${out}-subject-{empty-dark,light,phone-light}.png, ` +
+          `${out}-thread-reacted-{light,dark}.png and ` +
           `${out}-titled-post-{light,dark}.png`,
       );
-    });
+    }, { deviceScaleFactor: dpr });
     process.exit(0);
   }
 

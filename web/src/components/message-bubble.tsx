@@ -964,8 +964,10 @@ function MessageBubbleImpl(props: {
         // Tighten the spacing within a same-author run; keep a wider gap between
         // different authors.
         props.continuesAbove ? "mt-0.5" : "mt-2",
-        // Reactions hang below the bubble — grow the gap so they have room.
-        chipsShown && REACTION_OVERHANG,
+        // Reactions hang below the bubble — grow the gap so they have room. A post in a
+        // thread draws them IN FLOW instead, so the row already holds them and reserving
+        // the overhang there would be 28px of nothing under every reacted post.
+        chipsShown && !props.threadPost && REACTION_OVERHANG,
         // A post in a thread is a face and then the words, so the row is a two-column
         // one — the gap is the gutter between them.
         props.threadPost && "gap-2",
@@ -1276,7 +1278,14 @@ function MessageBubbleImpl(props: {
             ) : null}
 
             {chipsShown ? (
-              <ReactionChips reactions={reactions} anchoredRight={anchoredRight} onToggle={react} />
+              <ReactionChips
+                reactions={reactions}
+                anchoredRight={anchoredRight}
+                // A post in a thread has no bubble edge to straddle, so the row is drawn in
+                // flow under the words instead (see {@link ReactionChips}).
+                inFlow={props.threadPost === true}
+                onToggle={react}
+              />
             ) : null}
 
             {/* A message nobody can act on gets no actions surface at all. */}
@@ -2045,15 +2054,29 @@ function ReactionPicker(props: {
  * reaction highlighted. Clicking a chip toggles that reaction (removing ours
  * when it is already ours, otherwise adding/replacing it).
  *
- * Placed the way Messenger and Teams place theirs: the row *straddles* the
- * bubble's bottom edge on the author's side — about a third of a pill tucked
- * inside the bubble, the remaining two thirds hanging below it — so the
- * reactions read as attached to the message without eating into its text. It is
- * absolutely positioned so it never widens the bubble; the bubble row reserves
+ * On a BUBBLE it is placed the way Messenger and Teams place theirs: the row
+ * *straddles* the bubble's bottom edge on the author's side — about a third of a
+ * pill tucked inside the bubble, the remaining two thirds hanging below it — so
+ * the reactions read as attached to the message without eating into its text. It
+ * is absolutely positioned so it never widens the bubble; the bubble row reserves
  * the overhang below itself instead (see {@link REACTION_OVERHANG}). That
  * straddling is also why the pills carry a blurred fill and a drop shadow: they
  * sit *on top of* the bubble's edge rather than beside it, so a translucent fill
  * needs the blur to keep the emoji legible over whatever shows through.
+ *
+ * **A POST IN A CHANNEL THREAD HAS NO BUBBLE, so `inFlow` draws the row as the
+ * post's own last line instead** — and that is a bug fix rather than a
+ * preference. `threadPost` drops the bubble chrome because the thread's card is
+ * the surface, so the absolute row had no edge to straddle: it hung in the 28px
+ * band `REACTION_OVERHANG` reserved under a full-width post, with a 30px pill and
+ * a 20px glyph alone in it and the thread's own meta row a centimetre below. It
+ * read as one enormous free-floating emoji rather than as something somebody did
+ * to a post — measured on the real tenant, where a single 👍 was the loudest thing
+ * in a card whose words were one line. It is the same defect class as the reader's
+ * own quoted announcement being invisible: a decision that is really "am I a
+ * bubble" left keyed on the old shape. In flow the pill is 24px over a 16px glyph
+ * (the meta line beside it is set at 12px), it carries ONE hairline rather than a
+ * border beside a shadow, and the row reserves nothing.
  *
  * A count of one is implicit and stays unwritten: the emoji alone says one
  * person reacted, so the pill becomes a circle around it. The number appears
@@ -2064,17 +2087,31 @@ function ReactionChips(props: {
   /** Whether the bubble these hang off sits on the RIGHT of its row, which is the only
    *  thing this row needs to know: the chips extend outward from the anchored side. */
   anchoredRight: boolean;
+  /** Whether this message has no bubble edge to straddle — a POST in a channel thread,
+   *  where the thread's own card is the surface (see the note above this function). */
+  inFlow: boolean;
   onToggle: (pick: ReactionPick) => void;
 }) {
+  // The glyph follows the pill: 16px inside a 24px one, 20px inside a 30px one. A size
+  // decided per art would draw a custom emoji and a Unicode one at two heights in one row.
+  const glyph = props.inFlow ? "size-4" : "size-5";
   return (
     <div
       data-testid="message-reactions"
+      data-in-flow={props.inFlow ? "true" : undefined}
       className={cn(
-        // `top-full` + `-translate-y-1/3` puts a third of the row's height back
-        // inside the bubble; `w-max` lets it extend outward from its anchored
-        // side instead of being folded into the bubble's width.
-        "absolute top-full z-10 flex w-max -translate-y-1/3 items-center gap-1",
-        props.anchoredRight ? "right-2" : "left-2",
+        "flex items-center gap-1",
+        props.inFlow
+          ? // Under the words, in the flow, at the post's own left edge — a list entry's
+            // last line rather than something hung off it.
+            "mt-1.5"
+          : cn(
+              // `top-full` + `-translate-y-1/3` puts a third of the row's height back
+              // inside the bubble; `w-max` lets it extend outward from its anchored
+              // side instead of being folded into the bubble's width.
+              "absolute top-full z-10 w-max -translate-y-1/3",
+              props.anchoredRight ? "right-2" : "left-2",
+            ),
       )}
     >
       {props.reactions.map((r) => {
@@ -2103,13 +2140,45 @@ function ReactionChips(props: {
             // uploaded object, so nothing is uploaded and nothing is re-minted.
             onClick={() => props.onToggle({ key: r.key })}
             className={cn(
-              "flex cursor-pointer items-center rounded-full border leading-none shadow-card backdrop-blur-md transition-colors",
-              // One pill height either way (30px): a counted pill pads a 20px
-              // emoji, a lone one is a circle of the same size around it.
-              r.count > 1 ? "gap-1 px-2 py-1" : "size-[30px] justify-center",
-              r.mine
-                ? "border-primary/40 bg-reaction-chip-mine text-foreground"
-                : "border-reaction-chip-border bg-reaction-chip text-muted-foreground hover:bg-accent hover:text-foreground",
+              "flex cursor-pointer items-center rounded-full leading-none transition-colors",
+              props.inFlow
+                ? // On the thread's own card there is nothing behind the pill, so it carries
+                  // ONE hairline — a border beside a shadow is two answers to where a surface
+                  // ends — and no blur, which had nothing to blur. It is 24px against the
+                  // bubble row's 30, because a post's meta line is set at 12px and a pill
+                  // twice that height reads as an uploaded picture.
+                  //
+                  // The FILL has to be the chip's own rather than the translucent white a
+                  // bubble's chip wears: `--reaction-chip` is 72% white, which on a card
+                  // that IS white is a pill nobody can see — measured, the lone circle read
+                  // as a bare emoji sitting in the words. That is the argument
+                  // `--tracker-ref-surface` already makes for a chip drawn on every surface
+                  // in the app, so this one takes the neutral step off the card the same way.
+                  //
+                  // OURS differs by a hairline in the ACCENT rather than by its fill alone,
+                  // which is the bubble chip's own vocabulary: `--reaction-chip-mine` over a
+                  // white card is #f0f2fd against the neutral pill's #f4f4f5 — an 8-point
+                  // lift in blue, which is why the bubble never rested on the tint either.
+                  // It REPLACES the neutral pill's shadow rather than joining it: one
+                  // hairline per chip, differing in colour, because a border beside a shadow
+                  // is the pairing the fine shadow exists instead of.
+                  cn(
+                    r.count > 1 ? "gap-1 px-1.5 py-0.5" : "size-6 justify-center",
+                    r.mine
+                      ? "bg-reaction-chip-mine text-foreground ring-1 ring-inset ring-primary/40"
+                      : "bg-muted text-muted-foreground shadow-chip hover:bg-accent hover:text-foreground",
+                  )
+                : // Straddling a bubble's edge: the pill sits ON the fill, so a translucent
+                  // one needs the blur to keep the emoji legible over whatever shows
+                  // through. One pill height either way (30px): a counted pill pads a 20px
+                  // emoji, a lone one is a circle of the same size around it.
+                  cn(
+                    "border shadow-card backdrop-blur-md",
+                    r.count > 1 ? "gap-1 px-2 py-1" : "size-[30px] justify-center",
+                    r.mine
+                      ? "border-primary/40 bg-reaction-chip-mine text-foreground"
+                      : "border-reaction-chip-border bg-reaction-chip text-muted-foreground hover:bg-accent hover:text-foreground",
+                  ),
             )}
           >
             {custom ? (
@@ -2120,13 +2189,19 @@ function ReactionChips(props: {
                 src={custom.src}
                 label={reactionLabel(r.key)}
                 title={title}
-                className="size-5"
+                className={glyph}
               />
             ) : (
-              <Emoji emoji={reactionEmoji(r.key)} className="size-5" />
+              <Emoji emoji={reactionEmoji(r.key)} className={glyph} />
             )}
             {r.count > 1 && (
-              <span data-testid="reaction-count" className="text-[11px] font-medium tabular-nums">
+              <span
+                data-testid="reaction-count"
+                className={cn(
+                  "font-medium tabular-nums",
+                  props.inFlow ? "text-[10px]" : "text-[11px]",
+                )}
+              >
                 {r.count}
               </span>
             )}

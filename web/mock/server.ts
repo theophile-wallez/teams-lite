@@ -1146,6 +1146,15 @@ function seedChannelAlertThread(): void {
       sender_mri: PEOPLE[0]!.mri,
       content: "<p>The registry credentials expired — rotating them now.</p>",
       thread_root_id: rootId,
+      // A REACTED post in a channel thread, which the fixtures held none of — so the one
+      // surface where the chip row has no bubble edge to straddle could not be captured
+      // or asserted, and it shipped as a 30px pill alone in a 28px band under a
+      // full-width post (see `ReactionChips`' `inFlow`). Two of them, because the row's
+      // two shapes differ: a COUNTED pill beside a lone circle.
+      reactions: [
+        { key: "like", count: 2, mine: true, mris: [SELF_MRI, PEOPLE[1]!.mri] },
+        { key: "heart", count: 1, mine: false, mris: [PEOPLE[2]!.mri] },
+      ],
       is_self: false,
     },
     120_000,
@@ -1156,6 +1165,9 @@ function seedChannelAlertThread(): void {
       sender_mri: SELF_MRI,
       content: "<p>Thanks, I'll watch the rollout.</p>",
       thread_root_id: rootId,
+      // …and one on the reader's OWN post, which in a thread is drawn in the same column
+      // as everybody else's: nothing about a reaction here follows authorship.
+      reactions: [{ key: "like", count: 1, mine: false, mris: [PEOPLE[0]!.mri] }],
       is_self: true,
     },
     180_000,

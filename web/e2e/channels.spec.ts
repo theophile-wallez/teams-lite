@@ -555,6 +555,135 @@ test.describe("a channel thread", () => {
     await expect(thread).toHaveAttribute("data-reply-target", "true");
   });
 
+  test("the card's chrome is ONE row, and the accent is spent on the thread being answered", async ({
+    page,
+  }) => {
+    const thread = await openThreadWithReplies(page);
+    const toggle = thread.locator('[data-testid="thread-toggle"]');
+    const reply = thread.locator('[data-testid="thread-reply"]');
+
+    // Every box in ONE pass over the DOM, because the replies SLIDE IN when the thread is
+    // expanded: two sequential `boundingBox()` calls sample two different frames, and the
+    // whole assertion here is that the two share a row. One read proves that whether or not
+    // the card is still moving — which is sharper than waiting for it to settle.
+    const { a, b, card } = await thread.evaluate((el) => {
+      const box = (selector: string) => {
+        const found = el.querySelector(selector);
+        if (!found) throw new Error(`the thread card holds no ${selector}`);
+        const { x, y, width, height } = found.getBoundingClientRect();
+        return { x, y, width, height };
+      };
+      return {
+        a: box('[data-testid="thread-toggle"]'),
+        b: box('[data-testid="thread-reply"]'),
+        card: { width: el.getBoundingClientRect().width },
+      };
+    });
+
+    // ONE row. It used to be two — an accent pill counting the replies, then a full-width
+    // Reply under it — so a card whose words were one line spent three rows on chrome.
+    expect(Math.round(a.y + a.height / 2)).toBe(Math.round(b.y + b.height / 2));
+    expect(b.x).toBeGreaterThan(a.x + a.width - 1);
+    // Neither spans the card: a full-width row is what made "Reply" the loudest thing on it.
+    expect(b.width).toBeLessThan(card.width / 2);
+
+    // Both still clear the touch floor, which is what a foot row of meta must not cost.
+    expect(a.height).toBeGreaterThanOrEqual(44);
+    expect(b.height).toBeGreaterThanOrEqual(44);
+
+    // And NEITHER carries the accent at rest — every card in the history would otherwise
+    // wear the app's one accent for a disclosure. It is spent on the one thing that earns
+    // it: the thread the next Enter lands in, which is why the two are compared rather
+    // than a colour being spelled out here.
+    const ink = (target: typeof toggle) => target.evaluate((el) => getComputedStyle(el).color);
+    const rest = await ink(toggle);
+    expect(await ink(reply)).toBe(rest);
+    await reply.click();
+    await expect(thread).toHaveAttribute("data-reply-target", "true");
+    expect(await ink(reply)).not.toBe(rest);
+    // …and the count beside it stays quiet: one accent, on one thing.
+    expect(await ink(toggle)).toBe(rest);
+  });
+
+  test("a reacted post draws its chips IN FLOW, under the words", async ({ page }) => {
+    // A post in a thread has no bubble, so the chip row has no edge to straddle: hung off
+    // one it sat in a 28px reserved band under a full-width post, with a 30px pill alone in
+    // it, and read as an enormous free-floating emoji. Measured on the real tenant.
+    await gotoApp(page);
+    await openChannelsTab(page);
+    // Engineering · Incidents is the one channel whose thread the mock seeds with reactions
+    // (see `seedChannelAlertThread`), because until this the fixtures held none at all and so
+    // this surface could not be captured or asserted.
+    await page
+      .locator('[data-testid="channel-row"]')
+      .filter({ hasText: "Incidents" })
+      .first()
+      .click();
+    await expect
+      .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    // Found by the alert CARD it opens with rather than by the reaction, because the reacted
+    // posts are its replies: a folded card holds none, so a locator built on the chips could
+    // never find the thread that has to be expanded to draw them.
+    const thread = page
+      .locator('[data-testid="thread-group"]')
+      .filter({ has: page.locator('[data-testid="card-attachment"]') })
+      .last();
+    await thread.locator('[data-testid="thread-toggle"]').click();
+    const post = thread
+      .locator('[data-testid="message"]')
+      .filter({ has: page.locator('[data-testid="message-reactions"]') })
+      .first();
+    const row = post.locator('[data-testid="message-reactions"]');
+    await expect(row).toBeVisible();
+    // IN FLOW: the row is an ordinary block, so it is inside its post's own box rather than
+    // hanging below it, and the post reserves no band for an overhang.
+    await expect(row).toHaveAttribute("data-in-flow", "true");
+    expect(await row.evaluate((el) => getComputedStyle(el).position)).toBe("static");
+    // Both rects in ONE pass, for the reason the test above states: the replies slide in, so
+    // two sequential reads are two frames and the assertion is about their relative geometry.
+    const { rowBox, postBox } = await post.evaluate((el) => {
+      const found = el.querySelector('[data-testid="message-reactions"]');
+      if (!found) throw new Error("the post holds no reaction row");
+      const chips = found.getBoundingClientRect();
+      const own = el.getBoundingClientRect();
+      return {
+        rowBox: { x: chips.x, bottom: chips.bottom },
+        postBox: { x: own.x, bottom: own.bottom },
+      };
+    });
+    expect(rowBox.bottom).toBeLessThanOrEqual(postBox.bottom + 1);
+    // …and it starts at the post's own left edge, so it reads as that post's last line.
+    expect(Math.round(rowBox.x)).toBe(Math.round(postBox.x));
+
+    // A pill sized for a 12px meta line rather than for a bubble's 30px one, and carrying ONE
+    // hairline: a border beside a shadow is the pairing the fine shadow exists instead of.
+    const chips = row.locator("button");
+    const chip = chips.first();
+    const chipBox = await chip.boundingBox();
+    expect(chipBox!.height).toBeLessThanOrEqual(26);
+    for (const each of await chips.all()) {
+      expect(await each.evaluate((el) => getComputedStyle(el).borderTopWidth)).toBe("0px");
+    }
+    // A fill of its own too: `--reaction-chip` is 72% white, so on a card that IS white the
+    // lone circle read as a bare emoji sitting in the words.
+    const cardFill = await thread.evaluate((el) => getComputedStyle(el).backgroundColor);
+    for (const each of await chips.all()) {
+      const fill = await each.evaluate((el) => getComputedStyle(el).backgroundColor);
+      expect(fill).not.toBe(cardFill);
+      expect(fill).not.toBe("rgba(0, 0, 0, 0)");
+    }
+    // OURS is told apart by an accent hairline as well as by its fill — the tint alone is an
+    // 8-point lift in blue, which is why the bubble chip never rested on it either. The
+    // fixture puts ours first and a colleague's beside it, so the two are compared.
+    const shadows = await chips.evaluateAll((els) =>
+      els.map((el) => `${getComputedStyle(el).boxShadow}`),
+    );
+    await expect(chip).toHaveAttribute("data-mine", "true");
+    await expect(chips.nth(1)).not.toHaveAttribute("data-mine", "true");
+    expect(shadows[0]).not.toBe(shadows[1]);
+  });
+
   test("a CHAT reply is untouched: a quote, and no thread address", async ({ page }) => {
     // A chat has no threads, so nothing about this change may reach it — a chat reply is the
     // quote it has always been, and a `thread_root` there is refused by the backend outright.
