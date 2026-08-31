@@ -202,6 +202,140 @@ screenshots carry the last one.
   the same suite on master rather than a verdict on one run's list — a single differing member of
   a sibling pair is this class of flake, not a regression.
 
+## A CHANNEL IS DRAWN THE WAY TEAMS DRAWS IT (posts, or a conversation with a threads panel)
+
+Teams has TWO channel layouts and the channel itself says which. **POSTS** is the wall of titled
+announcements each with its replies under it (§ A CHANNEL THREAD is a THREAD, which is that
+surface in full). **CONVERSATION** is a running chat of top-level posts whose answers live behind
+a THREADS PANEL, one press away. This app draws both, per channel, from what the tenant states —
+never one shape for every channel. `src/channel_layout.rs` reads it, `channelLayoutOf` /
+`threadReplies` / `threadPanelHeading` in `web/src/lib/threads.ts` hold the pure decisions,
+`ThreadRepliesRow` in `message-pane.tsx` is the foot row and
+`web/src/components/channel-threads-panel.tsx` is the panel.
+
+**THE FIELD IS MEASURED, and CSA's own `channelType` is NOT it.** `properties.chatModalityType`
+on the channel's own THREAD, over the request `teams_members::fetch_thread` already makes
+(`GET {chatService}/v1/threads/{id}?view=msnp24Equivalent` — the one place that URL is spelled,
+which is why `channel_layout` delegates rather than repeating it and its own test scans for the
+endpoint rather than for a verb). Measured 2026-08-31 by `examples/channel_layout_recon.rs` —
+READ-ONLY, one CSA read plus one thread read per channel — over all 70 channels this account
+holds:
+
+- `Conversational` — **6** channels
+- `PostReply` — **10**
+- absent — **54**
+
+And the fact that makes it trustworthy rather than plausible: the two channels the user can name
+in their own client came back exactly as their own client draws them (`[Run] 👨‍💻 Devs`
+conversational, `[Run] Engine merge requests` posts). CSA's `channelType` (0/1) is
+private-vs-shared and reading it as a layout is the mistake § The channel sidebar mirrors Teams
+records twice already — `isFavorite` is Show/Hide, and `hidden` is not Teams' Hide.
+
+**ANYTHING BUT `Conversational` IS POSTS**, on both sides (`channel_layout::from_thread`,
+`channelLayoutOf`). That covers the 54 classic channels that carry no modality at all, a word a
+later Teams invents, and a page or a store too old to have been told — and it is the same reading
+`AN ABSENT KIND IS A PERSON` takes for a mention and `mergeVerdict` takes for an unknown merge
+status: the narrow, already-shipped answer is what an unrecognised value falls back to, because
+posts is the surface every channel here was drawn as before this.
+
+**THE READ IS PART OF OPENING THE CONVERSATION, and that is a bug fix rather than a placement
+preference.** `channel_layout` is an ordinary OPEN read (it publishes nothing, changes nothing on
+this machine, and makes a request `members` already makes — a gate would only stop a page from
+drawing the surface the tenant asked for), cached per PROCESS in the backend and for the session
+in the page. It rode a `useEffect` in the pane first, which fires the moment `openId` moves — so
+the answer landed in the middle of the pane's own open, while the history was still in flight.
+Measured on the mock: a channel then opened **1 566 px of 4 356** instead of at its end, with a
+second page pulled in behind it because the reader now read as "near the top", and the newest post
+in that channel — the alert card the capture waits for — was not mounted at all. `channelLayoutFor`
+is therefore awaited BESIDE the history read (`Promise.all`, so it costs no latency) and lands in
+the SAME state change as the messages: the rows are decided once, and nothing about the scroll can
+depend on which answer won a race. **Never move a read of this back into a per-open effect** — and
+note that `loadPetArchive` is another one, which could have shown the same thing at any time.
+
+Nine rules hold the conversation layout, and each is pinned by `web/e2e/channels.spec.ts` or
+`web/src/lib/threads.test.ts`:
+
+- **The main column draws the thread LEADS and nothing else** (`drawnMessages`). A reply is in the
+  panel, which is the whole point of the layout. So the rows are the chat's own
+  (`chatHistoryRows`), the bubbles are the chat's own — the reader's own post right in the accent
+  fill, a colleague's left in a grey one, which is exactly what Teams draws there — and the "…"
+  menu, the reactions, the edit and the delete are all the ones this app already has.
+- **The block TIME MARKS come back**, and that is the same rule rather than an exception to it. A
+  channel drawn as threads has none because the posts a mark would fall between belong to
+  different threads; this column really is one running conversation of top-level posts, so "the
+  day changed" says something true about the gap above one again.
+- **A POST DRAWN INSIDE A THREAD CARRIES NO CENTRED MARK, whichever layout put it there.** The
+  rule used to be spelled per layout and is now one line in `renderMsg` keyed on `threadPost`:
+  inside a card it cut a seven-reply thread into stamped fragments, and inside the PANEL it drew
+  the CHANNEL's own "Aug 17, 7:42 PM" above the root post — a mark about a gap the panel is not
+  showing. A post says WHEN beside WHO instead.
+- **THE FOOT ROW ANSWERS THREE QUESTIONS, because a reader decides on all three** (`threadReplies`):
+  WHO answered (`REPLIER_FACES`, three overlapping faces — a fourth 20px disc pushes the count and
+  the moment off a 390px row), HOW MANY (`replyCountLabel`, so nothing says "1 replies"), and WHEN
+  the last one landed (`formatMessageTime`, the same words a block mark uses, so "Yesterday 14:32"
+  means one thing everywhere here). A row saying only "5 replies" makes them open it to learn the
+  other two. **A REPLIER IS AN IDENTITY, never a name**: keyed on the sender's MRI and only on the
+  name where the store holds none, because 273 of one group chat's 899 messages arrive with a blank
+  sender and two different colleagues would otherwise stack as one person (§ WHO said it). An
+  authorless post is nobody and is not stacked at all.
+- **A post nobody has answered gets NO row** (`threadReplies` answers null). Not "0 replies": a
+  control that opens an empty panel is the "a control that changes nothing reads as a bug" rule.
+- **The accent is spent on the COUNT and on nothing else**, and the row follows its post's SIDE.
+  That is the posts layout's own lesson after it shipped an accent-filled pill on every card: the
+  app's one accent on every row of a history is the same as saying none of them is worth noticing.
+  The whole row is one 44px target under a thumb.
+- **THE PANEL BRINGS NO COMPOSER, and opening it AIMS the app's own.** There is ONE composer here —
+  its `data-conversation-id` is what a sanctioned live driver proves its target with — so the panel
+  deliberately differs from the reference on this one point and takes what already exists:
+  `openThreadPanel` calls `startReply` on the thread's root, the banner names the thread the next
+  Enter lands in (`replyHeading`), and closing the panel takes that aim back. A panel that opened
+  WITHOUT aiming would leave the reader answering a thread into the channel — a new untitled thread
+  beside the post rather than under it, which is the defect § A CHANNEL THREAD exists to close.
+  **The BANNER stays the one authority on where Enter lands**: a reader who presses its own Cancel
+  has said "not a reply", and the panel is left open rather than closed under them — which is also
+  the state a DEEP LINK into a reply produces, since a panel opened to SHOW a message must not
+  answer it for them.
+- **The panel states WHICH thread it is** (`data-thread-root`), names it by its TITLE where it has
+  one and by its opening words where it does not (`threadPanelHeading`, bounded to
+  `PANEL_HEADING_CHARS` — a header is one line), scrolls ITSELF, and separates the post from its
+  answers with a line that counts them rather than with a gap. A thread nobody has answered says
+  what the next Enter does instead of being empty.
+- **Below `md` it REPLACES the conversation**, the shape the diff page's own two columns take, and
+  the history is HIDDEN rather than unmounted so closing the panel returns the reader to their
+  place. A deep link into a reply maps that reply's id to the row of the post that holds it
+  (`rowOfMessage`), for the reason a pet ledger maps to a neighbour: a message with no row of its
+  own must not scroll to nothing.
+
+**A CONVERSATIONAL CHANNEL OFFERS NO POST TITLE** (`postSubjectOffered`'s third condition). Teams
+gives "Add a subject" to a channel whose history is a wall of titled announcements and gives a
+chat's own box to one drawn as a conversation — so a field there would draw a heading nothing else
+on that surface has, and title a post that reads as a message. The layout is optional in that
+signature for the reason above: not-told-yet and could-not-be-read both take the posts answer.
+
+`web/mock/server.ts` answers `channel_layout` per channel from `CHANNEL_LAYOUTS` and REFUSES a
+chat exactly as the backend does — a mock that answered "posts" for a chat would let a page asking
+the wrong question pass every test. **Exactly one fixture is conversational and WHICH one is
+deliberate**: `Design/Research`, in the SECOND team, because the first team's channels are what
+existing specs reach for by INDEX (`.first()` for a channel to open, `.nth(1)` for "another
+channel"), and a conversational channel has no subject field — putting the fixture at one of those
+indices rewrote the title spec, which has nothing to do with layouts. `Engineering/Incidents` keeps
+the alert thread the posts layout is captured on, so both surfaces are in one mock, one click
+apart.
+
+`cd web && bun run preview -- --out /tmp/chan --channels` captures the conversation in both themes
+and at a PHONE's width, the foot row cropped (pass `--dpr 3`: the faces are 20px and the moment is
+12px), the panel in both themes, the panel with the words in the box beside the banner naming the
+same thread, and the panel at a phone's width — `openChannel` is its helper, and it exists because
+`openConversation` walks the CHATS list first: `"Frontend"` reached the group chat "Frontend Guild"
+(measured), which is a thread with no threads in it and therefore a capture that waits for ever.
+
+**What is UNVERIFIED against the tenant is every pixel of the conversation layout.** The FIELD is
+measured over all 70 channels (above) and the parse is pinned in Rust, but no conversational
+channel has been drawn from the real tenant — there is no sandbox channel, so what the surface
+rests on is the mock. The failure mode if the field is misread is a channel drawn in the other
+layout rather than a message going anywhere it should not: the reply address is unchanged
+(`thread_root`), so an answer written in either layout lands in the same thread.
+
 ## A CHANNEL THREAD is a THREAD (a list of posts, and a reply that lands IN it)
 
 A channel's history is drawn as THREADS, and each one is now drawn as a thread rather than as a
@@ -3037,10 +3171,16 @@ user. Two independent mechanisms enforce that split:
   because a post has no bubble edge to straddle, and where the reader's own @mention is drawn in
   the tint of the CARD rather than of the accent fill it is not on — the "@" list offering the
   CHANNEL above the people in both themes with the chip it becomes, and the whole surface at a
-  phone's width):
-  `bun run preview -- --out /tmp/chan --channels` (it honours `--dpr`: the pill is 24px and the
-  card's foot row is 12px), or `openChannelsTab` /
-  `toggleTeamSection` / `openThreadWithReplies` from the same file. For the merge-request page — its tab strip at rest
+  phone's width) — and the OTHER LAYOUT beside it, since a channel is drawn the way Teams draws it
+  (§ A CHANNEL IS DRAWN THE WAY TEAMS DRAWS IT): the conversation in both themes and at a phone's
+  width, the foot row a post with answers earns cropped to itself, the THREADS PANEL in both
+  themes, that panel with the words in the box beside the banner naming the same thread, and the
+  panel at a phone's width where it REPLACES the conversation:
+  `bun run preview -- --out /tmp/chan --channels` (it honours `--dpr`: the pill is 24px, the
+  card's foot row is 12px and a replier's face is 20px), or `openChannelsTab` / `openChannel` /
+  `toggleTeamSection` / `openThreadWithReplies` from the same file — `openChannel` because
+  `openConversation` walks the CHATS list first, where a channel's name can match a group chat
+  instead. For the merge-request page — its tab strip at rest
   and current, the list, the page, its header's own approval and merge in both themes, its own
   sub-header of four pages in both themes and at a
   phone's width, the page that holds nothing yet,
@@ -7067,7 +7207,9 @@ user's. What changes is only what is asked.
   and, only when the user asks for it and only during the hours they set in the zone they
   named, publishing their own (`src/teams_presence.rs`,
   see § The user's own status), the READ-ONLY conversation roster an @mention list is
-  built from (`src/teams_members.rs`, see § @mentions), the per-chat ENCRYPTION that seals a
+  built from (`src/teams_members.rs`, see § @mentions) and — off that same one thread read —
+  which of Teams' two layouts a CHANNEL is drawn in (`src/channel_layout.rs`, see § A CHANNEL IS
+  DRAWN THE WAY TEAMS DRAWS IT), the per-chat ENCRYPTION that seals a
   message's words before they reach Teams (`src/seal.rs`, read back by `Store::seal_keyring` and
   applied at the last moment of a send by `teams_send::seal_body` — see § A SEALED chat), the
   one-to-one AUDIO CALLING

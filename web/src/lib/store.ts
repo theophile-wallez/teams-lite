@@ -88,9 +88,10 @@ import {
   type UpdateProgress,
   type WriteLock,
   channelLabel,
+  isChannelThreadId,
   UNKNOWN_WRITE_LOCK,
 } from "./protocol";
-import { threadReplyQuotes, threadRootOf } from "./threads";
+import { channelLayoutOf, threadReplyQuotes, threadRootOf, type ChannelLayout } from "./threads";
 import {
   chessMessageHtml,
   chessMessageText,
@@ -671,6 +672,11 @@ export type AppState = {
    *  directory lookup, so it is fetched on demand and then cached per conversation (see
    *  `ensureMentionCandidates`). */
   mentionCandidates: MentionCandidate[];
+  /** How each CHANNEL this page has opened is laid out, by channel id — Teams' own choice, read
+   *  once per channel WITH its history and kept for the session (see `channelLayoutFor`). A
+   *  channel absent here is drawn as POSTS, which is the answer for every classic channel and
+   *  the surface this app drew before the layout was read at all. */
+  channelLayouts: Record<string, ChannelLayout>;
   /** User appearance preference (System follows the OS). */
   appearance: Appearance;
   /** Concrete theme currently applied to <html> (what CSS keys off). */
@@ -1084,6 +1090,7 @@ function initialState(): AppState {
     recordingsCanBeKept: false,
     readReceipts: [],
     mentionCandidates: [],
+    channelLayouts: {},
     appearance: DEFAULT_APPEARANCE,
     resolvedTheme: "light",
     soundsEnabled: DEFAULT_SOUNDS_ENABLED,
@@ -3095,6 +3102,41 @@ export class TeamsController {
   }
 
   /**
+   * How a CHANNEL is laid out, for the open above — `undefined` for a chat, for a channel
+   * this page already knows, and for a read that failed.
+   *
+   * **IT IS PART OF OPENING THE CONVERSATION, and that placement is a bug fix rather than
+   * tidiness.** It rode a `useEffect` in the pane first, which fires the moment `openId`
+   * moves — so the answer landed in the middle of the pane's own open, while the history was
+   * still in flight. Measured on the mock: a channel then opened 2 100px short of its end
+   * with a second page pulled in behind it, because the pane read as "near the top" and
+   * backfilled; the newest post in that channel was not mounted at all, which is what the
+   * capture caught. Read here it lands in the SAME state change as the messages, so the rows
+   * are decided once and nothing about the scroll can depend on which answer won a race.
+   *
+   * It costs no latency: `Promise.all` puts it beside the history read rather than after it.
+   *
+   * **The answer is kept for the session and never re-read.** The modality is fixed where the
+   * channel was created, so a window on it would only be a second chance to ask; the BACKEND
+   * caches it per process as well, so a reload of this page costs one small GET per channel
+   * the reader visits and no more.
+   *
+   * **Best-effort, and what it falls back to is the surface that already shipped.** A read
+   * that fails leaves the channel absent from the map, which `channelLayoutOf` reads as
+   * POSTS — so a tenant this app cannot reach draws the channel exactly as it did before the
+   * layout was read at all, rather than drawing nothing or reporting a fault the reader can
+   * do nothing about.
+   */
+  private async channelLayoutFor(id: string): Promise<ChannelLayout | undefined> {
+    if (!isChannelThreadId(id) || this.get().channelLayouts[id]) return undefined;
+    try {
+      return channelLayoutOf((await this.backend.channelLayout(id)).layout);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Publish a conversation's mention candidates, with the CHANNEL ITSELF at the front where
    * the conversation is one.
    *
@@ -4844,11 +4886,17 @@ export class TeamsController {
     this.markThreadRead(id);
 
     try {
-      const res = await this.backend.open(id);
+      // The history, and — for a CHANNEL — how it is LAID OUT, read in parallel and landed in
+      // ONE state change. See `channelLayoutFor` for why the two must arrive together.
+      const [res, layout] = await Promise.all([this.backend.open(id), this.channelLayoutFor(id)]);
       const history = mergeRefreshedHistoryPage(this.messageCache.get(id), res);
       this.cacheMessages(id, history);
       if (this.get().openId === id) {
-        this.set({ messages: history.messages, hasMoreOlder: history.has_more });
+        this.set({
+          messages: history.messages,
+          hasMoreOlder: history.has_more,
+          ...(layout ? { channelLayouts: { ...this.get().channelLayouts, [id]: layout } } : {}),
+        });
       }
       this.markThreadRead(id);
     } catch (e) {

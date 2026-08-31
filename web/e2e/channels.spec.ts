@@ -1013,3 +1013,126 @@ test.describe("a channel post's title", () => {
     await expect(page.locator(subjectField)).toHaveValue("");
   });
 });
+
+/**
+ * A CHANNEL IS DRAWN THE WAY TEAMS DRAWS IT: as titled POSTS, or as a running CONVERSATION
+ * whose replies live behind a threads panel. The channel itself says which
+ * (`properties.chatModalityType`, measured on 70 of this tenant's channels), so these specs
+ * hold both surfaces on one mock — `Engineering/Frontend` is the conversational fixture and
+ * every other seeded channel is posts.
+ */
+test.describe("a channel's layout", () => {
+  const panel = '[data-testid="threads-panel"]';
+  const repliesRow = '[data-testid="post-replies"]';
+
+  /** Open a channel by NAME, from the Channels tab — never by index, because which index a
+   *  layout sits at is exactly what must not matter to a spec, and never by a name matched
+   *  across every tab, because the chat list is walked first. */
+  async function openNamedChannel(page: Page, name: string): Promise<void> {
+    await gotoApp(page);
+    await openChannelsTab(page);
+    await page.locator('[data-testid="channel-row"]').filter({ hasText: name }).first().click();
+    await expect
+      .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+  }
+
+  test("draws a conversational channel as bubbles and a posts channel as cards", async ({
+    page,
+  }) => {
+    await openNamedChannel(page, "Research");
+    // No thread CARDS at all: a conversational channel's main column is its top-level posts,
+    // and their answers are in the panel.
+    await expect(page.locator('[data-testid="thread-group"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="message"]').first()).toBeVisible();
+    // And the block time marks come BACK, because the column really is one running
+    // conversation again — the reason a channel drawn as threads has none.
+    await expect
+      .poll(() => page.locator('[data-testid="message-time"]').count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+
+    // The other layout is untouched, in the same mock and one click away.
+    await page.locator('[data-testid="channel-row"]').filter({ hasText: "Incidents" }).first().click();
+    await expect
+      .poll(() => page.locator('[data-testid="thread-group"]').count(), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    await expect(page.locator(repliesRow)).toHaveCount(0);
+  });
+
+  test("offers no post TITLE in a conversational channel", async ({ page }) => {
+    // Teams' conversational channel has a chat's own composer. A field there would draw a
+    // heading nothing else on that surface has, and title a post that reads as a message.
+    await openNamedChannel(page, "Research");
+    await expect(page.locator('[data-testid="composer-subject"]')).toHaveCount(0);
+    // …and the posts layout still has one, so this is the LAYOUT deciding rather than the
+    // field having been dropped for every channel.
+    await page.locator('[data-testid="channel-row"]').filter({ hasText: "Incidents" }).first().click();
+    await expect(page.locator('[data-testid="composer-subject"]')).toBeVisible();
+  });
+
+  test("says who answered, how many and when — and opens the panel", async ({ page }) => {
+    await openNamedChannel(page, "Research");
+    const row = page.locator(repliesRow).first();
+    await expect(row).toBeVisible();
+    // The three facts a reader decides to open a thread on. The count is words, never "1
+    // replies"; the moment is the same phrasing a block mark uses.
+    await expect(row).toContainText(/\d+ (reply|replies)/);
+    await expect(row).toContainText("Last reply");
+    // A face per replier, and no more than the row can hold.
+    const faces = await row.locator("img, [data-testid='avatar-initials'], span[aria-hidden]").count();
+    expect(faces).toBeGreaterThan(0);
+    // 44px under a thumb, the floor every target this app draws for one clears.
+    const box = await row.boundingBox();
+    expect(box).not.toBeNull();
+    expect(Math.round(box!.height)).toBeGreaterThanOrEqual(44);
+
+    await row.click();
+    await expect(page.locator(panel)).toBeVisible();
+    // WHICH thread it is showing, and the thread's own words in the header.
+    const root = await page.locator(panel).getAttribute("data-thread-root");
+    expect(root).toBeTruthy();
+    await expect(page.locator('[data-testid="threads-panel-heading"]')).not.toBeEmpty();
+    // The post, the line counting its replies, and the replies themselves.
+    await expect(page.locator('[data-testid="threads-panel-divider"]')).toContainText(
+      /\d+ (reply|replies)/,
+    );
+    await expect
+      .poll(() => page.locator(`${panel} [data-testid="message"]`).count())
+      .toBeGreaterThan(1);
+  });
+
+  test("aims the ONE composer at the thread it opened, and takes that aim back", async ({
+    page,
+  }) => {
+    await openNamedChannel(page, "Research");
+    await page.locator(repliesRow).first().click();
+    await expect(page.locator(panel)).toBeVisible();
+    // There is one composer in this app: the panel brings none of its own, so opening it aims
+    // that one — otherwise the reader's next Enter would post to the CHANNEL and land as a new
+    // untitled thread beside the post rather than as an answer under it.
+    await expect(page.locator('[data-testid="composer-shell"]')).toHaveCount(1);
+    await expect(page.locator('[data-testid="reply-banner"]')).toBeVisible();
+
+    await page.locator('[data-testid="threads-panel-close"]').click();
+    await expect(page.locator(panel)).toHaveCount(0);
+    // Closing takes the aim back: words written with no panel on screen belong to the channel.
+    await expect(page.locator('[data-testid="reply-banner"]')).toHaveCount(0);
+  });
+
+  test("replaces the conversation on a phone rather than squeezing it", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openNamedChannel(page, "Research");
+    await page.locator(repliesRow).first().click();
+    const panelBox = await page.locator(panel).boundingBox();
+    expect(panelBox).not.toBeNull();
+    // The whole width, and the history is not on screen beside it at all. HIDDEN rather than
+    // unmounted, deliberately: the conversation keeps its loaded history and its scroll
+    // position, so closing the panel returns the reader to where they were rather than to a
+    // pane that has to load itself again.
+    expect(panelBox!.width).toBeGreaterThan(300);
+    await expect(page.locator('[data-testid="message-scroll"]')).toBeHidden();
+    // Its close is the way back to the conversation.
+    await page.locator('[data-testid="threads-panel-close"]').click();
+    await expect(page.locator('[data-testid="message-scroll"]')).toBeVisible();
+  });
+});

@@ -130,9 +130,13 @@ export function Composer(props: {
   // all: a chat message has none in Teams, and a reply belongs to a thread already named by
   // its first post (see lib/post-subject.ts).
   const channels = useAppState((s) => s.channels);
+  // …and HOW that channel is drawn, which decides it too: a channel Teams draws as a running
+  // conversation has a chat's own composer, with no title in it (see lib/post-subject.ts).
+  const channelLayout = useAppState((s) => (openId ? s.channelLayouts[openId] : undefined));
   const subjectOffered = postSubjectOffered({
     isChannel: channels.some((channel) => channel.id === openId),
     replying: replyingTo !== null,
+    layout: channelLayout,
   });
   // The title being written. Local to the composer, like the pending pictures and for the
   // same reason: a title belongs to the post it is being written for, so it is dropped when

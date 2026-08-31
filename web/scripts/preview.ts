@@ -353,6 +353,30 @@ export async function openChannelsTab(page: Page): Promise<void> {
 }
 
 /**
+ * Open a CHANNEL by name, and report the channel id that was opened.
+ *
+ * `openConversation` walks every sidebar tab and takes the first row whose text matches, so a
+ * channel whose name is also a word in a chat's own title is not reachable through it — it
+ * opened the group chat "Frontend Guild" for `"Frontend"`, which is a thread with no threads
+ * in it and therefore a capture that waits for ever. This one looks only where channels are.
+ */
+export async function openChannel(page: Page, name: string): Promise<string> {
+  await openChannelsTab(page);
+  const row = page
+    .locator('[data-testid="channel-row"]')
+    .filter({ hasText: new RegExp(escapeForRegExp(name), "i") })
+    .first();
+  if ((await row.count()) === 0) {
+    const seen = await page.locator('[data-testid="channel-row"]').allInnerTexts();
+    throw new Error(
+      `no channel matching "${name}". Rows seen:\n` +
+        seen.map((text) => `  - ${oneLine(text)}`).join("\n"),
+    );
+  }
+  return openRow(page, row);
+}
+
+/**
  * Open the "…" menu on a chat row — Teams' own settings for that chat (pin, mute,
  * hide, mark read; see `web/src/components/chat-menu.tsx`). Returns the chat's id.
  *
@@ -3913,6 +3937,61 @@ if (import.meta.main) {
       await page.waitForTimeout(200);
       await shot(`${out}-mention-channel-chip-light.png`, '[data-testid="composer-shell"]');
       await clearComposer(page);
+
+      // THE OTHER LAYOUT. Everything above is a channel Teams draws as POSTS; this one is
+      // drawn as a running CONVERSATION, and the channel itself says which
+      // (`properties.chatModalityType` — 6 of this tenant's 70 channels are conversational).
+      // The mock's `Engineering/Frontend` is the conversational fixture, and nothing else
+      // about the app changes: the bubbles, the block time marks and the whole "…" menu are
+      // the chat's own.
+      // By CHANNEL rather than by name across every tab: `openConversation` walks the CHATS
+      // list first, where a name can match a group chat instead (measured: "Frontend" reached
+      // the group chat "Frontend Guild").
+      await openChannel(page, "Research");
+      await page.waitForSelector('[data-testid="post-replies"]');
+      await page.waitForTimeout(250);
+      await shot(`${out}-conversation-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-conversation-dark.png`);
+      // The foot row a post with answers earns, cropped: overlapping faces, the count in the
+      // app's one accent, and when the last reply landed — the three things a reader decides
+      // to open the panel on. `--dpr` matters here more than anywhere: the faces are 20px.
+      await setTheme("light");
+      // Brought into view and left to SETTLE before the crop: the history is virtualized, so a
+      // screenshot that scrolls its own target into view can be taken while the rows are still
+      // being measured — which photographed the bubble that had been at those coordinates a
+      // frame earlier (measured).
+      const repliesRow = page.locator('[data-testid="post-replies"]').first();
+      await repliesRow.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(400);
+      await repliesRow.screenshot({ path: `${out}-post-replies-light.png`, animations: "disabled" });
+      // THE THREADS PANEL, which is what pressing that row opens: the post, a line counting
+      // the replies, and the replies themselves — beside the conversation rather than inside
+      // it. It brings no composer of its own (there is one in this app), so opening it AIMS
+      // the app's own composer at this thread, which the banner below says.
+      await page.locator('[data-testid="post-replies"]').first().click();
+      await page.waitForSelector('[data-testid="threads-panel"]');
+      await page.waitForTimeout(250);
+      await shot(`${out}-panel-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-panel-dark.png`);
+      // …with the words in the box, so the panel and the banner naming the same thread are on
+      // screen together — the one thing that says where the next Enter lands.
+      await setTheme("light");
+      await typeInComposer(page, "Pinning it to the release branch then.");
+      await page.waitForTimeout(200);
+      await shot(`${out}-panel-replying-light.png`);
+      await clearComposer(page);
+      // A PHONE: one column at a time, the shape the diff page's own two columns take. The
+      // panel REPLACES the conversation there rather than squeezing it into half a screen,
+      // and its close is the way back.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForTimeout(250);
+      await shot(`${out}-panel-phone-light.png`);
+      await page.locator('[data-testid="threads-panel-close"]').click();
+      await page.waitForTimeout(250);
+      await shot(`${out}-conversation-phone-light.png`);
+      await page.setViewportSize(VIEWPORT);
       console.log(
         `[preview] wrote ${out}-tree-light.png, ${out}-open-light.png, ` +
           `${out}-collapsed-light.png, ${out}-placement-light.png, ${out}-card-light.png, ` +
@@ -3922,8 +4001,11 @@ if (import.meta.main) {
           `${out}-subject-{empty-dark,light,phone-light}.png, ` +
           `${out}-thread-reacted-{light,dark}.png, ` +
           `${out}-mention-channel-{light,dark}.png, ` +
-          `${out}-mention-channel-chip-light.png and ` +
-          `${out}-titled-post-{light,dark}.png`,
+          `${out}-mention-channel-chip-light.png, ` +
+          `${out}-titled-post-{light,dark}.png, ` +
+          `${out}-conversation-{light,dark,phone-light}.png, ` +
+          `${out}-post-replies-light.png and ` +
+          `${out}-panel-{light,dark,replying-light,phone-light}.png`,
       );
     }, { deviceScaleFactor: dpr });
     process.exit(0);

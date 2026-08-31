@@ -1170,6 +1170,13 @@ export class Backend {
   members(conversation: string): Promise<MembersResult> {
     return this.request<MembersResult>("members", { conversation });
   }
+  /** How this CHANNEL is laid out — as titled posts, or as a running conversation whose
+   *  replies live behind a threads panel. The channel itself says which
+   *  (`properties.chatModalityType`); an open read, and the backend REFUSES a chat, whose
+   *  flat history has no modality at all. */
+  channelLayout(conversation: string): Promise<{ layout?: string }> {
+    return this.request<{ layout?: string }>("channel_layout", { conversation });
+  }
   /** Fetch one hosted-content media object (inline image or shared file) through
    *  the backend, which attaches the session credentials the browser lacks. The
    *  bytes come back base64-encoded so they ride the same JSON WebSocket. */

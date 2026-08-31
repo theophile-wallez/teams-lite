@@ -36,20 +36,26 @@ pub struct ThreadMember {
 /// member keeps its row with this role, so it must not reach a mention list.
 const GONE_ROLES: [&str; 2] = ["ReadOnly", "None"];
 
-/// Fetch a conversation's roster.
+/// Fetch a conversation's own thread payload — the ONE `GET /v1/threads/{id}` this app
+/// makes, and the one place its URL is spelled.
+///
+/// Two facts are read off it and neither belongs to the other: the ROSTER
+/// ([`parse_thread_members`], below) and how a channel is LAID OUT
+/// (`crate::channel_layout`, which delegates here rather than repeating the request). A
+/// second spelling of this GET would be a second thing to keep in step with the
+/// endpoint, and it would slip past this module's own GET-only scan.
 ///
 /// Uses the `Authentication: skypetoken=…` scheme the rest of the chatService read
-/// path uses (never a Bearer). Returns every member the thread reports, including
-/// us — the caller filters itself out, exactly like the read-receipt path does.
+/// path uses (never a Bearer).
 ///
 /// Best-effort by contract: a thread the tenant will not expose answers an error for
 /// the caller's retry policy, and a caller that only wants suggestions treats that
-/// as "no roster" rather than as a failure.
-pub async fn fetch_thread_members(
+/// as "nothing known" rather than as a failure.
+pub async fn fetch_thread(
     http: &reqwest::Client,
     session: &crate::teams::Session,
     conversation_id: &str,
-) -> Result<Vec<ThreadMember>> {
+) -> Result<Value> {
     let chat_service = session
         .endpoint("chatService")
         .context("no chatService endpoint in regionGtms")?
@@ -63,14 +69,23 @@ pub async fn fetch_thread_members(
         .header("authentication", format!("skypetoken={}", session.skypetoken))
         .send()
         .await
-        .context("thread members request")?;
+        .context("thread request")?;
     let status = resp.status();
     let body = resp.text().await?;
     if !status.is_success() {
-        anyhow::bail!("thread members -> {status}");
+        anyhow::bail!("thread -> {status}");
     }
-    let parsed: Value = serde_json::from_str(&body).context("parse thread members")?;
-    Ok(parse_thread_members(&parsed))
+    serde_json::from_str(&body).context("parse thread")
+}
+
+/// Fetch a conversation's roster. Returns every member the thread reports, including
+/// us — the caller filters itself out, exactly like the read-receipt path does.
+pub async fn fetch_thread_members(
+    http: &reqwest::Client,
+    session: &crate::teams::Session,
+    conversation_id: &str,
+) -> Result<Vec<ThreadMember>> {
+    Ok(parse_thread_members(&fetch_thread(http, session, conversation_id).await?))
 }
 
 /// Parse a thread payload into its members. Pure, so the wire shape is pinned by a

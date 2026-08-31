@@ -1,11 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
+  channelLayoutOf,
   groupThreads,
+  PANEL_HEADING_CHARS,
+  REPLIER_FACES,
   replyCountLabel,
   replyHeading,
+  threadPanelHeading,
+  threadReplies,
   threadReplyQuotes,
   threadRootOf,
 } from "./threads";
+import { formatMessageTime } from "./message-time";
 import type { ChatMessage } from "./protocol";
 
 // A minimal channel post; overrides fill in the thread linkage under test.
@@ -138,5 +144,110 @@ describe("replyCountLabel", () => {
     expect(replyCountLabel(1)).toBe("1 reply");
     expect(replyCountLabel(0)).toBe("0 replies");
     expect(replyCountLabel(7)).toBe("7 replies");
+  });
+});
+
+describe("channelLayoutOf", () => {
+  it("is the channel's own choice, and anything unrecognised is POSTS", () => {
+    expect(channelLayoutOf("conversation")).toBe("conversation");
+    // Every one of these is a channel this app must keep drawing exactly as it did before
+    // the layout was read at all: an ABSENT modality is 54 of this tenant's 70 channels, and
+    // a word nobody measured must never opt a channel into the other surface.
+    for (const unknown of [
+      undefined,
+      null,
+      "",
+      "posts",
+      "Conversational",
+      "PostReply",
+      "something-new-in-2027",
+    ]) {
+      expect(channelLayoutOf(unknown)).toBe("posts");
+    }
+  });
+});
+
+describe("threadReplies", () => {
+  const thread = (replies: ChatMessage[]) => ({
+    rootId: "a",
+    subject: "",
+    lead: post("a", 1),
+    replies,
+  });
+
+  it("says nothing at all about a post nobody has answered", () => {
+    // Not "0 replies": a post with no thread under it has nothing to disclose, and a control
+    // that opens an empty panel is a control that changes nothing.
+    expect(threadReplies(thread([]))).toBeNull();
+  });
+
+  it("counts every reply and names the newest moment", () => {
+    const now = Date.parse("2026-08-31T12:00:00Z");
+    const replies = [
+      post("a1", 2, { sender: "Ada", sender_mri: "8:orgid:ada", compose_time: now - 7_200_000 }),
+      post("a2", 3, { sender: "Grace", sender_mri: "8:orgid:grace", compose_time: now - 60_000 }),
+    ];
+    const summary = threadReplies(thread(replies), now)!;
+    expect(summary.count).toBe(2);
+    expect(summary.label).toBe("2 replies");
+    // The newest reply is the LAST one, because a thread's replies arrive in seq order — read
+    // off the list rather than re-sorted.
+    expect(summary.lastReply).toBe(formatMessageTime(now - 60_000, now));
+  });
+
+  it("stacks one face per PERSON, keyed on the identity and never on the name", () => {
+    // Measured on this tenant, 273 of one group chat's 899 messages arrive with a blank
+    // sender — so two DIFFERENT colleagues both unnamed would stack as one person if the name
+    // were the key, and an authorless post (a recording, a thread activity) is nobody at all.
+    const replies = [
+      post("r1", 2, { sender: "Ada Lovelace", sender_mri: "8:orgid:ada" }),
+      post("r2", 3, { sender: "", sender_mri: "8:orgid:ada" }),
+      post("r3", 4, { sender: "Grace Hopper", sender_mri: "8:orgid:grace" }),
+      post("r4", 5, { sender: "", sender_mri: "" }),
+      post("r5", 6, { sender: "Alan Turing", sender_mri: "8:orgid:alan" }),
+      post("r6", 7, { sender: "Katherine", sender_mri: "8:orgid:katherine" }),
+    ];
+    const summary = threadReplies(thread(replies))!;
+    expect(summary.count).toBe(6);
+    expect(summary.repliers.map((r) => r.id)).toEqual(["r1", "r3", "r5"]);
+    expect(summary.repliers).toHaveLength(REPLIER_FACES);
+  });
+
+  it("falls back to the NAME only where there is no identity to key on", () => {
+    const replies = [
+      post("r1", 2, { sender: "Ada Lovelace", sender_mri: "" }),
+      post("r2", 3, { sender: "Ada Lovelace", sender_mri: "" }),
+    ];
+    expect(threadReplies(thread(replies))!.repliers.map((r) => r.id)).toEqual(["r1"]);
+  });
+});
+
+describe("threadPanelHeading", () => {
+  const thread = (over: { subject?: string; sender?: string } = {}) => ({
+    rootId: "a",
+    subject: over.subject ?? "",
+    lead: post("a", 1, { sender: over.sender ?? "Ada Lovelace" }),
+    replies: [],
+  });
+
+  it("names a titled announcement by its TITLE", () => {
+    expect(threadPanelHeading(thread({ subject: "  Release 4.2  " }), "the body")).toBe(
+      "Release 4.2",
+    );
+  });
+
+  it("takes an untitled post's opening words, on one line", () => {
+    expect(threadPanelHeading(thread(), "Deploy   is\nstuck again")).toBe("Deploy is stuck again");
+    const long = "x".repeat(PANEL_HEADING_CHARS + 20);
+    const heading = threadPanelHeading(thread(), long);
+    expect(heading).toBe(`${"x".repeat(PANEL_HEADING_CHARS)}…`);
+    expect(heading.length).toBeLessThanOrEqual(PANEL_HEADING_CHARS + 1);
+  });
+
+  it("names the author of a post with no words at all", () => {
+    // A post whose whole content is a picture or a card: the header still has to say which
+    // thread this is, and who wrote it is the only thing left that does.
+    expect(threadPanelHeading(thread({ sender: "Ada Lovelace" }), "   ")).toBe("Ada Lovelace");
+    expect(threadPanelHeading(thread({ sender: "" }), "")).toBe("Thread");
   });
 });

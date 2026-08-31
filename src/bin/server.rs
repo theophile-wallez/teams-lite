@@ -113,7 +113,7 @@ use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
     agent, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
-    custom_emoji,
+    channel_layout, custom_emoji,
     mail, push, push_policy, retry,
     sender_icon, signin, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
@@ -1509,6 +1509,16 @@ struct Ctx {
     /// on another install is not in here, which is what `agent_stop` reports (see
     /// § Running the released build beside the staged one).
     agent_runs_inflight: Arc<Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>>,
+    /// How each channel this process has been asked about is LAID OUT — posts, or a running
+    /// conversation (see [`channel_layout`]).
+    ///
+    /// A cache with no window, deliberately. The modality is fixed where the channel was
+    /// created, so a re-read would answer the same word every time — and the page asks on
+    /// every open of every channel, which is a request per open without this. It is per
+    /// PROCESS rather than in the store because it costs one small GET to rebuild: a restart
+    /// pays that once per channel the reader visits, and nothing has to be invalidated the
+    /// day a channel really does change shape. See the `channel_layout` method.
+    channel_layouts: Arc<Mutex<std::collections::HashMap<String, channel_layout::ChannelLayout>>>,
 }
 
 /// Everything this machine knows about audio calling right now.
@@ -3274,6 +3284,7 @@ async fn main() -> Result<()> {
         gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         tracker_people: Arc::new(Mutex::new(None)),
         agent_runs_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        channel_layouts: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     // Watch the broker, and react once per CHANGE of state (see `observe_broker`).
@@ -5376,6 +5387,20 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(|person| json!({ "mri": person.mri, "name": person.name }))
                 .collect();
             Ok(json!({ "members": members }))
+        }
+
+        // How this CHANNEL is drawn: as titled posts, or as a running conversation whose
+        // replies live behind a threads panel. Teams has both shapes and the channel itself
+        // says which (`channel_layout::from_thread`) — so a channel the user reads as a wall
+        // of cards in their own client is never drawn here as a column of chat bubbles.
+        //
+        // An OPEN read: it publishes nothing about the user, changes nothing on this machine
+        // and makes the same GET the `members` method above already makes. A gate would only
+        // stop a page from drawing the surface the tenant asked for.
+        "channel_layout" => {
+            let channel = param_str(params, "conversation")?;
+            let layout = channel_layout_of(ctx, &channel).await?;
+            Ok(json!({ "layout": layout.as_str() }))
         }
 
         // Read the non-secret view of the app settings: the configured GitLab host,
@@ -9337,6 +9362,32 @@ fn rename_mentionables(
     }
 }
 
+/// How one CHANNEL is laid out, answered from this process's own cache and read from the
+/// tenant at most once (see [`Ctx::channel_layouts`] for why there is no window on it).
+///
+/// A CHAT is refused rather than answered: a chat's history is flat and has no modality at
+/// all, so "posts" and "conversation" are both false about one — the rail
+/// `teams_send::parse_thread_root` already holds for a thread address in a chat.
+async fn channel_layout_of(ctx: &Ctx, channel_id: &str) -> Result<channel_layout::ChannelLayout> {
+    if !teams_read::is_channel_thread_id(channel_id) {
+        anyhow::bail!("channel_layout: not a channel — a chat's history has no layout");
+    }
+    if let Some(known) = ctx.channel_layouts.lock().unwrap().get(channel_id).copied() {
+        return Ok(known);
+    }
+    let http = ctx.http.clone();
+    let id = channel_id.to_string();
+    let layout = ctx
+        .retry_on_auth(move |session, _csa| {
+            let http = http.clone();
+            let id = id.clone();
+            async move { channel_layout::fetch(&http, &session, &id).await }
+        })
+        .await?;
+    ctx.channel_layouts.lock().unwrap().insert(channel_id.to_string(), layout);
+    Ok(layout)
+}
+
 /// Everybody a message in one conversation may @mention, named, most relevant first.
 ///
 /// A pure READ: the roster GET (src/teams_members.rs) and the short-profile lookup that
@@ -12799,6 +12850,36 @@ mod tests {
         for absent in ["set_chat_pinned", "set_chat_hidden"] {
             assert_eq!(write_class(absent), None, "{absent}");
         }
+    }
+
+    /// Reading a channel's LAYOUT is an ordinary open read, and it refuses a chat.
+    ///
+    /// It publishes nothing about the user, changes nothing on this machine and makes the
+    /// same `GET /v1/threads/{id}` the `members` method already makes — so a gate would only
+    /// stop a page from drawing the surface the tenant asked for. What it must NOT do is
+    /// answer for a CHAT: a flat history has no modality, so "posts" and "conversation" are
+    /// both false about one, and the resolver refuses by SHAPE rather than guessing.
+    #[test]
+    fn reading_a_channels_layout_is_an_open_read_and_refuses_a_chat() {
+        assert_eq!(write_class("channel_layout"), None);
+        assert!(!OUTWARD_METHODS.contains(&"channel_layout"));
+        assert!(!MACHINE_METHODS.contains(&"channel_layout"));
+
+        let source = include_str!("server.rs");
+        let resolver = source
+            .split("async fn channel_layout_of")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("channel_layout_of must exist");
+        assert!(
+            resolver.contains("is_channel_thread_id"),
+            "channel_layout_of must refuse a conversation that is not a channel: a chat's \
+             history is flat and carries no modality at all"
+        );
+        assert!(
+            resolver.contains("channel_layouts"),
+            "the answer is cached per process — the page asks on every open of every channel"
+        );
     }
 
     // Approving a merge request is the ONE write this app makes to a tracker. It acts

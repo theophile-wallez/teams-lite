@@ -1,8 +1,13 @@
-// Channel thread reconstruction. Teams returns a channel's posts as a single
-// flat, seq-ordered page in which posts from different threads interleave; each
-// post carries its thread's `thread_root_id`. Regrouping by that id restores the
-// "root post + its replies" structure the UI renders (chats stay flat and never
-// call this).
+// A channel's history: how it is SHAPED, and which of Teams' two layouts draws it.
+//
+// Teams returns a channel's posts as a single flat, seq-ordered page in which posts from
+// different threads interleave; each post carries its thread's `thread_root_id`. Regrouping
+// by that id restores the "root post + its replies" structure both layouts are built on
+// (chats stay flat and never call this).
+//
+// The LAYOUT is the channel's own and never this app's guess — see `channelLayoutOf`, and
+// AGENTS.md § A CHANNEL IS DRAWN THE WAY TEAMS DRAWS IT.
+import { formatMessageTime } from "./message-time";
 import type { ChatMessage } from "./protocol";
 
 /** A reconstructed channel thread: its root post (the `lead`) followed by its
@@ -94,3 +99,101 @@ export function replyHeading(message: ChatMessage, threadRoot: string | null): s
 export function replyCountLabel(count: number): string {
   return `${count} ${count === 1 ? "reply" : "replies"}`;
 }
+
+/** Which of Teams' two channel layouts a channel is drawn in. */
+export type ChannelLayout = "posts" | "conversation";
+
+/**
+ * Read a layout off the wire.
+ *
+ * **Anything this build does not recognise is POSTS**, which is the same rule the backend's
+ * own `channel_layout::from_thread` holds and for its reason: posts is the surface this app
+ * already drew for every channel, it is what 54 of this tenant's 70 channels carry (the
+ * modality is simply absent on a classic channel), and a page too old to have been told
+ * takes exactly that answer. Only the one word opts a channel into the other surface —
+ * drawing a running conversation on the strength of a value nobody measured is what
+ * `mergeVerdict` refuses for an unknown merge status.
+ */
+export function channelLayoutOf(value: string | null | undefined): ChannelLayout {
+  return value === "conversation" ? "conversation" : "posts";
+}
+
+/** What the foot row under a CONVERSATION-layout post says about its thread. */
+export type ThreadReplies = {
+  /** How many replies the thread holds. */
+  count: number;
+  /** Those replies in words (`replyCountLabel`). */
+  label: string;
+  /** Who replied, one message per person, in the order they first answered — the faces
+   *  the row stacks. Bounded by [`REPLIER_FACES`]. */
+  repliers: ChatMessage[];
+  /** When the newest reply landed, in the reader's own locale and zone. */
+  lastReply: string;
+};
+
+/**
+ * How many repliers' faces the foot row stacks.
+ *
+ * Three, because they OVERLAP: a fourth 20px disc pushes the count and "Last reply …" of a
+ * long thread off a 390px row, and the faces are a glance at who is in the thread rather
+ * than its roster — the reader opens the panel for that. It is the bound the chess strip and
+ * the pet layer already take, for the same reason.
+ */
+export const REPLIER_FACES = 3;
+
+/**
+ * The foot row's facts, or `null` for a post nobody has answered.
+ *
+ * `null` rather than a row reading "0 replies": a post with no thread under it has nothing
+ * to disclose, and a control that opens an empty panel is the "a control that changes
+ * nothing reads as a bug" rule.
+ *
+ * **A REPLIER IS AN IDENTITY, never a name.** The faces are keyed on the sender's own MRI
+ * and only on the name where the store holds no identity — measured on this tenant, 273 of
+ * one group chat's 899 messages arrive with a blank sender, so keying on the name alone
+ * would stack two DIFFERENT colleagues as one person (§ WHO said it). An authorless post —
+ * a recording, a thread activity — is nobody and is not stacked at all.
+ */
+export function threadReplies(thread: Thread, now?: number): ThreadReplies | null {
+  const { replies } = thread;
+  if (replies.length === 0) return null;
+  const repliers: ChatMessage[] = [];
+  const seen = new Set<string>();
+  for (const reply of replies) {
+    const identity = reply.sender_mri?.trim() || reply.sender?.trim();
+    if (!identity || seen.has(identity)) continue;
+    seen.add(identity);
+    if (repliers.length < REPLIER_FACES) repliers.push(reply);
+  }
+  // The replies are in seq order, so the newest is the last — read off the message rather
+  // than by sorting, because the group that built this thread already ordered them.
+  const newest = replies[replies.length - 1]!;
+  return {
+    count: replies.length,
+    label: replyCountLabel(replies.length),
+    repliers,
+    lastReply: formatMessageTime(newest.compose_time, now),
+  };
+}
+
+/**
+ * What the threads panel's header names the thread it is showing.
+ *
+ * A titled announcement is named by its TITLE, which is what the reader recognises it by —
+ * the rule `replyHeading` already holds for the composer's banner. An untitled post has only
+ * its words, so the panel takes their opening, bounded: a header is one line, and a post in a
+ * conversational channel is ordinary prose of any length.
+ */
+export function threadPanelHeading(thread: Thread, plainBody: string): string {
+  const subject = thread.subject.trim();
+  if (subject) return subject;
+  const words = plainBody.replace(/\s+/g, " ").trim();
+  if (!words) return thread.lead.sender.trim() || "Thread";
+  return words.length > PANEL_HEADING_CHARS
+    ? `${words.slice(0, PANEL_HEADING_CHARS).trimEnd()}…`
+    : words;
+}
+
+/** How much of an untitled post's own words the panel header carries. Wide enough to
+ *  recognise the post by and short enough to stay one line beside the panel's close. */
+export const PANEL_HEADING_CHARS = 40;

@@ -62,7 +62,16 @@ import { PresenceBadge } from "./presence-badge";
 import { usePresence } from "./use-presence";
 import { presenceIsUnknown } from "~/lib/presence";
 import { useModifierLabel } from "~/lib/platform";
-import { groupThreads, replyCountLabel, type Thread } from "~/lib/threads";
+import {
+  channelLayoutOf,
+  groupThreads,
+  replyCountLabel,
+  threadReplies,
+  threadRootOf,
+  type Thread,
+  type ThreadReplies,
+} from "~/lib/threads";
+import { ChannelThreadsPanel } from "./channel-threads-panel";
 import { Composer } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
 import { TypingIndicator } from "./typing-indicator";
@@ -355,6 +364,10 @@ export function MessagePane(props: { onBack?: () => void }) {
       return next;
     });
   }, []);
+  // Which thread the THREADS PANEL is showing, in a conversational channel — by root id
+  // rather than by thread, because the thread object is rebuilt on every live frame while
+  // what the reader opened is one address (the discipline `data-thread-root` already holds).
+  const [panelRootId, setPanelRootId] = useState<string | null>(null);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const prevOpenIdRef = useRef<string | null>(null);
@@ -410,16 +423,56 @@ export function MessagePane(props: { onBack?: () => void }) {
   // lookup is in flight states something we have not been told.
   const presenceKnown = partnerPresence !== undefined && !presenceIsUnknown(partnerPresence);
 
-  // Channels render as threads: the flat, seq-ordered page is regrouped by
-  // `thread_root_id` so a thread's root post and its replies sit together even
-  // though the API interleaves posts from different threads. Chats stay flat
-  // (`threads` is null). `replyRootOf` maps a reply's id back to its thread so a
-  // deep-link into a collapsed thread can auto-expand it.
+  // A channel's posts are regrouped by `thread_root_id`, so a thread's root post and its
+  // replies sit together even though the API interleaves posts from different threads. Chats
+  // stay flat and never call this. BOTH channel layouts need the grouping — the posts layout
+  // draws each thread as a card, and the conversation layout counts a thread's replies under
+  // its post and shows them in the panel — so it is the LAYOUT below that decides what is
+  // drawn, never this. `replyRootOf` maps a reply's id back to its thread, for a deep link
+  // into one.
   const isChannel = openChannel !== null;
-  const { threads, replyRootOf } = useMemo(() => {
+  const { threads: channelThreads, replyRootOf } = useMemo(() => {
     if (!isChannel) return { threads: null, replyRootOf: null };
     return groupThreads(messages);
   }, [isChannel, messages]);
+
+  /**
+   * WHICH OF TEAMS' TWO LAYOUTS THIS CHANNEL IS DRAWN IN — the channel's own choice, read
+   * from the tenant and never guessed (`channelLayoutOf`, over what `channelLayoutFor` read
+   * with the history: it lands in the same state change as the messages, so the rows below are
+   * decided ONCE — see that function for the defect a per-open effect caused).
+   *
+   * A channel the user reads as a wall of titled cards in their own client must not be drawn
+   * here as a column of chat bubbles, and the reverse: those are two different surfaces, and
+   * picking one for every channel would be wrong for most of them. Measured on this tenant,
+   * 6 of 70 channels are conversational and the other 64 are posts.
+   *
+   * Until the read answers — and for ever on a machine that cannot reach the tenant — the
+   * answer is POSTS, which is the surface every channel here was drawn as before this. So a
+   * failed read costs a channel nothing it had.
+   */
+  const channelLayout = useAppState((s) =>
+    channelLayoutOf(openChannel ? s.channelLayouts[openChannel.id] : undefined),
+  );
+
+  /** The threads drawn as CARDS — the posts layout, and nothing else. A conversational
+   *  channel still has threads: they are what the replies row counts and what the panel
+   *  shows, and they are read off `channelThreads` below. */
+  const threads = isChannel && channelLayout === "posts" ? channelThreads : null;
+
+  /**
+   * The messages the main column really draws.
+   *
+   * A chat draws its whole history. A CONVERSATIONAL channel draws the thread LEADS and
+   * nothing else — a reply there lives in the threads panel, which is the whole point of the
+   * layout: Teams' own conversational channel is a running conversation of top-level posts
+   * with each thread's answers one press away. The POSTS layout draws no flat list at all
+   * (its rows are the cards), so this is the chat's own history there and unused.
+   */
+  const drawnMessages = useMemo(
+    () => (threads ? messages : (channelThreads?.map((thread) => thread.lead) ?? messages)),
+    [threads, channelThreads, messages],
+  );
 
   // Which messages open a block of time, and what each one says (see lib/message-time.ts).
   // Taken over the history AS DRAWN, once per change of it rather than per rendered bubble.
@@ -432,19 +485,25 @@ export function MessagePane(props: { onBack?: () => void }) {
   // are normally hours apart). A post in a thread carries WHEN beside WHO instead, which is
   // where Teams puts it and the one place it says something about that post rather than about
   // the gap above it (see `threadPost` in components/message-bubble.tsx).
+  // A CONVERSATIONAL channel gets them BACK, and that is the same rule rather than an
+  // exception to it: its main column IS one running conversation of top-level posts — the
+  // replies that used to fall between the marks are in the panel — so "the day changed" and
+  // "an hour passed" say something true about the gap above a post again.
   const timeMarks = useMemo(
-    () => (threads ? new Map<string, string>() : messageTimeMarks([messages])),
-    [threads, messages],
+    () => (threads ? new Map<string, string>() : messageTimeMarks([drawnMessages])),
+    [threads, drawnMessages],
   );
 
   // Every game of chess this thread holds. A game IS its messages (see lib/chess-thread.ts),
   // so this is a pass over the history exactly as `timeMarks` is, and for its reason: the pane
   // re-renders on every scroll that mounts a row while a game changes only when the messages
-  // do. A CHANNEL is excluded — its history is drawn as threads, and a board inside one is a
-  // different surface (see AGENTS.md § Chess in a conversation).
+  // do. A CHANNEL is excluded — a board inside one is a different surface (see AGENTS.md
+  // § Chess in a conversation) — and it is excluded by being a CHANNEL rather than by being
+  // drawn as threads: both channel layouts hold no game, so reading the layout must not
+  // quietly hand one of them a board.
   const chessGames = useMemo(
-    () => (threads ? [] : chessGamesInThread(messages)),
-    [threads, messages],
+    () => (isChannel ? [] : chessGamesInThread(messages)),
+    [isChannel, messages],
   );
 
   /**
@@ -470,33 +529,87 @@ export function MessagePane(props: { onBack?: () => void }) {
   const petsShown = useAppState((s) => s.petsShown);
   const petArchive = useAppState((s) => (s.openId ? s.petArchive[s.openId] : undefined));
   useEffect(() => {
-    if (!openId || threads || !petsShown) return;
+    if (!openId || isChannel || !petsShown) return;
     void controller.loadPetArchive(openId);
-  }, [controller, openId, threads, petsShown]);
-  // A CHANNEL is excluded exactly as chess is — its history is drawn as THREADS, and where a creature
-  // walks over one of those is a different surface's question.
+  }, [controller, openId, isChannel, petsShown]);
+  // A CHANNEL is excluded exactly as chess is, and on the same test — being a channel rather
+  // than being drawn as threads. Where a creature walks over a channel is a different
+  // surface's question in either layout.
   const petHistory = useMemo(
-    () => (threads ? [] : withPetArchive(messages, petArchive)),
-    [threads, messages, petArchive],
+    () => (isChannel ? [] : withPetArchive(messages, petArchive)),
+    [isChannel, messages, petArchive],
   );
   // Every companion this thread holds — a pass over that history for the reason `timeMarks` and
   // `chessGames` are: the pane re-renders on every scroll that mounts a row and on every streamed agent
   // frame, while a creature changes only when the messages do.
   const pets = useMemo(() => petsInThread(petHistory), [petHistory]);
 
-  // Deep-linking to a reply inside a collapsed thread: expand that thread so the
-  // scroll effect can find and center the target node.
+  /**
+   * The thread the panel is showing, resolved from the id the reader opened.
+   *
+   * Only in the CONVERSATION layout: the posts layout has no panel — a thread's replies are
+   * already under it, in its own card — so a stale id from a channel that was drawn one way
+   * can never open a surface the other one does not have.
+   */
+  const panelThread = useMemo(
+    () =>
+      threads || !panelRootId
+        ? null
+        : (channelThreads?.find((thread) => thread.rootId === panelRootId) ?? null),
+    [threads, channelThreads, panelRootId],
+  );
+  /**
+   * The foot row each drawn post earns, by the post's own id — a pass over the threads for
+   * the reason `timeMarks` is one: the pane re-renders on every scroll that mounts a row,
+   * while what a thread holds changes only when the messages do.
+   *
+   * Empty in the POSTS layout, where the replies are already under their post.
+   */
+  const repliesByPost = useMemo(() => {
+    const rows = new Map<string, ThreadReplies>();
+    if (threads || !channelThreads) return rows;
+    for (const thread of channelThreads) {
+      const replies = threadReplies(thread);
+      if (replies) rows.set(thread.lead.id, replies);
+    }
+    return rows;
+  }, [threads, channelThreads]);
+
+  const closeThreadPanel = useCallback(() => {
+    setPanelRootId(null);
+    // The panel aimed the composer at its thread when it opened (see `openThreadPanel`), so
+    // closing it takes that aim back: words written with no panel on screen belong to the
+    // channel, and leaving the reply standing would post them into a thread the reader can
+    // no longer see.
+    controller.cancelReply();
+  }, [controller]);
+
+  // Deep-linking to a reply: in the POSTS layout expand that thread so the scroll effect can
+  // find and centre the target node; in the CONVERSATION layout the reply is not in the main
+  // column at all, so the panel that holds it is opened instead.
   useEffect(() => {
     if (!replyRootOf || !pendingScroll || pendingScroll.convId !== openId) return;
     const rootId = replyRootOf.get(pendingScroll.messageId);
-    if (rootId) {
+    if (!rootId) return;
+    if (threads) {
       setExpandedThreads((prev) => (prev.has(rootId) ? prev : new Set(prev).add(rootId)));
+    } else {
+      setPanelRootId(rootId);
     }
-  }, [replyRootOf, pendingScroll, openId]);
+  }, [replyRootOf, pendingScroll, openId, threads]);
 
-  // The rows the virtualizer works in: one per message for a chat, one per whole
-  // thread for a channel (a thread's root post and its replies are measured and
-  // scrolled as a single block, so expanding one just makes its row taller).
+  // A panel belongs to the conversation it was opened in. Walking away closes it — the rule a
+  // pasted picture and a typed title already follow — rather than leaving it to resolve against
+  // another channel's threads and draw nothing.
+  useEffect(() => {
+    setPanelRootId(null);
+  }, [openId]);
+
+
+  // The rows the virtualizer works in: one per message for a chat and for a CONVERSATIONAL
+  // channel (whose drawn messages are the thread leads), one per whole thread for a channel
+  // drawn as POSTS (a thread's root post and its replies are measured and scrolled as a
+  // single block, so expanding one just makes its row taller).
   // `rowOfMessage` maps a message id to the row that renders it, for deep links.
   //
   // A live agent run adds at most one row, and only while the message it is writing
@@ -504,9 +617,9 @@ export function MessagePane(props: { onBack?: () => void }) {
   // back. Once it has, the run rides that message's row instead (see `renderMsg`), so
   // the reply is one thing in the history and never two.
   const { rows, rowOfMessage } = useMemo(() => {
-    // A CHAT's rows are `chatHistoryRows`, which is where both absorptions live and where they
-    // are tested. A CHANNEL's are its threads, and it holds neither a board nor a creature.
-    const chat = threads ? null : chatHistoryRows(messages, chessGames);
+    // `chatHistoryRows` is where both absorptions live and where they are tested. A CHANNEL
+    // drawn as POSTS has thread rows instead, and holds neither a board nor a creature.
+    const chat = threads ? null : chatHistoryRows(drawnMessages, chessGames);
     const rowOfMessage = chat?.rowOfMessage ?? new Map<string, number>();
     const rows: HistoryRow[] = chat?.rows ?? [];
     if (threads) {
@@ -548,6 +661,18 @@ export function MessagePane(props: { onBack?: () => void }) {
         }
       });
     }
+    // Over the rows as they will really be drawn, for the reason the pet rule below is: a
+    // reply in a CONVERSATIONAL channel is drawn in the panel and has no row of its own, so
+    // its id points at the post that holds it — and the splice and the rebuild above both
+    // move the indices this resolves against. A deep link into such a reply therefore scrolls
+    // to its post, and the effect above opens the panel beside it.
+    if (!threads && channelThreads) {
+      for (const thread of channelThreads) {
+        const row = rowOfMessage.get(thread.lead.id);
+        if (row === undefined) continue;
+        for (const reply of thread.replies) rowOfMessage.set(reply.id, row);
+      }
+    }
     // LAST, over the rows as they will really be drawn: a pet ledger has no row of its own, so
     // its id points at a neighbour — and both the splice above and the rebuild move the indices
     // that rule resolves against. A rebuild that ran after it would drop every one of them.
@@ -555,7 +680,7 @@ export function MessagePane(props: { onBack?: () => void }) {
       rowOfMessage.set(id, index);
     }
     return { rows, rowOfMessage };
-  }, [threads, messages, agentRun, conversationRecordings, chessGames]);
+  }, [threads, channelThreads, drawnMessages, agentRun, conversationRecordings, chessGames]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -789,6 +914,35 @@ export function MessagePane(props: { onBack?: () => void }) {
     setFocusToken((t) => t + 1);
   }, [controller]);
 
+  /**
+   * Open the threads panel on one post, and AIM THE COMPOSER AT THAT THREAD.
+   *
+   * The two are one act rather than two, and that is the rule this layout rests on. There is
+   * ONE composer in this app (its `data-conversation-id` is what a sanctioned live driver
+   * proves its target with), so the panel does not bring a second one the way Teams' own does
+   * — and a panel that opened WITHOUT aiming it would leave the reader answering a thread
+   * into the channel itself, which is exactly the defect § A CHANNEL THREAD exists to close:
+   * their answer lands as a new untitled thread beside the post instead of under it.
+   *
+   * So `startReply` runs here, the composer's banner names the thread the next Enter lands in
+   * (`replyHeading`), and closing the panel takes that aim back (`closeThreadPanel`).
+   *
+   * **The BANNER stays the one authority on where Enter lands, and the panel is not a second
+   * one.** A reader who presses the composer's own Cancel has said "not a reply", and their
+   * next Enter posting to the channel is then right — so the panel is left open rather than
+   * closed under them. The same state is what a DEEP LINK into a reply produces (the panel
+   * opens to SHOW a message, and aiming the composer at it would be this app deciding to
+   * answer for them), which is why nothing here holds the two in lockstep.
+   */
+  const openThreadPanel = useCallback(
+    (thread: Thread) => {
+      setPanelRootId(thread.rootId);
+      controller.startReply(thread.lead);
+      setFocusToken((t) => t + 1);
+    },
+    [controller],
+  );
+
   // "Answer with <agent>": reply to that message, with that agent's tag already leading
   // the draft. Nothing is sent — the reply banner shows which message the answer is
   // about, and the user presses Enter (or says more first). The two halves are why it
@@ -929,8 +1083,15 @@ export function MessagePane(props: { onBack?: () => void }) {
     // both directions: two messages an hour apart are two things somebody said, and
     // tucking the second against the first at continuation spacing — under a line
     // that says the day changed — would draw them as one.
-    const mark = timeMarks.get(m.id);
-    const nextMark = next ? timeMarks.get(next.id) : undefined;
+    //
+    // A post drawn INSIDE A THREAD carries none, whichever layout put it there. The mark is a
+    // line about the gap above a message in one running conversation, and inside a thread that
+    // gap belongs to the channel rather than to the thread: in the posts layout it cut a
+    // seven-reply thread into stamped fragments inside its own card, and in the threads PANEL
+    // it drew the channel's own "Aug 17, 7:42 PM" above the root post, which says nothing at
+    // all about the thread the panel is showing. A post says WHEN beside WHO instead.
+    const mark = opts?.threadPost ? undefined : timeMarks.get(m.id);
+    const nextMark = next && !opts?.threadPost ? timeMarks.get(next.id) : undefined;
     return (
       <div key={m.id} className="contents">
         {mark && (
@@ -1099,158 +1260,203 @@ export function MessagePane(props: { onBack?: () => void }) {
         )}
       </header>
 
-      {/* The history and the control that floats over it. The wrapper is what the
-          jump-to-latest button positions against, so the button sits at the bottom
-          of the viewport (just above the composer) instead of scrolling away with
-          the messages. */}
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        {/* EVERY GAME OF CHESS RUNNING HERE, floating under the header: a board is one row in a
-            history that may be a hundred messages long, and a conversation can hold several games
-            at once. It takes no room from the conversation (see chess-games-strip.tsx) and it is
-            drawn only where there is a live game to name. */}
-        <ChessGamesStrip conversationId={openId} games={chessGames} />
-        {/* THE COMPANIONS WALKING OVER THIS CONVERSATION. Like the strip above it this takes no
-            room — the history keeps its own height and its own scroll, so nothing moves under the
-            reader when a creature appears — and like the strip it mounts NOTHING when there is
-            nothing to draw, which here also covers the reader having turned them off and having
-            asked for less motion (see pet-layer.tsx). It is deliberately gated on real pet data
-            rather than on the route: the preference is read inside `start()`, which runs in an
-            effect, and children render before any effect does. */}
-        {/* `petHistory` and not `messages`, for the reason the menu above takes it: an act EDITS the
-            reader's own ledger by id, and that message may have paged out of the loaded window while
-            the creature is alive — so a layer handed the loaded page alone would publish nothing and
-            say nothing for every press on it. */}
-        <PetLayer conversationId={openId} pets={pets} messages={petHistory} games={chessGames} />
+      {/* THE HISTORY, AND THE THREADS PANEL BESIDE IT.
+          A conversational channel's replies live in that panel, so the two are columns of one
+          row — and BELOW `md` it is one column at a time, the shape the diff page's own two
+          columns already take: the panel replaces the history rather than squeezing it into
+          half a phone. The composer stays under BOTH, because there is one of it. */}
+      <div className="flex min-h-0 flex-1">
+        {/* The history and the control that floats over it. The wrapper is what the
+            jump-to-latest button positions against, so the button sits at the bottom
+            of the viewport (just above the composer) instead of scrolling away with
+            the messages. */}
         <div
-          ref={viewportRef}
-          onScroll={onScroll}
-          data-testid="message-scroll"
-          // How much history is loaded, which the rendered row count no longer
-          // reveals now that the list is virtualized (used by the E2E suite).
-          data-loaded-count={messages.length}
-          // The bottom padding clears the composer's fade overlay (`h-14`, 56px):
-          // at 40px the gradient is down to ~9% of the background, so the last
-          // message reads at full contrast instead of sitting under the fade.
-          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-10 pt-4 md:px-5"
-        >
-          {/* A conversation with no messages can still hold a recording — a call placed in a
-              thread nobody has written in — and the recording is the one thing on screen
-              then, so it is drawn instead of the empty state rather than behind it. */}
-          {rows.length === 0 ? (
-            <EmptyState
-              loading={loadingMessages}
-              error={messagesError}
-              onRetry={() => void controller.openConversation(openId)}
-            />
-          ) : (
-            <div
-              // The virtualizer positions the rows itself (see `directDomUpdates`),
-              // so they carry no `transform` from React. The *height* stays here on
-              // purpose: prepending a page re-anchors the reader by writing
-              // `scrollTop`, and that write happens in the virtualizer's own layout
-              // effect — which runs before it would set this height itself. A
-              // scroller that hasn't grown yet clamps the write, and the reader ends
-              // up thrown back into the page that just loaded. Sizing this element
-              // during React's own DOM mutation keeps the growth ahead of the
-              // re-anchor; `containerRef` then keeps it in sync when a measurement
-              // changes the total without a re-render.
-              ref={virtualizer.containerRef}
-              className="relative mx-auto w-full max-w-chat"
-              style={{ height: `${virtualizer.getTotalSize()}px` }}
-            >
-              {hasMoreOlder && (
-                <div
-                  className="absolute inset-x-0 top-0 flex items-center justify-center"
-                  style={{ height: `${HISTORY_LOADER_PX}px` }}
-                >
-                  {loadingOlder ? (
-                    <span className="flex items-center gap-2 text-xs text-text-faint">
-                      <HugeiconsIcon
-                        icon={Loading02Icon}
-                        className="size-3 animate-spin"
-                        strokeWidth={1.6}
-                      />{" "}
-                      Loading earlier messages…
-                    </span>
-                  ) : olderError ? (
-                    <span className="text-xs text-destructive">
-                      Couldn't load earlier messages — scroll up to retry.
-                    </span>
-                  ) : null}
-                </div>
-              )}
-              {virtualRows.map((virtualRow) => {
-                const row = rows[virtualRow.index];
-                if (!row) return null;
-                return (
-                  <div
-                    key={virtualRow.key}
-                    data-index={virtualRow.index}
-                    ref={virtualizer.measureElement}
-                    // `flex flex-col` is load-bearing: the rows inside carry
-                    // vertical margins, and a flex container keeps them inside its
-                    // own box (no margin collapsing) so `measureElement` reports a
-                    // height that includes the spacing.
-                    className="absolute inset-x-0 top-0 flex flex-col"
-                  >
-                    {row.kind === "thread" ? (
-                      <ThreadGroup
-                        thread={row.thread}
-                        expanded={expandedThreads.has(row.thread.rootId)}
-                        onToggle={() => toggleThread(row.thread.rootId)}
-                        replyTarget={replyingTo?.threadRoot === row.thread.rootId}
-                        onReply={doReply}
-                        renderMsg={renderMsg}
-                      />
-                    ) : row.kind === "recording" ? (
-                      // Its own row and its own card: a recording is not a message, so it
-                      // takes no side, no bubble and no sender (see CallRecordingCard).
-                      <CallRecordingCard recording={row.recording} className="my-2" />
-                    ) : row.kind === "chess" ? (
-                      // The game, drawn where it was started. It is not a message either: it
-                      // takes no bubble, no side and no sender, because the row IS the game
-                      // the thread holds rather than one thing somebody said.
-                      <Suspense
-                        fallback={
-                          <div
-                            data-testid="chess-loading"
-                            aria-hidden
-                            className="mx-auto my-2 w-full max-w-80 animate-pulse rounded-xl border border-border-subtle bg-panel"
-                            // The room the board is about to take, so the history does not
-                            // shift when the chunk lands.
-                            style={{ height: `${CHESS_ROW_PX - 16}px` }}
-                          />
-                        }
-                      >
-                        <ChessGameCard
-                          game={row.game}
-                          conversationId={openId}
-                          className="my-2"
-                        />
-                      </Suspense>
-                    ) : row.kind === "agent" ? (
-                      <AgentPendingBubble
-                        run={row.run}
-                        author={selfName}
-                        onSettled={doAgentSettled}
-                        // Keyed by the message the run is writing into, exactly as a real
-                        // row is: the placeholder is replaced by that message the moment
-                        // Teams echoes it back, and a fold the reader made here must
-                        // survive that swap.
-                        transcriptOpen={agentTranscriptsOpen[row.run.message_id] ?? null}
-                        onTranscriptToggle={doAgentTranscriptToggle}
-                        onStop={doAgentStop}
-                      />
-                    ) : (
-                      renderMsg(row.message, row.prev, row.next)
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+          className={cn(
+            "relative flex min-h-0 flex-1 flex-col",
+            panelThread && "hidden md:flex",
           )}
+        >
+          {/* EVERY GAME OF CHESS RUNNING HERE, floating under the header: a board is one row in a
+              history that may be a hundred messages long, and a conversation can hold several games
+              at once. It takes no room from the conversation (see chess-games-strip.tsx) and it is
+              drawn only where there is a live game to name. */}
+          <ChessGamesStrip conversationId={openId} games={chessGames} />
+          {/* THE COMPANIONS WALKING OVER THIS CONVERSATION. Like the strip above it this takes no
+              room — the history keeps its own height and its own scroll, so nothing moves under the
+              reader when a creature appears — and like the strip it mounts NOTHING when there is
+              nothing to draw, which here also covers the reader having turned them off and having
+              asked for less motion (see pet-layer.tsx). It is deliberately gated on real pet data
+              rather than on the route: the preference is read inside `start()`, which runs in an
+              effect, and children render before any effect does. */}
+          {/* `petHistory` and not `messages`, for the reason the menu above takes it: an act EDITS the
+              reader's own ledger by id, and that message may have paged out of the loaded window while
+              the creature is alive — so a layer handed the loaded page alone would publish nothing and
+              say nothing for every press on it. */}
+          <PetLayer conversationId={openId} pets={pets} messages={petHistory} games={chessGames} />
+          <div
+            ref={viewportRef}
+            onScroll={onScroll}
+            data-testid="message-scroll"
+            // How much history is loaded, which the rendered row count no longer
+            // reveals now that the list is virtualized (used by the E2E suite).
+            data-loaded-count={messages.length}
+            // The bottom padding clears the composer's fade overlay (`h-14`, 56px):
+            // at 40px the gradient is down to ~9% of the background, so the last
+            // message reads at full contrast instead of sitting under the fade.
+            className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-10 pt-4 md:px-5"
+          >
+            {/* A conversation with no messages can still hold a recording — a call placed in a
+                thread nobody has written in — and the recording is the one thing on screen
+                then, so it is drawn instead of the empty state rather than behind it. */}
+            {rows.length === 0 ? (
+              <EmptyState
+                loading={loadingMessages}
+                error={messagesError}
+                onRetry={() => void controller.openConversation(openId)}
+              />
+            ) : (
+              <div
+                // The virtualizer positions the rows itself (see `directDomUpdates`),
+                // so they carry no `transform` from React. The *height* stays here on
+                // purpose: prepending a page re-anchors the reader by writing
+                // `scrollTop`, and that write happens in the virtualizer's own layout
+                // effect — which runs before it would set this height itself. A
+                // scroller that hasn't grown yet clamps the write, and the reader ends
+                // up thrown back into the page that just loaded. Sizing this element
+                // during React's own DOM mutation keeps the growth ahead of the
+                // re-anchor; `containerRef` then keeps it in sync when a measurement
+                // changes the total without a re-render.
+                ref={virtualizer.containerRef}
+                className="relative mx-auto w-full max-w-chat"
+                style={{ height: `${virtualizer.getTotalSize()}px` }}
+              >
+                {hasMoreOlder && (
+                  <div
+                    className="absolute inset-x-0 top-0 flex items-center justify-center"
+                    style={{ height: `${HISTORY_LOADER_PX}px` }}
+                  >
+                    {loadingOlder ? (
+                      <span className="flex items-center gap-2 text-xs text-text-faint">
+                        <HugeiconsIcon
+                          icon={Loading02Icon}
+                          className="size-3 animate-spin"
+                          strokeWidth={1.6}
+                        />{" "}
+                        Loading earlier messages…
+                      </span>
+                    ) : olderError ? (
+                      <span className="text-xs text-destructive">
+                        Couldn't load earlier messages — scroll up to retry.
+                      </span>
+                    ) : null}
+                  </div>
+                )}
+                {virtualRows.map((virtualRow) => {
+                  const row = rows[virtualRow.index];
+                  if (!row) return null;
+                  // The thread under a drawn post, resolved ONCE: which one the foot row counts,
+                  // whether the panel is already showing it, and what a press opens. Only a
+                  // conversational channel has any (`repliesByPost` is empty otherwise).
+                  const postThread =
+                    row.kind === "message"
+                      ? channelThreads?.find((t) => t.rootId === threadRootOf(row.message))
+                      : undefined;
+                  const postReplies =
+                    row.kind === "message" ? repliesByPost.get(row.message.id) : undefined;
+                  return (
+                    <div
+                      key={virtualRow.key}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      // `flex flex-col` is load-bearing: the rows inside carry
+                      // vertical margins, and a flex container keeps them inside its
+                      // own box (no margin collapsing) so `measureElement` reports a
+                      // height that includes the spacing.
+                      className="absolute inset-x-0 top-0 flex flex-col"
+                    >
+                      {row.kind === "thread" ? (
+                        <ThreadGroup
+                          thread={row.thread}
+                          expanded={expandedThreads.has(row.thread.rootId)}
+                          onToggle={() => toggleThread(row.thread.rootId)}
+                          replyTarget={replyingTo?.threadRoot === row.thread.rootId}
+                          onReply={doReply}
+                          renderMsg={renderMsg}
+                        />
+                      ) : row.kind === "recording" ? (
+                        // Its own row and its own card: a recording is not a message, so it
+                        // takes no side, no bubble and no sender (see CallRecordingCard).
+                        <CallRecordingCard recording={row.recording} className="my-2" />
+                      ) : row.kind === "chess" ? (
+                        // The game, drawn where it was started. It is not a message either: it
+                        // takes no bubble, no side and no sender, because the row IS the game
+                        // the thread holds rather than one thing somebody said.
+                        <Suspense
+                          fallback={
+                            <div
+                              data-testid="chess-loading"
+                              aria-hidden
+                              className="mx-auto my-2 w-full max-w-80 animate-pulse rounded-xl border border-border-subtle bg-panel"
+                              // The room the board is about to take, so the history does not
+                              // shift when the chunk lands.
+                              style={{ height: `${CHESS_ROW_PX - 16}px` }}
+                            />
+                          }
+                        >
+                          <ChessGameCard
+                            game={row.game}
+                            conversationId={openId}
+                            className="my-2"
+                          />
+                        </Suspense>
+                      ) : row.kind === "agent" ? (
+                        <AgentPendingBubble
+                          run={row.run}
+                          author={selfName}
+                          onSettled={doAgentSettled}
+                          // Keyed by the message the run is writing into, exactly as a real
+                          // row is: the placeholder is replaced by that message the moment
+                          // Teams echoes it back, and a fold the reader made here must
+                          // survive that swap.
+                          transcriptOpen={agentTranscriptsOpen[row.run.message_id] ?? null}
+                          onTranscriptToggle={doAgentTranscriptToggle}
+                          onStop={doAgentStop}
+                        />
+                      ) : (
+                        <>
+                          {renderMsg(row.message, row.prev, row.next)}
+                          {/* THE THREAD UNDER THIS POST, in a conversational channel: who
+                              answered, how many of them and when the last one landed, with the
+                              press that opens the panel holding them. Drawn only where there
+                              IS a thread (`threadReplies` answers null otherwise), because a
+                              control that opens an empty panel is a control that changes
+                              nothing. */}
+                          {postReplies && postThread && (
+                            <ThreadRepliesRow
+                              replies={postReplies}
+                              mine={row.message.is_self === true}
+                              open={panelRootId === postThread.rootId}
+                              onOpen={() => openThreadPanel(postThread)}
+                            />
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <JumpToLatest visible={!atBottom} onClick={jumpToLatest} />
         </div>
-        <JumpToLatest visible={!atBottom} onClick={jumpToLatest} />
+        {panelThread && (
+          <ChannelThreadsPanel
+            thread={panelThread}
+            replies={repliesByPost.get(panelThread.lead.id) ?? null}
+            onClose={closeThreadPanel}
+            renderMsg={renderMsg}
+          />
+        )}
       </div>
 
       {/* The composer's fade overlay reaches up over this row and the typing line,
@@ -1268,6 +1474,83 @@ export function MessagePane(props: { onBack?: () => void }) {
           pane is not on screen at all. */}
       {!callOwnsComposer && <Composer focusToken={focusToken} agentAnswer={agentAnswer} />}
     </section>
+  );
+}
+
+/**
+ * THE THREAD UNDER ONE POST of a conversational channel: who answered, how many of them, when
+ * the last one landed, and the press that opens the panel holding them.
+ *
+ * It is Teams' own row for that layout, and every part of it answers a question the reader has
+ * before deciding to open anything: the FACES say whether this is a conversation they are in,
+ * the COUNT says how much is behind the press, and the MOMENT says whether it is still going.
+ * A row that said only "5 replies" would make them open it to learn all three.
+ *
+ * **The accent is spent on the count and on nothing else.** That is the rule the posts
+ * layout's own foot row already holds after shipping it the other way: an accent-filled pill
+ * per post is the app's one accent on every row of the history, which is the same as saying
+ * none of them is worth noticing. So the faces and the moment are `text-dim`, the count
+ * carries the accent, and the whole row is one 44px target under a thumb.
+ *
+ * It follows the POST's side, because it belongs to that post: the reader's own message sits
+ * right in the accent fill in this layout (it is a chat bubble here, not a card), and a foot
+ * row pinned left under a right-hand bubble reads as belonging to the message above it.
+ */
+function ThreadRepliesRow(props: {
+  replies: ThreadReplies;
+  /** Whether the post above is the reader's own, which is which side it sits on. */
+  mine: boolean;
+  /** Whether the panel is already showing this thread — the accent ring the posts layout
+   *  spends on the thread being answered, in the one place this layout can spend it. */
+  open: boolean;
+  onOpen: () => void;
+}) {
+  const { replies, mine, open, onOpen } = props;
+  return (
+    <div className={cn("mb-1 flex px-1", mine ? "justify-end" : "justify-start")}>
+      <button
+        type="button"
+        onClick={onOpen}
+        // NOT `thread-replies`: that name is the POSTS layout's expanded reply list, and
+        // one name for two different things is a spec that passes against the wrong surface.
+        data-testid="post-replies"
+        data-open={open ? "true" : undefined}
+        aria-expanded={open}
+        className={cn(
+          "flex h-11 max-w-full items-center gap-2 rounded-lg px-1.5 text-xs transition-colors hover:bg-accent",
+          open && "bg-accent",
+        )}
+      >
+        {/* WHO answered, overlapping — a glance at the thread rather than its roster, which
+            is what the panel is for. Bounded at `REPLIER_FACES`; a fourth 20px disc pushes
+            the count and the moment off a 390px row. */}
+        <span className="flex shrink-0 items-center">
+          {replies.repliers.map((reply, i) => (
+            <Avatar
+              key={reply.id}
+              seed={reply.sender_mri || reply.sender}
+              label={reply.sender}
+              photo={reply.sender_mri ? { kind: "user", id: reply.sender_mri } : undefined}
+              fallback="person"
+              className={cn(
+                // The ring is the page's own background, so the discs read as a stack rather
+                // than as one wide smudge on either theme.
+                "size-5 shrink-0 ring-2 ring-background",
+                i > 0 && "-ml-1.5",
+              )}
+            />
+          ))}
+        </span>
+        <span className="shrink-0 font-medium text-primary">{replies.label}</span>
+        {/* WHEN, in the reader's own locale and zone — the same words a block mark uses, so
+            "Yesterday 14:32" means one thing everywhere in this app. It is the first thing to
+            give way on a narrow row: the faces and the count are what the press is decided
+            on. */}
+        <span className="hidden min-w-0 truncate text-text-faint sm:inline">
+          Last reply {replies.lastReply}
+        </span>
+      </button>
+    </div>
   );
 }
 

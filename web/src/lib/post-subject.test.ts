@@ -27,3 +27,27 @@ describe("outboundSubject", () => {
     expect(POST_SUBJECT_MAX_CHARS).toBe(250);
   });
 });
+
+describe("postSubjectOffered — the channel's own LAYOUT", () => {
+  it("offers no title in a channel drawn as a running CONVERSATION", () => {
+    // Teams' conversational channel has a chat's own composer: a post there is a message that
+    // happens to be able to hold a thread, and a heading over one would be an announcement in
+    // the middle of a conversation.
+    expect(
+      postSubjectOffered({ isChannel: true, replying: false, layout: "conversation" }),
+    ).toBe(false);
+  });
+
+  it("offers one where the layout is POSTS, is unknown, or was never read", () => {
+    // The layout is read from the tenant and arrives with the history, so "not told yet" and
+    // "could not be read" must both behave as the surface that already shipped.
+    for (const layout of ["posts", undefined] as const) {
+      expect(postSubjectOffered({ isChannel: true, replying: false, layout })).toBe(true);
+    }
+  });
+
+  it("still refuses a chat and a reply, whatever the layout says", () => {
+    expect(postSubjectOffered({ isChannel: false, replying: false, layout: "posts" })).toBe(false);
+    expect(postSubjectOffered({ isChannel: true, replying: true, layout: "posts" })).toBe(false);
+  });
+});

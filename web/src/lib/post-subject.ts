@@ -19,19 +19,34 @@ export const POST_SUBJECT_MAX_CHARS = 250;
 /**
  * Whether the composer offers a title at all.
  *
- * Two conditions, and each is Teams' own:
+ * Three conditions, and each is Teams' own:
  *   * a CHANNEL. A chat message has no title, so a field there would collect a line the
  *     send is refused for — and it would claim a distinction the surface does not have.
  *   * a NEW post. A REPLY is part of a thread that is already named, so the backend
  *     refuses a titled one (`teams_send::parse_subject`) — and a field the send refuses is
  *     worse than no field.
+ *   * a channel drawn as POSTS. Teams offers "Add a subject" in a channel whose history is a
+ *     wall of titled announcements and NOT in one drawn as a running conversation: there the
+ *     composer is a chat's own box, because a post in it is a chat message that happens to be
+ *     able to hold a thread (see § A CHANNEL IS DRAWN THE WAY TEAMS DRAWS IT). A field there
+ *     would draw a heading nothing else on that surface has — and the post it titled would
+ *     read as an announcement in a conversation.
  *
  * It is the one rule, read in both places it decides something: whether the field is drawn,
  * and whether what is in it travels. So a title typed before the reader pressed Reply is
  * simply not sent, and it is still there when they cancel the reply.
+ *
+ * The LAYOUT is optional because it is READ from the tenant and arrives with the history: a
+ * channel this page has not been told about yet, and a machine that could not reach the
+ * tenant, both take the posts answer — which is the surface this app drew before the layout
+ * was read at all, and the one whose composer has always offered a title.
  */
-export function postSubjectOffered(where: { isChannel: boolean; replying: boolean }): boolean {
-  return where.isChannel && !where.replying;
+export function postSubjectOffered(where: {
+  isChannel: boolean;
+  replying: boolean;
+  layout?: "posts" | "conversation";
+}): boolean {
+  return where.isChannel && !where.replying && where.layout !== "conversation";
 }
 
 /** What the title field's contents become on the wire: the trimmed line, or nothing at

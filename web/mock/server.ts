@@ -605,6 +605,29 @@ const CHANNEL_ALERTS: Record<string, ChannelAlerts> = {
   "Product/Roadmap": "all_new_posts_and_replies",
 };
 
+/** How each seeded channel is LAID OUT, keyed `"Team/Channel"` — the mock's stand-in for
+ *  `properties.chatModalityType` on the channel's own thread (see `src/channel_layout.rs`).
+ *  A channel absent here is drawn as POSTS, which is what 54 of this tenant's 70 channels
+ *  carry and what this app drew before the layout was read at all.
+ *
+ *  Exactly ONE is conversational, and WHICH one is deliberate. It is `Design/Research`, in the
+ *  SECOND team, because the first team's channels are what every existing spec reaches for by
+ *  INDEX — `.first()` for a channel to open and `.nth(1)` for "another channel", which is how
+ *  the title spec proves a subject does not follow the reader. A conversational channel offers
+ *  no subject field at all, so putting the fixture at one of those indices rewrote a spec that
+ *  has nothing to do with layouts (measured: it did). Design is expanded out of the box, so
+ *  the row is on screen, and `Engineering/Incidents` keeps the alert thread the POSTS layout
+ *  is captured on. Both surfaces are therefore in one mock, one click apart.
+ *
+ *  Fixed rather than random, for the reason the alerts above are. */
+const CHANNEL_LAYOUTS: Record<string, "posts" | "conversation"> = {
+  "Design/Research": "conversation",
+};
+
+/** The layout of each seeded channel, by id — filled by `seedChannels` from the table
+ *  above, because the id is built out of the team and channel slugs there. */
+const channelLayouts = new Map<string, "posts" | "conversation">();
+
 /** The channels Teams HIDES, keyed `"Team/Channel"` — every other seeded channel is
  *  shown. Fixed for the same reason as the alerts above, and there is exactly one, so
  *  a spec knows which team grows a "Hidden channels" entry.
@@ -1058,6 +1081,7 @@ function seedChannels(): void {
         is_ghost_read: false,
         draft: "",
       };
+      channelLayouts.set(id, CHANNEL_LAYOUTS[`${team.name}/${channelName}`] ?? "posts");
       const chs: ChannelState = { channel, messages, participants };
       recomputeChannelSummary(chs);
       // A channel whose last message is ours has necessarily been read.
@@ -7433,6 +7457,18 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         name: nickname(p.mri) || p.name,
       }));
       return { members };
+    }
+
+    case "channel_layout": {
+      // How a channel is drawn: the mock's stand-in for `properties.chatModalityType` on
+      // the channel's own thread. It REFUSES a chat exactly as the backend does — a flat
+      // history carries no modality, so neither answer is true about one, and a mock that
+      // answered "posts" there would let a page asking the wrong question pass every test.
+      const id = requireString(params, "conversation");
+      if (!mockIsChannelThreadId(id)) {
+        throw new Error("channel_layout: not a channel — a chat's history has no layout");
+      }
+      return { layout: channelLayouts.get(id) ?? "posts" };
     }
 
     case "open": {
