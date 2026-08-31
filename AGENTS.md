@@ -7486,6 +7486,26 @@ to everything else:
   subject this module could not classify may say anything and hiding it on the strength of a
   missing prefix would bury a real change. A `revert` sits with `fix`: something the reader
   HAD is gone.
+- **AND THE APP'S OWN PANEL COUNTS THAT WORK RATHER THAN LISTING IT** (`readerChanges` and
+  `internalChangesNote` in `web/src/lib/update.ts`, drawn at the foot of the disclosure). It is
+  the same rule at the size the surface really has: the page can keep the work one press away,
+  and a 22rem card over a sidebar cannot. Measured on the release a reader photographed and
+  could not read — five changes, of which one feature, two fixes and **two refactors**, so two
+  of its five lines were work nobody outside the code can see, each under a heading of its own
+  at the size of the feature above it. It is a COUNT and never a cut: "and 2 internal changes"
+  keeps every change the heading promised accounted for, which is the rule `omitted` already
+  holds one line up. Three things follow, and each is pinned by a test:
+  - **WHICH groups are work is stated ONCE, in Rust, and travels** (`Group::development`, set
+    from `DEVELOPMENT`). Recognising the four titles again in TypeScript would mean a heading
+    renamed in `changelog.rs` silently stopped being folded in the app, and the panel going
+    quietly back to spending its room on refactors. So `to_markdown` reads that flag too, rather
+    than the table beside it.
+  - **The "unless they are all there is" exception is the PAGE's rule applied again**, because a
+    card whose whole content is "and 4 internal changes" reads as one that failed to load — and
+    that is exactly the release which most needs to say what it was for.
+  - **The MOCK carries the flag** (`MOCK_UPDATE_CHANGES`), because a fixture that withheld it
+    would let a panel full of refactors pass every test — which is how the photographed release
+    came to draw two of its five lines that way.
 
 **The base is PROVED to be behind this build, and two releases are asked.** `latest` is the
 honest answer to "where is the reader coming from" — it is what every installed copy asks
@@ -8151,6 +8171,41 @@ measured; run `examples/signin_window_recon.rs` instead.
 - Conventional commits. No AI attribution / Co-Authored-By lines.
 - De-risk before building: prove the risky piece with a spike, then implement.
 - Verify against the real tenant when possible; don't over-promise.
+
+### THE SUBJECT IS THE CHANGELOG, so it is written for the READER (MANDATORY)
+
+Every commit that reaches `master` becomes one line somebody reads in the app's own update
+panel (§ Updating the app from inside it) — and that panel shows the SUBJECT ALONE, because
+the body has nowhere to go in a 22rem card. So a subject that needs its body to be understood
+is a subject nobody reads.
+
+**This is a rule because it failed.** A reader opened the panel on a five-change release,
+read it, and could not tell what a single line meant: `a chip is tinted for the surface it
+lands on`, `a thread card is words, not chrome`, `one predicate for a channel id, and the
+fill's own flag reads it`. Every one is accurate, and every one is a note the author wrote to
+themselves. The reasoning was in the bodies, where the panel cannot reach.
+
+Five rules, and the first one is the whole of it:
+
+- **Say what the reader can now DO, or what stopped being wrong** — never the mechanism that
+  got there. `you can now mention a whole channel`, `your own @mention is visible again in a
+  channel`, `a channel now looks the way it looks in Teams`.
+- **Use the words the app uses ON SCREEN.** A reader knows a channel, a mention, a reply, a
+  thread, a reaction. They do not know a chip, a rail, a fill, a flag, a predicate, a surface
+  or chrome: those are this codebase's own nouns, and several of them mean something else
+  entirely to somebody who has not read the file.
+- **ONE claim per subject.** Two changes joined by "and" make the reader guess which half the
+  commit was for. Two commits are free.
+- **The REASONING GOES IN THE BODY, at whatever length it deserves.** Nothing is lost by
+  moving it there — the release page renders every paragraph (`MAX_BODY_BYTES`), and that is
+  the surface with the room. This rule takes nothing away from § Working style: the argument,
+  the measurement and the cost are still written down, in the place that can hold them.
+- **A `refactor` or a `test` still says plainly what it was**, for whoever comes next in the
+  code — those are the two subjects whose reader really is another author. They are also the
+  ones the app COUNTS rather than lists, so their words never have to carry a stranger.
+
+The prose in THIS file, and in the module headers, is deliberately dense and stays that way:
+its reader has the code open. A commit subject has a second reader who does not.
 
 ## Git workflow
 

@@ -37,7 +37,9 @@
 //     reading what it brings.
 //
 // It is still ONE list, grouped once: what differs is how much of each entry a surface
-// has the room to draw.
+// has the room to draw — and, for the same reason, how much of the WORK it draws at all.
+// The [`DEVELOPMENT`] groups are folded behind a disclosure on the page and replaced by a
+// COUNT in the panel, off one flag this module sets ([`Group::development`]).
 //
 // NO SHA APPEARS HERE, and that is the same rule the button obeys (web/src/lib/update.ts):
 // a commit id reads as a fault code, and it is not what the reader is asking. They are
@@ -97,6 +99,20 @@ pub struct Change {
 pub struct Group {
     pub title: String,
     pub changes: Vec<Change>,
+    /// This heading describes the WORK rather than the app — see [`DEVELOPMENT`].
+    ///
+    /// It TRAVELS, because both surfaces fold on it and the set has to be named once:
+    /// [`to_markdown`] puts these groups behind a disclosure, and the app's panel replaces
+    /// them with a count (`readerChanges` in web/src/lib/update.ts). Spelling the four
+    /// titles again in TypeScript would mean a heading renamed here silently stopped being
+    /// folded there — two answers to "is this work or is this the app?", drifting at the
+    /// first rename.
+    ///
+    /// It is a fact about the GROUP and never about a page, so the "unless they are all
+    /// there is" exception is not in it: that one is a rendering rule, and each surface
+    /// applies it to these flags itself.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub development: bool,
 }
 
 /// Everything between two builds, grouped for a reader.
@@ -149,6 +165,13 @@ const TYPES: &[(&str, &str)] = &[
 /// behaviour by definition, a test proves what already shipped, and a bumped dependency is
 /// somebody's Tuesday — so on a page that has something to say, these are folded away
 /// behind one disclosure instead of standing between the reader and the features.
+///
+/// BOTH surfaces fold on this set, and the app's own panel needs it more than the page
+/// does: that panel is a 22rem card showing the newest few changes, so a release of one
+/// feature and two refactors spent three of its five lines on work nobody can see — which
+/// is what a reader photographed and could not read. The page has room to keep them one
+/// press away; the panel has room for a COUNT (`readerChanges` in web/src/lib/update.ts).
+/// The set is named HERE either way, and travels as [`Group::development`].
 ///
 /// They are never DROPPED, for the reason `docs` was always kept: they are why a release
 /// exists on a day nobody shipped a feature. That is also the one case the fold is wrong —
@@ -223,7 +246,11 @@ pub fn from_commits(messages: &[String], total: usize) -> Changelog {
             .map(|(_, change)| change.clone())
             .collect();
         if !changes.is_empty() {
-            groups.push(Group { title: wanted.to_string(), changes });
+            groups.push(Group {
+                title: wanted.to_string(),
+                changes,
+                development: DEVELOPMENT.contains(&wanted),
+            });
         }
     }
 
@@ -360,7 +387,9 @@ pub fn to_markdown(log: &Changelog) -> String {
     if log.is_empty() {
         return "No changes.".to_string();
     }
-    let is_development = |group: &&Group| DEVELOPMENT.contains(&group.title.as_str());
+    // The flag, not the table: it is the same answer the app's panel folds on, and reading
+    // the titles again here would be a second spelling of one set.
+    let is_development = |group: &&Group| group.development;
     let above: Vec<&Group> = log.groups.iter().filter(|g| !is_development(g)).collect();
     let folded: Vec<&Group> = log.groups.iter().filter(is_development).collect();
     // Nothing to put above the fold means nothing to fold: the work IS the release.
@@ -685,6 +714,41 @@ mod tests {
         assert!(md.contains("### Housekeeping"));
     }
 
+    /// The app folds the same set the page does, so the set travels rather than being spelled
+    /// again in TypeScript: a heading renamed here would otherwise stop being folded there,
+    /// silently, and the panel would go back to spending its room on work nobody can see.
+    ///
+    /// Pinned on the SERIALIZED shape, because the payload is what reaches the app.
+    #[test]
+    fn a_group_that_is_work_rather_than_the_app_says_so_on_the_wire() {
+        let got = log(&[
+            "feat(calendar): join a meeting",
+            "refactor(store): one query",
+            "test(emoji): pin the sort",
+            "chore: bump a dependency",
+            "docs(calling): map video",
+            "hotfix by hand",
+        ]);
+        let flagged: Vec<(&str, bool)> =
+            got.groups.iter().map(|g| (g.title.as_str(), g.development)).collect();
+        assert_eq!(
+            flagged,
+            vec![
+                ("New", false),
+                ("Reworked", true),
+                ("Documented", true),
+                ("Tests", true),
+                ("Housekeeping", true),
+                // Never folded: a subject this module could not classify may say anything.
+                ("Other", false),
+            ]
+        );
+
+        let json: serde_json::Value = serde_json::to_value(&got).unwrap();
+        assert_eq!(json["groups"][1]["development"], serde_json::json!(true));
+        assert!(json["groups"][0].get("development").is_none(), "false is skipped");
+    }
+
     /// A revert takes away something the reader HAD, so it belongs with the changes they can
     /// see rather than behind the fold with the work.
     #[test]
@@ -747,6 +811,11 @@ mod tests {
             .collect();
         change.sort();
         assert_eq!(change, vec!["breaking", "scope", "summary"]);
+        assert!(
+            json["groups"][0].get("development").is_none(),
+            "a group the reader can see carries no flag: the common group on the wire is \
+             two keys"
+        );
 
         // And an ordinary change carries neither of the two optional fields, so the
         // common entry on the wire is one word-bearing key.

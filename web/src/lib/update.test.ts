@@ -5,6 +5,8 @@ import {
   countChanges,
   downloadPercent,
   formatBytes,
+  internalChangesNote,
+  readerChanges,
   updateView,
 } from "./update";
 
@@ -221,6 +223,92 @@ describe("changesSummary", () => {
   it("counts across every group", () => {
     expect(countChanges(changes)).toBe(3);
     expect(countChanges(null)).toBe(0);
+  });
+
+  // The folded work is BELOW, as its own line, so every change the count promises is
+  // accounted for. Counting the listed ones alone would understate how far behind the build
+  // is, which is the one thing this line is for.
+  it("counts the folded work too", () => {
+    expect(changesSummary(withWork)).toBe("5 changes since your build");
+  });
+});
+
+// ---- the work, folded into a count ----------------------------------------------------
+// One feature, one fix and three changes nobody outside the code can see. It is the shape
+// of the release a reader photographed and could not read: two of its five lines were a
+// refactor, each under its own heading at the size of the feature above it.
+
+const withWork: UpdateChanges = {
+  groups: [
+    { title: "New", changes: [{ scope: "channels", summary: "draw a channel as Teams does" }] },
+    { title: "Fixed", changes: [{ scope: "mentions", summary: "tint a chip for its surface" }] },
+    {
+      title: "Reworked",
+      development: true,
+      changes: [
+        { scope: "mentions", summary: "one predicate for a channel id" },
+        { scope: "mentions", summary: "the row's own rail" },
+      ],
+    },
+    { title: "Tests", development: true, changes: [{ summary: "pin the sort" }] },
+  ],
+  total: 5,
+  omitted: 0,
+};
+
+describe("readerChanges", () => {
+  it("lists what the reader can see and counts the rest", () => {
+    const { groups, internal } = readerChanges(withWork);
+    expect(groups.map((g) => g.title)).toEqual(["New", "Fixed"]);
+    // The count is of CHANGES, not of groups: three commits behind two headings.
+    expect(internal).toBe(3);
+  });
+
+  // The one case the fold is wrong. Housekeeping is why a release exists on a day nobody
+  // shipped a feature, and a card whose whole content is "and 4 internal changes" reads as
+  // one that failed to load. `to_markdown` takes the same exception, for the same reason.
+  it("shows the work in full when it is all there is", () => {
+    const workOnly: UpdateChanges = {
+      groups: withWork.groups.filter((group) => group.development),
+      total: 3,
+      omitted: 0,
+    };
+    const { groups, internal } = readerChanges(workOnly);
+    expect(groups.map((g) => g.title)).toEqual(["Reworked", "Tests"]);
+    expect(internal).toBe(0);
+  });
+
+  // WHICH groups are work is the BACKEND's answer and never a title recognised here: the
+  // set is named once, in src/changelog.rs, or a heading renamed there quietly stops being
+  // folded in the app. So a "Reworked" carrying no flag is LISTED.
+  it("reads the flag rather than the heading", () => {
+    const unflagged: UpdateChanges = {
+      groups: [{ title: "Reworked", changes: [{ summary: "one query" }] }],
+      total: 1,
+      omitted: 0,
+    };
+    expect(readerChanges(unflagged).groups.map((g) => g.title)).toEqual(["Reworked"]);
+    expect(readerChanges(unflagged).internal).toBe(0);
+  });
+
+  it("has nothing to draw and nothing to count for no changes", () => {
+    expect(readerChanges(null)).toEqual({ groups: [], internal: 0 });
+  });
+
+  it("leaves an ordinary update alone", () => {
+    expect(readerChanges(changes)).toEqual({ groups: changes.groups, internal: 0 });
+  });
+});
+
+describe("internalChangesNote", () => {
+  it("counts in the plural the count needs", () => {
+    expect(internalChangesNote(3)).toBe("and 3 internal changes");
+    expect(internalChangesNote(1)).toBe("and 1 internal change");
+  });
+
+  it("says nothing about nothing", () => {
+    expect(internalChangesNote(0)).toBe("");
+    expect(internalChangesNote(-1)).toBe("");
   });
 });
 

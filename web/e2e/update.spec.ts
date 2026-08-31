@@ -196,6 +196,17 @@ test.describe("in-app update", () => {
     );
     await expect(panel).not.toContainText("def5678");
 
+    // AND THE WORK IS A COUNT, not five lines of it. A refactor alters no behaviour, a test
+    // proves what already shipped: drawn under their own headings at the size of the feature
+    // above them, they spent the room this card has on changes nobody outside the code can
+    // see. The release page keeps them one press away; here they are one line, so the six
+    // the heading promises are still all accounted for.
+    await expect(panel).not.toContainText("Documented");
+    await expect(panel).not.toContainText("map video and screen sharing");
+    await expect(page.getByTestId("update-changes-internal")).toHaveText(
+      "and 1 internal change",
+    );
+
     // THE BUTTON HAS NOT MOVED. The panel is portaled and anchored; a list that unfolded in
     // the row would shift the control the user is aiming at, which is the same reason the
     // download's cost is a title and not a line.

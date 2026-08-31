@@ -27,7 +27,13 @@
 // thing left to do when nothing restarted the app. So the button never moves between the
 // two clicks, and the sidebar keeps its rows for the chats.
 
-import type { LiveStatus, UpdateChanges, UpdateInfo, UpdateProgress } from "./protocol";
+import type {
+  LiveStatus,
+  UpdateChangeGroup,
+  UpdateChanges,
+  UpdateInfo,
+  UpdateProgress,
+} from "./protocol";
 
 /** What a click does, or that there is nothing to click. */
 export type UpdateAction = "download" | "apply" | "retry" | "none";
@@ -219,12 +225,70 @@ function pendingChanges(info: UpdateInfo): UpdateChanges | null {
   return changes;
 }
 
+/** The panel's own list: the changes a reader can see, and a COUNT of the rest. */
+export type ReaderChanges = {
+  /** The groups to draw, in the backend's own order. */
+  groups: UpdateChangeGroup[];
+  /** How many changes were folded into that count. 0 in the ordinary case. */
+  internal: number;
+};
+
+/**
+ * Split what the update brings into what a reader can see and how much work came with it.
+ *
+ * A refactor alters no behaviour by definition, a test proves what already shipped and a
+ * bumped dependency is somebody's Tuesday — so they must not stand between the reader and
+ * the features. The release page has room to keep them one press away behind a disclosure
+ * (`to_markdown` in src/changelog.rs); this panel is a 22 rem card over a sidebar, and its
+ * room is a COUNT.
+ *
+ * It is not a nicety. Measured on the release a reader photographed: five changes, of which
+ * one feature, two fixes and TWO REFACTORS — so two of the five lines in a panel that shows
+ * the newest few were work nobody outside the code can see, drawn at the same size and under
+ * their own heading as the feature above them.
+ *
+ * WHICH groups those are is the BACKEND's answer (`group.development`), never a list of
+ * titles recognised here: one set, named once, or a heading renamed in Rust quietly stops
+ * being folded in the app.
+ */
+export function readerChanges(changes: UpdateChanges | null): ReaderChanges {
+  if (!changes) return { groups: [], internal: 0 };
+  const visible = changes.groups.filter((group) => !group.development);
+  // Nothing above the fold means nothing to fold — the work IS the update. A panel whose
+  // whole content is the sentence "and 4 internal changes" reads as one that failed to
+  // load, and it is exactly the release that most needs to say what it was for. The page
+  // takes the same exception, for the same reason.
+  if (visible.length === 0) return { groups: changes.groups, internal: 0 };
+  const internal = changes.groups
+    .filter((group) => group.development)
+    .reduce((n, group) => n + group.changes.length, 0);
+  return { groups: visible, internal };
+}
+
+/**
+ * The one line the folded work becomes, or nothing.
+ *
+ * COUNTED rather than dropped, because it is why a release exists on a day nobody shipped a
+ * feature — the rule `omitted` already obeys one line up: a list that quietly stops reads as
+ * a complete one. It says "internal" rather than naming the four headings, since which kind
+ * of work it was is precisely what the reader does not need.
+ */
+export function internalChangesNote(count: number): string {
+  if (count <= 0) return "";
+  return `and ${count} internal change${count === 1 ? "" : "s"}`;
+}
+
 /**
  * The disclosure's own heading: how much this update is, in one line.
  *
  * A count, never a build: it answers "is this a typo fix or a fortnight of work?", which is
  * the question somebody hovers to ask before spending 130 MB. `omitted` is stated in the
  * same breath, because a list that stops without saying so reads as a complete one.
+ *
+ * It counts EVERY change the panel carries, the folded work included — that work is below,
+ * as `internalChangesNote`'s own line, so a reader can still account for each one. Counting
+ * only the listed ones would understate how far behind the build is, which is the one thing
+ * this line exists to state.
  */
 export function changesSummary(changes: UpdateChanges | null): string {
   if (!changes) return "";

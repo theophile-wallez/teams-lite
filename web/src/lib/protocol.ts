@@ -507,6 +507,14 @@ export type UpdateChange = {
 export type UpdateChangeGroup = {
   title: string;
   changes: UpdateChange[];
+  /** This heading is the WORK rather than the app — a refactor, a test, a bumped
+   *  dependency, a note. The backend says so (`DEVELOPMENT` in src/changelog.rs, carried as
+   *  `Group::development`) rather than the page recognising the four titles, so a heading
+   *  renamed there cannot silently stop being folded here. Absent means false.
+   *
+   *  `readerChanges` (lib/update.ts) is the one reader: the panel draws a COUNT of these
+   *  instead of listing them, exactly as the release page folds them behind a disclosure. */
+  development?: boolean;
 };
 
 /** Everything between the running build and the release the button offers.

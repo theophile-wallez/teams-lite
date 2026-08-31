@@ -6661,7 +6661,13 @@ const MOCK_UPDATE_CHANGES = {
       ],
     },
     {
+      // WORK rather than the app, and the mock says so the way the backend does
+      // (`Group::development`). It is the one group here that the panel does not list: it
+      // becomes "and 1 internal change" at the foot. A fixture that withheld the flag would
+      // let a panel spending its room on refactors pass every test — which is how the
+      // release a reader photographed came to draw two of its five lines that way.
       title: "Documented",
+      development: true,
       changes: [{ scope: "calling", summary: "map video and screen sharing" }],
     },
   ],

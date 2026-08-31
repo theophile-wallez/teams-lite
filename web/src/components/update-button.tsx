@@ -39,6 +39,12 @@
 //   • The words in it are the AUTHORS' — the commit subjects, grouped by the backend
 //     (src/changelog.rs, the same module that writes every release body on GitHub). This
 //     file states no heading of its own and re-derives no grouping.
+//   • It lists what the reader can SEE and counts the rest. A refactor, a test and a bumped
+//     dependency each got a heading and a line of their own here, at the size of the feature
+//     above them: measured on the release a reader photographed, two of five lines were work
+//     nobody outside the code can see. The split is `readerChanges` (lib/update.ts) off the
+//     backend's own flag — the release page has room to keep that work one press away, and
+//     this card's room is a count.
 
 import { useState } from "react";
 import * as HoverCardPrimitive from "@radix-ui/react-hover-card";
@@ -48,7 +54,13 @@ import { ThinkingOrb } from "thinking-orbs";
 import { Button } from "./ui/button";
 import { useLongPress } from "./use-long-press";
 import { useAppState, useController } from "./controller-context";
-import { changesSummary, updateView, type UpdateAction } from "~/lib/update";
+import {
+  changesSummary,
+  internalChangesNote,
+  readerChanges,
+  updateView,
+  type UpdateAction,
+} from "~/lib/update";
 import type { UpdateChanges } from "~/lib/protocol";
 
 /** Long enough that crossing the button on the way to a chat does not open it, short
@@ -202,6 +214,9 @@ export function UpdateButton() {
  * move the caret into the panel the moment it appeared.
  */
 function UpdateChangesPanel({ changes }: { changes: UpdateChanges }) {
+  // What a reader can see, and a count of the work — the split is `readerChanges`, off the
+  // flag the backend sets. This file recognises no heading of its own.
+  const { groups, internal } = readerChanges(changes);
   return (
     <HoverCardPrimitive.Portal>
       <HoverCardPrimitive.Content
@@ -219,7 +234,7 @@ function UpdateChangesPanel({ changes }: { changes: UpdateChanges }) {
           {changesSummary(changes)}
         </p>
         <div className="max-h-[19rem] overflow-y-auto pr-1">
-          {changes.groups.map((group) => (
+          {groups.map((group) => (
             <div key={group.title} className="mb-2 last:mb-0">
               <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-faint">
                 {group.title}
@@ -252,6 +267,17 @@ function UpdateChangesPanel({ changes }: { changes: UpdateChanges }) {
             </div>
           ))}
         </div>
+        {/* The work, as one line. OUTSIDE the scroller, with the heading, because it is a
+            statement ABOUT the list rather than an entry in it — and because a reader who
+            never scrolls to the foot of a long update would otherwise not see it at all. */}
+        {internal > 0 && (
+          <p
+            data-testid="update-changes-internal"
+            className="mt-2 text-[11px] leading-snug text-text-faint"
+          >
+            {internalChangesNote(internal)}
+          </p>
+        )}
       </HoverCardPrimitive.Content>
     </HoverCardPrimitive.Portal>
   );
