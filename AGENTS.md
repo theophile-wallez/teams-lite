@@ -283,7 +283,30 @@ Nine rules hold the conversation layout, and each is pinned by `web/e2e/channels
 - **The accent is spent on the COUNT and on nothing else**, and the row follows its post's SIDE.
   That is the posts layout's own lesson after it shipped an accent-filled pill on every card: the
   app's one accent on every row of a history is the same as saying none of them is worth noticing.
-  The whole row is one 44px target under a thumb.
+- **THE BOX IS THE INK, and the 44px target is GROWN — a foot row belongs to the post above it,
+  so the space between them is the whole of whether it reads as that post's own line.** It
+  shipped as a 44px-tall box around 20px of ink, which put 12px of air above the faces on every
+  post and **40px on a REACTED one**: the bubble already reserves `REACTION_OVERHANG` (28px) for
+  a chip row that STRADDLES its bottom edge, and this row then added its own air under that
+  band. The user photographed the second one. So the button is `h-6` — the 20px face with its
+  own 2px ring, so the hover fill hugs the content — and the target is a pseudo-element, the
+  technique the dialog's close, the slider's thumb and the pet's own trigger already use.
+  Measured after: **6px** on an ordinary post and **34px** on a reacted one, of which 20px is
+  the chip itself. Three things hold it, and each is pinned by `web/e2e/channels.spec.ts`:
+  - **It grows 4px UP and 16px DOWN** (`after:-top-1 after:-bottom-4`, 24 + 4 + 16 = 44) rather
+    than symmetrically, because what is above is a real control: a reacted post's chips hang
+    ~20px below the bubble's edge, and a symmetric 10px would put this target's top inside them
+    — the pet trigger's own lesson, where a grown box reached into the composer. Below there is
+    only the next message row's own `mt-2`, so the target ends exactly where its bubble starts.
+  - **The 44px is proved by a HIT TEST at both extremes**, and by one press just ABOVE the
+    target answering the chips instead — a computed `height` alone says nothing about which
+    element a thumb reaches. The row measured must be ON SCREEN for that: the history is
+    virtualized and its first row starts a thousand pixels above the viewport, where
+    `elementFromPoint` answers null for every y and the test passes or fails by accident.
+  - **The reacted gap is measured too**, because the fix is only visible in the pair: what this
+    row controls is the 6px, and the rest is the band the bubble owns. `mb-7` is deliberately
+    NOT narrowed for a post whose own foot row follows it — it would buy 4px, cost a prop
+    threaded through `renderMsg`, and bring the target's top back to the chips' own edge.
 - **THE PANEL BRINGS NO COMPOSER, and opening it AIMS the app's own.** There is ONE composer here —
   its `data-conversation-id` is what a sanctioned live driver proves its target with — so the panel
   deliberately differs from the reference on this one point and takes what already exists:
@@ -322,12 +345,27 @@ indices rewrote the title spec, which has nothing to do with layouts. `Engineeri
 the alert thread the posts layout is captured on, so both surfaces are in one mock, one click
 apart.
 
+**AND ONE OF ITS POSTS IS REACTED TO, which is the alert thread's own lesson one surface over**
+(`seedConversationalReactedPost`). A post here is an ordinary BUBBLE, so its chips straddle the
+bubble's bottom edge and the row reserves 28px for them — and the gap between the words and the
+foot row is decided by that band and the row together. With no reacted post in the fixture, a
+capture and a spec could only ever measure half of it, and the half they could not see is the one
+that shipped at 40px. It is the NEWEST post with replies so it is on screen when the channel
+opens, it adds no message (a reaction is a field on one that already exists), and it draws no
+random numbers — so no spec that counts this channel's backlog is touched.
+
 `cd web && bun run preview -- --out /tmp/chan --channels` captures the conversation in both themes
 and at a PHONE's width, the foot row cropped (pass `--dpr 3`: the faces are 20px and the moment is
-12px), the panel in both themes, the panel with the words in the box beside the banner naming the
-same thread, and the panel at a phone's width — `openChannel` is its helper, and it exists because
-`openConversation` walks the CHATS list first: `"Frontend"` reached the group chat "Frontend Guild"
-(measured), which is a thread with no threads in it and therefore a capture that waits for ever.
+12px), **that row UNDER its own reacted post in both themes** — the crop above is the row alone, so
+the space this feature is really about was in no picture at all — the panel in both themes, the
+panel with the words in the box beside the banner naming the same thread, and the panel at a
+phone's width. `openChannel` is its helper, and it exists because `openConversation` walks the
+CHATS list first: `"Frontend"` reached the group chat "Frontend Guild" (measured), which is a
+thread with no threads in it and therefore a capture that waits for ever. **The reacted post is
+found by its CHIP rather than by position, and only after the history is scrolled back to its
+END**: the crop before it scrolls to the FIRST row, and a virtualized list UNMOUNTS what is far
+from the viewport — so `.last()` photographed a plain bubble, and then a locator for the reacted
+one waited thirty seconds and timed out (both measured).
 
 **What is UNVERIFIED against the tenant is every pixel of the conversation layout.** The FIELD is
 measured over all 70 channels (above) and the parse is pinned in Rust, but no conversational
@@ -3173,7 +3211,9 @@ user. Two independent mechanisms enforce that split:
   CHANNEL above the people in both themes with the chip it becomes, and the whole surface at a
   phone's width) — and the OTHER LAYOUT beside it, since a channel is drawn the way Teams draws it
   (§ A CHANNEL IS DRAWN THE WAY TEAMS DRAWS IT): the conversation in both themes and at a phone's
-  width, the foot row a post with answers earns cropped to itself, the THREADS PANEL in both
+  width, the foot row a post with answers earns cropped to itself and again UNDER its own reacted
+  post in both themes — the space between the words and the faces was in no picture at all, which
+  is how it shipped at 40px — the THREADS PANEL in both
   themes, that panel with the words in the box beside the banner naming the same thread, and the
   panel at a phone's width where it REPLACES the conversation:
   `bun run preview -- --out /tmp/chan --channels` (it honours `--dpr`: the pill is 24px, the

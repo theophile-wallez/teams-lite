@@ -3965,6 +3965,44 @@ if (import.meta.main) {
       await repliesRow.scrollIntoViewIfNeeded();
       await page.waitForTimeout(400);
       await repliesRow.screenshot({ path: `${out}-post-replies-light.png`, animations: "disabled" });
+      // THE ROW UNDER ITS OWN POST, which is the state the reader really meets and the one no
+      // capture could draw before: the row is cropped to itself above, so the SPACE between
+      // somebody's words and the faces — the whole of whether it reads as that post's own line
+      // — was in no picture at all. The post is the REACTED one on purpose
+      // (`seedConversationalReactedPost` in the mock): its chip row straddles the bubble's
+      // bottom edge and the bubble reserves 28px for it, so this is the widest that gap ever
+      // gets, and it is what the user photographed. Both themes, because the chip and the faces
+      // are the two smallest things in the frame.
+      // Back to the END of the history first: the crop above scrolled to the FIRST row, and a
+      // virtualized list UNMOUNTS what is far from the viewport — so the reacted post (the
+      // newest one with replies) was not in the document at all here, and a locator for it
+      // waited thirty seconds and timed out (measured).
+      await page.locator('[data-testid="message-scroll"]').evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      await page.waitForTimeout(400);
+      // Found by the CHIP rather than by position: `.last()` is the last row that happens to be
+      // MOUNTED rather than the reacted post, so before the scroll above it photographed a
+      // plain bubble (measured). Asking for the row that holds both a chip and a foot row
+      // cannot drift whatever the virtualizer has mounted.
+      const reactedPost = page
+        .locator("[data-index]")
+        .filter({ has: page.locator('[data-testid^="reaction-chip"]') })
+        .filter({ has: page.locator('[data-testid="post-replies"]') })
+        .last();
+      await reactedPost.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(400);
+      await reactedPost.screenshot({
+        path: `${out}-post-replies-under-post-light.png`,
+        animations: "disabled",
+      });
+      await setTheme("dark");
+      await page.waitForTimeout(150);
+      await reactedPost.screenshot({
+        path: `${out}-post-replies-under-post-dark.png`,
+        animations: "disabled",
+      });
+      await setTheme("light");
       // THE THREADS PANEL, which is what pressing that row opens: the post, a line counting
       // the replies, and the replies themselves — beside the conversation rather than inside
       // it. It brings no composer of its own (there is one in this app), so opening it AIMS

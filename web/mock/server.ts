@@ -1215,6 +1215,45 @@ function seedChannelAlertThread(): void {
   chs.channel.is_read = true;
 }
 
+/**
+ * Put a REACTION on a post of the CONVERSATIONAL channel that already has replies.
+ *
+ * It exists for the reason the alert thread's own reactions do, one surface over: the state
+ * the reader really meets was one no capture could draw and no spec could find. A post in a
+ * conversational channel is an ordinary BUBBLE, so its chips STRADDLE the bubble's bottom
+ * edge and the row reserves `REACTION_OVERHANG` below itself — and the replies foot row then
+ * follows that band with air of its own. So the gap between the words and the row is
+ * decided by the two together, and a fixture with no reacted post measured only half of it.
+ * That half is what shipped: 40px from the words to the faces, which the user photographed.
+ *
+ * Deterministic and appended after `seedChannels`, drawing no random numbers — and it adds
+ * no message, since a reaction is a field on one that already exists. So no spec that counts
+ * a channel's backlog is touched.
+ */
+function seedConversationalReactedPost(): void {
+  const slug = (name: string) => name.toLowerCase().replace(/[^a-z]+/g, "-");
+  const [teamAndChannel] = Object.keys(CHANNEL_LAYOUTS);
+  if (!teamAndChannel) return;
+  const [team, channel] = teamAndChannel.split("/");
+  if (!team || !channel) return;
+  const chs = channelStore.get(`19:${slug(team)}-${slug(channel)}-mock@thread.tacv2`);
+  if (!chs) return;
+
+  // The NEWEST post that somebody answered, so it is on screen when the channel opens —
+  // which is what the capture and the measurement both need.
+  const replied = new Set(
+    chs.messages
+      .filter((m) => m.thread_root_id && m.thread_root_id !== m.id)
+      .map((m) => m.thread_root_id!),
+  );
+  const root = chs.messages.findLast((m) => m.id === m.thread_root_id && replied.has(m.id));
+  if (!root) return;
+  // A COUNTED pill the reader is part of: the widest shape the chip row takes, so the band
+  // it hangs in is measured at its worst rather than at a lone circle's.
+  root.reactions = [{ key: "like", count: 2, mine: true, mris: [SELF_MRI, PEOPLE[1]!.mri] }];
+  recomputeChannelSummary(chs);
+}
+
 /** Register a dedicated "Media Gallery" conversation whose messages exercise the
  *  UI's inline-image and attachment rendering: a pasted screenshot embedded in
  *  the HTML, an image shared as an attachment, a non-image file, plus two
@@ -12809,6 +12848,9 @@ seedChannels();
 // Appended to a channel that already exists, and drawing no random numbers, so it
 // changes nothing but the one channel it names.
 seedChannelAlertThread();
+// Same shape and the same reason: it names one channel, adds no message and draws no
+// random numbers, so it changes nothing but the one post it reacts to.
+seedConversationalReactedPost();
 // Mail draws no random numbers at all (its fixtures are fully deterministic), so
 // its position here cannot disturb any existing spec either.
 seedMail();

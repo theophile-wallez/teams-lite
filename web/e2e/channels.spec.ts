@@ -1072,7 +1072,10 @@ test.describe("a channel's layout", () => {
 
   test("says who answered, how many and when — and opens the panel", async ({ page }) => {
     await openNamedChannel(page, "Research");
-    const row = page.locator(repliesRow).first();
+    // The LAST one, because the channel opens at its end: the history is virtualized, so the
+    // FIRST row starts a thousand pixels above the viewport — where `elementFromPoint` answers
+    // null for every y and the hit test below would pass or fail by accident.
+    const row = page.locator(repliesRow).last();
     await expect(row).toBeVisible();
     // The three facts a reader decides to open a thread on. The count is words, never "1
     // replies"; the moment is the same phrasing a block mark uses.
@@ -1081,10 +1084,37 @@ test.describe("a channel's layout", () => {
     // A face per replier, and no more than the row can hold.
     const faces = await row.locator("img, [data-testid='avatar-initials'], span[aria-hidden]").count();
     expect(faces).toBeGreaterThan(0);
-    // 44px under a thumb, the floor every target this app draws for one clears.
+    // 44px under a thumb, the floor every target this app draws for one clears — and the INK
+    // is 24px, because a box a thumb tall is 24px of air between somebody's words and the
+    // faces (see `ThreadRepliesRow`). So the target is GROWN with a pseudo-element, the
+    // technique the dialog's close, the slider's thumb and the pet's own trigger use, and it
+    // is proved by a real HIT TEST at both extremes rather than by reading a class list.
     const box = await row.boundingBox();
     expect(box).not.toBeNull();
-    expect(Math.round(box!.height)).toBeGreaterThanOrEqual(44);
+    expect(Math.round(box!.height)).toBe(24);
+    const hit = await row.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const after = getComputedStyle(el, "::after");
+      const up = Number.parseFloat(after.top); // negative: how far it grows above
+      const down = Number.parseFloat(after.bottom);
+      const x = r.left + r.width / 2;
+      const inside = (y: number) =>
+        Number.isFinite(y) && el.contains(document.elementFromPoint(x, y));
+      return {
+        height: r.height - up - down,
+        // A pixel inside each end of the grown box, and one just OUTSIDE the top. That last
+        // one is what bounds the growth upward: a reacted post's chip row hangs ~20px below
+        // its bubble and this target starts 28px below it, so the 8px between them belongs to
+        // the chips — a symmetric grow would take it and steal their press.
+        topEdge: inside(r.top + up + 1),
+        bottomEdge: inside(r.bottom - down - 1),
+        aboveIt: inside(r.top + up - 2),
+      };
+    });
+    expect(Math.round(hit.height)).toBe(44);
+    expect(hit.topEdge).toBe(true);
+    expect(hit.bottomEdge).toBe(true);
+    expect(hit.aboveIt).toBe(false);
 
     await row.click();
     await expect(page.locator(panel)).toBeVisible();
@@ -1134,5 +1164,58 @@ test.describe("a channel's layout", () => {
     // Its close is the way back to the conversation.
     await page.locator('[data-testid="threads-panel-close"]').click();
     await expect(page.locator('[data-testid="message-scroll"]')).toBeVisible();
+  });
+
+  /**
+   * THE ROW SITS UNDER ITS OWN POST, and the two numbers are what the reader sees.
+   *
+   * A foot row belongs to the message above it, so the space between the words and the faces
+   * is the whole of whether it reads as that post's own line or as a separate thing floating
+   * in the history. It shipped as neither: the row's box was a 44px touch target around 20px
+   * of ink, so it added 12px of air above the faces on EVERY post — and 40px on a REACTED
+   * one, where the bubble already reserves `REACTION_OVERHANG` (28px) for a chip row that
+   * straddles its bottom edge. The user photographed the second one.
+   *
+   * Both are measured here because the fix is only visible in the pair: 24px of the reacted
+   * gap is the chip band the bubble really owns, and what this row controls is the rest.
+   */
+  test("sits close under its post, whether or not that post is reacted to", async ({ page }) => {
+    await openNamedChannel(page, "Research");
+    await expect(page.locator(repliesRow).first()).toBeVisible();
+    const gaps = await page.evaluate(() => {
+      const out: { gap: number; reacted: boolean }[] = [];
+      for (const btn of [...document.querySelectorAll('[data-testid="post-replies"]')]) {
+        const wrap = btn.parentElement as HTMLElement;
+        // The row and its post share one virtual row, so the post is the wrapper's own
+        // previous sibling — a fragment holding the message and, when it has any, its chips.
+        const holder = wrap.previousElementSibling;
+        const post = holder?.querySelector('[data-testid="message"]');
+        const ink = btn.querySelector("span");
+        if (!post || !ink) continue;
+        out.push({
+          gap: Math.round(ink.getBoundingClientRect().top - post.getBoundingClientRect().bottom),
+          reacted: (holder?.querySelectorAll("button[aria-label*='eaction']").length ?? 0) > 0,
+        });
+      }
+      return out;
+    });
+    expect(gaps.length).toBeGreaterThan(0);
+
+    // A post with no chips: the row's own 4px margin plus the 2px its 20px ink is centred by
+    // inside a 24px box. It was 12px, all of it the old box's air.
+    const plain = gaps.filter((g) => !g.reacted);
+    expect(plain.length).toBeGreaterThan(0);
+    for (const g of plain) expect(g.gap).toBeLessThanOrEqual(8);
+
+    // A REACTED post keeps the 28px its own chips hang in — the fixture carries exactly one,
+    // because this is the state the defect was photographed in and no capture could draw it
+    // before (`seedConversationalReactedPost` in the mock). 34px measured, of which 20 is the
+    // chip itself: what the row adds is the same 6px as above.
+    const reacted = gaps.filter((g) => g.reacted);
+    expect(reacted.length).toBeGreaterThan(0);
+    for (const g of reacted) {
+      expect(g.gap).toBeGreaterThan(24); // the chips really are in that band
+      expect(g.gap).toBeLessThanOrEqual(36); // and nothing else is
+    }
   });
 });

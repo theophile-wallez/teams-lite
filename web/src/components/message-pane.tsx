@@ -1507,7 +1507,10 @@ function ThreadRepliesRow(props: {
 }) {
   const { replies, mine, open, onOpen } = props;
   return (
-    <div className={cn("mb-1 flex px-1", mine ? "justify-end" : "justify-start")}>
+    // 4px above and 8px below: the row belongs to the POST above it, so it sits nearer that
+    // post than the next message — and the 8px is what the grown target below needs, since
+    // the next message row's own `mt-2` then puts its bubble exactly at the target's edge.
+    <div className={cn("mb-2 mt-1 flex px-1", mine ? "justify-end" : "justify-start")}>
       <button
         type="button"
         onClick={onOpen}
@@ -1517,7 +1520,21 @@ function ThreadRepliesRow(props: {
         data-open={open ? "true" : undefined}
         aria-expanded={open}
         className={cn(
-          "flex h-11 max-w-full items-center gap-2 rounded-lg px-1.5 text-xs transition-colors hover:bg-accent",
+          // THE BOX IS THE INK, and the 44px target is GROWN — the technique the dialog's
+          // close, the slider's thumb and the pet's own trigger already use, and the reason
+          // is the same: this row is one line under somebody's message, so a box a thumb tall
+          // is 24px of air between the words and the faces. Measured before this: 12px above
+          // the faces on every post, and 40px on a REACTED one — the bubble reserves
+          // `REACTION_OVERHANG` (28px) for chips that straddle its bottom edge, and this row
+          // then added its own air under that band. `h-6` is the 20px face with its own 2px
+          // ring, so the fill hugs the content.
+          "relative flex h-6 max-w-full items-center gap-2 rounded-lg px-1.5 text-xs transition-colors hover:bg-accent",
+          // 4px up, 16px down: 24 + 4 + 16 = 44. It grows DOWNWARD because what is above is a
+          // real control — a reacted post's chip row hangs ~20px below the bubble's edge, and a
+          // symmetric 10px would put this target's top inside it (the pet trigger's own lesson,
+          // where a grown box reached into the composer). Below there is only the next message's
+          // own margin, so the target ends exactly where its bubble starts.
+          "after:absolute after:inset-x-0 after:-bottom-4 after:-top-1 after:content-['']",
           open && "bg-accent",
         )}
       >
