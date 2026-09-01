@@ -120,7 +120,8 @@ use teams_lite::{
     teams_read, teams_readstate, teams_send, trouter, trouter_events,
 };
 use teams_lite::{
-    gitlab, gitlab_approval, gitlab_ci_graph, gitlab_mr, gitlab_mr_write, linear, link_preview,
+    gitlab, gitlab_approval, gitlab_ci_graph, gitlab_mr, gitlab_mr_write, gitlab_review, linear,
+    link_preview,
     tracker_people,
 };
 
@@ -484,7 +485,7 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// authenticates as the user, `signin_frame` answers with a picture of a sign-in page, and
 /// `signin_input` presses keys into it. `signin_frame` is gated as hard as the rest for that
 /// reason: a read whose answer is the pixels of somebody's password field is not a read.
-const MACHINE_METHODS: [&str; 33] = [
+const MACHINE_METHODS: [&str; 34] = [
     "repair_broker",
     "signin_start",
     "signin_frame",
@@ -515,6 +516,11 @@ const MACHINE_METHODS: [&str; 33] = [
     "agent_set_provider",
     "agent_set_unrestricted",
     "agent_stop",
+    // An AI READING of a merge request's diff. It starts a program on this machine and puts the
+    // user's employer's code in a prompt that reaches whichever model provider their default CLI is
+    // signed in to — so it is gated exactly as `agent_set_mode` is, and for the same reason. Reading
+    // whether a reading already EXISTS stays open (`gitlab_mr_review`): that answer starts nothing.
+    "gitlab_mr_review_run",
     "agent_persona_save",
     "agent_persona_remove",
     "set_person_name",
@@ -607,6 +613,10 @@ fn machine_effect(method: &str) -> &'static str {
         "agent_set_unrestricted" => {
             "lets a local agent this machine runs use the user's own Claude Code \
              configuration — every tool it holds"
+        }
+        "gitlab_mr_review_run" => {
+            "runs a local agent over a merge request's diff, which puts that code in a prompt \
+             reaching the model provider the default CLI is signed in to"
         }
         "agent_stop" => "stops a local agent this machine is running mid-answer",
         "seal_set" => {
@@ -6669,6 +6679,40 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             .await
         }
 
+        // The AI reading of the diff that this machine has already MADE, or null.
+        //
+        // OPEN, and it is the split `chess_engine_status` makes against `chess_engine_download`:
+        // asking whether a reading exists changes nothing, publishes nothing about the user, makes
+        // no network request and starts no program — so a gate would only stop a page from drawing
+        // the panel it has already paid for. Making one is the method below.
+        //
+        // It answers the review WHOLE, its own `head_sha` included, and never compares that with
+        // anything: whether the reading is of the commit on screen is the PAGE's question, because
+        // only the page knows which commit it is drawing (see `reviewIsStale`).
+        "gitlab_mr_review" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let stored = {
+                let store = ctx.store()?;
+                store.get_setting(&gitlab_review::setting_key(&project_path, iid))?
+            };
+            // An unparseable payload is treated as NO payload, which is the rule `gitlab_cached`
+            // already holds: a build that changed a field's shape must not serve the old one.
+            let review = stored
+                .and_then(|raw| serde_json::from_str::<gitlab_review::Review>(&raw).ok());
+            Ok(json!({ "review": review }))
+        }
+
+        // MAKE that reading: one agent run over this merge request's diff.
+        //
+        // A `MACHINE_METHODS` entry, for the reason `agent_set_mode` and `agent_set_tools` are:
+        // it starts a program on this machine and sends the user's employer's code to whichever
+        // model provider their default CLI is signed in to. That is never something a client which
+        // merely found this socket may decide, and it is never automatic — see `gitlab_review`.
+        "gitlab_mr_review_run" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            gitlab_review_run(ctx, project_path, iid).await
+        }
+
         // The head pipeline and its jobs. THE live read: the page repeats it while CI is
         // running, so its cache window is seconds rather than half a minute — long enough
         // that two open pages cost one request, short enough that a job turning green shows
@@ -8603,6 +8647,143 @@ async fn gitlab_cached(
     // would outlive a rename.
     with_teams_people(ctx, &mut value);
     Ok(value)
+}
+
+/// Make an AI reading of one merge request's diff: ONE agent run, and the answer held to the diff
+/// it was about.
+///
+/// Every rule this rests on is stated in `gitlab_review`; what lives here is the plumbing, and three
+/// of its decisions are worth reading before touching it.
+///
+/// **The DIFF and the HEAD SHA come from the reads the page has already made** (through
+/// `gitlab_cached`, so an open page pays for neither again). The sha is what makes the answer
+/// checkable rather than merely old — a review is stored against the commit it read, and the page
+/// says so when the branch has moved since.
+///
+/// **The run is granted NO TOOLS**, which is narrower than any other agent run in this app: the diff
+/// is IN the prompt, so there is nothing on this disk it needs, and the repository is very often not
+/// checked out here at all. It deliberately does NOT go through `permissions_from_settings` — a
+/// user who widened the machine's allowlist for their `@claude` threads did not ask for this run to
+/// be able to read their files.
+///
+/// **It resumes no session and stores none.** A reading of a diff is one question with one answer,
+/// and a session would carry the last branch's code into the next branch's review.
+async fn gitlab_review_run(ctx: &Ctx, project_path: String, iid: u64) -> Result<Value> {
+    // The two reads the page already holds. `refresh: false`, because the reader asked for a reading
+    // of what they are LOOKING at.
+    let detail = gitlab_cached(
+        ctx,
+        gitlab_mr::cache_key(&project_path, iid, "detail"),
+        GITLAB_DETAIL_TTL,
+        false,
+        GitLabRead::Detail { project_path: project_path.clone(), iid },
+    )
+    .await?;
+    let head_sha = detail
+        .get("diff_refs")
+        .and_then(|refs| refs.get("head_sha"))
+        .and_then(Value::as_str)
+        .or_else(|| detail.get("sha").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_string();
+    let title = detail.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
+    let diff_json = gitlab_cached(
+        ctx,
+        gitlab_mr::cache_key(&project_path, iid, gitlab_mr::DiffDepth::Listed.cache_kind()),
+        GITLAB_DIFF_TTL,
+        false,
+        GitLabRead::Diff {
+            project_path: project_path.clone(),
+            iid,
+            depth: gitlab_mr::DiffDepth::Listed,
+        },
+    )
+    .await?;
+    // Parsed into the review's OWN shape rather than `gitlab_mr::MergeRequestDiff`, which is an
+    // outbound type and cannot be read back at all (see `gitlab_review::ReviewDiffFile`).
+    let files: Vec<gitlab_review::ReviewDiffFile> = diff_json
+        .get("files")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .context("this merge request's changes could not be read, so there is nothing to review")?
+        .unwrap_or_default();
+    if files.is_empty() {
+        anyhow::bail!("this merge request changes no files");
+    }
+
+    // WHICH program answers is the user's own Settings choice, and every gate there applies: a
+    // provider they switched off answers nothing, and one this machine has no CLI for says so
+    // rather than failing inside the run.
+    let (backend, model, workspace) = {
+        let store = ctx.store()?;
+        let providers = agent_policy::Providers::parse(
+            store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
+        );
+        let backend = agent_policy::default_backend(
+            store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
+        );
+        if !providers.is_enabled(backend.name) {
+            anyhow::bail!(
+                "{} is switched off in Settings › AI providers, so nothing can read this diff",
+                backend.name
+            );
+        }
+        if !agent::is_available(backend) {
+            anyhow::bail!(
+                "`{}` is not on this machine's PATH, so it cannot read this diff",
+                backend.program
+            );
+        }
+        let workspace = store
+            .get_setting(agent::SETTING_WORKSPACE)?
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(agent::default_workspace);
+        (backend, providers.model(backend.name), workspace)
+    };
+
+    let input = gitlab_review::build_prompt(&files, &title);
+    let request = agent::Request {
+        backend,
+        prompt: input.prompt.clone(),
+        system_prompt: gitlab_review::system_prompt(),
+        // One question, one answer: a session would carry the last branch's code into this one.
+        resume_session: None,
+        workspace,
+        // NO tools. See the note above — this is deliberately not the machine's own allowlist.
+        permissions: agent::Permissions::Granted(Vec::new()),
+        model: model.clone(),
+    };
+    eprintln!(
+        "[gitlab-review] {project_path}!{iid} at {} — {} files, {} bytes of patch{}",
+        if head_sha.is_empty() { "an unknown commit" } else { &head_sha[..head_sha.len().min(8)] },
+        files.len(),
+        input.prompt.len(),
+        if input.truncated { " (cut)" } else { "" },
+    );
+    // The progress sender is required by `agent::run` and nothing here watches it: this is one
+    // question with one answer, so there is no bubble to stream into and no phase to draw. The
+    // receiver is held only so the channel is not closed under the run.
+    let (progress, _watch) = tokio::sync::watch::channel(agent::Progress::default());
+    let outcome = agent::run(&request, &progress).await?;
+    let review = gitlab_review::from_answer(
+        &outcome.text,
+        &input,
+        &head_sha,
+        backend.name,
+        model.as_deref(),
+        now_ms(),
+    )?;
+    {
+        let store = ctx.store()?;
+        store.set_setting(
+            &gitlab_review::setting_key(&project_path, iid),
+            &serde_json::to_string(&review)?,
+        )?;
+    }
+    Ok(json!({ "review": review }))
 }
 
 /// How long a folded roster of Teams people is reused before it is built again.
@@ -12974,9 +13155,25 @@ mod tests {
             "gitlab_mr_pipeline",
             "gitlab_mr_diff",
             "gitlab_mr_job_log",
+            // Asking whether an AI reading of the diff EXISTS starts nothing and publishes
+            // nothing — it is a `get_setting`. MAKING one is the machine method below.
+            "gitlab_mr_review",
         ] {
             assert_eq!(write_class(read), None, "{read} is a read");
             assert!(check_write_allowed(read, &json!({}), None).is_ok(), "{read}");
+        }
+
+        // MAKING one is a MACHINE method, and the split is the whole safety story of that feature:
+        // it starts a program on this machine and puts the user's employer's code in a prompt that
+        // reaches a model provider. A client that merely found this socket must not decide either.
+        assert_eq!(write_class("gitlab_mr_review_run"), Some(WriteClass::Machine));
+        assert!(check_write_allowed("gitlab_mr_review_run", &json!({}), Some("tok")).is_err());
+        {
+            let mut with_token = json!({});
+            with_token["write_token"] = json!("tok");
+            assert!(
+                check_write_allowed("gitlab_mr_review_run", &with_token, Some("tok")).is_ok(),
+            );
         }
 
         // And nothing else about a merge request is a method at all: a rebase, an

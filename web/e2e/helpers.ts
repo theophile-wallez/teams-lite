@@ -750,6 +750,14 @@ export async function setMergeRequestControl(
     /** Answer the job log as the TAIL of a much bigger one, which is the state the page has to
      *  tell the reader about. */
     truncate_job_log?: boolean;
+    /** Make the next AI READING of a diff refuse with this sentence — a CLI that is not on this
+     *  machine's PATH, a provider the user switched off. It has to be reported beside the button
+     *  that was pressed. */
+    refuse_review?: string;
+    /** Put a reading of every mock diff in place WITHOUT a run, so a spec can reach the stored path
+     *  without pressing anything — and `"stale"` makes it a reading of another commit, which the
+     *  page has to say rather than drawing a grouping of files that may have moved. */
+    review?: "stored" | "stale";
     clear?: boolean;
   },
 ): Promise<void> {

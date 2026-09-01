@@ -15,6 +15,7 @@ import type { ChessEngineState } from "./chess-engine";
 import type { ChessSoundsState } from "./chess-sound";
 import type { SendImage } from "./composer-image";
 import type { DiffDepth, GitLabDiff } from "./gitlab-diff";
+import type { GitLabReview } from "./gitlab-review";
 import type { WireDiffPosition } from "./gitlab-diff-comment";
 import type {
   GitLabDiscussionList,
@@ -1628,6 +1629,28 @@ export class Backend {
       iid: key.iid,
       depth,
       refresh,
+    });
+  }
+
+  /** The AI reading of this merge request's diff that this machine has already MADE, or null.
+   *
+   *  An ordinary open read — it is a `get_setting` on the backend, and it starts nothing. */
+  gitlabMergeRequestReview(key: MergeRequestKey): Promise<{ review: GitLabReview | null }> {
+    return this.request<{ review: GitLabReview | null }>("gitlab_mr_review", {
+      project_path: key.projectPath,
+      iid: key.iid,
+    });
+  }
+
+  /** MAKE that reading: one agent run over the diff, on this machine.
+   *
+   *  Gated (`MACHINE_METHODS`): it starts a program here and puts the code in a prompt that reaches
+   *  a model provider. It is slow by nature — a run is tens of seconds — so it carries no timeout of
+   *  its own and the page states that it is running. */
+  gitlabRunMergeRequestReview(key: MergeRequestKey): Promise<{ review: GitLabReview }> {
+    return this.request<{ review: GitLabReview }>("gitlab_mr_review_run", {
+      project_path: key.projectPath,
+      iid: key.iid,
     });
   }
 

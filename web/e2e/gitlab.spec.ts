@@ -1462,6 +1462,164 @@ test.describe.serial("the GitLab merge-request page", () => {
     for (let i = 0; i < 40; i += 1) await handle.press("ArrowLeft");
   });
 
+  // ---- the AI READING of the diff -----------------------------------------------
+  //
+  // A second view of ONE read: the same diff, grouped by what the branch does, with the reading's
+  // own thought process written around it (see lib/gitlab-review.ts). The run is the reader's own
+  // press, because it starts an agent on this machine and puts the code in a prompt.
+
+  const reviewView = (page: Page) => page.locator('[data-testid="gitlab-diff-review"]');
+
+  async function openThemes(page: Page) {
+    await page.locator('[data-testid="gitlab-diff-view-themes"]').click();
+    await expect(reviewView(page)).toBeVisible();
+  }
+
+  test("offers a reading of the diff, and names what the press costs before it is made", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+
+    await openThemes(page);
+    // Nothing has been read yet, and the offer says so rather than drawing an empty grouping.
+    await expect(reviewView(page)).toHaveAttribute("data-has-review", "no");
+    // The COST, before the press: this is the one fact the reader cannot undo afterwards — their
+    // branch's code reaches a model provider. The rule the update button holds for its 130 MB.
+    const cost = page.locator('[data-testid="gitlab-diff-review-cost"]');
+    await expect(cost).toContainText("reaches that provider");
+    await expect(cost).toContainText("no access to your files");
+
+    // The run, and the reading it lands as.
+    await page.locator('[data-testid="gitlab-diff-review-run"]').click();
+    await expect(reviewView(page)).toHaveAttribute("data-has-review", "yes", { timeout: 20_000 });
+    await expect(page.locator('[data-testid="gitlab-diff-review-headline"]')).not.toBeEmpty();
+    // WHICH machine read it — two facts, because one CLI runs several models.
+    await expect(page.locator('[data-testid="gitlab-diff-review-by"]')).toHaveText("claude · sonnet");
+
+    // Every changed file is accounted for: the themes plus the group of what nothing claimed.
+    const groups = page.locator('[data-testid="gitlab-diff-review-group"]');
+    await expect.poll(async () => await groups.count()).toBeGreaterThan(1);
+    const drawn = await page.locator('[data-testid="gitlab-diff-review-file"]').count();
+    const summary = await page.locator('[data-testid="gitlab-diff-summary"]').innerText();
+    const files = Number(summary.match(/^(\d+) file/)?.[1]);
+    expect(drawn).toBe(files);
+
+    // And the files nothing grouped are a group of their OWN rather than a footnote: a reviewer
+    // still has to read them, and a grouped view that left one out in silence would let them
+    // believe they had seen the branch.
+    await expect(
+      page.locator('[data-testid="gitlab-diff-review-group"][data-unplaced="yes"]'),
+    ).toBeVisible();
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("says when a reading is of an EARLIER commit, and keeps it anyway", async ({ page }) => {
+    // A reading is of one commit. It is not thrown away when the branch moves — it is still the best
+    // account anybody has — but a reader must not take a grouping of files that have since moved for
+    // a grouping of what is on screen.
+    await setMergeRequestControl(page, { review: "stale" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await openThemes(page);
+
+    await expect(reviewView(page)).toHaveAttribute("data-has-review", "yes");
+    await expect(reviewView(page)).toHaveAttribute("data-stale", "yes");
+    await expect(page.locator('[data-testid="gitlab-diff-review-stale"]')).toContainText(
+      "earlier commit",
+    );
+    // Kept, not discarded: the groups are still drawn.
+    await expect(page.locator('[data-testid="gitlab-diff-review-group"]').first()).toBeVisible();
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("a reading this machine already made is there without pressing anything", async ({
+    page,
+  }) => {
+    // It is stored per merge request on the backend, so walking away and coming back does not pay
+    // for a second run.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await openThemes(page);
+
+    await expect(reviewView(page)).toHaveAttribute("data-has-review", "yes");
+    await expect(reviewView(page)).toHaveAttribute("data-stale", "no");
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("a refused run is reported beside the button, and nothing is drawn as a reading", async ({
+    page,
+  }) => {
+    await setMergeRequestControl(page, {
+      refuse_review: "claude is not on this machine's PATH",
+    });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await openThemes(page);
+
+    await page.locator('[data-testid="gitlab-diff-review-run"]').click();
+    // An action that did not happen must never be left looking like it did — the composer's own
+    // contract, in the CLI's own words.
+    await expect(page.locator('[data-testid="gitlab-diff-review-error"]')).toContainText(
+      "not on this machine's PATH",
+    );
+    await expect(reviewView(page)).toHaveAttribute("data-has-review", "no");
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("a press on a file in the reading opens it in the FEED", async ({ page }) => {
+    // The reading is a MAP, not a place to read code: the diff is one press away and already drawn.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await openThemes(page);
+
+    const row = page.locator(`[data-testid="gitlab-diff-review-file"][data-path="${HEALTH}"]`);
+    await row.click();
+    // Back on the files view, at that file.
+    await expect(page.locator('[data-testid="gitlab-diff-view"]')).toHaveAttribute(
+      "data-view",
+      "files",
+    );
+    await expect(page.locator('[data-testid="gitlab-diff-pane"]')).toHaveAttribute(
+      "data-path",
+      HEALTH,
+    );
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("offers no layout toggle on the themes view, which draws no code", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+
+    // Unified/split says something about a patch, and there is no patch on this view: a control
+    // that changes nothing reads as a bug.
+    await expect(page.locator('[data-testid="gitlab-diff-layout"]')).toBeVisible();
+    await openThemes(page);
+    await expect(page.locator('[data-testid="gitlab-diff-layout"]')).toHaveCount(0);
+    // And back again.
+    await page.locator('[data-testid="gitlab-diff-view-files"]').click();
+    await expect(page.locator('[data-testid="gitlab-diff-layout"]')).toBeVisible();
+  });
+
   test("offers the split layout where two columns of code fit, and remembers it", async ({
     page,
   }) => {

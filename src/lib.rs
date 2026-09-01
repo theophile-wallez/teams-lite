@@ -52,6 +52,7 @@ pub mod gitlab_approval;
 pub mod gitlab_ci_graph;
 pub mod gitlab_mr;
 pub mod gitlab_mr_write;
+pub mod gitlab_review;
 pub mod graph_time;
 pub mod linear;
 pub mod link_preview;

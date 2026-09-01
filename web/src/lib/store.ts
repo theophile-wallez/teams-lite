@@ -172,6 +172,7 @@ import {
   type PierreSide,
 } from "./gitlab-diff-comment";
 import { symbolIsSearchable, type DiffSymbolTarget } from "./gitlab-diff-symbols";
+import type { DiffView, GitLabReview } from "./gitlab-review";
 import { jobLogIsLive } from "./gitlab-job-log";
 import {
   isNotMerged,
@@ -876,6 +877,18 @@ export type AppState = {
    *  question about the diff on screen, and carrying it to another branch would answer it about
    *  files that have nothing to do with the press. */
   gitlabDiffSymbol: DiffSymbolTarget | null;
+  /** The AI reading of this merge request's diff that this machine has made, or null. It is a
+   *  reading of one COMMIT, and it carries the sha it read so the page can say when the branch has
+   *  moved since (see `reviewIsStale`). */
+  gitlabReview: GitLabReview | null;
+  /** Whether a reading is being made right now. One at a time: a run is tens of seconds, and a
+   *  reader who pressed again because nothing had happened yet would pay for two. */
+  gitlabReviewBusy: boolean;
+  /** Why a reading did not happen, in the CLI's or the backend's own words, reported where the press
+   *  was made — the contract every outward-ish action in this app holds. */
+  gitlabReviewError: string | null;
+  /** Which view of the diff the reader is in: the feed of files, or the reading's themes. */
+  gitlabDiffView: DiffView;
   /** How wide the two side columns of the diff page are, in pixels — the reader's own drag,
    *  persisted per browser beside the layout above and for its reason: a per-screen decision with
    *  no upstream to write it to.
@@ -1208,6 +1221,10 @@ function initialState(): AppState {
     gitlabDiffDepth: "listed",
     gitlabDiffLayout: "unified",
     gitlabDiffSymbol: null,
+    gitlabReview: null,
+    gitlabReviewBusy: false,
+    gitlabReviewError: null,
+    gitlabDiffView: "files",
     gitlabDiffFilesWidth: FILES_COLUMN_DEFAULT_WIDTH,
     gitlabDiffSymbolsWidth: SYMBOLS_PANEL_DEFAULT_WIDTH,
     gitlabDiffSelection: null,
@@ -4006,6 +4023,13 @@ export class TeamsController {
       // A name pressed in one branch's code says nothing about another's, so the panel closes
       // with the merge request rather than searching this diff for the last one's word.
       gitlabDiffSymbol: null,
+      // A reading belongs to ONE merge request. It is re-read from the store below rather than
+      // carried over, and the view opens on the FILES — a themes view with the last branch's
+      // reading in it would be a grouping of files this page is not drawing.
+      gitlabReview: null,
+      gitlabReviewBusy: false,
+      gitlabReviewError: null,
+      gitlabDiffView: "files",
       // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
       // piece of this page that would be read as current when it is minutes old.
       gitlabPipeline: null,
@@ -4066,6 +4090,10 @@ export class TeamsController {
       .finally(() => {
         if (open()) this.set({ gitlabDetailLoading: false });
       });
+
+    // The reading this machine has already made. A local `get_setting`, so it costs no network and
+    // rides the page's own load like the reads beside it.
+    void this.loadGitLabReview(key);
 
     const notes = this.backend
       .gitlabMergeRequestNotes(key, refresh)
@@ -4364,6 +4392,65 @@ export class TeamsController {
     await this.loadDiff(key, "raw", false);
   }
 
+  // ---- the AI reading of the diff -------------------------------------------
+
+  /** Which view of the diff the reader is in: the FEED of files, or the reading's own themes.
+   *
+   *  Deliberately NOT persisted, unlike the unified/split layout beside it. A reading belongs to one
+   *  merge request, so opening the next one on a themes view would open it on a view with nothing in
+   *  it — and the control to get back is in the header of a page whose main column would be empty. */
+  setGitLabDiffView(view: DiffView): void {
+    if (this.get().gitlabDiffView === view) return;
+    this.set({ gitlabDiffView: view });
+  }
+
+  /** Read the reading this machine has already made for the open merge request, if any.
+   *
+   *  It is a `get_setting` on the backend — no network, no agent — so it rides the page's own load
+   *  like the four reads beside it. A failure is SILENT: a reading nobody has made yet and a read
+   *  that failed both mean "there is nothing to draw", and the panel's own offer is what a reader
+   *  acts on either way. */
+  private async loadGitLabReview(key: MergeRequestKey): Promise<void> {
+    try {
+      const { review } = await this.backend.gitlabMergeRequestReview(key);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) this.set({ gitlabReview: review });
+    } catch {
+      /* a reading that cannot be read is a reading nobody has made — the offer stands either way */
+    }
+  }
+
+  /**
+   * Ask for a reading of the open merge request's diff: ONE agent run, on this machine.
+   *
+   * It is the reader's own press and never automatic — the run costs them money and puts their
+   * employer's code in a prompt that reaches a model provider (see `src/gitlab_review.rs`). So the
+   * outcome is reported where the press was made, the words of a refusal are GitLab's or the CLI's
+   * own, and a run already in flight is not started twice: the run is tens of seconds long, and a
+   * reader who pressed again because nothing had happened yet would pay for two.
+   */
+  async runGitLabReview(): Promise<void> {
+    const key = this.get().openMergeRequest;
+    if (!key || this.get().gitlabReviewBusy) return;
+    this.set({ gitlabReviewBusy: true, gitlabReviewError: null });
+    try {
+      const { review } = await this.backend.gitlabRunMergeRequestReview(key);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        // The reading is shown the moment it lands, and the view switches to it: the reader pressed
+        // a control that says "read this diff", so being left on the file feed would be a press
+        // whose answer is somewhere they have to go and find.
+        this.set({ gitlabReview: review, gitlabDiffView: "themes" });
+      }
+    } catch (e) {
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        this.set({ gitlabReviewError: errText(e) });
+      }
+    } finally {
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        this.set({ gitlabReviewBusy: false });
+      }
+    }
+  }
+
   /** Switch between the unified and the split layout, and remember it. */
   setGitLabDiffLayout(layout: DiffLayout): void {
     if (this.get().gitlabDiffLayout === layout) return;
@@ -4633,6 +4720,10 @@ export class TeamsController {
       // A name pressed in one branch's code says nothing about another's — and the panel's own
       // width is NOT reset here, because that is the persisted preference (see the field).
       gitlabDiffSymbol: null,
+      gitlabReview: null,
+      gitlabReviewBusy: false,
+      gitlabReviewError: null,
+      gitlabDiffView: "files",
       // A comment being written belongs to one line of one file, so opening another merge
       // request — or leaving this one — takes it away rather than carrying it over to a line
       // that means something else there.

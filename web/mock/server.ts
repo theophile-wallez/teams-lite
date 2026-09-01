@@ -5307,6 +5307,79 @@ let mockGitLabTokenMissing = false;
  *  else — the page's other four panels have to stay drawn. Same hook, same contract: a spec
  *  that arms it MUST clear it. */
 let mockGitLabDiffRefusal: string | null = null;
+/** Why the next AI reading of a diff refuses, when a spec has armed one. */
+let mockGitLabReviewRefusal: string | null = null;
+/** The readings this machine has "made", keyed the way the backend keys its own stored one:
+ *  `<project>!<iid>`, ONE per merge request, with the head sha inside the payload. */
+const mockReviews = new Map<string, MockReview>();
+
+type MockReview = {
+  head_sha: string;
+  headline: string;
+  themes: { title: string; summary: string; files: { path: string; note?: string }[] }[];
+  unplaced: string[];
+  provider: string;
+  model?: string;
+  generated_ms: number;
+  truncated: boolean;
+  files_unseen: number;
+};
+
+/**
+ * A reading of one merge request's diff, built from that diff's OWN files.
+ *
+ * Every path here is a path the page really holds, which is what makes the fixture honest: a reading
+ * naming a file the diff does not have would let a broken `reviewGroups` pass every test, since
+ * dropping such a path is exactly the rule under test. And it deliberately leaves the LAST file
+ * ungrouped, because "a file no theme claimed" is the one state the view must never hide — a
+ * fixture where everything is grouped could not show it.
+ */
+function mockReviewFor(mr: MockMergeRequest): MockReview {
+  const files = mockDiffFiles.get(`${mr.project_path}!${mr.iid}`) ?? [];
+  const paths = files.map((file) => file.path);
+  // Two themes over the files that are not the last one, split down the middle — enough to show a
+  // grouping, and built from the real list so it survives a fixture change.
+  const grouped = paths.slice(0, Math.max(paths.length - 1, 1));
+  const half = Math.max(Math.ceil(grouped.length / 2), 1);
+  return {
+    head_sha: mr.sha,
+    headline:
+      "The user-facing pods can now be drained without dropping requests: the chart asks for a " +
+      "disruption budget and the health endpoint answers 503 while a replica finishes its work.",
+    themes: [
+      {
+        title: "A replica is drained before it goes",
+        summary:
+          "The health endpoint gains a draining state and answers 503 for it, so the load " +
+          "balancer stops sending new connections before the pod is taken away. Look closely at " +
+          "the order of the two checks: draining has to win over ready, or a draining replica " +
+          "still reports itself healthy.",
+        files: grouped.slice(0, half).map((path, index) => ({
+          path,
+          ...(index === 0
+            ? { note: "The two 503s are deliberate and mean different things — worth a comment." }
+            : {}),
+        })),
+      },
+      {
+        title: "The chart asks Kubernetes for the room to do it",
+        summary:
+          "A PodDisruptionBudget and a longer termination grace period, so a node drain takes one " +
+          "replica at a time and waits for it. The budget is read from the same values the " +
+          "template renders, so the two move together.",
+        files: grouped.slice(half).map((path) => ({ path })),
+      },
+    ].filter((theme) => theme.files.length > 0),
+    // What the READING left over. The view recomputes this against the diff on screen rather than
+    // trusting it (see `reviewGroups`), so this is only what the run itself reported.
+    unplaced: paths.slice(Math.max(paths.length - 1, 1)),
+    provider: "claude",
+    model: "sonnet",
+    generated_ms: Date.now() - 4 * 60_000,
+    truncated: false,
+    files_unseen: 0,
+  };
+}
 
 /** When set, an UPLOAD read fails with this sentence. Its own switch for the reason the diff's
  *  is: a picture this app cannot fetch must cost that picture and nothing else — the words
@@ -9204,6 +9277,37 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return mockDiffFor(mr, depth);
     }
 
+    // The AI READING of a diff, and the run that makes one.
+    //
+    // The backend runs the user's own agent CLI and parses its JSON; this reproduces the whole
+    // surface with no CLI, no model and nothing leaving the machine — which is what makes the view
+    // reviewable at all. Two things about it are deliberate:
+    //
+    //   - the reading is stored HERE, per merge request, exactly as the backend stores one per
+    //     merge request with the head sha inside it. So a spec can make one, walk away, come back
+    //     and find it — which is the whole of what the stored-reading path is;
+    //   - and the grouping is built from the mock's OWN diff, so every path in it is a path the
+    //     page really holds. A fixture naming a file the diff does not have would let a broken
+    //     `reviewGroups` pass every test, since dropping the unknown path is the rule under test.
+    case "gitlab_mr_review": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      return { review: mockReviews.get(`${projectPath}!${iid}`) ?? null };
+    }
+
+    case "gitlab_mr_review_run": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const mr = mockMergeRequestFor(projectPath, iid);
+      if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
+      if (mockGitLabReviewRefusal) throw new Error(mockGitLabReviewRefusal);
+      const review = mockReviewFor(mr);
+      mockReviews.set(`${projectPath}!${iid}`, review);
+      return { review };
+    }
+
     // One PICTURE a description or a comment points at. The real backend asks GitLab's own
     // upload API with the token, sniffs the bytes and hands them over base64; this answers with
     // a picture it draws itself, so the whole surface is reviewable with no GitLab and no
@@ -12197,6 +12301,10 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         mockGitLabTokenMissing = false;
         mockGitLabDiffRefusal = null;
         mockGitLabUploadRefusal = null;
+        mockGitLabReviewRefusal = null;
+        // Every stored READING goes too: a reading outlives the page, so one left behind would put
+        // a themes view in front of every later spec that opens that merge request.
+        mockReviews.clear();
         // Every job log goes back too: the running one's length grows on each read, so a spec
         // that wants to watch a live log has to start from a known number of lines.
         resetMockJobLogs();
@@ -12214,6 +12322,19 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         typeof body.refuse_job_log === "string" ? body.refuse_job_log : null;
       mockGitLabTraceRefusal = typeof body.refuse_trace === "string" ? body.refuse_trace : null;
       mockGitLabJobLogTruncated = body.truncate_job_log === true;
+      mockGitLabReviewRefusal =
+        typeof body.refuse_review === "string" ? body.refuse_review : null;
+      // A reading the machine has ALREADY made, so a spec can reach the stored path without
+      // pressing anything — and `stale: true` makes it a reading of another commit.
+      if (body.review === "stored" || body.review === "stale") {
+        for (const mr of mockMergeRequests) {
+          if (mockDiffFiles.has(`${mr.project_path}!${mr.iid}`)) {
+            const review = mockReviewFor(mr);
+            if (body.review === "stale") review.head_sha = "0000000000000000000000000000000000000000";
+            mockReviews.set(`${mr.project_path}!${mr.iid}`, review);
+          }
+        }
+      }
       return Response.json(
         {
           ok: true,
@@ -12224,6 +12345,8 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           refuse_job_log: mockGitLabJobLogRefusal,
           refuse_trace: mockGitLabTraceRefusal,
           truncate_job_log: mockGitLabJobLogTruncated,
+          refuse_review: mockGitLabReviewRefusal,
+          reviews: mockReviews.size,
         },
         { status: 200 },
       );

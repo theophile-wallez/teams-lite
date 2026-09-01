@@ -2677,6 +2677,114 @@ into `unsafeCSS` and re-injected on every press, and it would silently no-op whe
 boundaries do not coincide with the identifier. A cosmetic win with an invisible failure mode is not
 worth three undocumented attributes. The PANEL is where a name is marked exactly.
 
+### AN AI READING OF THE DIFF (the changes grouped by theme, with the thought process around them)
+
+A branch's diff arrives as a flat list of files in whatever order GitLab holds them, and that order
+says nothing about what the branch DOES: a chart value, the template that reads it, a handler that
+changed shape and a lockfile sit in one column with no relation stated. The **Themes** view asks the
+local agent to state the relation — a few themes, each naming some of the files and carrying the
+prose that says why they belong together and what to look at closely. `src/gitlab_review.rs` is the
+prompt, the parse and every bound; `web/src/lib/gitlab-review.ts` holds the pure decisions the view
+is built from and `web/src/components/gitlab-review-view.tsx` draws it.
+
+**IT IS A SECOND VIEW OF ONE READ, not a second surface.** The diff page draws the files as a FEED or
+as these THEMES from the same `gitlabDiff` — which is the shape the Pipelines page already has ("JOBS
+are a second view of one read, not a second surface"). So it is a control in the page's own header
+rather than a route: there is one diff, read two ways, and a second URL for one read would be a
+second thing to keep in step. The unified/split toggle is not drawn on it, because the themes view
+draws no code and a control that changes nothing reads as a bug.
+
+**THE PROGRAM IS THE ONE `agent.rs` ALREADY RUNS**, and neither module adds a way to reach a model.
+The CLI, the provider, the model and every permission decision stay § The local agent's: the user's
+own Settings › AI providers choice answers, a provider they switched off answers nothing, and a
+machine with no CLI on `PATH` says so rather than offering a dead control.
+
+**IT IS GRANTED NO TOOLS AT ALL**, which is narrower than any other agent run in this app, and it
+deliberately does NOT go through `permissions_from_settings`. The diff travels IN the prompt, so
+there is nothing on this disk the reading needs — and the repository is very often not checked out
+here at all, since the merge request was read out of a tracker over HTTP. A user who widened the
+machine's allowlist for their `@claude` threads did not ask for this run to be able to read their
+files.
+
+**WHAT IT COSTS IS STATED WHERE IT IS ASKED FOR, because it is real.** The diff — the user's
+employer's code — reaches whichever model provider their default CLI is signed in to, exactly as an
+`@claude` thread transcript already does. That is why the run is a PRESS and never automatic, why
+`gitlab_mr_review_run` is a `MACHINE_METHODS` entry (the write token, refused read-only, and the
+automation hook blocks a script that names it), and why the offer names the cost above the button
+rather than after it — the rule the update button holds for its 130 MB and the expanded diff read for
+its half a megabyte.
+
+**THE SPLIT BETWEEN THE TWO METHODS IS THE SAFETY STORY**, and it is the one
+`chess_engine_status`/`chess_engine_download` already makes. `gitlab_mr_review` is an OPEN read — a
+`get_setting`, which starts nothing, publishes nothing and makes no request — so a page can draw a
+reading it has already paid for even on a read-only backend. `gitlab_mr_review_run` is the machine
+method, because only it starts a program.
+
+Eleven rules hold it, and each is pinned by a test in `gitlab_review::tests`,
+`web/src/lib/gitlab-review.test.ts` or `web/e2e/gitlab.spec.ts`:
+
+- **NOTHING IS SILENTLY LEFT OUT.** A grouped view of a diff is a claim about the WHOLE diff, so
+  every changed file no theme claimed is a group of its own at the END — never a footnote and never
+  dropped. A reviewer who read the themes and believed they had seen the branch would otherwise be
+  wrong, with nothing on screen saying so. It is also the honest home for what the model got wrong: a
+  path it misspelled leaves its file unclaimed, which shows up there rather than vanishing. The spec
+  counts the rows against the diff's own file count.
+- **THE LEFTOVERS ARE COMPUTED AGAINST THE DIFF ON SCREEN**, not read off the stored list, so a file
+  added by a push since the reading was made turns up in them instead of being invisible.
+- **A path the diff does not hold is DROPPED**, on both sides. A model naming a file the diff does not
+  have is a model inventing one — the rule an @mention naming a person the thread does not hold
+  already follows. The second check in TypeScript is not redundant: a stored reading outlives the diff
+  it was made from, so a branch that moved leaves a reading naming files the page is not drawing.
+- **A file two themes claim goes to the FIRST, and a theme left with no files is dropped whole.** A
+  file drawn under two headings is a file reviewed twice and a coverage count that claims more files
+  than the diff holds; a heading over nothing reads as a section that failed to load.
+- **A reading is of ONE COMMIT, and a stale one is KEPT rather than thrown away.** The `head_sha` it
+  read travels with it, the page compares that with the commit it is drawing (`reviewIsStale`), and a
+  reading of an earlier commit says so in a line above the groups — it is still the best account
+  anybody has, and the reader can ask again. `reviewIsStale` answers FALSE when either sha is missing
+  rather than true: a warning on every reading is a warning nobody reads.
+- **ONE ROW PER MERGE REQUEST, with the sha inside it.** That bounds the growth by the number of merge
+  requests the user has ever asked about rather than by every commit of every one, and staleness stays
+  checkable. It is deliberately NOT in `gitlab_reads`, whose whole prefix is dropped when anybody
+  comments — a reading costs a real agent run, so it is not a response cache.
+- **The JSON is found INSIDE the answer.** A CLI wraps an answer in a fence or opens with "Here is the
+  analysis:" however firmly it was told not to, so the object is taken from the first `{` to the last
+  `}`. An answer holding no object at all is an ERROR rather than an empty reading: an empty one drawn
+  as a success would tell the reader their branch has no themes, which is a claim about their code
+  rather than about a failed run.
+- **The diff handed over is BOUNDED and what was left out is stated** (`MAX_REVIEW_DIFF_BYTES`, 256
+  KB — measured against the 523 KB expanded read of a large merge request). The FILE LIST is never
+  cut, only the patches, because the two answer different halves: a model handed patches alone would
+  group what it could see and never know the branch had more, while one handed the list can still
+  place a file whose patch the budget refused — which is exactly what a collapsed or binary file
+  already is here.
+- **The words are bounded too** (8 themes, a 120-character title, a 1 200-character note), and a
+  summary is cut on a CHARACTER boundary — the answer is prose in whatever language the branch is
+  written about, and a cut inside a multi-byte character is not a string.
+- **It resumes no session and stores none.** A reading is one question with one answer, and a session
+  would carry the last branch's code into the next branch's review.
+- **A press on a file in the reading opens it in the FEED.** The view is a MAP rather than a place to
+  read code: the diff is one press away and already drawn, so nothing here re-renders a patch. And a
+  refused run is reported beside the button that was pressed, in the CLI's own words — the composer's
+  contract, since a run that did not happen must never look like it did.
+
+`web/mock/server.ts` reproduces the whole flow with no CLI, no model and nothing leaving the machine
+(`mockReviewFor`, which builds the grouping from the mock's OWN diff so every path in it is one the
+page really holds — a fixture naming a file the diff does not have would let a broken `reviewGroups`
+pass every test — and deliberately leaves the LAST file ungrouped, because a fixture where everything
+is grouped could not show the one state the view must never hide). Its `{kind:"gitlab_mr"}` hook gains
+`refuse_review` and `review: "stored" | "stale"`, and **a spec MUST clear it**: one mock process serves
+the whole run, and a stored reading outlives the page. `cd web && bun run preview -- --out /tmp/rev
+--diff-review` captures the offer and its cost in both themes, the reading in both themes, the
+leftovers cropped, a stale reading, a refused run and a phone's width.
+
+**What is UNVERIFIED against the tenant is the RUN.** The prompt, the parse and every bound are
+pinned in Rust, the surface is pinned against the mock, and the diff reads it is built on are measured
+(§ The DIFF is a PAGE) — but no real agent has read a real merge request here, because that needs the
+user's own CLI, their own provider and their own press. The failure mode if the model answers
+something unexpected is a refusal reported at the button or a theme dropped for naming a file the diff
+does not hold, never a grouping that hides a changed file.
+
 ### The two side columns are DRAGGED (and the code keeps its own minimum)
 
 The files column shipped at a fixed `w-72`, and a reader has two reasons to disagree with it that
@@ -3403,7 +3511,12 @@ user. Two independent mechanisms enforce that split:
   dragged in both themes, and a phone's width where the panel is not drawn:
   `bun run preview -- --out /tmp/sym --diff-symbols`, or `pressDiffToken` from the same file — which
   names the FILE it presses in, because the same name stands in several of them, and matches the
-  token EXACTLY, because `server` is a substring of `serverReady`. For a COMMENT on a diff line — the
+  token EXACTLY, because `server` is a substring of `serverReady`. For the AI READING of a diff — the
+  offer and the cost it names in both themes, the reading it becomes in both themes, the files nothing
+  grouped cropped to themselves, a reading of an earlier commit, a refused run and a phone's width:
+  `bun run preview -- --out /tmp/rev --diff-review` (everything goes through the mock's own
+  `gitlab_mr_review*`, so no CLI runs and no model is reached — and that run RESETS the
+  `{kind:"gitlab_mr"}` hook at the end, because a stored reading outlives the page). For a COMMENT on a diff line — the
   affordance in the gutter, the box on one line, the span a drag covers, the thread it lands as, a
   comment being rewritten and the fold a resolved thread takes:
   `bun run preview -- --out /tmp/dc --diff-comment`, or `diffGutterLine` / `dragDiffLines` from
@@ -7435,6 +7548,9 @@ user's. What changes is only what is asked.
   person on EITHER tracker is in the user's own Teams
   (`src/tracker_people.rs`, see § A tracker user who is also a colleague) — plus the approval
   those trackers got first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
+  and an AI READING of a merge request's diff, which is a PROMPT and a PARSE rather than a way to
+  reach a model — the CLI, the provider and every permission stay the local agent's, and the run is
+  granted no tools at all (`src/gitlab_review.rs`, see § AN AI READING OF THE DIFF),
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
   § The local agent) and the user's own CUSTOM AGENTS that answer to a name they chose
