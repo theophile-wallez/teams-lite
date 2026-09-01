@@ -848,7 +848,7 @@ test.describe.serial("the GitLab merge-request page", () => {
       "Commits",
       "Pipelines",
       "Diffs",
-      "Themes",
+      "AI review",
     ]);
 
     // Opening a merge request means its Overview, and the strip says which page that is —
@@ -1752,7 +1752,8 @@ test.describe.serial("the GitLab merge-request page", () => {
   // machine before they press.
 
   test("asks a follow-up, and what it was TOLD is what the answer says it read", async ({ page }) => {
-    await setMergeRequestControl(page, { review: "stored" });
+    // HELD, so the state the optimistic draw is about has a duration at all — see below.
+    await setMergeRequestControl(page, { review: "stored", hold_ask: 1_500 });
     await page.setViewportSize({ width: 1280, height: 900 });
     await openGitLab(page);
     await openMergeRequest(page, 596);
@@ -1775,20 +1776,33 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(options.first()).toHaveAttribute("data-kind", "file");
     await options.first().click();
 
-    // The pick is a CHIP, and the "@…" is out of the words: what will travel is visible before the
-    // press, which is the whole reason the tags are chips rather than a syntax inside the question.
-    const tags = page.locator('[data-testid="gitlab-review-chat-tag"]');
-    await expect(tags).toHaveCount(1);
-    await expect(tags.first()).toHaveAttribute("data-kind", "file");
-    await expect(field).toHaveValue("");
+    // THE TAG IS WORDS IN THE QUESTION, not a chip beside it: the pick replaces the "@…" that opened
+    // the list, in place, where the caret is — so the reader can edit or delete it like any other
+    // word and there is no second place the same fact lives.
+    await expect(field).toHaveValue("@src/server/health.ts ");
+    await expect(page.locator('[data-testid="gitlab-review-chat-tag"]')).toHaveCount(0);
 
-    await field.type("Why is the draining check first?");
+    await field.type("— why is the draining check first?");
     await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
 
-    await expect(chat).toHaveAttribute("data-turns", "1", { timeout: 20_000 });
+    // THE QUESTION IS DRAWN AT ONCE, in its own bubble, and the BOX IS EMPTY in the same frame: a run
+    // is tens of seconds, so a composer that took the words and showed nothing would look like one
+    // that lost them. The words are never in neither place.
+    //
+    // The mock is HELD for this, which is the only way the assertion means anything: it answers in one
+    // frame otherwise, so "drawn optimistically" and "drawn because the answer already landed" would
+    // be the same picture and this test would pass on a page that drew nothing until the answer.
     const turn = page.locator('[data-testid="gitlab-review-turn"]').first();
-    await expect(turn).toContainText("Why is the draining check first?");
-    // The turn says what really TRAVELLED, from what the backend recorded.
+    await expect(turn).toContainText("why is the draining check first?");
+    await expect(turn).toHaveAttribute("data-answered", "no");
+    await expect(field).toHaveValue("");
+    // And the backend still holds NOTHING, which is what says the bubble is this page's own.
+    await expect(chat).toHaveAttribute("data-turns", "0");
+
+    await expect(chat).toHaveAttribute("data-turns", "1", { timeout: 20_000 });
+    await expect(turn).toHaveAttribute("data-answered", "yes");
+    // The turn says what really TRAVELLED, from what the backend recorded — read out of the words the
+    // reader wrote rather than out of a chip list.
     await expect(turn.locator('[data-testid="gitlab-review-turn-context"]')).toContainText(
       "src/server/health.ts",
     );
@@ -1797,16 +1811,15 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(answer.locator("code").first()).toBeVisible();
     expect(await answer.innerText()).not.toContain("```");
 
-    // A question that WORKED takes back the words and the tags, and only then.
-    await expect(field).toHaveValue("");
-    await expect(tags).toHaveCount(0);
-
     await setMergeRequestControl(page, { clear: true });
   });
 
-  test("a question the diff cannot answer for is refused AT the box, with the words kept", async ({
+  test("draws the question the MOMENT it leaves, and takes it back if it never left", async ({
     page,
   }) => {
+    // The two halves of the optimistic draw, and the second is what makes the first safe: the words
+    // go from the box to a bubble in one frame, and a publish that FAILED puts them back where they
+    // can be pressed again rather than leaving a bubble that says the question was asked.
     await setMergeRequestControl(page, {
       review: "stored",
       refuse_ask: "claude is not on this machine's PATH",
@@ -1818,20 +1831,74 @@ test.describe.serial("the GitLab merge-request page", () => {
 
     const field = page.locator('[data-testid="gitlab-review-chat-field"]');
     await field.click();
-    await field.type("why?");
+    await field.type("why the 503?");
     await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
 
-    // The composer's own contract: an action that did not happen must never look like it did.
+    // The words came BACK, beside the reason, and no bubble was left standing over the failure.
     await expect(page.locator('[data-testid="gitlab-review-chat-error"]')).toContainText(
       "not on this machine's PATH",
     );
-    // And the words are KEPT, so it is one press from being asked again.
-    await expect(field).toHaveValue("why?");
+    await expect(field).toHaveValue("why the 503?");
+    await expect(page.locator('[data-testid="gitlab-review-turn"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="gitlab-review-chat"]')).toHaveAttribute(
       "data-turns",
       "0",
     );
 
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("the SEND control is inside the composer's own box", async ({ page }) => {
+    // One box for one act — the app's own composer's shape. Two boxes ask the reader which of them
+    // they are typing into, and the button below the box read as a page control rather than as this
+    // field's own.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const inside = await page.evaluate(() => {
+      const ask = document.querySelector('[data-testid="gitlab-review-chat-ask"]');
+      const field = document.querySelector('[data-testid="gitlab-review-chat-field"]');
+      if (!ask || !field) return null;
+      // The box is the field's nearest common ancestor with the button: if Send sits outside it, the
+      // field's own parent does not contain the button.
+      return field.parentElement?.contains(ask) ?? false;
+    });
+    expect(inside).toBe(true);
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("the conversation column is DRAGGED, and the document keeps its own minimum", async ({
+    page,
+  }) => {
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const column = page.locator('[data-testid="gitlab-review-chat-column"]');
+    const before = (await column.boundingBox())!.width;
+    const handle = page.locator('[data-testid="gitlab-review-chat-splitter"]');
+    await expect(handle).toBeVisible();
+
+    // The keyboard, because it is what a real `separator` publishes and it needs no pointer maths.
+    // ArrowLeft widens a column that is to the RIGHT of its handle (`side="end"`).
+    await handle.focus();
+    for (let i = 0; i < 6; i += 1) await handle.press("ArrowLeft");
+    await expect.poll(async () => (await column.boundingBox())!.width).toBeGreaterThan(before + 40);
+
+    // And it stops where the DOCUMENT would be squeezed: that minimum is not a preference, because
+    // the code inside it is the one thing on this page that cannot be narrowed and still be read.
+    for (let i = 0; i < 60; i += 1) await handle.press("ArrowLeft");
+    const document_ = page.locator('[data-testid="gitlab-review-document"]');
+    await expect.poll(async () => (await document_.boundingBox())!.width).toBeGreaterThan(470);
+
+    // Put it back: the width is persisted per browser, and one mock process serves the whole run.
+    for (let i = 0; i < 80; i += 1) await handle.press("ArrowRight");
     await setMergeRequestControl(page, { clear: true });
   });
 

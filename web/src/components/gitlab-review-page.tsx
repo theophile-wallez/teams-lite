@@ -1,4 +1,4 @@
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
@@ -7,6 +7,9 @@ import {
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import {
+  resolveReviewChatWidth,
+  REVIEW_CHAT_MIN_WIDTH,
+  REVIEW_DOCUMENT_MIN_WIDTH,
   reviewAttribution,
   reviewCanBeAsked,
   reviewCoverage,
@@ -26,6 +29,7 @@ import { gitlabPageUrl, mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import { gitLabMarkdownOptions } from "~/lib/gitlab-upload";
 import { formatMessageTime } from "~/lib/message-time";
 import { cn } from "~/lib/utils";
+import { ColumnSplitter } from "./column-splitter";
 import { useAppState, useController } from "./controller-context";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
@@ -60,9 +64,14 @@ import { TrackerProjectProvider } from "./tracker-refs-context";
 //     its own renderer — never a model's HTML, and never `whitespace-pre-line` over raw text, which
 //     is what the first version drew: a model writes lists and backticked identifiers because that
 //     is how an engineer writes, and printed literally they are noise.
-//   - **The prose is set at a READABLE MEASURE and the code is not.** Two widths, deliberately: a
-//     paragraph is unreadable past about 65 characters and a patch is unreadable under about 90, so
-//     the document is as wide as the code needs and the words are held narrower inside it.
+//   - **The DOCUMENT is ONE measure, and the words fill it.** It shipped with a second, narrower rule
+//     inside it — `max-w-prose`, 65 characters, on every run of words — on the argument that a
+//     paragraph past that is unreadable. Against the CONVERSATION beside it that argument broke: the
+//     document column is then some 800px and the prose used half of it, so a theme's own description
+//     read as a cropped column with a hand's width of nothing beside it. It was reported that way.
+//     The measure is now the document's own `max-w-5xl` — bounded by what a unified PATCH needs,
+//     which is the widest thing on the page — and the only `max-w-prose` left is the OFFER's, because
+//     that one really is a card rather than the document.
 //   - **The code is the DIFF's, never the model's** — the patch the read already holds, so nothing
 //     on this page is code somebody's branch does not contain.
 //   - **A long patch opens FOLDED, and so does everything past the document's ceiling**
@@ -83,6 +92,32 @@ const DiffFilePatch = lazy(() =>
   import("./gitlab-diff-view").then((m) => ({ default: m.DiffFilePatch })),
 );
 
+/** The custom property the conversation column takes its width from.
+ *
+ *  Declared on the row that holds both columns and written by the splitter during a drag, which is
+ *  what keeps a resize off React's path entirely (see `column-splitter.tsx`). */
+const CHAT_WIDTH_VAR = "--review-chat-width";
+
+/** Below this the page is ONE column at a time — the app's own `md`, and the width the diff page's own
+ *  two columns collapse at. */
+const REVIEW_TWO_COLUMN_WIDTH = 768;
+
+/** The viewport's width, which decides whether there are two columns to divide and how wide the
+ *  conversation may be.
+ *
+ *  SSR-safe by starting at 0, which `resolveReviewChatWidth` reads as "nothing measured yet" and
+ *  leaves the asked-for width alone — the trap that guard exists for. */
+function useViewportWidth(): number {
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const measure = () => setWidth(window.innerWidth);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  return width;
+}
+
 export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path: string) => void }) {
   const detail = useAppState((s) => s.gitlabDetail);
   const diff = useAppState((s) => s.gitlabDiff);
@@ -90,7 +125,19 @@ export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path:
   const review = useAppState((s) => s.gitlabReview);
   const busy = useAppState((s) => s.gitlabReviewBusy);
   const error = useAppState((s) => s.gitlabReviewError);
+  const askedChatWidth = useAppState((s) => s.gitlabReviewChatWidth);
   const controller = useController();
+
+  const width = useViewportWidth();
+  // Two columns only where there is room for two, at the app's own `md`. Below it the conversation is
+  // a bounded slice under the document instead, and nothing is dragged.
+  const wide = width >= REVIEW_TWO_COLUMN_WIDTH;
+  const chatWidth = useMemo(
+    () => resolveReviewChatWidth({ viewport: width, asked: askedChatWidth }),
+    [width, askedChatWidth],
+  );
+  // The element the width is declared on, and the one the splitter writes to.
+  const columnHost = useRef<HTMLDivElement | null>(null);
 
   return (
     // A bare `!42` in the reading's own prose means a merge request of THIS project, exactly as it
@@ -154,7 +201,15 @@ export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path:
             // Two columns on a wide screen and one above the other on a phone, which is the shape
             // the diff page's own two take: a document of prose and code cannot share 390px with a
             // transcript, and below `md` the conversation follows the words it is about.
-            <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+            <div
+              ref={columnHost}
+              className="flex min-h-0 flex-1 flex-col md:flex-row"
+              // The width lives HERE, on the row both columns are in, because that is the one element
+              // a splitter can write to and the column can read from. React renders the resolved
+              // number; a drag overwrites it on the DOM and the store catches up at the end (see
+              // `column-splitter.tsx`).
+              style={{ [CHAT_WIDTH_VAR]: `${chatWidth}px` } as React.CSSProperties}
+            >
               <ReviewDocument
                 review={review}
                 diff={diff}
@@ -166,16 +221,45 @@ export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path:
                 onOpenFile={props.onOpenFile}
               />
               {review && (
-                // On a phone it is BOUNDED and the document keeps the rest, because a transcript of
-                // five turns would otherwise take the whole screen and leave the words it is about
-                // nowhere — and each half scrolls itself, so both stay reachable. On a wide screen it
-                // is a full-height column of its own.
-                <div className="flex max-h-[55%] min-h-0 shrink-0 flex-col border-t border-border-subtle md:max-h-none md:w-[26rem] md:border-l md:border-t-0">
-                  <h2 className="shrink-0 border-b border-border-subtle px-4 py-3 text-[13px] font-medium text-foreground md:px-5">
-                    Ask about it
-                  </h2>
-                  <ReviewChatPanel review={review} diff={diff} project={detail?.project_path} />
-                </div>
+                <>
+                  {/* The rule between the document and the conversation, and the handle that moves it
+                      — the diff page's own splitter, so a dragged column on this page behaves exactly
+                      as one there. Drawn only where there really are two columns to divide: below `md`
+                      each takes the full width in turn, so a splitter there would size nothing. */}
+                  {wide && (
+                    <ColumnSplitter
+                      host={columnHost}
+                      variable={CHAT_WIDTH_VAR}
+                      width={chatWidth}
+                      min={REVIEW_CHAT_MIN_WIDTH}
+                      // The DOCUMENT keeps its own minimum, which is not a preference: the code
+                      // inside it is the one thing on this page that cannot be narrowed and still be
+                      // read.
+                      max={Math.max(REVIEW_CHAT_MIN_WIDTH, width - REVIEW_DOCUMENT_MIN_WIDTH)}
+                      // `end`: the column is to the RIGHT of the handle, so rightward travel narrows
+                      // it.
+                      side="end"
+                      onCommit={(next) => controller.setGitLabReviewChatWidth(next)}
+                      label="Resize the conversation"
+                      testId="gitlab-review-chat-splitter"
+                    />
+                  )}
+                  {/* On a phone it is BOUNDED and the document keeps the rest, because a transcript of
+                      five turns would otherwise take the whole screen and leave the words it is about
+                      nowhere — and each half scrolls itself, so both stay reachable. On a wide screen
+                      it is a full-height column as wide as the reader dragged it, and it carries no
+                      border of its own: the splitter beside it IS the rule between the two. */}
+                  <div
+                    data-testid="gitlab-review-chat-column"
+                    className="flex max-h-[55%] min-h-0 shrink-0 flex-col border-t border-border-subtle md:max-h-none md:border-t-0"
+                    style={wide ? { width: `var(${CHAT_WIDTH_VAR})` } : undefined}
+                  >
+                    <h2 className="shrink-0 border-b border-border-subtle px-4 py-3 text-[13px] font-medium text-foreground md:px-5">
+                      Ask about it
+                    </h2>
+                    <ReviewChatPanel review={review} diff={diff} project={detail?.project_path} />
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -278,7 +362,7 @@ function ReviewOffer(props: {
           prompt — so this says where their code goes, in as many words. */}
       <p
         data-testid="gitlab-review-cost"
-        className="max-w-prose text-[11px] leading-relaxed text-text-faint"
+        className="text-[11px] leading-relaxed text-text-faint"
       >
         This runs the agent you chose in Settings › AI providers, on this machine. The diff is put in
         the prompt, so this branch's code reaches that provider — exactly as it does when you write
@@ -317,11 +401,11 @@ function ReviewHeadline(props: {
         <div data-testid="gitlab-review-headline">
           <RichNodes
             nodes={headline}
-            className="max-w-prose text-[17px] leading-relaxed text-foreground [&_p]:m-0"
+            className="text-[17px] leading-relaxed text-foreground [&_p]:m-0"
           />
         </div>
       ) : (
-        <p className="max-w-prose text-[17px] leading-relaxed text-text-dim">
+        <p className="text-[17px] leading-relaxed text-text-dim">
           This branch was read, but the reading said nothing about it as a whole.
         </p>
       )}
@@ -343,7 +427,7 @@ function ReviewHeadline(props: {
         // moved for a grouping of what is on screen.
         <p
           data-testid="gitlab-review-stale"
-          className="flex max-w-prose items-start gap-1.5 rounded-lg bg-element px-3 py-2 text-[12px] leading-relaxed text-text-dim"
+          className="flex items-start gap-1.5 rounded-lg bg-element px-3 py-2 text-[12px] leading-relaxed text-text-dim"
         >
           <HugeiconsIcon icon={Alert02Icon} className="mt-px size-3.5 shrink-0" strokeWidth={1.8} />
           This reading is of an earlier commit. Somebody has pushed since, so the code below may have
@@ -353,7 +437,7 @@ function ReviewHeadline(props: {
       {limits && (
         <p
           data-testid="gitlab-review-limits"
-          className="max-w-prose text-[11px] leading-relaxed text-text-faint"
+          className="text-[11px] leading-relaxed text-text-faint"
         >
           {limits}
         </p>
@@ -364,7 +448,7 @@ function ReviewHeadline(props: {
         // will read the fold as the reading having nothing to show.
         <p
           data-testid="gitlab-review-folded"
-          className="max-w-prose text-[11px] leading-relaxed text-text-faint"
+          className="text-[11px] leading-relaxed text-text-faint"
         >
           {folded.folded} of {folded.total} diffs start folded — the long ones, and everything past
           the first few — so this page opens on the words rather than on the code. Open any of them
@@ -420,7 +504,7 @@ function ReviewSection(props: {
           <div data-testid="gitlab-review-summary">
             <RichNodes
               nodes={summary}
-              className="max-w-prose text-[14px] leading-relaxed text-text-dim"
+              className="text-[14px] leading-relaxed text-text-dim"
             />
           </div>
         )}
@@ -471,10 +555,7 @@ function ReviewFile(props: {
         // What the reading said about THIS file, above its code and set as prose: it is a remark
         // about the change rather than a label on it.
         <div data-testid="gitlab-review-note">
-          <RichNodes
-            nodes={note}
-            className="max-w-prose text-[13px] leading-relaxed text-text-dim"
-          />
+          <RichNodes nodes={note} className="text-[13px] leading-relaxed text-text-dim" />
         </div>
       )}
       {/* ONE box per file, whose own top bar names it. The bar is this page's rather than the
@@ -591,7 +672,7 @@ function ReviewError(props: { error: string }) {
   return (
     <p
       data-testid="gitlab-review-error"
-      className="flex max-w-prose items-start gap-1.5 text-[12px] leading-relaxed text-destructive"
+      className="flex items-start gap-1.5 text-[12px] leading-relaxed text-destructive"
     >
       <HugeiconsIcon icon={Alert02Icon} className="mt-px size-3.5 shrink-0" strokeWidth={1.8} />
       {props.error}

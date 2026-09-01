@@ -944,3 +944,80 @@ describe("Backend.writeLockStatus", () => {
     backend.close();
   });
 });
+
+// A request that starts an AGENT RUN outlives the ordinary ceiling, and it MUST, because the run
+// does. These went out on the 30-second default and every real reading exceeded it: the reader met
+// `timeout: gitlab_mr_review_run` while the backend ran on, finished, and stored the answer — an
+// action that worked reported as one that failed. Nothing else could catch it, because the mock
+// answers instantly, so no spec and no capture ever waited.
+describe("an agent run's own request ceiling", () => {
+  /** Every method whose backend handler starts a CLI, and the frame it sends. */
+  const AGENT_CALLS: Array<{ name: string; call: (backend: Backend) => Promise<unknown> }> = [
+    {
+      name: "gitlab_mr_review_run",
+      call: (backend) =>
+        backend.gitlabRunMergeRequestReview({ projectPath: "acme/webapp", iid: 596 }),
+    },
+    {
+      name: "gitlab_mr_review_ask",
+      call: (backend) =>
+        backend.gitlabAskMergeRequestReview(
+          { projectPath: "acme/webapp", iid: 596 },
+          "why?",
+          { themes: [], paths: [] },
+        ),
+    },
+  ];
+
+  for (const { name, call } of AGENT_CALLS) {
+    it(`${name} is still waiting well past the ordinary 30 seconds`, async () => {
+      const { backend, socket } = await connected();
+      const settled = vi.fn();
+      const promise = call(backend);
+      // A rejection here is the bug; the assertion is at the end, so nothing is swallowed.
+      void promise.then(
+        () => settled("resolved"),
+        (e: unknown) => settled(`rejected: ${String(e)}`),
+      );
+
+      // Five minutes — an ordinary reading of a large diff. The old ceiling was 30 seconds.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(settled).not.toHaveBeenCalled();
+
+      // And the ANSWER still lands, which is the half that says the request was never dropped.
+      const frame = JSON.parse(socket.sent[0]!) as { id: number };
+      socket.simulateMessage(JSON.stringify({ id: frame.id, result: { review: null, chat: null } }));
+      await expect(promise).resolves.toBeTruthy();
+      backend.close();
+    });
+  }
+
+  it("gives up eventually, and LATER than the backend's own bound", async () => {
+    // The ceiling has to LOSE the race with `agent::RUN_IDLE_TIMEOUT` (30 min), or the reader is
+    // handed a bare `timeout: <method>` in place of the CLI's own reason for stopping.
+    const { backend } = await connected();
+    const promise = backend.gitlabRunMergeRequestReview({ projectPath: "acme/webapp", iid: 596 });
+    const settled = vi.fn();
+    void promise.catch((e: unknown) => settled(String(e)));
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(settled).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(settled).toHaveBeenCalledWith(expect.stringContaining("timeout: gitlab_mr_review_run"));
+    backend.close();
+  });
+
+  it("leaves every OTHER request on the ordinary ceiling", async () => {
+    // The long one is for a run, not for the socket: an answer lost on an ordinary read has to fail
+    // while somebody is still looking at the screen.
+    const { backend } = await connected();
+    const promise = backend.gitlabMergeRequestReviewChat({ projectPath: "acme/webapp", iid: 596 });
+    const settled = vi.fn();
+    void promise.catch((e: unknown) => settled(String(e)));
+
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(settled).toHaveBeenCalledWith(expect.stringContaining("timeout: gitlab_mr_review_chat"));
+    backend.close();
+  });
+});

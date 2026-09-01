@@ -79,11 +79,13 @@ export const MERGE_REQUEST_PAGES: readonly MergeRequestPageEntry[] = [
   },
   {
     page: "review",
-    label: "Themes",
-    // "Themes" rather than "Review", deliberately: the Overview page carries a real **Approve**
-    // and a real **Merge**, so a tab called Review beside them would promise the approval flow.
-    // It is also the name this feature already has everywhere — in the store, in the mock, in
-    // every test id and in AGENTS.md — so there is one word for one thing.
+    label: "AI review",
+    // TWO WORDS rather than one, and it is the user's own call over an argument made here first.
+    // This shipped as "Themes" on the reasoning that the Overview carries a real Approve and a real
+    // Merge, so a tab called "Review" beside them would promise the approval flow. That risk is
+    // real and "AI review" answers it: the qualifier is what says this is a machine's read-through
+    // rather than the approval, which one word could not. What it costs is a two-word label in a
+    // strip of one-word ones, and the row already scrolls sideways on a phone.
     hint: "The changes read by a local agent and grouped by what the branch does",
     // No `gitlabPath`: GitLab has no such page. See `gitlabPath` above.
   },

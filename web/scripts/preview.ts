@@ -3808,12 +3808,21 @@ if (import.meta.main) {
         await setTheme("dark");
         await shot(`${out}-tags-dark.png`, '[data-testid="gitlab-review-chat"]');
         await setTheme("light");
-        // Narrowed to a FILE by a substring of its path, which is how one is really found.
+        // Narrowed to a FILE by a substring of its path, which is how one is really found — and the
+        // pick lands INSIDE the words, which is what this picture is of.
         await page.locator(field).type("health");
         await page.locator('[data-testid="gitlab-review-chat-option"]').first().click();
-        await page.locator(field).type("Why is the draining check first?");
+        await page.locator(field).type("— why is the draining check first?");
         await shot(`${out}-question-light.png`, '[data-testid="gitlab-review-chat"]');
+        // HELD, so the state the whole feature turns on has a duration to photograph: this mock
+        // answers in one frame, and a real run is tens of seconds.
+        await emit({ kind: "gitlab_mr", review: "stored", hold_ask: 2_000 });
         await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
+        // THE QUESTION, drawn the moment it left, with the box already empty. It is a state the
+        // answer's own picture cannot show, and the whole of what makes the press feel answered.
+        await page.waitForSelector('[data-testid="gitlab-review-turn"][data-answered="no"]');
+        await shot(`${out}-asked-light.png`, '[data-testid="gitlab-review-chat"]');
+        await emit({ kind: "gitlab_mr", review: "stored" });
         await page.waitForSelector('[data-testid="gitlab-review-chat"][data-turns="1"]', {
           timeout: 20_000,
         });
@@ -3859,7 +3868,7 @@ if (import.meta.main) {
           `[preview] wrote ${out}-offer-{light,dark}.png, ${out}-{light,dark}.png, ` +
             `${out}-file-{light,dark}.png, ${out}-sticky-light.png, ${out}-folded-light.png, ` +
             `${out}-unplaced-light.png, ${out}-stale-light.png, ${out}-refused-light.png, ` +
-            `${out}-tags-{light,dark}.png, ${out}-question-light.png, ` +
+            `${out}-tags-{light,dark}.png, ${out}-question-light.png, ${out}-asked-light.png, ` +
             `${out}-answer-{light,dark}.png, ${out}-with-chat-light.png, ` +
             `${out}-ask-refused-light.png and ${out}-mobile{,-chat}-light.png`,
         );

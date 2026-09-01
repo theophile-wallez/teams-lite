@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  drawnReviewTurns,
   matchReviewTags,
   MAX_REVIEW_TAG_FILES,
   patchTextLineCount,
@@ -12,12 +13,18 @@ import {
   reviewGroups,
   reviewIsStale,
   reviewLimits,
+  resolveReviewChatWidth,
+  REVIEW_CHAT_DEFAULT_WIDTH,
+  REVIEW_CHAT_MIN_WIDTH,
+  REVIEW_DOCUMENT_MIN_WIDTH,
   reviewQuestionCanBeAsked,
   reviewSectionId,
   reviewTagKey,
   reviewTagLimit,
   reviewTags,
+  reviewTagsInText,
   reviewTagsToWire,
+  reviewTagText,
   turnContext,
   UNPLACED_TITLE,
   type GitLabReview,
@@ -471,5 +478,165 @@ describe("turnContext", () => {
     // theme that has gone — and "theme 4" is a line nobody can read.
     expect(turnContext(turn({ themes: [9], paths: ["a.ts"] }), review())).toBe("a.ts");
     expect(turnContext(turn({ themes: [0] }), null)).toBeNull();
+  });
+});
+
+describe("a tag is WORDS in the question", () => {
+  const withThemes = () =>
+    review({
+      themes: [
+        { title: "A replica is drained before it goes", summary: "S", files: [{ path: "a.ts" }] },
+        { title: "The chart", summary: "S", files: [{ path: "b.yaml" }] },
+      ],
+    });
+  const tags = () => reviewTags(withThemes(), diff(["src/server/health.ts", "b.yaml"]));
+
+  it("writes a FILE bare and a THEME in brackets", () => {
+    // A path holds no space, so it is one word. A theme's title is a sentence, so it takes the
+    // bracket form this app already uses for a mention whose name has spaces (`@[Ada Byron]`) —
+    // without it, `@A replica is drained` would end at the first space and name nothing.
+    const all = tags();
+    const theme = all.find((tag) => tag.kind === "theme")!;
+    const file = all.find((tag) => tag.kind === "file")!;
+    expect(reviewTagText(file)).toBe("@src/server/health.ts");
+    expect(reviewTagText(theme)).toBe("@[A replica is drained before it goes]");
+  });
+
+  it("reads back exactly what the words name, in the order they are written", () => {
+    const all = tags();
+    const text = "Why does @[The chart] change @b.yaml and not @src/server/health.ts?";
+    expect(reviewTagsInText(text, all).map((tag) => tag.label)).toEqual([
+      "The chart",
+      "b.yaml",
+      "src/server/health.ts",
+    ]);
+  });
+
+  it("reads a THEME whose title holds spaces, which a bare run could not", () => {
+    const all = tags();
+    const bracketed = reviewTagsInText("about @[A replica is drained before it goes] please", all);
+    expect(bracketed.map((tag) => tag.kind)).toEqual(["theme"]);
+    // The same title written bare names nothing, which is exactly why the bracket form exists.
+    expect(reviewTagsInText("about @A replica is drained before it goes", all)).toEqual([]);
+  });
+
+  it("leaves a run that names no tag as the words it is", () => {
+    // The rule an @mention naming a person the thread does not hold already follows: a question
+    // about `@rfc-2119` is a question about `@rfc-2119`.
+    expect(reviewTagsInText("what about @rfc-2119 and @nobody/at/all.ts?", tags())).toEqual([]);
+  });
+
+  it("names a tag once however many times it is written", () => {
+    const all = tags();
+    const twice = "@b.yaml and @b.yaml again";
+    expect(reviewTagsInText(twice, all).map((tag) => tag.label)).toEqual(["b.yaml"]);
+  });
+
+  it("round-trips every tag it offers", () => {
+    // The composer INSERTS `reviewTagText` and the send READS `reviewTagsInText`, so a tag the one
+    // writes and the other cannot see would travel with nothing — silently.
+    const all = tags();
+    for (const tag of all) {
+      expect(reviewTagsInText(`ask about ${reviewTagText(tag)} now`, all).map(reviewTagKey)).toEqual([
+        reviewTagKey(tag),
+      ]);
+    }
+  });
+});
+
+describe("drawnReviewTurns", () => {
+  const turn = (question: string): GitLabReviewTurn => ({
+    question,
+    answer: "because",
+    themes: [],
+    paths: [],
+    asked_ms: 1,
+  });
+
+  it("puts the question in flight LAST, with no answer under it", () => {
+    // A conversation is read from the bottom, and "no answer yet" is not "the model said nothing" —
+    // which is an ERROR on the backend and never a turn.
+    const drawn = drawnReviewTurns({ turns: [turn("first")] }, {
+      question: "second",
+      themes: [0],
+      paths: ["a.ts"],
+      asked_ms: 2,
+    });
+    expect(drawn.map((t) => t.question)).toEqual(["first", "second"]);
+    expect(drawn[0]!.answer).toBe("because");
+    expect(drawn[1]!.answer).toBeNull();
+    // It carries what it was TOLD, so the transcript does not change shape when the real one lands.
+    expect(drawn[1]!.themes).toEqual([0]);
+    expect(drawn[1]!.paths).toEqual(["a.ts"]);
+  });
+
+  it("is just the stored turns with nothing in flight", () => {
+    expect(drawnReviewTurns({ turns: [turn("only")] }, null).map((t) => t.answer)).toEqual([
+      "because",
+    ]);
+    expect(drawnReviewTurns(null, null)).toEqual([]);
+  });
+
+  it("draws a question in flight even with no stored turns at all", () => {
+    // The first question a reader asks is the one most likely to look swallowed.
+    const drawn = drawnReviewTurns(null, {
+      question: "why?",
+      themes: [],
+      paths: [],
+      asked_ms: 1,
+    });
+    expect(drawn.map((t) => t.question)).toEqual(["why?"]);
+  });
+});
+
+describe("resolveReviewChatWidth", () => {
+  it("gives the reader what they asked for when it fits", () => {
+    expect(resolveReviewChatWidth({ viewport: 1600, asked: 500 })).toBe(500);
+  });
+
+  it("keeps the DOCUMENT its own minimum, which is not a preference", () => {
+    // The code inside the document is the one thing on this page that cannot be narrowed and still
+    // be read — the rule `DIFF_CODE_MIN_WIDTH` holds one page over.
+    const width = resolveReviewChatWidth({ viewport: 900, asked: 800 });
+    expect(width).toBe(900 - REVIEW_DOCUMENT_MIN_WIDTH);
+    expect(900 - width).toBeGreaterThanOrEqual(REVIEW_DOCUMENT_MIN_WIDTH);
+  });
+
+  it("never goes under its own minimum, even in a window with no room", () => {
+    // A column of two words is not a conversation. On a window this narrow the page is one column at
+    // a time anyway, so nothing is drawn at this width — but the number must still be sane.
+    expect(resolveReviewChatWidth({ viewport: 500, asked: 400 })).toBe(REVIEW_CHAT_MIN_WIDTH);
+    expect(resolveReviewChatWidth({ viewport: 1600, asked: 10 })).toBe(REVIEW_CHAT_MIN_WIDTH);
+  });
+
+  it("clamps NOTHING before the window is measured", () => {
+    // A viewport of 0 is the first paint. Clamping against it brings the column back at its own
+    // minimum on every load — the trap `resolveDiffColumnWidths` states in full.
+    expect(resolveReviewChatWidth({ viewport: 0, asked: 900 })).toBe(900);
+    expect(resolveReviewChatWidth({ viewport: 0, asked: Number.NaN })).toBe(REVIEW_CHAT_DEFAULT_WIDTH);
+  });
+});
+
+describe("a tag at the END of a sentence", () => {
+  const tags = () => reviewTags(review(), diff(["src/server/health.ts", "b.yaml"]));
+
+  it("keeps the punctuation the SENTENCE owns out of the path", () => {
+    // A reader really does write "and not @src/server/health.ts?" — a question ends in a question
+    // mark. `agent_policy::split_prefix` states the same rule for an agent's own address, and
+    // without it a tag would silently name nothing whenever it fell at the end of a sentence.
+    for (const trailing of ["?", ".", ",", "!", ";", ":", ")", "?)", '."']) {
+      expect(
+        reviewTagsInText(`what about @src/server/health.ts${trailing}`, tags()).map((t) => t.label),
+      ).toEqual(["src/server/health.ts"]);
+    }
+  });
+
+  it("keeps a path's own extension, which is not punctuation to trim into", () => {
+    // The walk stops at the first character that is not sentence punctuation, so `.ts` survives.
+    expect(reviewTagsInText("@src/server/health.ts", tags()).map((t) => t.label)).toEqual([
+      "src/server/health.ts",
+    ]);
+    // And a run that is punctuation all the way down names nothing rather than looping.
+    expect(reviewTagsInText("@... and @?!", tags())).toEqual([]);
   });
 });

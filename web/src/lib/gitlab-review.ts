@@ -417,6 +417,77 @@ export function matchReviewTags(
   return out;
 }
 
+/**
+ * How one tag is WRITTEN INSIDE the question.
+ *
+ * **A tag is words in the prompt, not a chip beside it**, which is the shape every other "@" in this
+ * app takes: `@claude` is read back out of a message's own words (`agent_policy::address_in`), a
+ * tracker reference is read out of them (`lib/tracker-ref.ts`), and a chess move is read out of them.
+ * There is nothing to keep in step, the reader can edit or delete a tag with the caret like any other
+ * word, and what will travel is legible in the sentence itself rather than in a row above it.
+ *
+ * A FILE is one word — a path holds no space — so it is written bare. A THEME's title is a sentence,
+ * so it takes the BRACKET form this app already uses for a mention whose name has spaces
+ * (`@[Ada Byron]`, see § @mentions): without it, `@A replica is drained` would end at the first
+ * space and name nothing.
+ */
+export function reviewTagText(tag: ReviewTag): string {
+  return tag.kind === "file" ? `@${tag.path}` : `@[${tag.label}]`;
+}
+
+/**
+ * The tags a question's own WORDS name, in the order they are written.
+ *
+ * The one reader of a question's text, so what the composer offered and what really travels cannot
+ * disagree — and a tag the reader deleted with the caret is simply gone, with nothing to clean up.
+ *
+ * A run that matches no tag stays the words it is, which is the rule an @mention naming a person the
+ * thread does not hold already follows: `@rfc-2119` in a question is a question about `@rfc-2119`.
+ */
+export function reviewTagsInText(text: string, tags: ReviewTag[]): ReviewTag[] {
+  const byText = new Map(tags.map((tag) => [reviewTagText(tag), tag]));
+  const picked: ReviewTag[] = [];
+  const seen = new Set<string>();
+  // `@[…]` first, because a bare run would stop at the `[` and match nothing — and the bracket form
+  // is the only one that can hold a title with spaces in it.
+  const pattern = /@\[([^\]\n]+)\]|@([^\s@]+)/g;
+  for (const match of text.matchAll(pattern)) {
+    const tag =
+      match[1] !== undefined ? byText.get(`@[${match[1]}]`) : bareTag(match[2]!, byText);
+    if (!tag) continue;
+    const key = reviewTagKey(tag);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    picked.push(tag);
+  }
+  return picked;
+}
+
+/** The trailing characters that belong to the SENTENCE rather than to the path before them.
+ *
+ *  A question ends in `?`, a clause in `,`, a list item in `;` — and a reader really does write "and
+ *  not @src/server/health.ts?". `agent_policy::split_prefix` states the same rule for an agent's own
+ *  address ("the punctuation an address is written with belongs to it"), and without it a tag would
+ *  silently name nothing whenever it fell at the end of a sentence. */
+const TAG_TRAILING_PUNCTUATION = new Set([".", ",", "?", "!", ";", ":", ")", "]", "}", '"', "'", "…"]);
+
+/** The tag a bare `@run` names, backing off one trailing punctuation mark at a time.
+ *
+ *  The LONGEST match wins, so a path that really ends in one of those characters is found before
+ *  anything is trimmed — and the walk stops at the first character that is not punctuation, so
+ *  `health.ts` keeps its extension. */
+function bareTag(run: string, byText: Map<string, ReviewTag>): ReviewTag | undefined {
+  let candidate = run;
+  while (candidate.length > 0) {
+    const tag = byText.get(`@${candidate}`);
+    if (tag) return tag;
+    const last = candidate[candidate.length - 1]!;
+    if (!TAG_TRAILING_PUNCTUATION.has(last)) return undefined;
+    candidate = candidate.slice(0, -1);
+  }
+  return undefined;
+}
+
 /** What a set of picked tags becomes on the wire: the theme indices and the file paths.
  *
  *  The FILES are bounded here as well as in the backend, and the two numbers are the same one:
@@ -443,6 +514,65 @@ export function reviewTagLimit(tags: ReviewTag[]): string | null {
   return `A question carries at most ${MAX_REVIEW_TAG_FILES} files. Ask about these, then ask again.`;
 }
 
+/**
+ * A question that has left this page and whose answer has not come back yet.
+ *
+ * **It is DRAWN at once, which is the rule `chessPending` already holds for a move**: a board that
+ * waits for a round trip before the piece moves feels broken, and so does a composer that swallows a
+ * question and shows nothing. The words leave the box on the press and appear as the reader's own
+ * turn in the transcript, so nothing is ever lost between the two — and it is TAKEN BACK if the
+ * publish fails, with the words handed back to the box where they can be pressed again.
+ *
+ * It carries no answer, because there is none. What it carries is exactly what the turn it becomes
+ * will carry, so the transcript does not change shape when the real one lands.
+ */
+export type PendingReviewQuestion = {
+  question: string;
+  themes: number[];
+  paths: string[];
+  asked_ms: number;
+};
+
+/**
+ * The transcript as the panel draws it: the turns the backend holds, then the question in flight.
+ *
+ * ONE list, so the panel has one thing to draw and the pending question is at the bottom where a
+ * conversation is read from. The pending one is marked (`answer` is null) rather than given an empty
+ * answer, because "no answer yet" and "the model said nothing" are different things — and an empty
+ * answer is an ERROR on the backend, never a turn.
+ */
+export type DrawnReviewTurn = {
+  question: string;
+  /** `null` while the answer is still on its way. */
+  answer: string | null;
+  themes: number[];
+  paths: string[];
+  asked_ms: number;
+};
+
+export function drawnReviewTurns(
+  chat: GitLabReviewChat | null | undefined,
+  pending: PendingReviewQuestion | null | undefined,
+): DrawnReviewTurn[] {
+  const turns: DrawnReviewTurn[] = (chat?.turns ?? []).map((turn) => ({
+    question: turn.question,
+    answer: turn.answer,
+    themes: turn.themes,
+    paths: turn.paths,
+    asked_ms: turn.asked_ms,
+  }));
+  if (pending) {
+    turns.push({
+      question: pending.question,
+      answer: null,
+      themes: pending.themes,
+      paths: pending.paths,
+      asked_ms: pending.asked_ms,
+    });
+  }
+  return turns;
+}
+
 /** Whether a question can be asked at all.
  *
  *  It needs a reading to be about — the backend refuses one without it, and the page must not offer a
@@ -460,7 +590,10 @@ export function reviewQuestionCanBeAsked(
  *  It names what really TRAVELLED, which the backend recorded rather than the page assuming: a
  *  tagged file the diff does not hold never reached the model, and a transcript claiming it did would
  *  misstate what the answer rests on. */
-export function turnContext(turn: GitLabReviewTurn, review: GitLabReview | null): string | null {
+export function turnContext(
+  turn: Pick<GitLabReviewTurn, "themes" | "paths">,
+  review: GitLabReview | null,
+): string | null {
   const parts: string[] = [];
   for (const index of turn.themes) {
     const title = review?.themes[index]?.title;
@@ -468,6 +601,38 @@ export function turnContext(turn: GitLabReviewTurn, review: GitLabReview | null)
   }
   for (const path of turn.paths) parts.push(path);
   return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+// ---- the CONVERSATION's own column, which the reader drags ---------------------
+//
+// The same gesture the diff page's two side columns take (`ColumnSplitter`), and the same reasoning
+// about what gives way: the DOCUMENT keeps a minimum, because the code inside it is the one thing on
+// this page that cannot be narrowed and still be read.
+
+/** What the conversation column opens at. */
+export const REVIEW_CHAT_DEFAULT_WIDTH = 416;
+
+/** The narrowest it may be dragged. Below this a question and its answer are a column of two words. */
+export const REVIEW_CHAT_MIN_WIDTH = 280;
+
+/** The room the DOCUMENT keeps whatever the reader drags, which is not a preference: a unified patch
+ *  under about 90 characters is unreadable, and the code is why this page exists. It is the rule
+ *  `DIFF_CODE_MIN_WIDTH` holds one page over. */
+export const REVIEW_DOCUMENT_MIN_WIDTH = 480;
+
+/**
+ * How wide the conversation column really is, given the window and what the reader asked for.
+ *
+ * A viewport of 0 is the first paint, before anything is measured, and nothing is clamped against it
+ * — the trap `resolveDiffColumnWidths` states in full: clamping to `min(asked, 0)` brings every
+ * column back at its own minimum, which is the bug the guard exists to prevent.
+ */
+export function resolveReviewChatWidth(input: { viewport: number; asked: number }): number {
+  if (!Number.isFinite(input.asked)) return REVIEW_CHAT_DEFAULT_WIDTH;
+  const wanted = Math.round(Math.max(input.asked, REVIEW_CHAT_MIN_WIDTH));
+  if (input.viewport <= 0) return wanted;
+  const room = input.viewport - REVIEW_DOCUMENT_MIN_WIDTH;
+  return Math.max(REVIEW_CHAT_MIN_WIDTH, Math.min(wanted, room));
 }
 
 /** The id one section of the document hangs off, so the sticky heading, the tab's own panel and

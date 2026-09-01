@@ -5312,6 +5312,19 @@ let mockGitLabReviewRefusal: string | null = null;
 /** A follow-up QUESTION this mock refuses, so the page's own report of one is reachable — the twin
  *  of `mockGitLabReviewRefusal` beside it. */
 let mockGitLabAskRefusal: string | null = null;
+
+/**
+ * How long this mock HOLDS a follow-up before answering, in ms.
+ *
+ * It exists because the optimistic draw is otherwise unreachable here: a real run is tens of seconds,
+ * this mock answers in one frame, so the state the whole feature turns on — the question drawn in its
+ * own bubble with the box already empty and no answer yet — has no duration at all and no capture can
+ * photograph it. It is the gap `{kind:"call_start", hold:…}` already fills for a call, and for the
+ * same stated reason: the mock's own path is instant, so the window a reader really sees did not exist
+ * there. A spec MUST clear it — one mock process serves the whole run, and a held question would make
+ * every later one wait.
+ */
+let mockGitLabAskHoldMs = 0;
 /** The readings this machine has "made", keyed the way the backend keys its own stored one:
  *  `<project>!<iid>`, ONE per merge request, with the head sha inside the payload. */
 const mockReviews = new Map<string, MockReview>();
@@ -9480,6 +9493,10 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         throw new Error("read the changes first — a question needs a reading to be about");
       }
       if (mockGitLabAskRefusal) throw new Error(mockGitLabAskRefusal);
+      // Held BEFORE anything is stored, which is where a real run's time goes.
+      if (mockGitLabAskHoldMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, mockGitLabAskHoldMs));
+      }
       const themes = numberList(params, "themes").slice(0, 8);
       // Only a path the DIFF holds travels, exactly as `build_chat_prompt` decides: a client cannot
       // make this read a file the merge request never changed, and the turn records what really went.
@@ -12501,6 +12518,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         // left behind would put a transcript in front of every later spec.
         mockReviewChats.clear();
         mockGitLabAskRefusal = null;
+        mockGitLabAskHoldMs = 0;
         // Every job log goes back too: the running one's length grows on each read, so a spec
         // that wants to watch a live log has to start from a known number of lines.
         resetMockJobLogs();
@@ -12521,6 +12539,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       mockGitLabReviewRefusal =
         typeof body.refuse_review === "string" ? body.refuse_review : null;
       mockGitLabAskRefusal = typeof body.refuse_ask === "string" ? body.refuse_ask : null;
+      mockGitLabAskHoldMs = typeof body.hold_ask === "number" ? body.hold_ask : 0;
       // A reading the machine has ALREADY made, so a spec can reach the stored path without
       // pressing anything — and `stale: true` makes it a reading of another commit.
       if (body.review === "stored" || body.review === "stale") {
@@ -12570,6 +12589,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           truncate_job_log: mockGitLabJobLogTruncated,
           refuse_review: mockGitLabReviewRefusal,
           refuse_ask: mockGitLabAskRefusal,
+          hold_ask: mockGitLabAskHoldMs,
           reviews: mockReviews.size,
           chats: mockReviewChats.size,
         },

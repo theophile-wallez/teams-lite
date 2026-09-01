@@ -2706,10 +2706,12 @@ three things a URL gives are the point — it survives a reload, it can be sent 
 asked to review, and the browser's own Back leaves it.
 
 What it costs is one more tab in a strip of four, and the strip **APPENDS** rather than inserting so
-no tab a reader has learned moves (`MERGE_REQUEST_PAGES`). It is labelled **Themes** rather than
-"Review": the Overview page carries a real **Approve** and a real **Merge**, so a tab called Review
-beside them would promise the approval flow — and Themes is the name this feature already has in the
-store, in the mock, in every test id and in this file, so there is one word for one thing.
+no tab a reader has learned moves (`MERGE_REQUEST_PAGES`). It is labelled **AI review**: the Overview
+page carries a real **Approve** and a real **Merge**, so a tab called just "Review" beside them would
+promise the approval flow, and the qualifier is what says this one is a machine's read-through
+instead. It shipped as **Themes** on the same argument with one word, and two is what the user asked
+for — the internal name stays `review`/`themes` everywhere it is not a label, so there is still one
+word for one thing in the store, the mock and every test id.
 
 **GITLAB HAS NO PAGE FOR IT, and `gitlabPath` is therefore ABSENT rather than empty.** That
 distinction is load-bearing: `gitlabPageUrl` is what every failure on these five pages offers as the
@@ -2734,9 +2736,13 @@ Twelve rules hold the document, and each is pinned by `web/e2e/gitlab.spec.ts` o
   because that is how an engineer writes, and the first version printed them literally with
   `whitespace-pre-line`. **The mock's own fixture carries markdown for that reason**: flat prose
   there would let a page that printed the backticks pass every test.
-- **Two MEASURES, one column.** The document is as wide as the CODE needs (`max-w-5xl`) and the words
-  are held narrower inside it (`max-w-prose`): a paragraph is unreadable past about 65 characters and
-  a unified patch is unreadable under about 90.
+- **ONE measure, and the words FILL it.** The document is as wide as the CODE needs (`max-w-5xl`),
+  which is the widest thing on the page. It shipped with a second, narrower rule inside it —
+  `max-w-prose`, 65 characters, on every run of words — on the argument that a paragraph past that is
+  unreadable. Against the CONVERSATION beside it that broke: the document column is then some 800px
+  and the prose used half of it, so a theme's own description read as a cropped column with a hand's
+  width of nothing beside it. It was reported that way. The only `max-w-prose` left is the OFFER's,
+  because that one really is a card rather than the document.
 - **THE CODE IS THE DIFF'S, NEVER THE MODEL'S.** A model asked to quote a change would paraphrase it,
   and a paraphrased patch is invented code presented as somebody's branch — so the page renders the
   patch the read already holds and the model only ever NAMES files, which is the rule `from_answer`
@@ -2800,16 +2806,58 @@ two patches and nothing else; a question with NO tags carries the reading and no
 are drawn as CHIPS rather than as a syntax inside the words, so the reader can see what will travel
 before they press.
 
-Eleven rules hold it, and each is pinned by `gitlab_review::tests`,
-`web/src/lib/gitlab-review.test.ts` or `web/e2e/gitlab.spec.ts`:
+Fourteen rules hold it, and each is pinned by `gitlab_review::tests`,
+`web/src/lib/gitlab-review.test.ts`, `web/src/lib/ws-client.test.ts` or `web/e2e/gitlab.spec.ts`:
 
 - **A question needs a READING to be about.** The backend refuses one without it, so the panel is not
   drawn at all until there is one — a control that reports a refusal is what this app draws nothing
   instead of.
+- **THE PAGE'S OWN REQUEST CEILING IS LONGER THAN THE BACKEND'S, and that is a bug fix rather than a
+  tuning choice.** Both agent methods went out on `ws-client.ts`'s ordinary `REQUEST_TIMEOUT_MS` (30 s),
+  which every real run exceeds — so the reader met **`timeout: gitlab_mr_review_run`** on every press
+  while the backend ran on, finished, and stored the answer: an action that worked, reported as one
+  that failed. The doc comment beside the method even claimed it "carries no timeout of its own", which
+  `request` never allowed. `AGENT_REQUEST_TIMEOUT_MS` (35 min) is the fix, and the number is chosen to
+  LOSE the race with `agent::RUN_IDLE_TIMEOUT` (30 min): past that the backend has given up and answers
+  with the CLI's own reason, and a page timer that fired first would replace that sentence with a bare
+  `timeout: <method>`. A request with NO ceiling was the other option and is not needed — a socket that
+  closes rejects every pending request already. **Nothing but a unit test can catch this class**: the
+  mock answers in one frame, so no spec and no capture ever waited, which is why
+  `ws-client.test.ts` drives it on fake timers and holds an agent request to still being in flight five
+  minutes in.
 - **THE TRANSCRIPT IS ITS OWN STORE ROW** (`gitlab_review_chat:{project}!{iid}`), because the two have
   different lifetimes: a fresh reading REPLACES the reading and must not throw away the questions
   somebody asked — those were about this branch and are still worth reading. A spec presses "Read it
   again" and holds the turns to surviving.
+- **A TAG IS WORDS IN THE QUESTION, never a chip beside it** (`reviewTagText`, `reviewTagsInText`).
+  That is the shape every other "@" in this app takes — `@claude` is read back out of a message's own
+  words, and so is a tracker reference — and it is what a chip row above the field was replaced by:
+  the chips were a second place the same fact lived, they could not be edited with the caret, and they
+  pushed the box down. A FILE is written bare (`@src/server/health.ts`) and a THEME takes the BRACKET
+  form this app already uses for a name with spaces in it (`@[A replica is drained…]`), because a bare
+  run would end at the first space and name nothing. **The punctuation a SENTENCE owns is trimmed
+  back off** (`TAG_TRAILING_PUNCTUATION`): a reader really does write "and not
+  @src/server/health.ts?", and without it the tag would silently name nothing whenever it fell at the
+  end of a question — the rule `agent_policy::split_prefix` already states for an agent's own address.
+  The longest match wins first, so a path keeps its own extension.
+- **THE QUESTION IS DRAWN THE MOMENT IT LEAVES**, in its own bubble, with the words already gone from
+  the box (`gitlabReviewPending`, `drawnReviewTurns`). A run is tens of seconds, so a composer that
+  took the words and showed nothing until the answer landed looked like one that had lost them. It is
+  the rule `chessPending` already holds for a move and for its reason — and the words are never in
+  NEITHER place: the box is cleared in the same frame the bubble appears.
+- **A publish that FAILED takes the bubble back and hands the words back**, beside the reason — unless
+  the reader has written something new meanwhile, which is the rule `removeSentWords` holds for a
+  draft rewritten while a send travelled. The composer's contract read through the optimistic draw.
+- **THE COMPOSER IS ONE BOX and Send is inside it**, at the foot of it — the app's own composer's own
+  shape (`rounded-2xl bg-card`, a column with a control row under the field). Two boxes for one act
+  ask the reader which of them they are typing into, and a button under the box read as a page control
+  rather than as this field's own.
+- **THE COLUMN IS DRAGGED**, with the diff page's own `ColumnSplitter` so a resize behaves the same on
+  both pages, and the width is persisted per browser beside that page's two. What gives way is the
+  CONVERSATION: `REVIEW_DOCUMENT_MIN_WIDTH` (480) is the room the document keeps whatever the reader
+  drags, and it is not a preference — the code inside it is the one thing here that cannot be narrowed
+  and still be read, which is the rule `DIFF_CODE_MIN_WIDTH` holds one page over. A viewport of 0 is
+  the first paint and clamps nothing, the trap `resolveDiffColumnWidths` states in full.
 - **Only a path the DIFF really holds travels.** `build_chat_prompt` drops any other, which is the
   rail `from_answer` holds for a path the MODEL invented applied to one a CLIENT asked for: nothing
   here can be made to read a file the merge request never changed. The composer only ever OFFERS
@@ -2826,11 +2874,10 @@ Eleven rules hold it, and each is pinned by `gitlab_review::tests`,
   (`MAX_QUESTION_CHARS` — it catches a whole file pasted into the box), the code one question carries
   is 64 KiB (`MAX_CHAT_PATCH_BYTES`, deliberately smaller than the reading's own 256 KiB: a follow-up
   about a part must not quietly cost what a fresh reading costs), the files it may tag are 8
-  (`MAX_QUESTION_FILES`, mirrored by `MAX_REVIEW_TAG_FILES` — a question tagged with every file of a
-  149-file branch is a fresh reading wearing a question's clothes), and the transcript keeps 12 turns
+  (`MAX_QUESTION_FILES`, mirrored by `MAX_REVIEW_TAG_FILES`), and the transcript keeps 12 turns
   (`MAX_CHAT_TURNS`). **The last one is quadratic in what reaches the provider**, since every turn is
   re-sent as context on the next question, and what falls off is the OLDEST so the exchange the reader
-  is in the middle of always travels. **The composer STATES the file bound before a send**
+  is in the middle of always travels. The composer STATES the file bound before a send
   (`reviewTagLimit`), which is the rule the composer's own picture ceilings hold.
 - **The answer is PROSE, and an EMPTY one is an error.** Markdown rather than the reading's JSON,
   because a person reads it — an envelope round a paragraph would be parsed away and rendered
@@ -2844,29 +2891,34 @@ Eleven rules hold it, and each is pinned by `gitlab_review::tests`,
   `mousemove`, never `mouseenter`** — this list opens right over the field the reader just clicked, so
   a row appearing under a stationary cursor would take the active row away from the keyboard, which is
   the defect both composer typeaheads were fixed for. Escape leaves the "@" as text.
-- **A refusal is reported AT the box, and the words are KEPT.** The composer's contract: a question
-  that did not reach the model must never look like it did, and it is one press from being asked again.
-- **A question that WORKED takes back the words and the tags, and only then** — cleared on the press,
-  a question the model never saw would be lost.
-- **The panel is BESIDE the document on a wide screen and BELOW it on a phone.** A document of prose
-  and code cannot share 390 px with a transcript, and below `md` the conversation follows the words it
-  is about — the shape the diff page's own two columns take.
+- **The panel is BESIDE the document on a wide screen and BELOW it on a phone**, bounded there so a
+  transcript of five turns cannot take the screen from the words it is about. Each half scrolls
+  itself.
 
 `web/mock/server.ts` reproduces the whole flow with no CLI and no model (`mockReviewAnswer`, which
 ECHOES what the question was told — the themes by title and the files by path — because that is the
 half a page can get wrong, and otherwise answers fixed prose so every capture is the same picture). It
 mirrors every REFUSAL the backend makes rather than only the happy path: a question with no words, one
 past the bound, and one asked before any reading exists. Its `{kind:"gitlab_mr"}` hook gains
-`refuse_ask` and `chat: "stored"`, and **a spec MUST clear it** — a question outlives the page exactly
-as a reading does. What the mock deliberately does NOT enforce is the write TOKEN, which is why
+`refuse_ask`, `chat: "stored"` and **`hold_ask`**, and **a spec MUST clear all three** — a question
+outlives the page exactly as a reading does, and a held one would make every later question wait.
+
+**`hold_ask` EXISTS BECAUSE THE OPTIMISTIC DRAW IS OTHERWISE UNREACHABLE HERE.** A real run is tens of
+seconds and this mock answers in one frame, so the state the whole change turns on — the question in
+its own bubble, the box already empty, no answer yet — has no duration at all: no capture could
+photograph it, and a spec asserting the bubble would pass identically on a page that drew nothing
+until the answer landed. It is the gap `{kind:"call_start", hold:…}` already fills for a call start,
+and for the same stated reason.
+
+What the mock deliberately does NOT enforce is the write TOKEN, which is why
 `gitlabAskMergeRequestReview` goes out through `writeRequest` and the pairing is pinned in Rust: see
 § THE MOCK DOES NOT ENFORCE THE WRITE TOKEN, which is the defect this method's own sibling shipped.
 
 **What is UNVERIFIED against the tenant is the RUN, exactly as it is for the reading.** The prompt,
 the parse and every bound are pinned in Rust and the surface against the mock; no real agent has
 answered a real question here, because that needs the user's own CLI and their own press. The failure
-mode if the model answers something unexpected is a refusal reported at the box with the words still
-in it, never a transcript claiming code it was never given.
+mode if the model answers something unexpected is a refusal reported at the box with the words handed
+back, never a transcript claiming code it was never given.
 
 **THE PROGRAM IS THE ONE `agent.rs` ALREADY RUNS**, and neither module adds a way to reach a model.
 The CLI, the provider, the model and every permission decision stay § The local agent's: the user's

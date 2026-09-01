@@ -26,9 +26,10 @@ describe("the pages of a merge request", () => {
       "Commits",
       "Pipelines",
       "Diffs",
-      // "Themes" rather than "Review": the Overview carries a real Approve and a real Merge, so a
-      // tab called Review beside them would promise the approval flow.
-      "Themes",
+      // "AI review" rather than "Review": the Overview carries a real Approve and a real Merge, so a
+      // tab called Review beside them would promise the approval flow, and the qualifier is what
+      // says this one is a machine's read-through instead.
+      "AI review",
     ]);
   });
 

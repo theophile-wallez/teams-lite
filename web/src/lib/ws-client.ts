@@ -205,6 +205,27 @@ const RECONNECT_MAX_DELAY_MS = 10_000;
 const RECONNECT_INITIAL_DELAY_MS = 500;
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * The ceiling for a request that starts an AGENT RUN on this machine.
+ *
+ * **It has to be LONGER than the backend's own bound, and that is the whole point of the number.**
+ * A reading of a diff is one CLI invocation with no progress frames — the page cannot tell "still
+ * thinking" from "hung" — and the backend already bounds it: `agent::RUN_IDLE_TIMEOUT` kills a child
+ * that has said nothing for 30 minutes, and answers with the CLI's own reason. So this timer must
+ * lose that race, or the reader is handed `timeout: gitlab_mr_review_run` in place of a sentence
+ * that says what went wrong.
+ *
+ * It also cost the feature. These methods went out on the ordinary 30-second ceiling, which every
+ * real run exceeds, so the reader met `timeout: gitlab_mr_review_run` EVERY time — while the backend
+ * ran on, finished, and stored the reading. An action that worked, reported as one that failed.
+ * Nothing could catch it: the mock answers instantly, so no spec and no capture ever waited.
+ *
+ * A request with NO timeout at all was the other option and is not needed: a socket that closes
+ * rejects every pending request already (`ws.onclose`), which is what covers a backend that died.
+ * What a ceiling still buys is an answer that is lost while the socket stays up.
+ */
+const AGENT_REQUEST_TIMEOUT_MS = 35 * 60_000;
+
 export type BackendOptions = {
   giveUpMs?: number;
   initialDelayMs?: number;
@@ -383,7 +404,11 @@ export class Backend {
     }
   }
 
-  private request<T = unknown>(method: string, params?: unknown): Promise<T> {
+  private request<T = unknown>(
+    method: string,
+    params?: unknown,
+    timeoutMs: number = REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -393,7 +418,7 @@ export class Backend {
       // request never leaves a lingering timer alive.
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(`timeout: ${method}`));
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending.set(id, {
         resolve: (v) => {
           clearTimeout(timer);
@@ -424,10 +449,15 @@ export class Backend {
   private async writeRequest<T = unknown>(
     method: string,
     params: Record<string, unknown>,
+    timeoutMs?: number,
   ): Promise<T> {
     const presented = this.writeToken;
     try {
-      return await this.request<T>(method, { ...params, write_token: presented ?? undefined });
+      return await this.request<T>(
+        method,
+        { ...params, write_token: presented ?? undefined },
+        timeoutMs,
+      );
     } catch (e) {
       const fresh = await this.retryWithAFreshToken(e, presented);
       if (fresh === null) {
@@ -438,7 +468,7 @@ export class Backend {
         if (isWriteTokenRefusal(e)) this.onWriteRefused?.();
         throw e;
       }
-      return await this.request<T>(method, { ...params, write_token: fresh });
+      return await this.request<T>(method, { ...params, write_token: fresh }, timeoutMs);
     }
   }
 
@@ -1651,13 +1681,18 @@ export class Backend {
    *  refusal, which names a token and tells a frontend to go and read it. That shipped, and it is
    *  the only thing between this method and the wrong call path.
    *
-   *  It is slow by nature — a run is tens of seconds — so it carries no timeout of its own and the
-   *  page says that it is running. */
+   *  **It carries {@link AGENT_REQUEST_TIMEOUT_MS} rather than the ordinary ceiling, and that is a
+   *  bug fix rather than a tuning choice.** It shipped on the 30-second default, which every real
+   *  run exceeds, so the reader met `timeout: gitlab_mr_review_run` every time while the backend ran
+   *  on and stored the reading — an action that worked, reported as one that failed. The comment
+   *  here used to claim the request carried no timeout of its own; it went through `request`, which
+   *  always had one. */
   gitlabRunMergeRequestReview(key: MergeRequestKey): Promise<{ review: GitLabReview }> {
-    return this.writeRequest<{ review: GitLabReview }>("gitlab_mr_review_run", {
-      project_path: key.projectPath,
-      iid: key.iid,
-    });
+    return this.writeRequest<{ review: GitLabReview }>(
+      "gitlab_mr_review_run",
+      { project_path: key.projectPath, iid: key.iid },
+      AGENT_REQUEST_TIMEOUT_MS,
+    );
   }
 
   /** The CONVERSATION about that reading, if the reader has asked anything.
@@ -1685,13 +1720,19 @@ export class Backend {
     question: string,
     tags: { themes: number[]; paths: string[] },
   ): Promise<{ chat: GitLabReviewChat }> {
-    return this.writeRequest<{ chat: GitLabReviewChat }>("gitlab_mr_review_ask", {
-      project_path: key.projectPath,
-      iid: key.iid,
-      question,
-      themes: tags.themes,
-      paths: tags.paths,
-    });
+    // The same ceiling as the reading, because it is the same run: one CLI invocation with no
+    // progress frames, bounded by the backend rather than by this timer.
+    return this.writeRequest<{ chat: GitLabReviewChat }>(
+      "gitlab_mr_review_ask",
+      {
+        project_path: key.projectPath,
+        iid: key.iid,
+        question,
+        themes: tags.themes,
+        paths: tags.paths,
+      },
+      AGENT_REQUEST_TIMEOUT_MS,
+    );
   }
 
   /** MERGE the branch.

@@ -758,6 +758,10 @@ export async function setMergeRequestControl(
      *  reading's, because the two are reported in different places: a refused reading at the button
      *  and a refused question at the box the words are still in. */
     refuse_ask?: string;
+    /** HOLD the next follow-up for this many ms before answering. The optimistic draw — the question
+     *  in its own bubble with the box already empty and no answer yet — has no duration against a mock
+     *  that answers in one frame, so this is the only way a spec or a capture can see it at all. */
+    hold_ask?: number;
     /** Put a CONVERSATION about the reading in place without asking anything, so a spec and a
      *  capture can reach a transcript without paying for a turn per picture. It needs a reading, so
      *  it implies one. */

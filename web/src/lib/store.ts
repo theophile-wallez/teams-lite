@@ -172,7 +172,14 @@ import {
   type PierreSide,
 } from "./gitlab-diff-comment";
 import { symbolIsSearchable, type DiffSymbolTarget } from "./gitlab-diff-symbols";
-import { reviewTagsToWire, type GitLabReview, type GitLabReviewChat, type ReviewTag } from "./gitlab-review";
+import {
+  REVIEW_CHAT_DEFAULT_WIDTH,
+  reviewTagsToWire,
+  type GitLabReview,
+  type GitLabReviewChat,
+  type PendingReviewQuestion,
+  type ReviewTag,
+} from "./gitlab-review";
 import { jobLogIsLive } from "./gitlab-job-log";
 import {
   isNotMerged,
@@ -896,6 +903,15 @@ export type AppState = {
   /** Why a question was not answered, in the CLI's or the backend's own words, reported at the box
    *  the words are still in — the composer's own contract. */
   gitlabReviewAskError: string | null;
+  /** A question that has left this page and whose answer has not come back. It is DRAWN as the
+   *  reader's own turn at once — the rule `chessPending` holds for a move, because a composer that
+   *  swallows a question and shows nothing feels broken — and it is taken back if the publish fails,
+   *  with the words handed back to the box. */
+  gitlabReviewPending: PendingReviewQuestion | null;
+  /** How wide the reader dragged the READING's conversation column, in pixels. Persisted per browser
+   *  beside the diff page's own two, and for their reason: a per-screen decision with no upstream to
+   *  write it to. */
+  gitlabReviewChatWidth: number;
   /** How wide the two side columns of the diff page are, in pixels — the reader's own drag,
    *  persisted per browser beside the layout above and for its reason: a per-screen decision with
    *  no upstream to write it to.
@@ -1052,6 +1068,7 @@ const GITLAB_DIFF_LAYOUT_KEY = "teams-lite:gitlab-diff-layout";
 // the window happens at draw time, in `resolveDiffColumnWidths`).
 const GITLAB_DIFF_FILES_WIDTH_KEY = "teams-lite:gitlab-diff-files-width";
 const GITLAB_DIFF_SYMBOLS_WIDTH_KEY = "teams-lite:gitlab-diff-symbols-width";
+const GITLAB_REVIEW_CHAT_WIDTH_KEY = "teams-lite:gitlab-review-chat-width";
 
 /**
  * The calendar's display preferences — the three toggles the view menu offers.
@@ -1240,6 +1257,8 @@ function initialState(): AppState {
     gitlabReviewChat: EMPTY_REVIEW_CHAT,
     gitlabReviewAsking: false,
     gitlabReviewAskError: null,
+    gitlabReviewPending: null,
+    gitlabReviewChatWidth: REVIEW_CHAT_DEFAULT_WIDTH,
     gitlabDiffFilesWidth: FILES_COLUMN_DEFAULT_WIDTH,
     gitlabDiffSymbolsWidth: SYMBOLS_PANEL_DEFAULT_WIDTH,
     gitlabDiffSelection: null,
@@ -4047,6 +4066,7 @@ export class TeamsController {
       gitlabReviewChat: EMPTY_REVIEW_CHAT,
       gitlabReviewAsking: false,
       gitlabReviewAskError: null,
+      gitlabReviewPending: null,
       // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
       // piece of this page that would be read as current when it is minutes old.
       gitlabPipeline: null,
@@ -4444,28 +4464,64 @@ export class TeamsController {
   /**
    * Ask a FOLLOW-UP about the reading: the same agent run, narrowed to what the reader tagged.
    *
-   * The words are NOT cleared here. That is the composer's own contract, and it is what makes a
-   * refusal recoverable: a question that did not reach the model must be left where the reader can
-   * press again, and one that did is cleared by the caller once the turn is really there.
+   * **The question is DRAWN at once**, as the reader's own turn with no answer under it yet
+   * (`gitlabReviewPending`). That is the rule `chessPending` already holds for a move and for its
+   * reason: a run is tens of seconds, so a composer that takes the words and shows nothing until the
+   * answer lands looks like one that lost them. The words go from the box to the transcript in one
+   * frame, and they are never in neither.
+   *
+   * **A publish that FAILED takes the turn back**, and the caller puts the words back in the box
+   * beside the reason (`gitlabReviewAskError`). That is the composer's own contract read through the
+   * optimistic draw: a question that did not reach the model must end up where the reader can press
+   * again, and a bubble left standing over a failure would say it was asked.
    */
   async askGitLabReview(question: string, tags: ReviewTag[]): Promise<boolean> {
     const key = this.get().openMergeRequest;
     if (!key || this.get().gitlabReviewAsking) return false;
-    this.set({ gitlabReviewAsking: true, gitlabReviewAskError: null });
+    const wire = reviewTagsToWire(tags);
+    this.set({
+      gitlabReviewAsking: true,
+      gitlabReviewAskError: null,
+      // What really TRAVELS, so the pending turn says the same thing the real one will. The paths
+      // are the wire's — bounded — rather than every file the reader tagged.
+      gitlabReviewPending: {
+        question,
+        themes: wire.themes,
+        paths: wire.paths,
+        asked_ms: Date.now(),
+      },
+    });
     try {
-      const wire = reviewTagsToWire(tags);
       const { chat } = await this.backend.gitlabAskMergeRequestReview(key, question, wire);
-      if (sameMergeRequest(this.get().openMergeRequest, key)) this.set({ gitlabReviewChat: chat });
+      // The real turn REPLACES the pending one in the same state change, so the transcript never
+      // draws the question twice — which is what a separate clear would let a render between the two
+      // do.
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        this.set({ gitlabReviewChat: chat, gitlabReviewPending: null });
+      }
       return true;
     } catch (e) {
       if (sameMergeRequest(this.get().openMergeRequest, key)) {
-        this.set({ gitlabReviewAskError: errText(e) });
+        this.set({ gitlabReviewAskError: errText(e), gitlabReviewPending: null });
       }
       return false;
     } finally {
       if (sameMergeRequest(this.get().openMergeRequest, key)) {
         this.set({ gitlabReviewAsking: false });
       }
+    }
+  }
+
+  /** Remember how wide the reader dragged the reading's conversation column. */
+  setGitLabReviewChatWidth(width: number): void {
+    if (!Number.isFinite(width)) return;
+    const next = Math.round(width);
+    if (this.get().gitlabReviewChatWidth === next) return;
+    this.set({ gitlabReviewChatWidth: next });
+    try {
+      localStorage.setItem(GITLAB_REVIEW_CHAT_WIDTH_KEY, String(next));
+    } catch {
+      /* ignore — a failed persist just does not survive a reload */
     }
   }
 
@@ -4613,6 +4669,10 @@ export class TeamsController {
       if (Number.isFinite(symbols) && symbols > 0) {
         this.set({ gitlabDiffSymbolsWidth: Math.round(symbols) });
       }
+      // The READING's conversation column, read back here rather than in a loader of its own: it is
+      // the same kind of preference, kept on the same terms.
+      const chat = Number(localStorage.getItem(GITLAB_REVIEW_CHAT_WIDTH_KEY));
+      if (Number.isFinite(chat) && chat > 0) this.set({ gitlabReviewChatWidth: Math.round(chat) });
     } catch {
       /* ignore — a column width is non-critical */
     }
@@ -4776,6 +4836,7 @@ export class TeamsController {
       gitlabReviewChat: EMPTY_REVIEW_CHAT,
       gitlabReviewAsking: false,
       gitlabReviewAskError: null,
+      gitlabReviewPending: null,
       // A comment being written belongs to one line of one file, so opening another merge
       // request — or leaving this one — takes it away rather than carrying it over to a line
       // that means something else there.
