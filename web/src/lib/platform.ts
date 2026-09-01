@@ -71,10 +71,16 @@ export function hasModifier(event: Pick<KeyboardEvent, "ctrlKey" | "metaKey">): 
  * opposite case, which `messaging.spec.ts` caught: a menu whose row was CLICKED is still
  * mounted for its exit animation, and it then swallowed the Escape that cancels the pending
  * reply that row had just started. The state cannot tell those apart, because both read
- * `closed`. What can is the KEY itself: every Radix layer dismisses in the CAPTURE phase and
- * calls `preventDefault()`, so the shell's own handler checks `event.defaultPrevented` first
- * (see components/app.tsx) and this function is what remains for the case that flag cannot
- * cover — a dialog that is up and did not consume the key.
+ * `closed`. What can is asking BEFORE Radix has moved anything, which is what
+ * {@link watchOpenLayers} does from the CAPTURE phase — so the shell asks {@link aLayerWasOpen}
+ * first (see components/app.tsx) and this function is what remains for the case that answer cannot
+ * cover: a dialog that is up and never saw the key at all, because a native `datetime-local` input
+ * ate it for its own calendar.
+ *
+ * It deliberately does NOT read `event.defaultPrevented`, and this comment said for a while that
+ * the shell did. It does not, and it must not: a Radix layer that is CLOSING still calls
+ * `preventDefault()`, so that flag reads the same for a layer the reader was looking at and one
+ * whose own row they had just clicked — which is the regression `messaging.spec.ts` catches.
  */
 export function aModalIsOpen(): boolean {
   if (typeof document === "undefined") return false;
@@ -177,8 +183,16 @@ export function watchOpenLayers(): () => void {
   if (typeof document === "undefined") return () => {};
   const onKeyDownCapture = () => {
     layerWasOpen =
-      document.querySelector('[role="dialog"][data-state="open"], [role="menu"][data-state="open"]') !==
-      null;
+      document.querySelector(
+        // A dialog and a menu carry a role that says what they are. The third member is for a layer
+        // that honestly has NEITHER: a hover card publishes no `role` at all (Radix deliberately
+        // leaves it roleless, because supplementary content is not a dialog), so a card the reader
+        // is looking at could not be matched here — and on a merge-request route the shell's own
+        // Escape calls `goToList()`, so one press would dismiss the card AND throw the reader off
+        // the page. `data-escape-layer` is what such a layer opts in with, rather than claiming a
+        // role it does not have (see components/review-code-chip.tsx).
+        '[role="dialog"][data-state="open"], [role="menu"][data-state="open"], [data-escape-layer][data-state="open"]',
+      ) !== null;
   };
   document.addEventListener("keydown", onKeyDownCapture, { capture: true });
   return () => document.removeEventListener("keydown", onKeyDownCapture, { capture: true });

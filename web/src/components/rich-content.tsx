@@ -24,6 +24,7 @@ import { EmailSummaryCard } from "./email-summary";
 import { GitLabImage } from "./gitlab-image";
 import { MediaImage } from "./media-image";
 import { PersonHoverCard } from "./person-card";
+import { CodeRefChip } from "./review-code-chip";
 import { TrackerRefChip } from "./tracker-ref-chip";
 import { useTrackerVocabulary } from "./tracker-refs-context";
 import { renderWordEffects } from "./word-effect";
@@ -631,6 +632,16 @@ function renderNode(node: RichNode, key: number, ctx: RenderContext): ReactNode 
         >
           {children}
         </TrackerRefChip>
+      );
+    case "codeRef":
+      // A NAME in the code, mentioned in the AI reading's prose and proved to stand in the diff
+      // that reading is about (lib/gitlab-review-code.ts). The children are the run verbatim, so
+      // the chip adds an affordance and replaces nothing — and a surface with no diff to point at
+      // draws the words alone, which is what every surface but the reading gets.
+      return (
+        <CodeRefChip key={key} symbol={node.attrs.symbol ?? ""} inCode={node.attrs.inCode}>
+          {children}
+        </CodeRefChip>
       );
     case "agent":
       // The very chip the composer drew (components/agent-tag.tsx), so tagging an agent

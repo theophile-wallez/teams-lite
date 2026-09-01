@@ -206,6 +206,10 @@ drained without dropping requests\"), never a category (\"YAML changes\", \"test
 For each theme write a `summary`: the thought process a reviewer needs — what changed, why these \
 files are one change, and what to look at closely. Where one file needs a remark of its own, put \
 it in that file's `note`. Say what you are unsure about rather than guessing.\n\n\
+Write the `headline`, every `summary` and every `note` as markdown. Every time you name something \
+in the code — a function, a constant, a field, a key — quote that identifier in backticks. The \
+reader presses those to see the lines it stands on, so a name written as a bare word is a name \
+they cannot reach.\n\n\
 Answer with JSON and NOTHING else — no prose around it, no code fence. This shape:\n\
 {{\"headline\": \"one sentence about the whole branch\", \"themes\": [{{\"title\": \"…\", \
 \"summary\": \"…\", \"files\": [{{\"path\": \"exact/path/from/the/files/list\", \"note\": \"…\"}}]}}]}}\n\n\
@@ -728,6 +732,31 @@ mod tests {
         // parse really applies rather than being left to guess it.
         assert!(prompt.contains("dropped"));
         assert!(prompt.contains("headline"));
+    }
+
+    /// THE READING'S PROSE IS MARKDOWN, AND ITS IDENTIFIERS ARE BACKTICKED, because the page turns
+    /// each one into a chip a reader presses to see the lines it stands on
+    /// (`web/src/lib/gitlab-review-code.ts`).
+    ///
+    /// It is pinned because the whole of that feature's best branch rests on it and NOTHING else can
+    /// notice it is gone: the mock's own fixture backticks nine names, so every capture and every
+    /// spec would keep passing while a real run wrote flat prose and the reader met a reading with
+    /// almost no chips in it. That is the "a fixture that is tidier than the real answer is a fixture
+    /// that lies" defect, and this assertion is the only thing on this side of the process boundary
+    /// that can catch it.
+    ///
+    /// `chat_system_prompt` has asked for exactly this since it shipped and is pinned the same way —
+    /// so the two prompts agree about what the page can draw.
+    #[test]
+    fn the_reading_system_prompt_asks_for_identifiers_in_backticks() {
+        let prompt = system_prompt();
+        assert!(prompt.contains("markdown"));
+        assert!(prompt.contains("backticks"));
+        // And the REASON travels with the instruction: a model told why is one that keeps doing it
+        // on the file notes as well as on the headline.
+        assert!(prompt.contains("press"));
+        // Its sibling asks for the same thing, so a reading and an answer are marked by one rule.
+        assert!(chat_system_prompt().contains("backticks"));
     }
 
     // ---- asking a FOLLOW-UP ---------------------------------------------------

@@ -433,6 +433,16 @@ function AppInner() {
               controller.setGitLabDiffFile(path);
               if (mergeRequestId) goToMergeRequestDiff(mergeRequestId);
             }}
+            // And a press on a NAME in the reading's prose leaves for the same page with that
+            // name's own occurrences panel open on it — the surface built for a list of places,
+            // which is where a coarse pointer is sent because a floating card cannot be drawn over
+            // a 317px document (see review-code-chip.tsx). The name is resolved to a PLACE first,
+            // for the reason the file is named first: the diff page reads where to open from that
+            // state, so navigating without it lands the reader at the top of the branch.
+            onOpenSymbol={(symbol, place) => {
+              controller.openGitLabReviewSymbol(symbol, place);
+              if (mergeRequestId) goToMergeRequestDiff(mergeRequestId);
+            }}
           />
         </div>
       ) : onChessRoute && routeConversationId && routeGameId ? (

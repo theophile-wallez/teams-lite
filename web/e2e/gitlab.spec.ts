@@ -1993,6 +1993,249 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-review-chat"]')).toHaveCount(0);
   });
 
+  // ---- a NAME in the reading's prose --------------------------------------------
+  //
+  // The reading writes about the branch, and the things it writes about are in the diff one page
+  // over. Each of those names is a chip, hovered for the real lines it stands on and pressed to go
+  // to them. `lib/gitlab-review-code.ts` decides which words; these pin the page's own half.
+
+  /** The names the document has marked, in reading order. */
+  const markedNames = (page: Page) =>
+    page.locator('[data-testid="review-code-ref"]').evaluateAll((els) =>
+      els.map((el) => el.getAttribute("data-symbol") ?? ""),
+    );
+
+  test("marks a name the diff holds, and leaves alone one it does not", async ({ page }) => {
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const names = await markedNames(page);
+    // FROM THE MODEL'S OWN BACKTICKS. `draining` and `ready` are single lowercase words, so nothing
+    // about their spelling says code — the backtick is what makes them reachable at all.
+    expect(names).toContain("draining");
+    expect(names).toContain("ready");
+    expect(names).toContain("READY_PATH");
+    // FROM ITS OWN SPELLING, with no backticks anywhere near it. This is the branch that answers the
+    // paragraph a model really writes, and the fixture puts it in the same sentence as the refusal
+    // below so neither can pass alone.
+    expect(names).toContain("terminationGracePeriodSeconds");
+    // AND A NAME THE DIFF DOES NOT HOLD IS THE WORD IT IS, backticks or not. `gracefulShutdown` is
+    // in a code span in that same sentence and the branch never mentions it — so the chip stays a
+    // claim worth trusting. It is the rule a tracker reference nothing can address already follows.
+    expect(names).not.toContain("gracefulShutdown");
+    // And an English word the branch DOES hold stays prose: `state` and `health` are both in the
+    // patches, and in a sentence they are words.
+    expect(names).not.toContain("state");
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("shows the real lines behind a name on hover, and never an empty panel", async ({ page }) => {
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const chip = page.locator('[data-testid="review-code-ref"]').first();
+    const name = await chip.getAttribute("data-symbol");
+    await chip.hover();
+
+    const card = page.locator('[data-testid="review-code-card"]');
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute("data-symbol", name!);
+    // THE PANEL IS NEVER EMPTY, which is the invariant the whole feature rests on: a chip is minted
+    // only for a member of the index, and every member is a name the search finds. A chip whose card
+    // said "nowhere else" would be a control that changes nothing.
+    await expect(card.locator('[data-testid="review-code-card-line"]').first()).toBeVisible();
+    await expect(card.locator('[data-testid="review-code-card-summary"]')).toContainText(
+      "occurrence",
+    );
+    // The line is REAL CODE from the branch, with the name marked in it — so the card says which of
+    // several names in one sentence it belongs to.
+    await expect(card.locator('[data-testid="review-code-card-line"]').first()).toContainText(name!);
+    // And the line says which side it is on, in words rather than only in colour.
+    await expect(
+      card.locator('[data-testid="review-code-card-line"]').first(),
+    ).toHaveAttribute("data-side", /new|old|both/);
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("ESCAPE closes the card and leaves the reader on the reading", async ({ page }) => {
+    // A hover card publishes no `role` at all, so neither shell guard could see one — and on a
+    // merge-request route the app's own Escape calls `goToList()`. Without the third member added to
+    // `watchOpenLayers`' selector, one press would dismiss the card AND throw the reader off the
+    // page, taking a half-written follow-up question with it.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    await page.locator('[data-testid="review-code-ref"]').first().hover();
+    await expect(page.locator('[data-testid="review-code-card"]')).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[data-testid="review-code-card"]')).toHaveCount(0);
+    // STILL HERE. This is the assertion the whole attribute exists for.
+    await expect(page.locator('[data-testid="gitlab-review-page"]')).toBeVisible();
+    expect(new URL(page.url()).pathname).toMatch(/\/review$/);
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("a press inside the card goes to that line in the DIFF page", async ({ page }) => {
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    await page.locator('[data-testid="review-code-ref"]').first().hover();
+    const row = page.locator('[data-testid="review-code-card-line"]').first();
+    await expect(row).toBeVisible();
+    const path = await page
+      .locator('[data-testid="review-code-card-file"]')
+      .first()
+      .getAttribute("data-path");
+    await row.click();
+
+    // The DIFF page, at that file, with the name's own occurrences panel open on it — the surface
+    // built for a list of places, which is where a list of places belongs.
+    await expect(page.locator('[data-testid="gitlab-diff-page"]')).toBeVisible();
+    expect(new URL(page.url()).pathname).toMatch(/\/diff$/);
+    await expect(page.locator('[data-testid="gitlab-diff-pane"]')).toHaveAttribute(
+      "data-path",
+      path!,
+    );
+    await expect(page.locator('[data-testid="gitlab-diff-symbols"]')).toBeVisible();
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test.describe("a name on a PHONE", () => {
+    // A real coarse pointer, because that is the whole of what this branch turns on:
+    // `useCoarsePointer` reads `(pointer: coarse)`, and a narrow viewport alone does not set it —
+    // `hasTouch` is what does, which is the lever e2e/mobile.spec.ts relies on for every other
+    // coarse-pointer rule in this app.
+    //
+    // The OPTIONS are spelled out rather than taken from `devices["Pixel 7"]`, and that is not a
+    // preference: a device preset carries `defaultBrowserType`, and Playwright refuses that inside a
+    // describe group because it forces a new worker — which fails the WHOLE FILE to collect, not just
+    // this group. mobile.spec.ts can use the preset because it is top-level there.
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
+
+    test("PRESSES to the diff page instead of opening a card over the reading", async ({ page }) => {
+      // Measured: this document column is about 317px tall on a phone, and a card of three files by
+      // three places at the 44px this app gives a row under a thumb is about 570px — it would cover
+      // the sticky heading, the paragraph the name was in, and the box below it. So there is no card
+      // here at all, and the press goes to the surface built for a list of places.
+      await setMergeRequestControl(page, { review: "stored" });
+      await openGitLab(page);
+      await openMergeRequest(page, 596);
+      await openThemes(page);
+
+      const press = page.locator('[data-testid="review-code-press"]').first();
+      await expect(press).toBeVisible();
+      // The name is still readable as a name, and it says what it is for whoever cannot hover.
+      await expect(press).toHaveAttribute("aria-label", /in the changes on this branch/);
+
+      await press.tap();
+      // NO CARD, ever, on this pointer.
+      await expect(page.locator('[data-testid="review-code-card"]')).toHaveCount(0);
+      // The diff page, ON THE CODE, at the file the name stands in.
+      await expect(page.locator('[data-testid="gitlab-diff-page"]')).toBeVisible();
+      expect(new URL(page.url()).pathname).toMatch(/\/diff$/);
+      // The PATCH column rather than the file tree: the reader asked for a line, so a tree with no
+      // mention of the name they pressed would be the page ignoring the question.
+      await expect(page.locator('[data-testid="gitlab-diff-page"]')).toHaveAttribute(
+        "data-column",
+        "patch",
+      );
+      // At a real file rather than at nothing: the press resolves the name to a PLACE before it
+      // navigates, so the pane names the file that place is in (`openGitLabReviewSymbol`).
+      await expect(page.locator('[data-testid="gitlab-diff-pane"]')).toHaveAttribute(
+        "data-path",
+        /.+/,
+      );
+      // AND NO OCCURRENCES PANEL, which is this page's own rule rather than a shortfall of the
+      // press: below `DIFF_COLUMNS_MIN_WIDTH` it is one column at a time, so a list of places would
+      // be a third page competing with the two there already are (§ A NAME pressed in the code). So
+      // what a phone gets from a chip is the CODE, at the line — not the list.
+      await expect(page.locator('[data-testid="gitlab-diff-symbols"]')).toHaveCount(0);
+
+      await setMergeRequestControl(page, { clear: true });
+    });
+
+    test("keeps the inline target the ink's own box rather than growing it to 44px", async ({
+      page,
+    }) => {
+      // Growing it would add 14px above and below a ~16px chip, and two names on adjacent lines would
+      // then have targets overlapping by 21px — a thumb on the lower half of one opening the other
+      // one's code. That is why the coarse path is a NAVIGATION and not a panel: this target is
+      // honest only because pressing it costs the reader nothing they cannot undo.
+      await setMergeRequestControl(page, { review: "stored" });
+      await openGitLab(page);
+      await openMergeRequest(page, 596);
+      await openThemes(page);
+
+      const box = (await page.locator('[data-testid="review-code-ref"]').first().boundingBox())!;
+      expect(box).not.toBeNull();
+      // The prose is 14px on `leading-relaxed`, so a line box is about 22.75px. The chip stays inside
+      // one: anything approaching 44 is a target reaching into the line above or below.
+      expect(box.height).toBeLessThan(30);
+
+      // AND A HIT TEST, because a measured height says nothing about what a thumb REACHES. This app
+      // grows a small target with a PSEUDO-ELEMENT, which adds no height to the box it hangs off — so
+      // the assertion above passes with 14px of invisible target above and below. That is not
+      // hypothetical: `after:-inset-y-[14px]` was on this very button once, the height assertion was
+      // green, and only a press showed it. The rule is proved by what the point resolves to.
+      // MEASURED FROM THE INK, never from the button. That is the whole of what makes this test able
+      // to see the defect: padding and a grown pseudo-element both enlarge the BUTTON's own rect, so
+      // a probe taken relative to it lands outside whatever growth it is meant to detect and passes.
+      // The ink's box is the one thing that does not move.
+      const reach = await page
+        .locator('[data-testid="review-code-ref"]')
+        .first()
+        .evaluate((ink) => {
+          const r = (ink as HTMLElement).getBoundingClientRect();
+          const press = ink.closest('[data-testid="review-code-press"]');
+          const at = (y: number) => {
+            const hit = document.elementFromPoint(r.left + 2, y);
+            return !!press && (hit === press || press.contains(hit));
+          };
+          // 10px clear of the ink is inside the next line's own text at this size, and well inside
+          // any of the growths that have been tried here.
+          return { above: at(r.top - 10), below: at(r.bottom + 10) };
+        });
+      expect(reach.above, "the target reaches into the line above").toBe(false);
+      expect(reach.below, "the target reaches into the line below").toBe(false);
+
+      await setMergeRequestControl(page, { clear: true });
+    });
+  });
+
+  test("says at document level why a name might not be marked", async ({ page }) => {
+    // A name is only marked against the patches that TRAVELLED, and the fixture carries files with
+    // none. It is said once and at document level, because the chip that would have explained a
+    // missing chip is the thing that is absent.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    await expect(page.locator('[data-testid="gitlab-review-unmarked"]')).toContainText(
+      "not marked",
+    );
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
   test("offers the split layout where two columns of code fit, and remembers it", async ({
     page,
   }) => {

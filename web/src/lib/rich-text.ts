@@ -78,7 +78,15 @@ export type RichTag =
    *  {@link markTrackerRefs}, the way `agent` only comes from {@link markAgentTag}. Its
    *  children are the author's own text, verbatim, so anything that does not know the tag
    *  still shows exactly what was written. */
-  | "trackerRef";
+  | "trackerRef"
+  /** A NAME in the code, mentioned in the AI reading's own prose (`computeState`,
+   *  `READY_PATH`) and proved to stand in the diff that reading is about. The parser never
+   *  produces one — prose carries no markup for a name either — so it only ever comes from
+   *  {@link markReviewCode}, the way `trackerRef` only comes from {@link markTrackerRefs}. Its
+   *  children are the run of characters verbatim, so anything that does not know the tag still
+   *  shows exactly the word that was written. It is drawn ONLY on the reading, because it is a
+   *  claim about one merge request's changes and nowhere else has a diff to point at. */
+  | "codeRef";
 
 export type RichAttrs = {
   href?: string;
@@ -139,6 +147,16 @@ export type RichAttrs = {
    *  bytes arrive, so a description does not re-flow around it as it loads. */
   width?: number;
   height?: number;
+  /** Code references only: the name to search the diff for. It is the run VERBATIM and is the
+   *  same bytes the index was built from, which is what makes the panel behind the chip
+   *  guaranteed non-empty — never lower-cased, never trimmed (see `symbolIndex`). It is kept
+   *  beside the children for the reason a tracker reference's own is: the children are what was
+   *  written, and this is what is asked. */
+  symbol?: string;
+  /** Code references only: whether the chip already sits on the surface an inline `code` span
+   *  paints. There it adds an affordance instead of painting a second surface on top of one —
+   *  the rule the renderer's own `code` case already holds for a `code` inside a `pre`. */
+  inCode?: boolean;
 };
 
 export type RichNode =

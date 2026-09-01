@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
@@ -24,8 +24,11 @@ import {
 } from "~/lib/gitlab-review";
 import type { ResolvedTheme } from "~/lib/appearance";
 import { diffFileNotice, formatDiffStat, type GitLabDiff } from "~/lib/gitlab-diff";
+import type { PierreSide } from "~/lib/gitlab-diff-comment";
 import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
 import { gitlabPageUrl, mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
+import { markReviewCode, reviewCodeUnsearchable } from "~/lib/gitlab-review-code";
+import { ReviewCodeProvider, useCodeVocabulary } from "./review-code-context";
 import { gitLabMarkdownOptions } from "~/lib/gitlab-upload";
 import { formatMessageTime } from "~/lib/message-time";
 import { cn } from "~/lib/utils";
@@ -118,7 +121,14 @@ function useViewportWidth(): number {
   return width;
 }
 
-export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path: string) => void }) {
+export function GitLabReviewPage(props: {
+  onBack: () => void;
+  onOpenFile: (path: string) => void;
+  /** Leave for the DIFF page with one name's occurrences panel open on it — the press a name chip
+   *  in the prose makes on a coarse pointer, and the press a row inside its hover card makes on
+   *  any pointer (see `review-code-chip.tsx`). */
+  onOpenSymbol: (symbol: string, place?: { path: string; lineNumber: number; side: PierreSide }) => void;
+}) {
   const detail = useAppState((s) => s.gitlabDetail);
   const diff = useAppState((s) => s.gitlabDiff);
   const diffError = useAppState((s) => s.gitlabDiffError);
@@ -139,10 +149,40 @@ export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path:
   // The element the width is declared on, and the one the splitter writes to.
   const columnHost = useRef<HTMLDivElement | null>(null);
 
+  // Written inline, these would be new function identities on every render of this page, so the
+  // provider's value object would be new every render too.
+  //
+  // **WHAT IS LOAD-BEARING IS `code`, AND IT IS SAFE EITHER WAY**: it is memoized on the DIFF alone
+  // (see review-code-context.tsx), so the four marking memos — which key on it and not on the value
+  // object — do not re-run when only these move. So this is hygiene rather than a fix: it keeps the
+  // context value from changing for no reason, which is what re-renders every consumer of it.
+  //
+  // And it is honest about its limit: `props.onOpenSymbol` is an inline arrow in `app.tsx`, so it is
+  // a fresh identity on every render of the SHELL and these two follow it. Memoizing it there as
+  // well would close that, and it is deliberately not done — the shell passes `onOpenFile` the same
+  // way, and one file's style is worth more than a dependency that changes nothing measurable.
+  const onOpenSymbol = props.onOpenSymbol;
+  const openSymbol = useCallback((symbol: string) => onOpenSymbol(symbol), [onOpenSymbol]);
+  const goToOccurrence = useCallback(
+    (symbol: string, path: string, lineNumber: number, side: PierreSide) =>
+      onOpenSymbol(symbol, { path, lineNumber, side }),
+    [onOpenSymbol],
+  );
+
   return (
     // A bare `!42` in the reading's own prose means a merge request of THIS project, exactly as it
     // does in the description and in a comment on a line of the diff (see lib/tracker-ref.ts).
     <TrackerProjectProvider project={detail?.project_path}>
+      {/* And a NAME in that prose means something in THIS branch's diff — which is why the
+          vocabulary is one page's and not the app's (see review-code-context.tsx). The provider
+          wraps the conversation as well as the document, because an answer to a follow-up question
+          is prose about the same code. */}
+      <ReviewCodeProvider
+        diff={diff}
+        hasReview={!!review}
+        onOpenSymbol={openSymbol}
+        onGoToOccurrence={goToOccurrence}
+      >
       <section
         data-testid="gitlab-review-page"
         className="flex h-full min-h-0 w-full flex-col bg-background"
@@ -277,6 +317,7 @@ export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path:
           )}
         </div>
       </section>
+      </ReviewCodeProvider>
     </TrackerProjectProvider>
   );
 }
@@ -405,9 +446,19 @@ function ReviewHeadline(props: {
   const coverage = reviewCoverage(review, props.diff);
   const limits = reviewLimits(review);
   const folded = reviewFoldedPatches(props.groups);
+  const unmarked = reviewCodeUnsearchable(props.diff);
+  const code = useCodeVocabulary();
+  // Parsed, then MARKED — the two in one memo, because the marking is a pass over the tree the parse
+  // just made and a second memo would key on an array identity this one already owns. It is done
+  // here rather than inside `RichNodes` for the reason review-code-context.tsx gives: this prose is
+  // the only prose in the app that has a diff to point at.
   const headline = useMemo(
-    () => parseGitLabMarkdown(review.headline, gitLabMarkdownOptions(props.project)),
-    [review.headline, props.project],
+    () =>
+      markReviewCode(
+        parseGitLabMarkdown(review.headline, gitLabMarkdownOptions(props.project)),
+        code,
+      ),
+    [review.headline, props.project, code],
   );
   return (
     <header className="flex flex-col gap-3 px-4 pt-5 pb-6 md:px-6">
@@ -436,6 +487,16 @@ function ReviewHeadline(props: {
         <span data-testid="gitlab-review-coverage">
           {coverage.grouped} of {coverage.total} files grouped
         </span>
+        {/* WHY A NAME MIGHT NOT BE MARKED, said once and at document level — the only level where a
+            missing chip can explain itself, since the chip that would have explained it is the thing
+            that is absent. A name is only marked against the patches that TRAVELLED, and on the real
+            instance 96 of one merge request's 149 files came back with none. */}
+        {unmarked && (
+          <>
+            {" · "}
+            <span data-testid="gitlab-review-unmarked">{unmarked}</span>
+          </>
+        )}
       </p>
       {props.stale && (
         // A reading is of ONE commit. It is not thrown away when the branch moves — it is still the
@@ -486,9 +547,11 @@ function ReviewSection(props: {
   onOpenFile: (path: string) => void;
 }) {
   const { group } = props;
+  const code = useCodeVocabulary();
   const summary = useMemo(
-    () => parseGitLabMarkdown(group.summary, gitLabMarkdownOptions(props.project)),
-    [group.summary, props.project],
+    () =>
+      markReviewCode(parseGitLabMarkdown(group.summary, gitLabMarkdownOptions(props.project)), code),
+    [group.summary, props.project, code],
   );
   return (
     <section
@@ -551,9 +614,13 @@ function ReviewFile(props: {
   const [open, setOpen] = useState<boolean | null>(null);
   const shown = open ?? patch?.shown ?? false;
   const stat = formatDiffStat(entry.file);
+  const code = useCodeVocabulary();
   const note = useMemo(
-    () => (entry.note ? parseGitLabMarkdown(entry.note, gitLabMarkdownOptions(props.project)) : null),
-    [entry.note, props.project],
+    () =>
+      entry.note
+        ? markReviewCode(parseGitLabMarkdown(entry.note, gitLabMarkdownOptions(props.project)), code)
+        : null,
+    [entry.note, props.project, code],
   );
   const notice = diffFileNotice(entry.file);
   return (

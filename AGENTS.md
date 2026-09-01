@@ -2783,6 +2783,158 @@ needs two columns of code, and here the code sits inside a column of prose set a
 so split would be two columns of eight characters, which is the reason `effectiveDiffLayout` refuses
 it on a phone. The toggle stays on the Diffs page, where it changes something.
 
+#### AND A NAME IN THAT PROSE IS THE CODE IT NAMES (hovered for its lines, pressed to go to them)
+
+The reading writes about the branch, and the things it writes about are in the diff one page over:
+"`health()` gains a draining state", "the `grantedAction` is extracted in `computeState`". Read as
+words, every one of those is a dead end — the reader has to remember the name, press through to the
+feed and find it. Each is now a CHIP: hovering it shows the real lines of the branch it stands on,
+with the name marked exactly, and pressing it goes to that line on the Diffs page with the name's own
+occurrences panel open. `web/src/lib/gitlab-review-code.ts` decides which words,
+`gitlab-diff-symbols.ts` where they stand, `web/src/components/review-code-chip.tsx` draws it and
+`review-code-context.tsx` carries what one page's prose is read against.
+
+**THE SEARCH IS THE DIFF PAGE'S OWN, and nothing here re-spells it.** `symbolOccurrences` already
+answers "where does this name stand in these changes" for a press on a token in the code
+(§ A NAME pressed in the code); this asks the same function. What is added is one cheaper question —
+"is this word a name these changes hold AT ALL?", asked of every candidate in a paragraph — and it is
+`symbolIndex`, which lives in that same module for a reason that is correctness rather than tidiness:
+a second module would re-spell the boundary, and the obvious tokenizer is wrong in exactly the
+direction `wholeWordMatches` refuses. Over `memory: 256Mi`, a real line of the fixture, an identifier
+pattern applied globally yields `Mi`, whose left-hand neighbour is `6` — a name character — so the
+search finds nothing there. **`nameRuns` is what makes the two ONE predicate**: a MAXIMAL run of name
+characters has a non-name character on both sides by construction, which is precisely the boundary the
+search tests for, so `256Mi` is one run and `symbolIsSearchable` refuses it for opening with a digit.
+`the index and the search cannot disagree` walks every member of the index through the search and is
+the test the whole feature rests on — because a chip whose panel reads "Nowhere else in these changes"
+about a name two centimetres away in the patch is a control that changes nothing.
+
+**A NAME THE DIFF DOES NOT HOLD STAYS THE WORD IT IS.** The rule `markTrackerRefs` holds for a
+reference nothing can address and `agent_markdown`'s @mention holds for a person the thread does not
+hold. It is what makes a chip a claim worth trusting, and it is why nothing here needs a stop-list.
+
+**AND IN PLAIN PROSE THE SHAPE HAS TO SAY CODE, which is the honest limit of the feature.** The words
+of a branch are also the words of a sentence: `state`, `flag`, `group`, `mode`, `payload`, `ready` and
+`transitions` are all identifiers in the branch this was reported against AND ordinary English in the
+paragraph describing it. So a word with no backticks round it is marked only where its own spelling
+says it is a name — an internal `_`, ONE lowercase-to-uppercase hump, or a trailing `()`. Ten rules
+hold it, and each is pinned by `gitlab-review-code.test.ts` or `web/e2e/gitlab.spec.ts`:
+
+- **ONE hump is the shape, not two.** Measured over `web/src` — 19 754 distinct identifiers, 4 766 of
+  them humped — **2 811 carry exactly one against 1 955 with more, so 59%** of every humped name here:
+  `computeState`, `grantedAction`, `initActions`, `replicaCount`, `apiVersion` and `toBe` among them.
+  A two-hump threshold marks `getNextActions` (2 humps) and refuses `computeState` (1) IN THE SAME
+  SENTENCE, and a reader who can infer no rule from what is marked reads the marking as noise. That
+  version was written and measured out.
+- **A single lowercase word is REFUSED, and a backtick is what overrules it.** Nothing in the text can
+  tell `state` the field from `state` the noun, so the model's own mark is the only honest signal —
+  which is why the ONE backend change is a sentence in `gitlab_review::system_prompt()` asking for an
+  identifier in backticks. `chat_system_prompt` has asked for exactly that since it shipped and the
+  reading's prompt never did, so a real run wrote flat prose while the mock's fixture backticked nine
+  names: every capture and every spec would have passed over a reading with almost no chips in it.
+  That is the "a fixture that is tidier than the real answer is a fixture that lies" defect, and
+  `the_reading_system_prompt_asks_for_identifiers_in_backticks` is the only thing on that side of the
+  process boundary that can catch it.
+- **A span that points at ONE name drops the shape test; one that quotes a FRAGMENT keeps it.**
+  `` `draining` `` is the model pointing, so a single lowercase word is reachable there;
+  `` `kind: PodDisruptionBudget` `` is a quotation, so `PodDisruptionBudget` is marked and `kind` is
+  not. Without the split every lowercase word inside every quoted fragment becomes a chip — and it is
+  what keeps `` `/ready` `` plain while `` `ready` `` is a chip, which the capture shows in one line.
+- **SEGMENTS, never chains.** `state.automatedAction` marks `automatedAction` and leaves `state.` as
+  prose. Three things follow and each was a real bug in the version that marked the chain: nothing
+  indexes a dotted chain (`.` is not a name character), so a chain lookup can only ever fail;
+  `symbolIsSearchable` REFUSES a dotted name, so the card behind such a chip would have no name, no
+  summary and no rows; and it is the cut Shiki already makes in the feed, where `onTokenClick` reports
+  `automatedAction` alone — so one word gets one answer on both pages of one merge request.
+- **A FILE of the diff is refused whole.** `health.ts` is the tail of `src/server/health.ts`, so a
+  chip on it would search `health` — a different question from the one its own text asks
+  (`namesAFileOfTheDiff`). `package.json`, `values.yaml` and `bun.lock` go the same way, and in prose
+  every segment of each is lowercase and refused anyway.
+- **A FENCED BLOCK is left entirely alone.** A fence is `pre > code` in this app's parser, so `pre` is
+  skipped BY NAME before the `code` branch is reached — the rule `markTrackerRefs` states as "a
+  reference inside code is code". Without it the fixture's own `ts` block becomes a row of pressable
+  pills, `if` and `return` included.
+- **THE COST IS STATED RATHER THAN FIXED:** a proper noun with an internal capital that the branch
+  also holds — `GitLab`, `TypeScript`, `PostgreSQL` — becomes a chip. The panel behind one is honest,
+  so it costs a chip nobody needed; the rule that would prevent it costs `computeState`. It is pinned
+  as a test, because a cost nobody can see is one somebody later reads as a bug.
+- **ON A PHONE THE PRESS LANDS ON THE CODE, NOT ON A LIST, and that is a stated limit.** The diff
+  page draws its occurrences panel only where there are two columns to put it beside — below
+  `DIFF_COLUMNS_MIN_WIDTH` it is one column at a time, and that rule is the panel's own and predates
+  this. So a chip there gives the file, the code and the lit LINE: "take me to this" rather than "show
+  me everywhere". One thing had to change for it — that page opens on the FILES, and a reader who
+  pressed a NAME has already answered which file, so it opens on the PATCH when a name is already
+  open. Without it the press landed on a file tree with no mention of the name pressed, which is what
+  the phone spec caught and now pins.
+- **The COARSE pointer gets a press that NAVIGATES, and no card at all — for three MECHANISMS rather
+  than for a pixel count.** An earlier draft of this section gave two figures, a 317px document column
+  and a 570px card, and neither was measured here; they are gone, because § Conventions' own rule is
+  not to write a number into this file that nothing measured. What holds instead is checkable: on a
+  phone the document SHARES its column with the follow-up conversation (`max-h-[55%]`), so a floating
+  card covers the sticky heading and the paragraph the name was in, and Radix cannot shrink it to fit
+  (`shift` and `flip` MOVE a panel); a TAP cannot close what it opened, because the trigger is not a
+  `DismissableLayerBranch`, so the dismissal fires on its `pointerdown` and the `click` after it
+  re-opens — structural, and true of an open-only handler too; and a HOLD collides with the platform's
+  own text selection, whose only fix here is `user-select: none`, which would make an identifier the
+  one word on the page a reader cannot copy, on the surface where copying one into a grep is the
+  commonest next move.
+- **THE INLINE TARGET IS NOT GROWN, and that is the other half of the same trade.** The prose is 14px
+  on `leading-relaxed`, so a line box is 22.75px: growing a ~16px chip to 44 would add 14px above and
+  below, and two names on adjacent lines would have targets overlapping by 21px — a thumb on the lower
+  half of one opening the other one's code. § A HOLD is how a phone reaches a menu answers that same
+  failure for the thread foot row by growing 4px UP and 16px DOWN, "because what is above is a real
+  control"; in a paragraph there is a real control in BOTH directions, so no asymmetry is available. A
+  16px target that takes the reader to a whole surface is fair; a 16px target that opens a 570px
+  overlay is not.
+- **ESCAPE closes the card and the reader STAYS on the reading.** A hover card publishes no `role` at
+  all, so neither `aLayerWasOpen` nor `aModalIsOpen` could match one — and on a merge-request route the
+  shell's Escape calls `goToList()`, so one press would dismiss the card AND throw the reader off the
+  page, taking a half-written follow-up question with it. `watchOpenLayers`' selector gains a third
+  alternation member, `[data-escape-layer][data-state="open"]`, which is the narrow fix: no role is
+  invented and nothing about the other two layers moves. **Two stale comments were corrected with
+  it** — `platform.ts` and `platform.test.ts` both described the shell as checking
+  `event.defaultPrevented`, and it does not: it asks `aLayerWasOpen()` from the capture phase, because
+  a CLOSING Radix layer preventDefaults too. (Whether the shell ever did is not claimed here; what is
+  claimed is what it does now.)
+
+**THE CHIP IS THE QUIETEST IN THIS APP, and the first capture is why.** It was drawn in the accent with
+an underline, and a marked name in a paragraph then read as a LINK — same ink, same rule as every
+anchor here — so a reader expects to leave the page, and five in one summary spend the app's one accent
+on furniture. The word keeps the colour of the prose it is in and only the dotted RULE is the app's own;
+the accent arrives on HOVER, where the reader has already aimed. Inside a `code` span the surface is
+already painted, so the chip adds no second wash — the rule `renderNode`'s own `code` case holds one
+level up for a `code` inside a `pre`.
+
+**IT IS NOT READ BY `RichNodes`, and that is the opposite choice from `tracker-refs-context.tsx`.**
+That context is read by the seam itself and its own header gives two reasons: the answer belongs to the
+app ("it is two settings"), and a reference is drawn on nearly every surface there is. Neither holds
+here — this answer is ONE page's diff read and the surface is ONE route. So the MARKING is done by the
+four memos that already parse this prose (the headline, a theme's summary, a file's note, and an answer
+in the follow-up conversation), and only the CHIP reads the context. `RichNodes` is called from seven
+places in five files and by every message bubble in the app through `RichContent`; a third marker there
+would make every surface that draws words pay for a feature drawn on one route.
+
+**WHY A NAME MIGHT NOT BE MARKED is said once, at document level** (`reviewCodeUnsearchable`, beside
+the coverage count). A name is only ever marked against the patches that TRAVELLED, and that is the
+normal case rather than an edge: measured on the real instance, 96 of one merge request's 149 files came
+back collapsed at every page size. It is stated at document level because the chip that would have
+explained a missing chip is the thing that is absent.
+
+`web/mock/server.ts` needed ONE sentence added to its reading fixture, and it carries two rules at
+once: `gracefulShutdown` in a code span that the diff does not hold, and
+`terminationGracePeriodSeconds` in plain prose that it does — so a page that marked every word and a
+page that marked only backticked ones would each fail. `cd web && bun run preview -- --out /tmp/rev
+--diff-review --dpr 3` captures the marked prose in both themes (pass `--dpr 3`: the feature is 14px
+type with a dotted rule under some of its words), the card open over the page it covers, and the card
+CROPPED to itself in both themes — the crop is the pair, because what the card is about is 11px code
+and a 10px line number, and the whole-page shot is what says how much of the paragraph it sits over.
+
+**What is UNVERIFIED against the tenant is the same thing the reading's own is:** no real agent has
+written a real reading with these chips in it, because that needs the user's own CLI and their own
+press. The DIFF reads the marking is built on are measured (§ The DIFF is a PAGE), the rules are pinned
+in unit tests and the surface against the mock. The failure mode if a model ignores the backtick
+instruction is fewer chips, never a wrong one — the diff gate is what guarantees that.
+
 #### AND THE READER CAN ASK ABOUT IT (a follow-up, tagging a theme or a file)
 
 The reading answers "what does this branch do". The next question is always narrower — "why is the
@@ -3827,7 +3979,12 @@ user. Two independent mechanisms enforce that split:
   to themselves, a reading of an earlier commit, a refused run, a phone's width — and the FOLLOW-UP
   conversation beside it: the "@" list offering a theme above the files in both themes, the chips that
   say what will travel, the answer it lands as in both themes, the whole page with the conversation
-  beside it, a refused question, and that panel at a phone's width where it is BELOW the document:
+  beside it, a refused question, and that panel at a phone's width where it is BELOW the document —
+  and the NAMES in that prose (§ AND A NAME IN THAT PROSE IS THE CODE IT NAMES): the marked words
+  cropped to one theme's own summary in both themes, the card a hover opens over the page it covers,
+  and that card cropped to itself in both themes. Pass `--dpr 3` for those: the feature is 14px type
+  with a dotted rule under some of its words, and a 1200px page says nothing about whether either can
+  be read.
   `bun run preview -- --out /tmp/rev --diff-review`, or `openReview` from the same file (everything
   goes through the mock's own `gitlab_mr_review*`, so no CLI runs and no model is reached — and that
   run RESETS the `{kind:"gitlab_mr"}` hook at the end, because a stored reading and a stored

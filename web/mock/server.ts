@@ -5429,7 +5429,15 @@ function mockReviewFor(mr: MockMergeRequest): MockReview {
           "- the ORDER of the checks — `draining` has to win over `ready`, or a draining replica " +
           "still reports itself healthy;\n" +
           "- `READY_PATH` moved from `/ready` to `/readyz`, so anything probing the old path gets " +
-          "a 404 rather than a health answer.",
+          "a 404 rather than a health answer.\n\n" +
+          // TWO RULES OF THE NAME CHIPS, in one sentence, both against real fixture data
+          // (lib/gitlab-review-code.ts). `gracefulShutdown` is in a CODE SPAN and the diff does not
+          // hold it, so it stays plain code — the gate that makes a chip a claim worth trusting.
+          // `terminationGracePeriodSeconds` is in PLAIN PROSE with no backticks, and the diff does
+          // hold it, so its own spelling is what earns it a chip. Without the pair, a page that
+          // marked every word or only backticked ones would pass every test.
+          "There is no `gracefulShutdown` hook yet, so terminationGracePeriodSeconds is the whole " +
+          "of what gives a replica its time.",
         files: grouped.slice(0, half).map((path, index) => ({
           path,
           ...(index === 0

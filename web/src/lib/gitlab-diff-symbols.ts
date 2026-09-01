@@ -289,6 +289,102 @@ function isNameChar(ch: string): boolean {
   return ch !== "" && /[A-Za-z0-9_$]/.test(ch);
 }
 
+// ---- the NAMES the diff holds ------------------------------------------------
+//
+// {@link symbolOccurrences} answers "where does this one name stand", which is the question a
+// press in the code asks. The reading's own prose asks the cheaper one first — "is this word a
+// name these changes hold at all?" — of every candidate word in a paragraph, and it must have
+// the SAME answer.
+//
+// **THAT IS WHY THIS LIVES HERE AND NOT IN THE CALLER.** A second module would have to re-spell
+// the boundary, and the obvious tokenizer — `/[A-Za-z_$][A-Za-z0-9_$]*/g` — is wrong in exactly
+// the direction {@link wholeWordMatches} refuses: over `memory: 256Mi` (a real line of the diff
+// fixture) it yields `Mi`, whose left-hand neighbour is `6` — a name character — so the search
+// finds nothing there. A word in the index whose search comes back empty is a chip whose panel
+// says "Nowhere else in these changes" about a name that is on screen beside it, which is a
+// control that changes nothing.
+//
+// {@link nameRuns} is what makes the two one predicate: a MAXIMAL run of name characters has a
+// non-name character (or the end of the line) on both sides BY CONSTRUCTION, which is precisely
+// the boundary `wholeWordMatches` tests for. So `256Mi` is one run, `symbolIsSearchable` refuses
+// it for opening with a digit, and `Mi` never enters the index at all.
+
+/** One maximal run of name characters, and where it sits. */
+export type NameRun = { name: string; start: number; end: number };
+
+/**
+ * Every maximal run of name characters in `text`.
+ *
+ * It is the ONE tokenizer this app reads a name out of running text with — the index below is
+ * built from it, and the reading's prose is scanned with it — so a word the index holds and a
+ * word a paragraph offers are cut from their surroundings by one rule.
+ *
+ * A run is returned whatever it looks like; {@link symbolIsSearchable} is what judges one. Two
+ * jobs in one function would leave a caller unable to ask the second question about a run it can
+ * see.
+ *
+ * Note what this does NOT do: it never joins two runs across a `.`, so `state.automatedAction` is
+ * `state` and `automatedAction`, and `health.ts` is `health` and `ts`. That is the same cut Shiki
+ * makes in the diff feed, where `onTokenClick` reports `automatedAction` alone — so one word gets
+ * one answer on both pages of one merge request.
+ */
+export function nameRuns(text: string): NameRun[] {
+  const runs: NameRun[] = [];
+  let at = 0;
+  while (at < text.length) {
+    if (!isNameChar(text[at]!)) {
+      at += 1;
+      continue;
+    }
+    const start = at;
+    while (at < text.length && isNameChar(text[at]!)) at += 1;
+    runs.push({ name: text.slice(start, at), start, end: at });
+  }
+  return runs;
+}
+
+/** The names the patches of one diff hold. A `Set`, because the only question asked of it is
+ *  membership — and it is READ-ONLY to its callers, since a caller that added to it would be
+ *  claiming the diff holds a name it does not. */
+export type SymbolIndex = ReadonlySet<string>;
+
+/** An index of nothing, for a caller with no diff yet. Shared rather than built per call, so a
+ *  memo keyed on it is stable while the diff is still on its way. */
+export const EMPTY_SYMBOL_INDEX: SymbolIndex = new Set<string>();
+
+/**
+ * Every name the patches of `diff` hold, taken over the text that TRAVELLED.
+ *
+ * Built once per diff and asked many times, which is the whole reason it exists: marking a
+ * paragraph runs a membership test per word, where a search per word would walk every patch line
+ * again for each of them.
+ *
+ * What it can be wrong about is what {@link SymbolSearch.unsearchable} already says out loud:
+ * four of the five states a file arrives in carry no patch, so a name that stands only in a
+ * binary file, a pure rename or a stretch GitLab collapsed is absent from this — the same
+ * blindness the panel states in a sentence, in the one direction that is safe. A name it does
+ * not hold is left as the word it was.
+ *
+ * **Every member is guaranteed to be findable.** A member is a maximal run that
+ * {@link symbolIsSearchable} accepted, so `symbolOccurrences(diff, member)` answers a search with
+ * at least one occurrence in it — the boundary is the same rule, the comparison is the same bytes
+ * (nothing here folds case), and the bounds are the same two constants.
+ * `the_index_and_the_search_cannot_disagree` pins that over the fixture's own diff.
+ */
+export function symbolIndex(diff: GitLabDiff | null | undefined): SymbolIndex {
+  if (!diff) return EMPTY_SYMBOL_INDEX;
+  const names = new Set<string>();
+  for (const file of diff.files) {
+    if (!fileIsSearchable(file)) continue;
+    for (const line of patchTextLines(file.patch)) {
+      for (const run of nameRuns(line.text)) {
+        if (symbolIsSearchable(run.name)) names.add(run.name);
+      }
+    }
+  }
+  return names;
+}
+
 /**
  * The panel's own heading: how many, and in how many files.
  *

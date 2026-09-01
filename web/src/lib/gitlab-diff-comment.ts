@@ -64,6 +64,21 @@ export type WireDiffPosition = {
  *  a rendered diff, that one is about a file. */
 export type PierreSide = "additions" | "deletions";
 
+/** Which COLUMN of a rendered diff a line is reached from.
+ *
+ *  A removed line is only ever drawn in the deletions column; everything else — an added line, and a
+ *  context line, which is drawn in BOTH — is reached from the additions one.
+ *
+ *  It is one function because FOUR callers had spelled it out by hand across three files: this
+ *  module's own comment anchor, the diff page's jump to an occurrence, the store's `firstPlaceOf`, and
+ *  the reading's own hover card. Four copies of a two-branch mapping is four chances for one of them
+ *  to send a reader to the wrong gutter. It lives HERE rather than beside the search because this
+ *  module owns both types — `gitlab-diff-symbols.ts` imports from this one, so the reverse would be a
+ *  cycle. */
+export function pierreSideOf(side: DiffLineSide): PierreSide {
+  return side === "old" ? "deletions" : "additions";
+}
+
 /** A selection as `@pierre/diffs` reports one. Its own `SelectedLineRange`, mirrored here so
  *  the rules below are testable without importing the renderer. `end` may sit ABOVE `start`:
  *  `start` is where the drag began, not where the range begins. */
@@ -505,7 +520,7 @@ export function diffCommentAnchor(target: DiffCommentTarget): {
   lineNumber: number;
 } {
   return {
-    side: target.last.side === "old" ? "deletions" : "additions",
+    side: pierreSideOf(target.last.side),
     lineNumber: diffLineNumber(target.last),
   };
 }

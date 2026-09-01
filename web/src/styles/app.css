@@ -512,6 +512,65 @@ html[data-virtual-keyboard-open] .composer-shell {
 .tracker-ref:hover {
   background-color: var(--tracker-ref-surface-hover);
 }
+/* A NAME the AI reading mentions, drawn as the code it names (lib/gitlab-review-code.ts, drawn by
+   components/review-code-chip.tsx). It is a word in the middle of a sentence, and what it has to say
+   for itself is only that there is code behind it.
+
+   IT IS THE QUIETEST CHIP IN THIS APP, on purpose. A tracker reference gets a filled pill because it
+   appears on every surface there is and carries a vendor's mark that needs a background; a paragraph
+   here carries FIVE of these, and five filled pills in one sentence is a row of buttons with prose
+   between them. So this spends a dotted rule and the type it is already set in — no fill, no border,
+   no weight change, and no change to the line height, which is what lets a marked word sit in a
+   paragraph without moving the words around it.
+
+   The TARGET is the ink's own box and is deliberately not grown to the 44px this app gives a control
+   under a thumb. The prose is 14px on `leading-relaxed`, so a line box is 22.75px: growing a ~16px
+   chip to 44 would put 14px of target above and below it, and two names on adjacent lines would then
+   have targets overlapping by 21px — a thumb on the lower half of one opening the other one's code.
+   § A HOLD is how a phone reaches a menu records that same failure for the thread foot row and
+   answers it by growing 4px UP and 16px DOWN, "because what is above is a real control"; in a
+   paragraph there is a real control in BOTH directions, so no asymmetry is available. That is why a
+   coarse pointer gets a press that NAVIGATES rather than a panel: a 16px target that takes the reader
+   to a whole surface is fair, where a 16px target that opens a 570px overlay is not. */
+.code-ref {
+  /* THE WORD KEEPS THE COLOUR OF THE PROSE IT IS IN, and only the RULE under it is the app's own.
+     It was drawn in the accent first and the capture said why not: a marked name in a paragraph then
+     reads as a LINK — the same ink and the same underline as every anchor in this app — so a reader
+     expects to leave the page, and five of them in one summary spend the app's one accent on
+     furniture. § THE CHROME IS ONE ROW AT THE FOOT records that argument for a thread card's
+     disclosure, and § A CHANNEL IS DRAWN THE WAY TEAMS DRAWS IT for its foot row: the accent goes to
+     the one thing that earns it, which here is the HOVER — where the reader has already aimed. */
+  color: inherit;
+  /* `from-font` keeps the rule where the typeface says an underline goes, so it clears a descender
+     instead of cutting through the `p` of `computeState`. */
+  text-decoration: underline dotted var(--code-ref-rule);
+  text-decoration-thickness: from-font;
+  text-underline-offset: 0.15em;
+  border-radius: 0.2rem;
+  /* One name, one chip: a line break inside it would draw half the name on each line, which is the
+     rule `.tracker-ref` and `.mention-chip` both hold. */
+  white-space: nowrap;
+  cursor: default;
+  transition: background-color 120ms ease-out;
+}
+/* The hover wash is the only surface this chip ever paints, and it paints it where the reader has
+   already aimed. It bleeds a little past the word so the wash reads as belonging to it rather than as
+   a rectangle behind it. */
+.code-ref:hover {
+  color: var(--code-ref);
+  text-decoration-color: var(--code-ref);
+  background-color: var(--code-ref-surface-hover);
+  box-shadow: 0 0 0 0.15em var(--code-ref-surface-hover);
+}
+/* INSIDE an inline `code` span the surface is already painted, so the chip adds no second wash on
+   top of one — the rule `renderNode`'s own `code` case holds one level up for a `code` inside a
+   `pre`: only one of the two paints. The RULE still goes to the accent on hover, because that is
+   the whole of what says which of several names in one sentence the card belongs to. */
+.code-ref-bare:hover {
+  background-color: transparent;
+  box-shadow: none;
+}
+
 /* The mark rides with the text: sized in `em` so it follows the font of whatever the chip
    sits in — a message body, a comment, a merge request's description. */
 .tracker-ref-logo {

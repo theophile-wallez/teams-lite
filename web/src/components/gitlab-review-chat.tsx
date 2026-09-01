@@ -17,7 +17,9 @@ import {
 } from "~/lib/gitlab-review";
 import type { GitLabDiff } from "~/lib/gitlab-diff";
 import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
+import { markReviewCode } from "~/lib/gitlab-review-code";
 import { gitLabMarkdownOptions } from "~/lib/gitlab-upload";
+import { useCodeVocabulary } from "./review-code-context";
 import { formatMessageTime } from "~/lib/message-time";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
@@ -367,9 +369,19 @@ function ReviewTurn(props: {
   project: string | undefined;
 }) {
   const { turn } = props;
+  const code = useCodeVocabulary();
+  // An ANSWER is prose about the same code the document is about, so a name in one is marked by the
+  // same rules — the fourth and last of the memos that do it (see review-code-context.tsx). It costs
+  // nothing where there is no diff: the vocabulary is empty and `markReviewCode` hands the tree back.
   const answer = useMemo(
-    () => (turn.answer ? parseGitLabMarkdown(turn.answer, gitLabMarkdownOptions(props.project)) : null),
-    [turn.answer, props.project],
+    // BOTH sides of the rebase: a turn whose answer has not landed yet draws nothing (a question is
+    // drawn the moment it leaves, so `turn.answer` is empty while the run is out), and one that HAS
+    // landed is marked like every other piece of this page's prose.
+    () =>
+      turn.answer
+        ? markReviewCode(parseGitLabMarkdown(turn.answer, gitLabMarkdownOptions(props.project)), code)
+        : null,
+    [turn.answer, props.project, code],
   );
   const context = turnContext(turn, props.review);
   return (

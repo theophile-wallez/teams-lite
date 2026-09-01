@@ -113,6 +113,17 @@
   --tracker-ref-surface: #ededf0;
   --tracker-ref-surface-hover: #e2e2e8;
 
+  /* A NAME in the AI reading's prose that the branch's diff really holds (lib/gitlab-review-code.ts).
+   * It is deliberately QUIETER than a tracker chip and than inline code: a paragraph carries several
+   * of these, so a filled pill on each would read as a row of buttons rather than as prose with
+   * pressable words in it. What it spends is a DOTTED underline in the app's accent — the one thing a
+   * word in the middle of a sentence can wear without changing its shape or its line height — plus a
+   * wash on hover, which is where the reader has already aimed. It is drawn on one surface only, so
+   * unlike the tracker chip it needs no background it can guarantee. */
+  --code-ref: #4f46e5; /* the accent's own ink, so a name reads as this app's own affordance */
+  --code-ref-rule: rgba(79, 70, 229, 0.45);
+  --code-ref-surface-hover: rgba(79, 70, 229, 0.1);
+
   /* Reaction pills straddle the bubble's bottom edge, and their fill is
    * translucent so that edge shows faintly through the chip. The chip pairs it
    * with a backdrop blur, which keeps the emoji legible over whatever is behind.
@@ -299,6 +310,13 @@
   --tracker-ref: #e4e4e7; /* zinc-200 */
   --tracker-ref-surface: #34343a;
   --tracker-ref-surface-hover: #3f3f47;
+
+  /* The name chip on dark. The ink is lifted well clear of the dark surface it sits on — the accent
+   * at its light-theme value is unreadable there — and the rule and the wash are the same two
+   * translucencies of it, so the chip is one colour on both themes rather than two. */
+  --code-ref: #a5b4fc;
+  --code-ref-rule: rgba(165, 180, 252, 0.5);
+  --code-ref-surface-hover: rgba(165, 180, 252, 0.14);
 
   --reaction-chip: rgba(46, 46, 46, 0.7);
   --reaction-chip-mine: rgba(58, 65, 128, 0.76);

@@ -9,6 +9,8 @@ import {
   symbolOccurrences,
   symbolSearchLimits,
   symbolSearchSummary,
+  nameRuns,
+  symbolIndex,
 } from "./gitlab-diff-symbols";
 import type { GitLabDiff, GitLabDiffFile } from "./gitlab-diff";
 
@@ -26,6 +28,20 @@ const PATCH = [
   "+export function health(server, ready) {",
   "+  if (server.draining) return 503;",
   "   return serverReady ? 200 : 503;",
+  "",
+].join("\n");
+
+/** A chart value, which is where the sharpest tokenizer trap in this app really lives: `256Mi` is
+ *  one maximal run of name characters and is refused for opening with a digit, while the obvious
+ *  identifier pattern applied globally would yield `Mi` — whose left-hand neighbour is `6`, a name
+ *  character, so the search can never find it. */
+const MEMORY_PATCH = [
+  "--- a/chart/values.yaml",
+  "+++ b/chart/values.yaml",
+  "@@ -1,2 +1,3 @@",
+  " resources:",
+  "+  memory: 256Mi",
+  "+  replicaCount: 2",
   "",
 ].join("\n");
 
@@ -263,5 +279,107 @@ describe("fileIsSearchable", () => {
   it("is exactly whether the file's patch travelled", () => {
     expect(fileIsSearchable(file())).toBe(true);
     expect(fileIsSearchable(file({ patch: undefined }))).toBe(false);
+  });
+});
+
+describe("nameRuns", () => {
+  it("cuts a name out of running text at any character that cannot be part of one", () => {
+    expect(nameRuns("if (server.draining) return 503;").map((run) => run.name)).toEqual([
+      "if",
+      "server",
+      "draining",
+      "return",
+      "503",
+    ]);
+  });
+
+  it("never joins two names across a dot, which is the same cut the diff feed makes", () => {
+    // Shiki tokenizes `state.automatedAction` into three tokens, so `onTokenClick` on the diff page
+    // already searches `automatedAction` alone. One word must get one answer on both pages of one
+    // merge request.
+    expect(nameRuns("state.automatedAction").map((run) => run.name)).toEqual([
+      "state",
+      "automatedAction",
+    ]);
+    expect(nameRuns("src/server/health.ts").map((run) => run.name)).toEqual([
+      "src",
+      "server",
+      "health",
+      "ts",
+    ]);
+  });
+
+  it("reports where each run sits, so a caller can mark exactly the characters it found", () => {
+    const runs = nameRuns("  memory: 256Mi");
+    expect(runs.map((run) => [run.name, run.start, run.end])).toEqual([
+      ["memory", 2, 8],
+      ["256Mi", 10, 15],
+    ]);
+  });
+
+  it("is empty for text holding no name at all", () => {
+    expect(nameRuns("  -> { } +++ ")).toEqual([]);
+  });
+});
+
+describe("symbolIndex", () => {
+  it("holds the names the patches carry, and nothing from a file whose patch never travelled", () => {
+    const index = symbolIndex(diff([file(), file({ path: "logo.png", patch: undefined })]));
+    for (const name of ["server", "health", "draining", "ready", "serverReady", "import"]) {
+      expect(index.has(name)).toBe(true);
+    }
+    expect(symbolIndex(diff([file({ patch: undefined })])).size).toBe(0);
+  });
+
+  /** THE PROOF the whole feature rests on: a name in the index is a name the search finds.
+   *
+   *  A chip is only ever minted for a member of this set, so a member the search comes back empty
+   *  for is a chip whose panel says "Nowhere else in these changes" about a name that is on screen
+   *  beside it — a control that changes nothing, which this codebase bans by name. It holds because
+   *  a member is a MAXIMAL run of name characters, which has a non-name character on both sides by
+   *  construction, and that is exactly the boundary `wholeWordMatches` tests for. */
+  it("cannot disagree with the search: every member is found, with at least one occurrence", () => {
+    const d = diff([file(), file({ path: "chart/values.yaml", patch: MEMORY_PATCH })]);
+    const index = symbolIndex(d);
+    expect(index.size).toBeGreaterThan(5);
+    for (const name of index) {
+      const found = symbolOccurrences(d, name);
+      expect(found, `the index holds ${name} and the search refused it`).not.toBeNull();
+      expect(found!.total, `the index holds ${name} and the search found none`).toBeGreaterThan(0);
+    }
+  });
+
+  it("never admits a run the search would refuse at its own boundary", () => {
+    // `256Mi` is a real line of the fixture. A tokenizer written as `/[A-Za-z_$][A-Za-z0-9_$]*/g`
+    // yields `Mi`, whose left-hand neighbour is `6` — a name character — so the search finds
+    // nothing. The maximal run is `256Mi`, which `symbolIsSearchable` refuses for opening with a
+    // digit, so neither ever enters.
+    const index = symbolIndex(diff([file({ path: "chart/values.yaml", patch: MEMORY_PATCH })]));
+    expect(index.has("Mi")).toBe(false);
+    expect(index.has("256Mi")).toBe(false);
+    expect(index.has("memory")).toBe(true);
+  });
+
+  it("never folds case, because the search is a byte comparison", () => {
+    const index = symbolIndex(diff([file()]));
+    expect(index.has("ready")).toBe(true);
+    expect(index.has("Ready")).toBe(false);
+    expect(symbolOccurrences(diff([file()]), "Ready")!.total).toBe(0);
+  });
+
+  it("respects the search's own length bounds rather than restating them", () => {
+    const long = "a".repeat(SYMBOL_MAX_CHARS + 1);
+    const index = symbolIndex(
+      diff([file({ patch: ["@@ -1,1 +1,2 @@", "+const x = 1;", `+const ${long} = 2;`, ""].join("\n") })]),
+    );
+    // One character is under `SYMBOL_MIN_CHARS`, and the long one is over `SYMBOL_MAX_CHARS`.
+    expect(index.has("x")).toBe(false);
+    expect(index.has(long)).toBe(false);
+    expect(index.has("const")).toBe(true);
+  });
+
+  it("is empty for no diff at all", () => {
+    expect(symbolIndex(null).size).toBe(0);
+    expect(symbolIndex(undefined).size).toBe(0);
   });
 });

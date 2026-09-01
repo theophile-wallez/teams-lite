@@ -166,12 +166,17 @@ import {
   diffCommentPosition,
   diffCommentTarget,
   diffCommentsAvailable,
+  pierreSideOf,
   type DiffCommentTarget,
   type DiffLineSelection,
   type PierreLineRange,
   type PierreSide,
 } from "./gitlab-diff-comment";
-import { symbolIsSearchable, type DiffSymbolTarget } from "./gitlab-diff-symbols";
+import {
+  symbolIsSearchable,
+  symbolOccurrences,
+  type DiffSymbolTarget,
+} from "./gitlab-diff-symbols";
 import {
   REVIEW_CHAT_DEFAULT_WIDTH,
   reviewTagsToWire,
@@ -884,6 +889,15 @@ export type AppState = {
    *  question about the diff on screen, and carrying it to another branch would answer it about
    *  files that have nothing to do with the press. */
   gitlabDiffSymbol: DiffSymbolTarget | null;
+  /** Whether the diff page should open on the CODE rather than on the file list, because the reader
+   *  arrived by pressing a NAME in the reading's prose and has already answered which file.
+   *
+   *  A ONE-SHOT INTENT, consumed by that page on mount, and that is what makes it right where reading
+   *  {@link gitlabDiffSymbol} would be wrong: the symbol OUTLIVES the visit — it is dropped only when
+   *  a merge request is opened or left — so a reader who pressed a name, went back, and then opened
+   *  the Diffs tab would find that page skipping its own file list on the strength of a press they
+   *  made two surfaces ago. An intent says "this navigation", where a symbol says "this branch". */
+  gitlabDiffOpenOnCode: boolean;
   /** The AI reading of this merge request's diff that this machine has made, or null. It is a
    *  reading of one COMMIT, and it carries the sha it read so the page can say when the branch has
    *  moved since (see `reviewIsStale`). */
@@ -1251,6 +1265,7 @@ function initialState(): AppState {
     gitlabDiffDepth: "listed",
     gitlabDiffLayout: "unified",
     gitlabDiffSymbol: null,
+    gitlabDiffOpenOnCode: false,
     gitlabReview: null,
     gitlabReviewBusy: false,
     gitlabReviewError: null,
@@ -4057,6 +4072,7 @@ export class TeamsController {
       // A name pressed in one branch's code says nothing about another's, so the panel closes
       // with the merge request rather than searching this diff for the last one's word.
       gitlabDiffSymbol: null,
+      gitlabDiffOpenOnCode: false,
       // A reading belongs to ONE merge request. It is re-read from the store below rather than
       // carried over, and the view opens on the FILES — a themes view with the last branch's
       // reading in it would be a grouping of files this page is not drawing.
@@ -4627,6 +4643,47 @@ export class TeamsController {
     this.set({ gitlabDiffSymbol: { name: open.name, path, lineNumber, side } });
   }
 
+  /**
+   * Open a name's occurrences panel from the READING, where there is no line to have pressed.
+   *
+   * The reading's prose names things (§ AN AI READING OF THE DIFF); the diff page is where a list of
+   * places belongs. So a chip there resolves to a PLACE before it navigates — `openGitLabDiffSymbol`
+   * takes one because a press in the code has one, and this is the same state reached from a surface
+   * that does not.
+   *
+   * `place` is the row the reader pressed inside the hover card, when they pressed one. With none it
+   * is the FIRST place the name stands, in the diff's own order — the same order the panel will list,
+   * so the reader lands on the row they would have pressed first anyway.
+   *
+   * It does nothing at all when the name stands nowhere: a chip is only ever minted for a name the
+   * index holds, so that cannot happen from one — but the diff may have moved under a page that has
+   * been open a while, and landing the reader on an empty panel would be worse than the press doing
+   * nothing.
+   */
+  openGitLabReviewSymbol(
+    name: string,
+    place?: { path: string; lineNumber: number; side: PierreSide },
+  ): void {
+    if (!symbolIsSearchable(name)) return;
+    const at = place ?? firstPlaceOf(this.get().gitlabDiff, name);
+    if (!at) return;
+    this.setGitLabDiffFile(at.path);
+    this.set({
+      gitlabDiffSymbol: { name, path: at.path, lineNumber: at.lineNumber, side: at.side },
+      // THIS navigation opens on the code. It is an intent rather than something read back off the
+      // symbol, because the symbol outlives the visit — see the field.
+      gitlabDiffOpenOnCode: true,
+    });
+  }
+
+  /** Consume the "open on the code" intent above. The diff page calls it on mount, having already
+   *  read it: an intent that stayed set would make the NEXT arrival at that page — the Diffs tab,
+   *  pressed later — skip its own file list on the strength of a press made two surfaces ago. */
+  consumeGitLabDiffOpenOnCode(): void {
+    if (!this.get().gitlabDiffOpenOnCode) return;
+    this.set({ gitlabDiffOpenOnCode: false });
+  }
+
   // ---- how wide the two side columns are ------------------------------------
 
   /** Remember how wide the reader dragged the files column. */
@@ -4830,6 +4887,7 @@ export class TeamsController {
       // A name pressed in one branch's code says nothing about another's — and the panel's own
       // width is NOT reset here, because that is the persisted preference (see the field).
       gitlabDiffSymbol: null,
+      gitlabDiffOpenOnCode: false,
       gitlabReview: null,
       gitlabReviewBusy: false,
       gitlabReviewError: null,
@@ -7588,6 +7646,28 @@ export class TeamsController {
     }
     this.set({ petsShown: shown });
   }
+}
+
+/** The FIRST place a name stands in a diff, in the diff's own order, or `null` when it stands
+ *  nowhere.
+ *
+ *  It reads through `symbolOccurrences`, which is the one answer in this app to "where does this name
+ *  stand in these changes" — so the place a chip lands on and the first row of the panel it opens are
+ *  the same row by construction. The side is translated into the renderer's own two words, because
+ *  that is the vocabulary a lit line is stated in. */
+function firstPlaceOf(
+  diff: GitLabDiff | null,
+  name: string,
+): { path: string; lineNumber: number; side: PierreSide } | null {
+  const search = symbolOccurrences(diff, name);
+  const file = search?.files[0];
+  const occurrence = file?.occurrences[0];
+  if (!file || !occurrence) return null;
+  return {
+    path: file.path,
+    lineNumber: occurrence.lineNumber,
+    side: pierreSideOf(occurrence.side),
+  };
 }
 
 function errText(e: unknown): string {

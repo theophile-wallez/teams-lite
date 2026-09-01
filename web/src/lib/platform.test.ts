@@ -80,12 +80,15 @@ describe("aModalIsOpen", () => {
     withLayer("dialog", "closed", () => expect(aModalIsOpen()).toBe(true));
   });
 
-  it("does NOT stand aside for a menu, which is what `defaultPrevented` covers", () => {
+  it("does NOT stand aside for a menu, which is what `aLayerWasOpen` covers", () => {
     // Matching a menu here was tried and broke the opposite case: a menu whose row was CLICKED
     // is still mounted for its exit animation, and it swallowed the Escape that cancels the
     // pending reply that row had just started. A menu the reader dismissed WITH Escape is
-    // handled by the shell's own `event.defaultPrevented` check instead — every Radix layer
-    // calls `preventDefault()` when it dismisses on that key.
+    // handled by `watchOpenLayers` / `aLayerWasOpen` instead, which asks from the CAPTURE phase
+    // before Radix has moved anything. This comment used to name a `defaultPrevented` check in
+    // the shell; there has never been one, and there must not be — a CLOSING Radix layer calls
+    // `preventDefault()` too, so that flag reads the same for a layer the reader was looking at
+    // and one whose row they had just clicked.
     withLayer("menu", "open", () => expect(aModalIsOpen()).toBe(false));
     withLayer("menu", "closed", () => expect(aModalIsOpen()).toBe(false));
   });

@@ -17,3 +17,9 @@
 # borrows the main checkout's install — is ignored too, and can never be staged by
 # mistake (web/.gitignore says the same for the web app's own install).
 node_modules
+
+# Playwright's own failure artifacts. `web/.gitignore` already names this, and that is
+# not enough: the E2E config resolves `outputDir` against the CWD, so a run started
+# from the REPO ROOT rather than from `web/` leaves the directory HERE — untracked, and
+# one `git add -A` away from committing somebody's screenshots and traces.
+test-results/

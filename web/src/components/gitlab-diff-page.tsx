@@ -29,6 +29,7 @@ import {
   diffCommentAnchor,
   diffCommentableFiles,
   diffThreadsFor,
+  pierreSideOf,
 } from "~/lib/gitlab-diff-comment";
 import { mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import type { DiffAnnotation, DiffFeedHandle } from "./gitlab-diff-view";
@@ -126,6 +127,9 @@ function useDiffState() {
     /** The name the reader pressed in the code, and how wide they have dragged the two side
      *  columns. */
     symbol: useAppState((s) => s.gitlabDiffSymbol),
+    /** Whether the reader arrived by pressing a NAME in the reading's prose, so this page opens on
+     *  the CODE. A one-shot intent, consumed on mount — see the field. */
+    openOnCode: useAppState((s) => s.gitlabDiffOpenOnCode),
     filesWidth: useAppState((s) => s.gitlabDiffFilesWidth),
     symbolsWidth: useAppState((s) => s.gitlabDiffSymbolsWidth),
   };
@@ -144,6 +148,7 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
     selection,
     comment,
     symbol,
+    openOnCode,
     filesWidth,
     symbolsWidth,
   } = useDiffState();
@@ -153,7 +158,25 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
   const width = useViewportWidth();
   // Which column the reader is IN on a narrow screen. The page opens on the files, because
   // that is the question a diff asks first — which of these do I want to read?
-  const [column, setColumn] = useState<DiffColumn>("files");
+  //
+  // UNLESS THE READER ARRIVED BY PRESSING A NAME in the reading's prose (§ AND A NAME IN THAT PROSE
+  // IS THE CODE IT NAMES). They have already answered "which of these" — they asked for a particular
+  // line — so opening on the files would show them a tree with no mention of the name they pressed.
+  // It reads the controller for the same reason `openAt` does: this page is told where to open before
+  // it is navigated to.
+  //
+  // The INTENT and never the symbol itself: `gitlabDiffSymbol` is dropped only when a merge request
+  // is opened or left, so reading it here would make the Diffs tab — pressed later, from the strip —
+  // skip its own file list on the strength of a press made two surfaces ago. The intent is consumed
+  // just below.
+  const [column, setColumn] = useState<DiffColumn>(openOnCode ? "patch" : "files");
+  // Consumed on mount, after the initialiser above has read it. An effect rather than a call inside
+  // that initialiser, which would be a write during render.
+  useEffect(() => {
+    controller.consumeGitLabDiffOpenOnCode();
+    // Once, for this arrival.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const columns = diffPageColumns(width, column);
   const effective = effectiveDiffLayout(layout, width);
   const expand = expandDiffHint(diff);
@@ -489,13 +512,16 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
                       // The file becomes the one on screen, the LIT line moves to the occurrence,
                       // and the feed goes to it — which is the whole point of a place: a file here
                       // runs to nine hundred lines, so naming the file is not going there.
-                      const side = occurrence.side === "old" ? "deletions" : "additions";
                       controller.goToGitLabDiffOccurrence(
                         occurrencePath,
                         occurrence.lineNumber,
-                        side,
+                        pierreSideOf(occurrence.side),
                       );
-                      feed.current?.showLine(occurrencePath, occurrence.lineNumber, side);
+                      feed.current?.showLine(
+                        occurrencePath,
+                        occurrence.lineNumber,
+                        pierreSideOf(occurrence.side),
+                      );
                     }}
                     onClose={() => controller.closeGitLabDiffSymbol()}
                   />

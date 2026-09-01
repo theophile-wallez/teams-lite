@@ -3769,6 +3769,47 @@ if (import.meta.main) {
         await page.waitForTimeout(300);
         await shot(`${out}-sticky-light.png`);
 
+        // THE NAMES IN THE PROSE, and the code behind one.
+        //
+        // Cropped to a SUMMARY rather than shot whole: what this feature is about is 14px type with a
+        // dotted rule under some of its words, and a 1200px page says nothing about whether either can
+        // be read — so pass `--dpr 3` for these. The crop is the theme's own prose, which is where the
+        // fixture puts all three outcomes in two sentences: `draining`, `ready` and `READY_PATH` are
+        // marked from the model's own backticks, `terminationGracePeriodSeconds` is marked from its
+        // own spelling with no backticks at all, and `gracefulShutdown` sits in backticks and stays
+        // plain code because the diff does not hold it.
+        await page
+          .locator('[data-testid="gitlab-review-document"]')
+          .evaluate((el) => el.scrollTo(0, 0));
+        await page.waitForSelector('[data-testid="review-code-ref"]');
+        await page.waitForTimeout(200);
+        const prose = '[data-testid="gitlab-review-summary"]';
+        await shot(`${out}-names-light.png`, prose);
+        await setTheme("dark");
+        await shot(`${out}-names-dark.png`, prose);
+        await setTheme("light");
+
+        // THE CARD a hover opens: the name, how many places it stands, and the real lines of the diff
+        // with the name marked exactly. It is opened by a real HOVER, because that is the gesture —
+        // and the wait is on the CARD's own test id rather than a timeout, since the trigger holds the
+        // pointer for `OPEN_DELAY_MS` before anything is drawn.
+        const chip = page.locator('[data-testid="review-code-ref"]').first();
+        await chip.hover();
+        await page.waitForSelector('[data-testid="review-code-card"]', { timeout: 5_000 });
+        // The rows are drawn from a search that runs when the card opens, so one frame past the card
+        // is what puts code in it rather than "Looking through the changes…".
+        await page.waitForSelector('[data-testid="review-code-card-line"]', { timeout: 5_000 });
+        await page.waitForTimeout(250);
+        await shot(`${out}-card-light.png`);
+        await shot(`${out}-card-crop-light.png`, '[data-testid="review-code-card"]');
+        await setTheme("dark");
+        await shot(`${out}-card-dark.png`, '[data-testid="review-code-card"]');
+        await setTheme("light");
+        // Off the chip, so the card is gone before the next shot — a card left open would sit over
+        // the folded file the crop below is about.
+        await page.locator('[data-testid="gitlab-review-title"]').hover();
+        await page.waitForTimeout(300);
+
         // The LONG diff, folded on open, with the count in its label — and the leftovers, the
         // section the document must never hide.
         await shot(
@@ -3866,7 +3907,9 @@ if (import.meta.main) {
 
         console.log(
           `[preview] wrote ${out}-offer-{light,dark}.png, ${out}-{light,dark}.png, ` +
-            `${out}-file-{light,dark}.png, ${out}-sticky-light.png, ${out}-folded-light.png, ` +
+            `${out}-file-{light,dark}.png, ${out}-sticky-light.png, ` +
+            `${out}-names-{light,dark}.png, ${out}-card-light.png, ${out}-card-crop-light.png, ` +
+            `${out}-card-dark.png, ${out}-folded-light.png, ` +
             `${out}-unplaced-light.png, ${out}-stale-light.png, ${out}-refused-light.png, ` +
             `${out}-tags-{light,dark}.png, ${out}-question-light.png, ${out}-asked-light.png, ` +
             `${out}-answer-{light,dark}.png, ${out}-with-chat-light.png, ` +
