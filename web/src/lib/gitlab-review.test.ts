@@ -640,3 +640,33 @@ describe("a tag at the END of a sentence", () => {
     expect(reviewTagsInText("@... and @?!", tags())).toEqual([]);
   });
 });
+
+describe("a tag whose path holds an @", () => {
+  // Both of these are real: a scoped package in a monorepo, and a Next.js parallel route. A run that
+  // stopped at the second `@` read NEITHER — the tag was offered by the list, written into the
+  // sentence by the pick, and then silently never travelled with the question.
+  const paths = ["packages/@acme/ui/button.tsx", "app/@modal/page.tsx", "src/a.ts", "src/a.tsx"];
+  const tags = () => reviewTags(review(), diff(paths));
+
+  it("reads a path with an @ in the middle of it", () => {
+    for (const path of ["packages/@acme/ui/button.tsx", "app/@modal/page.tsx"]) {
+      expect(reviewTagsInText(`what about @${path}?`, tags()).map((t) => t.label)).toEqual([path]);
+    }
+  });
+
+  it("never finds a shorter tag INSIDE a longer one", () => {
+    // `src/a.ts` is a prefix of `src/a.tsx`, so a match that ignored what follows would name the
+    // wrong file — and this is the half the boundary rule exists for.
+    expect(reviewTagsInText("@src/a.tsx", tags()).map((t) => t.label)).toEqual(["src/a.tsx"]);
+    expect(reviewTagsInText("@src/a.ts", tags()).map((t) => t.label)).toEqual(["src/a.ts"]);
+    // And a word that merely starts like one names nothing.
+    expect(reviewTagsInText("@src/a.tsxyz", tags())).toEqual([]);
+  });
+
+  it("reads two tags written with nothing between them", () => {
+    expect(reviewTagsInText("@src/a.ts@src/a.tsx", tags()).map((t) => t.label)).toEqual([
+      "src/a.ts",
+      "src/a.tsx",
+    ]);
+  });
+});

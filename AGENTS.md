@@ -2812,19 +2812,41 @@ Fourteen rules hold it, and each is pinned by `gitlab_review::tests`,
 - **A question needs a READING to be about.** The backend refuses one without it, so the panel is not
   drawn at all until there is one — a control that reports a refusal is what this app draws nothing
   instead of.
-- **THE PAGE'S OWN REQUEST CEILING IS LONGER THAN THE BACKEND'S, and that is a bug fix rather than a
-  tuning choice.** Both agent methods went out on `ws-client.ts`'s ordinary `REQUEST_TIMEOUT_MS` (30 s),
-  which every real run exceeds — so the reader met **`timeout: gitlab_mr_review_run`** on every press
-  while the backend ran on, finished, and stored the answer: an action that worked, reported as one
-  that failed. The doc comment beside the method even claimed it "carries no timeout of its own", which
-  `request` never allowed. `AGENT_REQUEST_TIMEOUT_MS` (35 min) is the fix, and the number is chosen to
-  LOSE the race with `agent::RUN_IDLE_TIMEOUT` (30 min): past that the backend has given up and answers
-  with the CLI's own reason, and a page timer that fired first would replace that sentence with a bare
-  `timeout: <method>`. A request with NO ceiling was the other option and is not needed — a socket that
-  closes rejects every pending request already. **Nothing but a unit test can catch this class**: the
-  mock answers in one frame, so no spec and no capture ever waited, which is why
-  `ws-client.test.ts` drives it on fake timers and holds an agent request to still being in flight five
-  minutes in.
+- **THE PAGE'S OWN REQUEST CEILING IS LONGER THAN THE BOUND THAT REALLY ENDS THE RUN, and that is a
+  bug fix rather than a tuning choice.** Both agent methods went out on `ws-client.ts`'s ordinary
+  `REQUEST_TIMEOUT_MS` (30 s), which every real run exceeds — so the reader met
+  **`timeout: gitlab_mr_review_run`** on every press while the backend ran on, finished, and stored the
+  answer: an action that worked, reported as one that failed. The doc comment beside the method even
+  claimed it "carries no timeout of its own", which `request` never allowed.
+  `AGENT_REQUEST_TIMEOUT_MS` (35 min) is the fix, and the number is chosen to LOSE the race with
+  `agent::RUN_IDLE_TIMEOUT` (30 min): past that the backend has given up and answers with the CLI's own
+  reason, and a page timer that fired first would replace that sentence with a bare `timeout: <method>`.
+  It deliberately does NOT beat `agent::RUN_MAX_DURATION` (8 h), and that gap is stated rather than
+  papered over: the idle bound is the one a review really meets — this run holds no tools, so the CLI
+  thinks and then writes one answer — while a page ceiling above eight hours would leave a hung request
+  pending all day. `the_pages_agent_ceiling_outlasts_the_backends_idle_bound` pins the pair across the
+  process boundary, because moving either number changes nothing any suite exercises.
+- **AND THE SAME BUG WAS IN `send`, which is the one RPC that must never have it.**
+  `teams_send::send_message` uploads each picture to AMS inline and only then POSTs, so a send carrying
+  pictures takes as long as the user's uplink needs — and the composer admits 30 MiB in one message,
+  about four minutes at 1 Mbit/s. On the ordinary ceiling the page reported a FAILURE for a message the
+  backend then posted, and left the words in the box. **The second half is why it matters more than a
+  wrong sentence**: a send that failed says so at the composer, so the reader sees their words still
+  there and presses Enter again — `sendingRef` was released by the rejection, so nothing stops them and
+  the colleague gets the message TWICE. It is exactly the failure § ONE ENTER IS ONE MESSAGE exists to
+  prevent, reached through a timer instead of a press. `UPLOAD_REQUEST_TIMEOUT_MS` (5 min) applies only
+  when the send really carries pictures, which is measurable from the params, so a send with none keeps
+  the ordinary ceiling.
+- **A socket dropped and REPLACED rejects what was in flight on it.** `teardownSocket` nulls `onclose`
+  before closing, so that handler's own rejection never runs for a socket torn down this way — and
+  `openSocket` calls it first, so a `retryNow()` landing while a socket is dying but before its close
+  event has dispatched orphaned every pending request. `watchWakeups` calls `retryNow` on exactly the
+  moments a phone comes back, which is when a socket is most likely mid-death. It was survivable while
+  every ceiling was 30 s and stopped being once one was 35 minutes: the reader would sit in front of
+  "Reading the changes…" for half an hour with nothing able to say what was wrong. The rejection is now
+  where the socket is really dropped, which is what makes "one ending for every way out" true of it.
+- **Nothing but a unit test can catch this class**: the mock answers in one frame, so no spec and no
+  capture ever waited. `ws-client.test.ts` drives all three on fake timers.
 - **THE TRANSCRIPT IS ITS OWN STORE ROW** (`gitlab_review_chat:{project}!{iid}`), because the two have
   different lifetimes: a fresh reading REPLACES the reading and must not throw away the questions
   somebody asked — those were about this branch and are still worth reading. A spec presses "Read it
@@ -2839,7 +2861,17 @@ Fourteen rules hold it, and each is pinned by `gitlab_review::tests`,
   back off** (`TAG_TRAILING_PUNCTUATION`): a reader really does write "and not
   @src/server/health.ts?", and without it the tag would silently name nothing whenever it fell at the
   end of a question — the rule `agent_policy::split_prefix` already states for an agent's own address.
-  The longest match wins first, so a path keeps its own extension.
+  **A tag is matched by its OWN SPELLING at each `@` rather than by a pattern over the words**, and
+  that is what makes a path holding an `@` work: `packages/@acme/ui/button.tsx` and Next.js's
+  `app/@modal/page.tsx` are both real, and a run that stopped at the second `@` read neither — the tag
+  was offered by the list, written into the sentence, and then silently never travelled. What follows a
+  match must END it (`endsATag`), which is the half that keeps `@src/a.ts` out of `@src/a.tsx`.
+- **THE QUERY IS WHAT STANDS BETWEEN THE "@" AND THE CARET**, never to the end of the text. Read to the
+  end, the pick sliced from the end and DELETED every word after the caret, and the list matched
+  against the whole tail — so a reader going back to add a tag mid-sentence lost the rest of their
+  question. A click or an arrow closes a list measured against the old position rather than leaving it
+  matching the wrong run, and the inserted tag takes a trailing space only where the text has not got
+  one already.
 - **THE QUESTION IS DRAWN THE MOMENT IT LEAVES**, in its own bubble, with the words already gone from
   the box (`gitlabReviewPending`, `drawnReviewTurns`). A run is tens of seconds, so a composer that
   took the words and showed nothing until the answer landed looked like one that had lost them. It is

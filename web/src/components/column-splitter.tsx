@@ -173,6 +173,15 @@ export function ColumnSplitter(props: ColumnSplitterProps) {
       document.removeEventListener("pointerup", onUp);
       document.removeEventListener("pointercancel", onCancel);
       document.removeEventListener("pointerdown", onLostRelease, true);
+      // UNMOUNTING is a way out too, and it was the one `end` never heard about — so the rule this
+      // component states for itself ("one ending for every way out") was not true of it. A handle can
+      // go while a drag is on: the window narrows past the two-column width, or the panel beside it
+      // closes. The listeners went with it and `document.body` was left holding `cursor: col-resize`
+      // and `user-select: none` for the whole page until somebody dragged something else.
+      //
+      // A CANCEL rather than a commit, because a gesture the page took away did not happen — which is
+      // the reading `pointercancel` already gets here.
+      end("cancel");
     };
   }, [clamp, end, paint]);
 

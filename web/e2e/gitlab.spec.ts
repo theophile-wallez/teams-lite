@@ -1814,6 +1814,31 @@ test.describe.serial("the GitLab merge-request page", () => {
     await setMergeRequestControl(page, { clear: true });
   });
 
+  test("picks a tag MID-SENTENCE without eating the rest of the question", async ({ page }) => {
+    // The query is what stands between the "@" and the CARET. Read to the END of the text instead,
+    // the pick sliced from the end and deleted every word after the caret — so a reader who went back
+    // to add a tag lost the rest of what they had written.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const field = page.locator('[data-testid="gitlab-review-chat-field"]');
+    await field.click();
+    await field.type("why does change the budget?");
+    // Back to just after "does ", which is where the "@" goes.
+    for (let i = 0; i < "change the budget?".length; i += 1) await field.press("ArrowLeft");
+    await field.type("@health");
+    await page.locator('[data-testid="gitlab-review-chat-option"]').first().click();
+
+    // The tag landed in the middle, BOTH halves of the sentence survived, and there is ONE space
+    // after it rather than two — the text already had one, and a pick must not add a second.
+    await expect(field).toHaveValue("why does @src/server/health.ts change the budget?");
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
   test("draws the question the MOMENT it leaves, and takes it back if it never left", async ({
     page,
   }) => {
@@ -1858,15 +1883,25 @@ test.describe.serial("the GitLab merge-request page", () => {
     await openMergeRequest(page, 596);
     await openThemes(page);
 
-    const inside = await page.evaluate(() => {
-      const ask = document.querySelector('[data-testid="gitlab-review-chat-ask"]');
+    // Measured, not inferred from the DOM: what "inside the box" means to a reader is that the
+    // button's own rectangle sits within the surface the field is on. Ancestry proves nothing about
+    // that — a button one level up could still be drawn below the box.
+    const box = (await page.locator('[data-testid="gitlab-review-chat-field"]').boundingBox())!;
+    const ask = (await page.locator('[data-testid="gitlab-review-chat-ask"]').boundingBox())!;
+    const surface = await page.evaluate(() => {
       const field = document.querySelector('[data-testid="gitlab-review-chat-field"]');
-      if (!ask || !field) return null;
-      // The box is the field's nearest common ancestor with the button: if Send sits outside it, the
-      // field's own parent does not contain the button.
-      return field.parentElement?.contains(ask) ?? false;
+      // The nearest ancestor that really paints a surface — the box.
+      const el = field?.closest(".bg-card") ?? field?.parentElement;
+      const rect = el?.getBoundingClientRect();
+      return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null;
     });
-    expect(inside).toBe(true);
+    expect(surface).not.toBeNull();
+    expect(ask.x).toBeGreaterThanOrEqual(surface!.x);
+    expect(ask.x + ask.width).toBeLessThanOrEqual(surface!.x + surface!.width + 1);
+    expect(ask.y).toBeGreaterThanOrEqual(surface!.y);
+    expect(ask.y + ask.height).toBeLessThanOrEqual(surface!.y + surface!.height + 1);
+    // And it is BELOW the field rather than beside it, which is the app's own composer's shape.
+    expect(ask.y).toBeGreaterThanOrEqual(box.y + box.height - 1);
 
     await setMergeRequestControl(page, { clear: true });
   });
@@ -1893,12 +1928,21 @@ test.describe.serial("the GitLab merge-request page", () => {
 
     // And it stops where the DOCUMENT would be squeezed: that minimum is not a preference, because
     // the code inside it is the one thing on this page that cannot be narrowed and still be read.
-    for (let i = 0; i < 60; i += 1) await handle.press("ArrowLeft");
+    //
+    // BOTH SIDES are asserted, because a floor alone is satisfied by the page at rest — it starts
+    // with a document far wider than the minimum, so `> 470` would pass against a splitter that
+    // clamped nothing. The pair is: the document really reached its minimum, AND never went under it.
     const document_ = page.locator('[data-testid="gitlab-review-document"]');
-    await expect.poll(async () => (await document_.boundingBox())!.width).toBeGreaterThan(470);
+    for (let i = 0; i < 60; i += 1) await handle.press("ArrowLeft");
+    await expect
+      .poll(async () => Math.round((await document_.boundingBox())!.width))
+      .toBeLessThan(500);
+    expect(Math.round((await document_.boundingBox())!.width)).toBeGreaterThanOrEqual(478);
 
-    // Put it back: the width is persisted per browser, and one mock process serves the whole run.
+    // Put it back, because the width is persisted per browser and one mock process serves the whole
+    // run — so a column left at its minimum is the width every later spec on this page opens at.
     for (let i = 0; i < 80; i += 1) await handle.press("ArrowRight");
+    await expect.poll(async () => (await column.boundingBox())!.width).toBeLessThan(before + 40);
     await setMergeRequestControl(page, { clear: true });
   });
 

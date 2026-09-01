@@ -77,6 +77,11 @@ export function ReviewChatPanel(props: {
   // Where the "@" that opened the list starts, or `null` for a list that is not open. It is an
   // OFFSET rather than a boolean because what is typed after it is the query.
   const [trigger, setTrigger] = useState<number | null>(null);
+  // Where the CARET was when the trigger was measured. The query is what stands between the two, so
+  // this cannot be read off the text: with the query taken to the END instead, picking a tag deleted
+  // every word after the caret and the list matched against the whole tail — so a reader going back
+  // to add a tag mid-sentence lost the rest of their question.
+  const [caret, setCaret] = useState(0);
   const [active, setActive] = useState(0);
   const field = useRef<HTMLTextAreaElement | null>(null);
   const end = useRef<HTMLDivElement | null>(null);
@@ -86,7 +91,7 @@ export function ReviewChatPanel(props: {
   // what travels are one fact rather than two.
   const tags = useMemo(() => reviewTagsInText(question, all), [question, all]);
   const picked = useMemo(() => new Set(tags.map(reviewTagKey)), [tags]);
-  const query = trigger === null ? "" : question.slice(trigger + 1);
+  const query = trigger === null ? "" : question.slice(trigger + 1, caret);
   const matches = useMemo(
     () => (trigger === null ? [] : matchReviewTags(all, query, picked)),
     [trigger, all, query, picked],
@@ -107,17 +112,23 @@ export function ReviewChatPanel(props: {
     // so the sentence carries on. Nothing is kept beside the field.
     const before = question.slice(0, trigger);
     const after = question.slice(trigger + 1 + query.length);
-    const inserted = `${reviewTagText(tag)} `;
+    // A space AFTER it, so the reader carries straight on typing — and NOT a second one when the text
+    // already has one there, which is what a pick in the middle of a sentence has in front of it. At
+    // the END of the text there is nothing following, so the space is wanted.
+    const spaced = after.startsWith(" ") ? "" : " ";
+    const inserted = `${reviewTagText(tag)}${spaced}`;
     setQuestion(`${before}${inserted}${after}`);
     setTrigger(null);
     setActive(0);
-    // The caret goes after what was inserted, or the next thing typed lands before it.
-    const caret = before.length + inserted.length;
+    // The caret goes after what was inserted, or the next thing typed lands before it — and the state
+    // follows, so the next "@" measures its query from the right place.
+    const next = before.length + inserted.length;
+    setCaret(next);
     requestAnimationFrame(() => {
       const el = field.current;
       if (!el) return;
       el.focus();
-      el.setSelectionRange(caret, caret);
+      el.setSelectionRange(next, next);
     });
   };
 
@@ -177,7 +188,17 @@ export function ReviewChatPanel(props: {
         {/* ONE BOX, and Send is inside it — the app's own composer's shape (see `composer.tsx`): a
             column holding the field and then a control row at its foot, on one surface with one focus
             ring. Two boxes for one act ask the reader which of them they are typing into. */}
-        <div className="relative flex cursor-text flex-col gap-1.5 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card">
+        <div
+          className="relative flex cursor-text flex-col gap-1.5 rounded-2xl bg-card px-3 py-2.5 shadow-chip transition-shadow focus-within:shadow-card"
+          // `cursor-text` promises the whole box types, so a press anywhere in it that is not a
+          // control puts the caret in the field — the app's own composer wires exactly this, and the
+          // class without the handler is a padding frame that says "type here" and does nothing.
+          onMouseDown={(event) => {
+            if (event.target !== event.currentTarget) return;
+            event.preventDefault();
+            field.current?.focus();
+          }}
+        >
           {matches.length > 0 && (
             // Over the box rather than under it, because the box is at the foot of a column: a list
             // below would be off the bottom of the screen.
@@ -238,12 +259,21 @@ export function ReviewChatPanel(props: {
               // The list is open while the caret is in a run of non-whitespace after an "@" that
               // opens the text or follows whitespace — the rule the emoji and mention typeaheads
               // hold, so `note@example` and an "@" in the middle of a word open nothing.
-              const caret = event.target.selectionStart ?? next.length;
-              const at = next.lastIndexOf("@", Math.max(caret - 1, 0));
+              const where = event.target.selectionStart ?? next.length;
+              const at = next.lastIndexOf("@", Math.max(where - 1, 0));
               const opens = at === 0 || (at > 0 && /\s/.test(next[at - 1]!));
-              const run = at >= 0 ? next.slice(at + 1, caret) : "";
+              const run = at >= 0 ? next.slice(at + 1, where) : "";
               setTrigger(at >= 0 && opens && !/\s/.test(run) ? at : null);
+              setCaret(where);
               setActive(0);
+            }}
+            onSelect={(event) => {
+              // A click or an arrow moves the caret with no change to the text. A list measured
+              // against the OLD position would then match the wrong run, so it closes: the reader
+              // types to open one again, which is what the "@" already means.
+              const where = (event.target as HTMLTextAreaElement).selectionStart ?? 0;
+              if (trigger !== null && where !== caret) setTrigger(null);
+              setCaret(where);
             }}
             onKeyDown={(event) => {
               if (matches.length > 0) {

@@ -445,47 +445,51 @@ export function reviewTagText(tag: ReviewTag): string {
  * thread does not hold already follows: `@rfc-2119` in a question is a question about `@rfc-2119`.
  */
 export function reviewTagsInText(text: string, tags: ReviewTag[]): ReviewTag[] {
-  const byText = new Map(tags.map((tag) => [reviewTagText(tag), tag]));
+  // Longest spelling first. It is a TIE-BREAK rather than the rule that keeps `@src/a.ts` out of
+  // `@src/a.tsx` — `endsATag` is what does that, and a mutation of this order fails no test today,
+  // because it only decides between two tags where one spelling IS the other plus a character
+  // `endsATag` allows (a path ending in `?`). Kept because it costs nothing and the alternative is a
+  // silent wrong answer the day such a pair exists.
+  const spellings = tags
+    .map((tag) => ({ tag, text: reviewTagText(tag) }))
+    .sort((a, b) => b.text.length - a.text.length);
   const picked: ReviewTag[] = [];
   const seen = new Set<string>();
-  // `@[…]` first, because a bare run would stop at the `[` and match nothing — and the bracket form
-  // is the only one that can hold a title with spaces in it.
-  const pattern = /@\[([^\]\n]+)\]|@([^\s@]+)/g;
-  for (const match of text.matchAll(pattern)) {
-    const tag =
-      match[1] !== undefined ? byText.get(`@[${match[1]}]`) : bareTag(match[2]!, byText);
-    if (!tag) continue;
-    const key = reviewTagKey(tag);
+  for (let at = text.indexOf("@"); at >= 0; at = text.indexOf("@", at + 1)) {
+    // A tag is matched by its OWN SPELLING at this position rather than by a pattern over the words,
+    // which is what makes a path holding an `@` work: `packages/@acme/ui/button.tsx` and Next.js's
+    // `app/@modal/page.tsx` are both real, and a run that stopped at the second `@` read neither —
+    // the tag was offered by the list, written into the sentence, and then silently never travelled.
+    const found = spellings.find(
+      (candidate) => text.startsWith(candidate.text, at) && endsATag(text, at + candidate.text.length),
+    );
+    if (!found) continue;
+    // Past what matched, so a tag cannot be found inside the one before it.
+    at += found.text.length - 1;
+    const key = reviewTagKey(found.tag);
     if (seen.has(key)) continue;
     seen.add(key);
-    picked.push(tag);
+    picked.push(found.tag);
   }
   return picked;
 }
 
-/** The trailing characters that belong to the SENTENCE rather than to the path before them.
+/** The characters that may FOLLOW a tag, so a spelling is never found inside a longer word.
  *
- *  A question ends in `?`, a clause in `,`, a list item in `;` — and a reader really does write "and
- *  not @src/server/health.ts?". `agent_policy::split_prefix` states the same rule for an agent's own
- *  address ("the punctuation an address is written with belongs to it"), and without it a tag would
- *  silently name nothing whenever it fell at the end of a sentence. */
-const TAG_TRAILING_PUNCTUATION = new Set([".", ",", "?", "!", ";", ":", ")", "]", "}", '"', "'", "…"]);
+ *  Whitespace and the end of the text are the ordinary ones. The punctuation a SENTENCE owns is here
+ *  too, because a reader really does write "and not @src/server/health.ts?" — the rule
+ *  `agent_policy::split_prefix` states for an agent's own address ("the punctuation an address is
+ *  written with belongs to it"), and without it a tag would name nothing whenever it ended a question.
+ *  And `@` itself, so two tags written with nothing between them are two tags.
+ *
+ *  What this REFUSES is the important half: `@src/a.ts` inside `@src/a.tsx` is not a match, because
+ *  `x` is not here. */
+const TAG_BOUNDARY = new Set([".", ",", "?", "!", ";", ":", ")", "]", "}", '"', "'", "…", "@"]);
 
-/** The tag a bare `@run` names, backing off one trailing punctuation mark at a time.
- *
- *  The LONGEST match wins, so a path that really ends in one of those characters is found before
- *  anything is trimmed — and the walk stops at the first character that is not punctuation, so
- *  `health.ts` keeps its extension. */
-function bareTag(run: string, byText: Map<string, ReviewTag>): ReviewTag | undefined {
-  let candidate = run;
-  while (candidate.length > 0) {
-    const tag = byText.get(`@${candidate}`);
-    if (tag) return tag;
-    const last = candidate[candidate.length - 1]!;
-    if (!TAG_TRAILING_PUNCTUATION.has(last)) return undefined;
-    candidate = candidate.slice(0, -1);
-  }
-  return undefined;
+function endsATag(text: string, at: number): boolean {
+  if (at >= text.length) return true;
+  const next = text[at]!;
+  return /\s/.test(next) || TAG_BOUNDARY.has(next);
 }
 
 /** What a set of picked tags becomes on the wire: the theme indices and the file paths.
@@ -615,9 +619,21 @@ export const REVIEW_CHAT_DEFAULT_WIDTH = 416;
 /** The narrowest it may be dragged. Below this a question and its answer are a column of two words. */
 export const REVIEW_CHAT_MIN_WIDTH = 280;
 
-/** The room the DOCUMENT keeps whatever the reader drags, which is not a preference: a unified patch
- *  under about 90 characters is unreadable, and the code is why this page exists. It is the rule
- *  `DIFF_CODE_MIN_WIDTH` holds one page over. */
+/**
+ * The room the DOCUMENT keeps whatever the reader drags.
+ *
+ * It is the point below which this page stops being the thing it is — a column narrower than this
+ * holds neither a readable paragraph nor a patch — and it is not a preference, because the reader can
+ * drag the conversation and the document cannot answer back.
+ *
+ * **It does NOT claim to fit a whole line of code**, and an earlier spelling of this comment did: 480
+ * px of column is about 430 of content after the page's own padding, which is some 60 monospace
+ * characters rather than the ~90 a unified patch really wants. Reserving that would take 700 px and
+ * leave the conversation a sliver on a 1280 px screen. What the reader gets at the minimum is a
+ * document they can still read the PROSE of, with the code scrolling sideways inside it — which is
+ * what `overflow: scroll` on a patch is for, and what a phone already does. `DIFF_CODE_MIN_WIDTH`
+ * (360) is the diff page's own answer to the same question, and it is smaller still.
+ */
 export const REVIEW_DOCUMENT_MIN_WIDTH = 480;
 
 /**

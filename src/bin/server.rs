@@ -14516,6 +14516,45 @@ mod tests {
     /// One direction only. A name in the hook that is no longer gated costs nothing: it blocks a
     /// string no backend answers, which is noise rather than a fault, and there are a few
     /// (`set_calling`, `mail_mark_read`) left from methods that have gone.
+    /// The page's own request ceiling for an agent run is LONGER than the bound that really ends one.
+    ///
+    /// The two numbers live on opposite sides of a process boundary — `AGENT_REQUEST_TIMEOUT_MS` in
+    /// `web/src/lib/ws-client.ts`, `RUN_IDLE_TIMEOUT` here — and the whole reason the page's is what it
+    /// is, is that it must LOSE the race: past the idle bound the backend has given up and answers
+    /// with the CLI's own reason, and a page timer firing first would replace that sentence with a bare
+    /// `timeout: <method>`. That is exactly what shipped, with the page on a 30-second ceiling.
+    ///
+    /// Nothing but this test can notice the relation breaking, because moving either number changes no
+    /// behaviour any suite exercises: the mock answers in one frame.
+    #[test]
+    fn the_pages_agent_ceiling_outlasts_the_backends_idle_bound() {
+        let client = include_str!("../../web/src/lib/ws-client.ts");
+        let line = client
+            .lines()
+            .find(|line| line.contains("const AGENT_REQUEST_TIMEOUT_MS"))
+            .expect("ws-client.ts declares AGENT_REQUEST_TIMEOUT_MS");
+        // `35 * 60_000` — the minutes are what the page really spells, so they are what is read.
+        let minutes: u64 = line
+            .split('=')
+            .nth(1)
+            .and_then(|rhs| rhs.split('*').next())
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or_else(|| panic!("could not read the minutes out of `{}`", line.trim()));
+        assert!(
+            line.contains("60_000"),
+            "AGENT_REQUEST_TIMEOUT_MS is no longer spelled in minutes, so this test is reading the \
+             wrong number out of `{}`",
+            line.trim()
+        );
+        let idle_minutes = agent::RUN_IDLE_TIMEOUT.as_secs() / 60;
+        assert!(
+            minutes > idle_minutes,
+            "the page gives up after {minutes} min while the backend runs on until {idle_minutes} \
+             min of silence — so a reader would meet `timeout: gitlab_mr_review_run` in place of the \
+             CLI's own reason, which is the bug this pairing exists to prevent"
+        );
+    }
+
     #[test]
     fn every_gated_method_is_named_in_the_automation_guard() {
         let hook = include_str!("../../.claude/hooks/guard-live-automation.sh");

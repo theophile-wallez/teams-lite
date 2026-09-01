@@ -203,7 +203,12 @@ export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path:
             // transcript, and below `md` the conversation follows the words it is about.
             <div
               ref={columnHost}
-              className="flex min-h-0 flex-1 flex-col md:flex-row"
+              // The direction is `wide`'s too, not a `md:` class. They are two different measurements
+              // — a media query is on the viewport, `window.innerWidth` counts a scrollbar it does
+              // not — so at the boundary the CSS could lay out a row while the JS said narrow, giving
+              // the column no width and no handle. The diff page has one source of truth for the same
+              // reason (`diffPageColumns`).
+              className={cn("flex min-h-0 flex-1", wide ? "flex-row" : "flex-col")}
               // The width lives HERE, on the row both columns are in, because that is the one element
               // a splitter can write to and the column can read from. React renders the resolved
               // number; a drag overwrites it on the DOM and the store catches up at the end (see
@@ -251,7 +256,14 @@ export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path:
                       border of its own: the splitter beside it IS the rule between the two. */}
                   <div
                     data-testid="gitlab-review-chat-column"
-                    className="flex max-h-[55%] min-h-0 shrink-0 flex-col border-t border-border-subtle md:max-h-none md:border-t-0"
+                    className={cn(
+                      "flex min-h-0 shrink-0 flex-col",
+                      // Narrow: a bounded slice UNDER the document, so a transcript of five turns
+                      // cannot take the screen from the words it is about. Wide: a full-height column
+                      // as wide as the reader dragged it, with no border of its own — the splitter
+                      // beside it IS the rule between the two.
+                      wide ? "" : "max-h-[55%] border-t border-border-subtle",
+                    )}
                     style={wide ? { width: `var(${CHAT_WIDTH_VAR})` } : undefined}
                   >
                     <h2 className="shrink-0 border-b border-border-subtle px-4 py-3 text-[13px] font-medium text-foreground md:px-5">
@@ -347,12 +359,16 @@ function ReviewOffer(props: {
   files: number;
 }) {
   return (
+    // The CARD is the measure here, and the two paragraphs inside it take it rather than one of them
+    // carrying a narrower rule of its own — two stacked paragraphs wrapping at two widths on one card
+    // reads as a rendering fault. This is the one place a prose measure survives on this page, because
+    // this really is a card rather than the document.
     <div className="flex max-w-2xl flex-col items-start gap-3 rounded-xl bg-card p-5 shadow-card">
       <h2 className="flex items-center gap-2 text-[15px] font-medium text-foreground">
         <HugeiconsIcon icon={SparklesIcon} className="size-4 text-primary" strokeWidth={1.8} />
         Read these changes by theme
       </h2>
-      <p className="max-w-prose text-[13px] leading-relaxed text-text-dim">
+      <p className="text-[13px] leading-relaxed text-text-dim">
         A local agent reads the whole diff and writes it up: what the branch does, section by section,
         with the code of each change under the paragraph that explains it. The {props.files} changed{" "}
         {props.files === 1 ? "file" : "files"} are all accounted for.

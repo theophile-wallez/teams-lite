@@ -208,12 +208,20 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /**
  * The ceiling for a request that starts an AGENT RUN on this machine.
  *
- * **It has to be LONGER than the backend's own bound, and that is the whole point of the number.**
- * A reading of a diff is one CLI invocation with no progress frames — the page cannot tell "still
- * thinking" from "hung" — and the backend already bounds it: `agent::RUN_IDLE_TIMEOUT` kills a child
- * that has said nothing for 30 minutes, and answers with the CLI's own reason. So this timer must
- * lose that race, or the reader is handed `timeout: gitlab_mr_review_run` in place of a sentence
- * that says what went wrong.
+ * **It has to be LONGER than the bound that really ends one of these runs, and that is the whole
+ * point of the number.** A reading of a diff is one CLI invocation with no progress frames — the page
+ * cannot tell "still thinking" from "hung" — and the backend bounds it two ways:
+ * `agent::RUN_IDLE_TIMEOUT` kills a child that has said NOTHING for 30 minutes, and
+ * `agent::RUN_MAX_DURATION` is an 8-hour backstop for one that never stops talking. This number beats
+ * the FIRST, deliberately, and not the second.
+ *
+ * That is the honest claim rather than a gap. The idle bound is the one a review really meets: this
+ * run is granted no tools, so the CLI does nothing but think and then write one answer, and a child
+ * that has gone quiet for half an hour is a child that has died. A run that keeps talking for eight
+ * hours is not a reading of a diff — and a page ceiling above eight hours would leave a hung request
+ * pending all day rather than telling the reader anything. What the gap costs is the one case where a
+ * run really talks for over 35 minutes: the reader gets `timeout: <method>` and the run goes on. The
+ * answer is still stored, so pressing again finds it.
  *
  * It also cost the feature. These methods went out on the ordinary 30-second ceiling, which every
  * real run exceeds, so the reader met `timeout: gitlab_mr_review_run` EVERY time — while the backend
@@ -225,6 +233,27 @@ const REQUEST_TIMEOUT_MS = 30_000;
  * What a ceiling still buys is an answer that is lost while the socket stays up.
  */
 const AGENT_REQUEST_TIMEOUT_MS = 35 * 60_000;
+
+/**
+ * The ceiling for a send that carries PICTURES.
+ *
+ * **The same bug as the agent methods above, in the one RPC that must never have it.**
+ * `teams_send::send_message` uploads each picture to AMS inline, one at a time, and only then POSTs
+ * the message — so a send carrying pictures takes as long as the user's uplink needs. The composer's
+ * three ceilings admit 30 MiB in one message (§ Pictures in a message), which is about four minutes
+ * at 1 Mbit/s up; on the ordinary 30-second ceiling the page reported a FAILURE for a message the
+ * backend then posted, and left the words in the box.
+ *
+ * That is bad twice over, and the second is the reason this exists. A send that failed says so at the
+ * composer — so the reader sees the words still there and presses Enter again. `sendingRef` was
+ * released by the rejection, so nothing stops them, and the colleague gets the message TWICE. It is
+ * exactly the failure § ONE ENTER IS ONE MESSAGE exists to prevent, reached through a timer instead
+ * of through a press.
+ *
+ * A send with NO pictures keeps the ordinary ceiling: it is one POST, and an answer lost on that has
+ * to fail while somebody is still looking at the screen.
+ */
+const UPLOAD_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 export type BackendOptions = {
   giveUpMs?: number;
@@ -304,6 +333,7 @@ export class Backend {
       this.reconnectTimer = null;
     }
     this.reconnecting = false;
+    // `teardownSocket` rejects what was in flight; this covers a `close()` with no socket at all.
     this.teardownSocket();
     for (const p of this.pending.values()) p.reject(new Error("closed"));
     this.pending.clear();
@@ -351,6 +381,23 @@ export class Backend {
     ws.onmessage = (m) => this.onMessage(String(m.data));
   }
 
+  /**
+   * Drop the current socket, and REJECT whatever was in flight on it.
+   *
+   * The rejection is here rather than only in `onclose`, and it is the pairing that makes every
+   * request ceiling in this file safe. This nulls `onclose` BEFORE calling `ws.close()`, so the
+   * rejection at that handler never runs for a socket torn down this way — and `openSocket` calls this
+   * first. So a `retryNow()` that lands while a socket is dying but before its close event has
+   * dispatched (`connected` already false, `onclose` still queued) orphaned every pending request:
+   * nothing would settle them but their own timer. `watchWakeups` calls `retryNow` on exactly the
+   * moments a phone comes back, which is when a socket is most likely to be mid-death.
+   *
+   * It was survivable while every ceiling was 30 seconds. It stopped being once an agent run got 35
+   * minutes and a picture-carrying send five: the reader would sit in front of "Reading the changes…"
+   * for half an hour with nothing wrong that anything could say. The words are `connection closed`,
+   * the same as `onclose`'s, so the sentences `send-failure.ts` and `call-failure.ts` already write
+   * for a dropped socket cover this too.
+   */
   private teardownSocket(): void {
     const ws = this.ws;
     if (!ws) return;
@@ -364,6 +411,8 @@ export class Backend {
       /* ignore */
     }
     this.ws = null;
+    for (const p of this.pending.values()) p.reject(new Error("connection closed"));
+    this.pending.clear();
   }
 
   private scheduleReconnect(): void {
@@ -591,39 +640,45 @@ export class Backend {
      *  sent before a thread could be answered. */
     threadRoot?: string,
   ): Promise<{ sent: boolean }> {
-    return this.writeRequest<{ sent: boolean }>("send", {
-      conversation,
-      text,
-      reply_to: replyTo,
-      content_html: contentHtml,
-      // WHICH thread this post lands in. It decides the POST's address on the backend
-      // rather than anything in the body, so a reply to an announcement goes under it
-      // instead of opening a second thread beside it.
-      thread_root: threadRoot || undefined,
-      // The post's TITLE, where a channel post has one — `properties.subject` on the
-      // message, never words in its body (see lib/post-subject.ts). Absent means untitled,
-      // which is every message this app sent before the field existed.
-      subject: subject || undefined,
-      // When Teams is to DELIVER it, in epoch milliseconds — absent means now. The
-      // service holds the message until then, so this is one ordinary send with one more
-      // field in it rather than a queue on this machine.
-      scheduled_time: scheduledTime,
-      // Who the message @mentions. The body's mention spans carry only an index; this
-      // list is what tells Teams whom each index names, so they are notified.
-      mentions: mentions && mentions.length > 0 ? mentions : undefined,
-      // The pictures the message carries, in the order the composer holds them: that is
-      // the order the backend uploads them in, and the order they appear in the body.
-      images:
-        images.length > 0
-          ? images.map((image) => ({
-              name: image.name,
-              content_type: image.contentType,
-              width: image.width,
-              height: image.height,
-              data_base64: image.dataBase64,
-            }))
-          : undefined,
-    });
+    return this.writeRequest<{ sent: boolean }>(
+      "send",
+      {
+        conversation,
+        text,
+        reply_to: replyTo,
+        content_html: contentHtml,
+        // WHICH thread this post lands in. It decides the POST's address on the backend
+        // rather than anything in the body, so a reply to an announcement goes under it
+        // instead of opening a second thread beside it.
+        thread_root: threadRoot || undefined,
+        // The post's TITLE, where a channel post has one — `properties.subject` on the
+        // message, never words in its body (see lib/post-subject.ts). Absent means untitled,
+        // which is every message this app sent before the field existed.
+        subject: subject || undefined,
+        // When Teams is to DELIVER it, in epoch milliseconds — absent means now. The
+        // service holds the message until then, so this is one ordinary send with one more
+        // field in it rather than a queue on this machine.
+        scheduled_time: scheduledTime,
+        // Who the message @mentions. The body's mention spans carry only an index; this
+        // list is what tells Teams whom each index names, so they are notified.
+        mentions: mentions && mentions.length > 0 ? mentions : undefined,
+        // The pictures the message carries, in the order the composer holds them: that is
+        // the order the backend uploads them in, and the order they appear in the body.
+        images:
+          images.length > 0
+            ? images.map((image) => ({
+                name: image.name,
+                content_type: image.contentType,
+                width: image.width,
+                height: image.height,
+                data_base64: image.dataBase64,
+              }))
+            : undefined,
+      },
+      // A send that CARRIES pictures gets the longer ceiling, and one that does not keeps the
+      // ordinary one: the slow part is measurable from the params, so nothing has to guess.
+      images.length > 0 ? UPLOAD_REQUEST_TIMEOUT_MS : undefined,
+    );
   }
   /** Rewrite one of our own messages. `contentHtml` is the same optional rich body a
    *  {@link send} carries and is used INSTEAD of escaping `text`: a message whose body is

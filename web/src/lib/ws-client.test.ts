@@ -60,6 +60,11 @@ class FakeWebSocket {
     this.readyState = FakeWebSocket.CLOSED;
     this.onclose?.({});
   }
+  /** DYING but not yet closed: the browser has moved the socket on and the close event is queued.
+   *  It is the state `retryNow()` can land in, and the one that orphaned pending requests. */
+  simulateClosing(): void {
+    this.readyState = FakeWebSocket.CLOSING;
+  }
 }
 
 let originalWebSocket: typeof globalThis.WebSocket;
@@ -1018,6 +1023,75 @@ describe("an agent run's own request ceiling", () => {
 
     await vi.advanceTimersByTimeAsync(31_000);
     expect(settled).toHaveBeenCalledWith(expect.stringContaining("timeout: gitlab_mr_review_chat"));
+    backend.close();
+  });
+});
+
+// A SEND that carries pictures is the same bug class as an agent run, in the one RPC that must never
+// have it: `teams_send::send_message` uploads each picture to AMS inline and only then POSTs the
+// message, so it takes as long as the user's uplink needs — and the composer admits 30 MiB in one
+// message. On the ordinary ceiling the page reported a failure for a message the backend then posted,
+// left the words in the box, and released `sendingRef` — so the next Enter posted it AGAIN.
+describe("a send that carries pictures", () => {
+  const picture = {
+    name: "screenshot.png",
+    contentType: "image/png" as const,
+    dataBase64: "iVBORw0KGgo=",
+    width: 100,
+    height: 80,
+  };
+
+  it("is still waiting well past the ordinary 30 seconds", async () => {
+    const { backend, socket } = await connected();
+    const settled = vi.fn();
+    const promise = backend.send("19:x@thread.v2", "look", undefined, "<p>look</p>", [picture]);
+    void promise.then(
+      () => settled("resolved"),
+      (e: unknown) => settled(`rejected: ${String(e)}`),
+    );
+
+    // Two minutes — a 10 MiB screenshot on an ordinary uplink.
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(settled).not.toHaveBeenCalled();
+
+    const frame = JSON.parse(socket.sent[0]!) as { id: number };
+    socket.simulateMessage(JSON.stringify({ id: frame.id, result: { sent: true } }));
+    await expect(promise).resolves.toEqual({ sent: true });
+    backend.close();
+  });
+
+  it("leaves a send with NO pictures on the ordinary ceiling", async () => {
+    // One POST, and an answer lost on that has to fail while somebody is still looking at the screen.
+    const { backend } = await connected();
+    const promise = backend.send("19:x@thread.v2", "hello");
+    const settled = vi.fn();
+    void promise.catch((e: unknown) => settled(String(e)));
+
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(settled).toHaveBeenCalledWith(expect.stringContaining("timeout: send"));
+    backend.close();
+  });
+});
+
+// A socket dropped and REPLACED rejects what was in flight on it. `teardownSocket` nulls `onclose`
+// before closing, so that handler's own rejection never runs for a socket torn down this way — and
+// `retryNow()` can land while one is dying but before its close event has dispatched. That orphaned
+// every pending request, settled by nothing but its own timer: survivable at 30 seconds, and not once
+// an agent run gets 35 minutes.
+describe("a socket dropped and replaced", () => {
+  it("rejects what was in flight rather than leaving it to the timer", async () => {
+    const { backend, socket } = await connected();
+    const promise = backend.gitlabRunMergeRequestReview({ projectPath: "acme/webapp", iid: 596 });
+    const settled = vi.fn();
+    void promise.catch((e: unknown) => settled(String(e)));
+
+    // The socket dies and `retryNow()` lands before its close event has dispatched — the wakeup path.
+    socket.simulateClosing();
+    backend.retryNow();
+
+    // Rejected AT ONCE, in the words a dropped socket already has, rather than in 35 minutes.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledWith(expect.stringContaining("connection closed"));
     backend.close();
   });
 });
