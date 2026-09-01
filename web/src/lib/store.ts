@@ -922,6 +922,15 @@ export type AppState = {
    *  swallows a question and shows nothing feels broken — and it is taken back if the publish fails,
    *  with the words handed back to the box. */
   gitlabReviewPending: PendingReviewQuestion | null;
+  /** The answer to the pending question SO FAR, as the backend streams it (`gitlab_mr_review_answer`).
+   *
+   *  A run is tens of seconds, so an answer that appeared whole at the end left the reader watching a
+   *  spinner for all of it — and there was nothing on screen to say the model had started. It is drawn
+   *  in the pending turn's own place, so the words simply become the answer when the run ends.
+   *
+   *  It is the PENDING question's, which is what makes it honest: the pending bubble belongs to the
+   *  page that pressed, so a page with none ignores the frames and meets the turn when it lands. */
+  gitlabReviewStreaming: string;
   /** How wide the reader dragged the READING's conversation column, in pixels. Persisted per browser
    *  beside the diff page's own two, and for their reason: a per-screen decision with no upstream to
    *  write it to. */
@@ -1273,6 +1282,7 @@ function initialState(): AppState {
     gitlabReviewAsking: false,
     gitlabReviewAskError: null,
     gitlabReviewPending: null,
+    gitlabReviewStreaming: "",
     gitlabReviewChatWidth: REVIEW_CHAT_DEFAULT_WIDTH,
     gitlabDiffFilesWidth: FILES_COLUMN_DEFAULT_WIDTH,
     gitlabDiffSymbolsWidth: SYMBOLS_PANEL_DEFAULT_WIDTH,
@@ -1988,6 +1998,28 @@ export class TeamsController {
     // One merge request moved. `kind` says which read arrived — or `stale`, which is what
     // a WRITE broadcasts: it carries no payload, because the point of it is that every
     // page (this one included, and the phone beside it) has to read again.
+    // THE ANSWER TO A QUESTION, AS IT IS WRITTEN. A run is tens of seconds, so an answer that
+    // appeared whole at the end left the reader watching a spinner for all of it with nothing saying
+    // the model had even started.
+    //
+    // It is drawn into the PENDING question's own place, which is what makes it honest: that bubble
+    // belongs to the page that pressed, so a page with no pending question ignores these frames and
+    // meets the turn when the answer lands — which is what it did before this existed.
+    on("gitlab_mr_review_answer", (raw) => {
+      const d = raw as { project_path?: string; iid?: number; text?: string } | null;
+      if (!d || typeof d.project_path !== "string" || typeof d.iid !== "number") return;
+      if (typeof d.text !== "string") return;
+      if (!sameMergeRequest({ projectPath: d.project_path, iid: d.iid }, this.get().openMergeRequest)) {
+        return;
+      }
+      // Only while a question of THIS page's is out. Without it a frame arriving after the answer had
+      // landed — the last one always races the response — would draw a half answer under a turn that
+      // is already complete.
+      if (!this.get().gitlabReviewPending) return;
+      if (this.get().gitlabReviewStreaming === d.text) return;
+      this.set({ gitlabReviewStreaming: d.text });
+    });
+
     on("gitlab_mr_updated", (raw) => {
       const d = raw as
         | (Record<string, unknown> & { project_path?: string; iid?: number; kind?: string })
@@ -4083,6 +4115,7 @@ export class TeamsController {
       gitlabReviewAsking: false,
       gitlabReviewAskError: null,
       gitlabReviewPending: null,
+      gitlabReviewStreaming: "",
       // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
       // piece of this page that would be read as current when it is minutes old.
       gitlabPipeline: null,
@@ -4506,6 +4539,8 @@ export class TeamsController {
         paths: wire.paths,
         asked_ms: Date.now(),
       },
+      // Nothing of the LAST answer, or a fresh question would open under the words of the one before.
+      gitlabReviewStreaming: "",
     });
     try {
       const { chat } = await this.backend.gitlabAskMergeRequestReview(key, question, wire);
@@ -4513,12 +4548,16 @@ export class TeamsController {
       // draws the question twice — which is what a separate clear would let a render between the two
       // do.
       if (sameMergeRequest(this.get().openMergeRequest, key)) {
-        this.set({ gitlabReviewChat: chat, gitlabReviewPending: null });
+        this.set({ gitlabReviewChat: chat, gitlabReviewPending: null, gitlabReviewStreaming: "" });
       }
       return true;
     } catch (e) {
       if (sameMergeRequest(this.get().openMergeRequest, key)) {
-        this.set({ gitlabReviewAskError: errText(e), gitlabReviewPending: null });
+        this.set({
+          gitlabReviewAskError: errText(e),
+          gitlabReviewPending: null,
+          gitlabReviewStreaming: "",
+        });
       }
       return false;
     } finally {
@@ -4895,6 +4934,7 @@ export class TeamsController {
       gitlabReviewAsking: false,
       gitlabReviewAskError: null,
       gitlabReviewPending: null,
+      gitlabReviewStreaming: "",
       // A comment being written belongs to one line of one file, so opening another merge
       // request — or leaving this one — takes it away rather than carrying it over to a line
       // that means something else there.

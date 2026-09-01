@@ -8935,8 +8935,56 @@ async fn gitlab_review_ask(
         input.prompt.len(),
         if input.truncated { " (code cut)" } else { "" },
     );
-    let (progress, _watch) = tokio::sync::watch::channel(agent::Progress::default());
-    let outcome = agent::run(&request, &progress).await?;
+    // THE ANSWER IS STREAMED WHILE IT IS WRITTEN, which is what the `progress` channel
+    // `agent::run` already takes is for — this call created it and threw the receiver away, so the
+    // reader watched a spinner for tens of seconds and then met a whole answer at once.
+    //
+    // The frames are `gitlab_mr_review_answer` and they carry the merge request plus the text SO FAR.
+    // A page draws them into its own pending question and nothing else, which is the one honest
+    // reading of them: the pending bubble belongs to the page that pressed. A SECOND page open on the
+    // same merge request has no pending question to fill, so it ignores the frames and meets the turn
+    // when the answer lands — the same thing it does today.
+    //
+    // It is the shape `agent_stream_local` has and deliberately not that function: this run posts no
+    // Teams message, so there is no `message_id`, no conversation and no persona to name — every
+    // field of an `agent_stream` frame would be empty, and a client would have to know which of the
+    // two kinds of frame it was reading.
+    let (progress, mut watch) = tokio::sync::watch::channel(agent::Progress::default());
+    let run = agent::run(&request, &progress);
+    tokio::pin!(run);
+    let outcome = loop {
+        tokio::select! {
+            // THE RUN is what this loop is waiting for. It ends the loop whichever branch was polled
+            // last, so there is no task to cancel and no frame after the answer.
+            outcome = &mut run => break outcome,
+            // A change in the answer so far, or the keepalive: a run may be quiet for a long time and
+            // a page hearing nothing has to assume the backend died, so the frame then repeats what it
+            // said last (the reading `agent_stream_local` states in full).
+            waited = tokio::time::timeout(AGENT_STREAM_KEEPALIVE, watch.changed()) => {
+                // A CLOSED channel cannot happen while `progress` is alive in this scope, which it is
+                // for as long as the run is — and if it ever did, carrying on is the harmless answer,
+                // because the run's own branch is what ends this loop. It is deliberately NOT a panic
+                // on a state that "cannot happen": one here would take the reader's whole socket with
+                // it, and the test below scans this handler for exactly that.
+                if !matches!(waited, Ok(Err(_))) {
+                    let text = watch.borrow_and_update().text.clone();
+                    ctx.emit(
+                        "gitlab_mr_review_answer",
+                        json!({
+                            "project_path": project_path,
+                            "iid": iid,
+                            "text": text,
+                        }),
+                    );
+                }
+                // Floored AFTER the frame, so the first words appear at once and only what follows is
+                // spaced out. The channel keeps the latest value alone, so a burst during the sleep
+                // collapses into one frame rather than a backlog — and the run is simply not polled
+                // for those 50 ms, which costs a run of tens of seconds nothing.
+                tokio::time::sleep(AGENT_STREAM_INTERVAL).await;
+            }
+        }
+    }?;
     let answer = gitlab_review::chat_answer(&outcome.text)?;
 
     // The turn records what really TRAVELLED, not what was asked for: a tagged path the diff does not
@@ -14516,6 +14564,52 @@ mod tests {
     /// One direction only. A name in the hook that is no longer gated costs nothing: it blocks a
     /// string no backend answers, which is noise rather than a fault, and there are a few
     /// (`set_calling`, `mail_mark_read`) left from methods that have gone.
+    /// THE REVIEW'S ANSWER IS STREAMED, and the frame it is streamed on is the one the page listens
+    /// for.
+    ///
+    /// The `progress` channel `agent::run` takes has always been there; this handler created it and
+    /// threw the receiver away, so a reader watched a spinner for tens of seconds and then met a whole
+    /// answer at once. Nothing else can catch that coming back: the E2E drives the MOCK's own stream,
+    /// so deleting the loop here would leave every spec passing.
+    ///
+    /// It scans for the emit, the event NAME (which is on the other side of a process boundary, in
+    /// `store.ts`), and the text field a page draws — and for the two things that make the loop safe:
+    /// the keepalive, so a quiet run is not mistaken for a dead backend, and the absence of an
+    /// `unreachable!`, because a panic in a request handler takes the reader's whole socket with it.
+    #[test]
+    fn the_reviews_answer_is_streamed_while_it_is_written() {
+        let source = include_str!("server.rs");
+        let at = source
+            .find("async fn gitlab_review_ask")
+            .expect("the review's ask handler is named `gitlab_review_ask`");
+        let end = source[at..]
+            .find("\n/// How long a folded roster")
+            .expect("the handler is followed by the roster's own window");
+        let handler = &source[at..at + end];
+        assert!(
+            handler.contains("\"gitlab_mr_review_answer\""),
+            "the handler must emit the frame the page listens for",
+        );
+        assert!(
+            handler.contains("AGENT_STREAM_KEEPALIVE"),
+            "a quiet run must repeat its last frame, or a page reads silence as a dead backend",
+        );
+        assert!(
+            handler.contains("AGENT_STREAM_INTERVAL"),
+            "the frames must be floored, or a burst of tokens is a burst of frames",
+        );
+        assert!(
+            !handler.contains("unreachable!"),
+            "a panic in a request handler takes the reader's whole socket with it",
+        );
+        // The PAGE's own half: the same event name, on the other side of the socket.
+        let store = include_str!("../../web/src/lib/store.ts");
+        assert!(
+            store.contains("on(\"gitlab_mr_review_answer\""),
+            "the page must listen for the frame the backend emits",
+        );
+    }
+
     /// The page's own request ceiling for an agent run is LONGER than the bound that really ends one.
     ///
     /// The two numbers live on opposite sides of a process boundary — `AGENT_REQUEST_TIMEOUT_MS` in

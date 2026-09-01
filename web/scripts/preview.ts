@@ -3908,6 +3908,12 @@ if (import.meta.main) {
         // answer's own picture cannot show, and the whole of what makes the press feel answered.
         await page.waitForSelector('[data-testid="gitlab-review-turn"][data-answered="no"]');
         await shot(`${out}-asked-light.png`, '[data-testid="gitlab-review-chat"]');
+        // THE ANSWER BEING WRITTEN, which is the state the whole streaming half is about: the words so
+        // far in the answer's own place, with "still writing…" under them rather than a spinner
+        // standing where the answer will be. It waits for real words rather than for a moment, because
+        // a fixed pause photographs whatever the mock happened to have sent.
+        await page.waitForSelector('[data-testid="gitlab-review-chat-streaming"]');
+        await shot(`${out}-streaming-light.png`, '[data-testid="gitlab-review-chat"]');
         await emit({ kind: "gitlab_mr", review: "stored" });
         await page.waitForSelector('[data-testid="gitlab-review-chat"][data-turns="1"]', {
           timeout: 20_000,
@@ -3959,7 +3965,7 @@ if (import.meta.main) {
             `${out}-unplaced-light.png, ${out}-stale-light.png, ${out}-refused-light.png, ` +
             `${out}-tags-{light,dark}.png, ${out}-question-light.png, ` +
             `${out}-chip-{light,dark}.png, ${out}-chip-theme-light.png, ${out}-grown-light.png, ` +
-            `${out}-asked-light.png, ` +
+            `${out}-asked-light.png, ${out}-streaming-light.png, ` +
             `${out}-answer-{light,dark}.png, ${out}-with-chat-light.png, ` +
             `${out}-ask-refused-light.png and ${out}-mobile{,-chat}-light.png`,
         );

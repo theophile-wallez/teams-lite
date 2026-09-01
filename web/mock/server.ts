@@ -5325,6 +5325,14 @@ let mockGitLabAskRefusal: string | null = null;
  * every later one wait.
  */
 let mockGitLabAskHoldMs = 0;
+
+/** How many pieces a held answer is streamed in.
+ *
+ *  Enough that a spec can catch the answer PART-WAY and a capture can photograph it, and few enough
+ *  that a 2 s hold is not a hundred frames. The real backend's rate is a floor in milliseconds
+ *  (`AGENT_STREAM_INTERVAL`) rather than a count, because it has a real CLI's output to follow; what
+ *  this mirrors is the SHAPE — text that grows — and not the cadence. */
+const MOCK_ANSWER_STREAM_PIECES = 6;
 /** The readings this machine has "made", keyed the way the backend keys its own stored one:
  *  `<project>!<iid>`, ONE per merge request, with the head sha inside the payload. */
 const mockReviews = new Map<string, MockReview>();
@@ -9577,10 +9585,9 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         throw new Error("read the changes first — a question needs a reading to be about");
       }
       if (mockGitLabAskRefusal) throw new Error(mockGitLabAskRefusal);
-      // Held BEFORE anything is stored, which is where a real run's time goes.
-      if (mockGitLabAskHoldMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, mockGitLabAskHoldMs));
-      }
+      // The HOLD is spent on the STREAM below rather than in one silent wait, because that is where a
+      // real run's time goes: the words arrive over the whole of it. A hold of nothing answers at
+      // once, which is what every spec that does not care about the stream gets.
       const themes = numberList(params, "themes").slice(0, 8);
       // Only a path the DIFF holds travels, exactly as `build_chat_prompt` decides: a client cannot
       // make this read a file the merge request never changed, and the turn records what really went.
@@ -9589,9 +9596,26 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         .filter((path) => changed.has(path))
         .slice(0, 8);
       const chat = mockReviewChats.get(key) ?? { turns: [] };
+      const answer = mockReviewAnswer(review, themes, paths, question);
+      // STREAMED, in pieces, exactly as the backend streams a real run's own `progress` channel — a
+      // mock that answered whole would let a page that drew nothing until the end pass every test,
+      // and the state the whole change is about (words arriving) would have no duration to
+      // photograph. It is only worth doing while a spec ASKED for a hold: with none, this mock
+      // answers in one frame and a stream of one piece says nothing.
+      if (mockGitLabAskHoldMs > 0) {
+        const pieces = MOCK_ANSWER_STREAM_PIECES;
+        for (let piece = 1; piece < pieces; piece += 1) {
+          broadcast("gitlab_mr_review_answer", {
+            project_path: projectPath,
+            iid,
+            text: answer.slice(0, Math.ceil((answer.length * piece) / pieces)),
+          });
+          await new Promise((resolve) => setTimeout(resolve, mockGitLabAskHoldMs / pieces));
+        }
+      }
       chat.turns.push({
         question,
-        answer: mockReviewAnswer(review, themes, paths, question),
+        answer,
         themes,
         paths,
         asked_ms: Date.now(),

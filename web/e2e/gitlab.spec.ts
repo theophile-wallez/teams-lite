@@ -2067,6 +2067,82 @@ test.describe.serial("the GitLab merge-request page", () => {
     await setMergeRequestControl(page, { clear: true });
   });
 
+  test("streams the answer as it is written, in the answer's own place", async ({ page }) => {
+    // A run is tens of seconds. An answer that appeared whole at the end left the reader watching a
+    // spinner for all of it, with nothing on screen saying the model had even started.
+    //
+    // The mock is HELD for this, and it STREAMS through the hold rather than waiting silently, which
+    // is the only way the assertion means anything: answering in one frame would make "streamed" and
+    // "arrived at the end" the same picture.
+    await setMergeRequestControl(page, { review: "stored", hold_ask: 2_000 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const field = page.locator('[data-testid="gitlab-review-chat-field"]');
+    await field.click();
+    await field.type("why the 503?");
+    await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
+
+    const turn = page.locator('[data-testid="gitlab-review-turn"]').first();
+    const answer = turn.locator('[data-testid="gitlab-review-turn-answer"]');
+    // Words are drawn BEFORE the answer has landed, in the answer's own place — so nothing moves at
+    // the swap, which is what a spinner somewhere else would have made unavoidable.
+    await expect(turn).toHaveAttribute("data-answered", "no");
+    await expect(answer).not.toBeEmpty();
+    // And it SAYS it is still writing, because the moment belongs to a finished turn.
+    await expect(page.locator('[data-testid="gitlab-review-chat-streaming"]')).toBeVisible();
+    const partial = (await answer.innerText()).length;
+
+    // It GROWS: the same element holds more of the answer a moment later.
+    await expect.poll(async () => (await answer.innerText()).length).toBeGreaterThan(partial);
+
+    // And it settles into the real turn, with the streaming note gone.
+    await expect(turn).toHaveAttribute("data-answered", "yes", { timeout: 20_000 });
+    await expect(page.locator('[data-testid="gitlab-review-chat-streaming"]')).toHaveCount(0);
+    await expect(answer.locator("code").first()).toBeVisible();
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("puts the question in the chat's own bubble and the answer in none", async ({ page }) => {
+    // The two halves of what a transcript beside a document should look like. With both sides in
+    // bubbles it is two columns of tinted slabs, and the answer is the long one — so the question
+    // keeps the app's own grey chat bubble and the answer is prose on the panel itself.
+    await setMergeRequestControl(page, { review: "stored", chat: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const turn = page.locator('[data-testid="gitlab-review-turn"]').first();
+    const question = turn.locator('[data-testid="gitlab-review-turn-question"]');
+    const answer = turn.locator('[data-testid="gitlab-review-turn-answer"]');
+    await expect(question).toBeVisible();
+    await expect(answer).toBeVisible();
+
+    // THE QUESTION IS THE CHAT'S OWN BUBBLE — measured against a real incoming bubble in a real chat
+    // rather than against a colour spelled here, so the two cannot drift apart.
+    const paint = (locator: ReturnType<typeof page.locator>) =>
+      locator.evaluate((el) => getComputedStyle(el).backgroundColor);
+    const bubble = await paint(question);
+    // Not the ACCENT, which is what it used to be: this panel is a column beside a document and the
+    // app has one accent to spend.
+    const accent = await page
+      .locator('[data-testid="gitlab-review-run"]')
+      .evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(bubble).not.toBe(accent);
+
+    // THE ANSWER IS IN NO BUBBLE: nothing is painted behind it and it has no rounding of its own.
+    const answerPaint = await paint(answer);
+    expect(["rgba(0, 0, 0, 0)", "transparent"]).toContain(answerPaint);
+    const rounded = await answer.evaluate((el) => getComputedStyle(el).borderRadius);
+    expect(rounded === "0px" || rounded === "").toBe(true);
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
   test("the SEND control is inside the composer's own box", async ({ page }) => {
     // One box for one act — the app's own composer's shape. Two boxes ask the reader which of them
     // they are typing into, and the button below the box read as a page control rather than as this

@@ -2961,7 +2961,7 @@ two patches and nothing else; a question with NO tags carries the reading and no
 WORDS IN THE QUESTION — the reader sees what will travel in the sentence they wrote, and the rule below
 says why that is the shape rather than a chip row beside the field.
 
-Twenty-four rules hold it, and each is pinned by `gitlab_review::tests`,
+Twenty-six rules hold it, and each is pinned by `gitlab_review::tests`,
 `web/src/lib/gitlab-review.test.ts`, `web/src/lib/ws-client.test.ts` or `web/e2e/gitlab.spec.ts`:
 
 - **A question needs a READING to be about.** The backend refuses one without it, so the panel is not
@@ -3063,6 +3063,43 @@ Twenty-four rules hold it, and each is pinned by `gitlab_review::tests`,
   question. A click or an arrow closes a list measured against the old position rather than leaving it
   matching the wrong run, and the inserted tag takes a trailing space only where the text has not got
   one already.
+- **THE ANSWER IS STREAMED AS IT IS WRITTEN**, into the answer's own place under the question — so
+  nothing moves when the run ends and the partial simply becomes the answer. A run is tens of
+  seconds, and an answer that appeared whole at the end left the reader watching a spinner for all of
+  it with nothing saying the model had started. The mechanism was already there and thrown away: the
+  `progress` channel `agent::run` takes was created by this handler and its receiver dropped, so the
+  fix is a `select!` beside the run that emits `gitlab_mr_review_answer` frames carrying the text so
+  far. Five rules hold it:
+  - **The frames are FLOORED at `AGENT_STREAM_INTERVAL` and repeated at `AGENT_STREAM_KEEPALIVE`**,
+    which are `agent_stream_local`'s own numbers and are read for its reasons: a burst of tokens must
+    not be a burst of frames, and a page hearing nothing from a quiet run has to be able to tell it
+    from a dead backend.
+  - **It is NOT `agent_stream`**, deliberately. This run posts no Teams message, so there is no
+    `message_id`, no conversation and no persona to name — every field of that frame would be empty,
+    and a client would have to know which of two kinds of frame it was reading.
+  - **A page draws the frames into its OWN pending question and nothing else.** That bubble belongs to
+    the page that pressed, so a second page open on the same merge request ignores them and meets the
+    turn when the answer lands — which is what it did before this existed. A frame arriving after the
+    answer has settled (the last one always races the response) is dropped for the same reason.
+  - **There is no panic path.** The stream is a branch of a `select!` in a loop rather than a future
+    that must never return, because a closed channel "cannot happen" while the sender is alive in that
+    scope — and a panic on a state that cannot happen would take the reader's whole socket with it.
+  - **Only a RUST test can catch this coming back**, because the E2E drives the MOCK's own stream:
+    `the_reviews_answer_is_streamed_while_it_is_written` scans the handler for the emit, the two rate
+    constants and the absence of a panic, and scans `store.ts` for the same event name on the other
+    side of the socket. The mock streams through its `hold_ask` rather than waiting silently, because a
+    mock that answered whole would let a page that drew nothing until the end pass every test.
+- **THE QUESTION IS THE CHAT'S OWN BUBBLE AND THE ANSWER IS IN NONE.** The question takes
+  `bubble-incoming` — the app's own grey, so a question here is the same object a message in a chat is
+  — rather than the accent it shipped with: this panel is a 400px column beside a document, where a
+  filled accent bubble is the loudest thing on the page, and the app has one accent to spend. The
+  ANSWER has no bubble at all, because it is the long half of every turn (paragraphs, lists, fenced
+  code) and a tinted slab the width of the panel round it says nothing the question above has not
+  already said. With both sides in bubbles the transcript is two columns of slabs and the answer is
+  unreadable as prose. **The CHIPS follow the surface**: no `onAccent` on a grey bubble, which is § A
+  CHIP IS TINTED FOR THE SURFACE IT LANDS ON applied the moment the surface moved. The spec measures
+  the bubble against the accent rather than naming a colour, and measures that nothing is painted
+  behind the answer.
 - **THE QUESTION IS DRAWN THE MOMENT IT LEAVES**, in its own bubble, with the words already gone from
   the box (`gitlabReviewPending`, `drawnReviewTurns`). A run is tens of seconds, so a composer that
   took the words and showed nothing until the answer landed looked like one that had lost them. It is
@@ -3129,7 +3166,9 @@ Twenty-four rules hold it, and each is pinned by `gitlab_review::tests`,
 ECHOES what the question was told — the themes by title and the files by path — because that is the
 half a page can get wrong, and otherwise answers fixed prose so every capture is the same picture). It
 mirrors every REFUSAL the backend makes rather than only the happy path: a question with no words, one
-past the bound, and one asked before any reading exists. Its `{kind:"gitlab_mr"}` hook gains
+past the bound, and one asked before any reading exists. It STREAMS a held answer in pieces rather than waiting
+silently, because that is where a real run's time goes — and a mock that answered whole would let a
+page that drew nothing until the end pass every test. Its `{kind:"gitlab_mr"}` hook gains
 `refuse_ask`, `chat: "stored"` and **`hold_ask`**, and **a spec MUST clear all three** — a question
 outlives the page exactly as a reading does, and a held one would make every later question wait.
 
@@ -4122,8 +4161,8 @@ user. Two independent mechanisms enforce that split:
   conversation beside it: the "@" list offering a theme above the files in both themes — each file row
   naming the whole path beside the name its chip will show — the CHIP a picked tag becomes, cropped to
   the composer's own box in both themes, a THEME's chip, the box GROWN to its eight-line ceiling, the
-  answer it lands as in both themes (where the same chip is drawn on the accent fill), the whole page
-  with the conversation
+  answer BEING WRITTEN — the words so far in the answer's own place — the answer it lands as in both
+  themes, the whole page with the conversation
   beside it, a refused question, and that panel at a phone's width where it is BELOW the document —
   and the NAMES in that prose (§ AND A NAME IN THAT PROSE IS THE CODE IT NAMES): the marked words
   cropped to one theme's own summary in both themes, the card a hover opens over the page it covers,

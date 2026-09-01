@@ -98,6 +98,9 @@ export function ReviewChatPanel(props: {
 }) {
   const chat = useAppState((s) => s.gitlabReviewChat);
   const pending = useAppState((s) => s.gitlabReviewPending);
+  // The answer to that pending question so far, streamed by the backend. It is drawn in the answer's
+  // own place, so the words simply become the answer when the run ends and nothing moves at the swap.
+  const streaming = useAppState((s) => s.gitlabReviewStreaming);
   const asking = useAppState((s) => s.gitlabReviewAsking);
   const error = useAppState((s) => s.gitlabReviewAskError);
   const controller = useController();
@@ -182,6 +185,9 @@ export function ReviewChatPanel(props: {
                   review={props.review}
                   tags={all}
                   project={props.project}
+                  // The words SO FAR, on the turn that has no answer yet — and only on that one, so a
+                  // frame arriving late cannot draw a partial answer under a finished turn.
+                  streaming={turn.answer === null ? streaming : ""}
                 />
               </li>
             ))}
@@ -284,21 +290,27 @@ function ReviewTurn(props: {
    *  already follows. */
   tags: ReviewTag[];
   project: string | undefined;
+  /** The answer SO FAR, while this turn's run is still writing. Empty on a settled turn. */
+  streaming: string;
 }) {
   const { turn } = props;
   const code = useCodeVocabulary();
   // An ANSWER is prose about the same code the document is about, so a name in one is marked by the
   // same rules — the fourth and last of the memos that do it (see review-code-context.tsx). It costs
   // nothing where there is no diff: the vocabulary is empty and `markReviewCode` hands the tree back.
+  // The words to draw: the settled answer, or what has been STREAMED of it so far. One expression, so
+  // the partial and the final go through the same parser and the same code marking — which is what
+  // makes the swap at the end invisible rather than a re-layout.
+  //
+  // A name in an answer is marked like every other piece of this page's prose, and it costs nothing
+  // where there is no diff: the vocabulary is empty and `markReviewCode` hands the tree back.
+  const words = turn.answer ?? (props.streaming || null);
   const answer = useMemo(
-    // BOTH sides of the rebase: a turn whose answer has not landed yet draws nothing (a question is
-    // drawn the moment it leaves, so `turn.answer` is empty while the run is out), and one that HAS
-    // landed is marked like every other piece of this page's prose.
     () =>
-      turn.answer
-        ? markReviewCode(parseGitLabMarkdown(turn.answer, gitLabMarkdownOptions(props.project)), code)
+      words
+        ? markReviewCode(parseGitLabMarkdown(words, gitLabMarkdownOptions(props.project)), code)
         : null,
-    [turn.answer, props.project, code],
+    [words, props.project, code],
   );
   const context = turnContext(turn, props.review);
   return (
@@ -308,15 +320,25 @@ function ReviewTurn(props: {
       className="flex flex-col gap-2"
     >
       <div className="flex flex-col items-end gap-0.5">
+        {/* THE QUESTION IS THE CHAT'S OWN BUBBLE, and the ANSWER is not in one at all.
+            
+            It is the app's `bubble-incoming` grey rather than a lookalike, so a question here is the
+            same object a message in a chat is — and it is that grey rather than the ACCENT for two
+            reasons. This panel is a 400px column beside a document, where a filled accent bubble is
+            the loudest thing on the page and the app has one accent to spend (§ the reply row spends
+            it on the thread being answered, not on furniture). And it is what makes the ANSWER
+            readable as prose: with both sides in bubbles the transcript is two columns of tinted
+            slabs, and the answer is the long one. */}
         <p
           data-testid="gitlab-review-turn-question"
-          className="max-w-[92%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-primary px-3 py-2 text-[13px] leading-relaxed text-primary-foreground"
+          className="max-w-[92%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-bubble-incoming px-3 py-2 text-[13px] leading-relaxed text-bubble-incoming-foreground shadow-card"
         >
           {/* THE SAME CHIPS THE FIELD DREW, from the same walk over the same words — so what the
               reader pointed at is legible in the message as well as in the box, and a question is not
-              a paragraph of raw paths. `onAccent`, because this bubble IS the accent fill: the tint
-              is a property of the surface rather than of the tag (§ A CHIP IS TINTED FOR THE SURFACE
-              IT LANDS ON). */}
+              a paragraph of raw paths. NO `onAccent`: the bubble is the chat's grey, and a chip is
+              tinted for the surface it lands on rather than for whose message it is (§ A CHIP IS
+              TINTED FOR THE SURFACE IT LANDS ON — the rule that section records a year of white ink
+              on white for). */}
           <ReviewQuestionText question={turn.question} tags={props.tags} />
         </p>
         {context && (
@@ -332,12 +354,28 @@ function ReviewTurn(props: {
         )}
       </div>
       {answer ? (
-        <div
-          data-testid="gitlab-review-turn-answer"
-          className="rounded-2xl rounded-bl-md bg-element px-3 py-2"
-        >
+        // THE ANSWER IS NOT IN A BUBBLE. It is the long half of every turn — paragraphs, lists, fenced
+        // code — and a bubble round it is a tinted slab the width of the panel that says nothing: the
+        // question above it already says whose words these are not. It is the shape § The local agent
+        // states for a reply in a thread ("the answer sits on the LEFT"), taken one step further
+        // because here there is no thread to sit in: the prose IS the surface, at the panel's own
+        // measure, so the code inside it reads as code rather than as code inside a box inside a box.
+        <div data-testid="gitlab-review-turn-answer" className="pr-1">
           <RichNodes nodes={answer} className="text-[13px] leading-relaxed text-text-dim" />
-          <p className="mt-1 text-[10px] text-text-faint">{formatMessageTime(turn.asked_ms)}</p>
+          {turn.answer ? (
+            <p className="mt-1 text-[10px] text-text-faint">{formatMessageTime(turn.asked_ms)}</p>
+          ) : (
+            // STILL WRITING. The moment belongs to a finished turn, so what stands here while the
+            // words arrive says the run is going instead — beside them rather than over them, so
+            // nothing about the prose moves when it goes.
+            <p
+              data-testid="gitlab-review-chat-streaming"
+              className="mt-1 flex items-center gap-1.5 text-[10px] text-text-faint"
+            >
+              <FadeArc className="size-3" />
+              still writing…
+            </p>
+          )}
         </div>
       ) : (
         // The answer's own place, saying it is on its way — rather than a spinner somewhere else on
@@ -377,7 +415,7 @@ function ReviewQuestionText(props: { question: string; tags: ReviewTag[] }) {
         part.kind === "text" ? (
           <span key={index}>{part.text}</span>
         ) : (
-          <ReviewTagChip key={index} tag={part.tag} onAccent />
+          <ReviewTagChip key={index} tag={part.tag} />
         ),
       )}
     </>
