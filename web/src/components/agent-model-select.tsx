@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ArrowDown01Icon, CheckmarkCircle02Icon, Loading02Icon } from "@hugeicons/core-free-icons";
+import { ArrowDown01Icon, CheckmarkCircle02Icon } from "@hugeicons/core-free-icons";
 import {
   agentBackendLabel,
   agentModelDetail,
@@ -11,6 +11,7 @@ import {
 } from "~/lib/agent";
 import { cn } from "~/lib/utils";
 import { AgentLogo, modelMark } from "./agent-logo";
+import { FadeArc } from "./loading-ui/fade-arc";
 import {
   Command,
   CommandEmpty,
@@ -124,11 +125,15 @@ export function AgentModelSelect(props: {
                   : "Not in this machine's list"}
             </span>
           </span>
-          <HugeiconsIcon
-            icon={busy ? Loading02Icon : ArrowDown01Icon}
-            className={cn("ml-auto size-4 shrink-0 text-text-faint", busy && "animate-spin")}
-            strokeWidth={1.8}
-          />
+          {busy ? (
+            <FadeArc className="ml-auto size-4 shrink-0 text-text-faint" />
+          ) : (
+            <HugeiconsIcon
+              icon={ArrowDown01Icon}
+              className="ml-auto size-4 shrink-0 text-text-faint"
+              strokeWidth={1.8}
+            />
+          )}
         </button>
       </PopoverTrigger>
 

@@ -9,7 +9,6 @@ import {
   ExternalLinkIcon,
   GhostIcon,
   GitPullRequestArrowIcon,
-  Loading02Icon,
   Mail01Icon,
   Moon02Icon,
   Settings02Icon,
@@ -40,6 +39,7 @@ import { CallRecordingsSettings } from "./call-recordings-settings";
 import { ChessEngineSettings } from "./chess-engine-settings";
 import { CustomAgentsSettings } from "./custom-agents-settings";
 import { CustomEmojiSettings } from "./custom-emoji-settings";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { MaintenanceSettings } from "./maintenance-settings";
 import { RenamedPeopleSettings } from "./renamed-people-settings";
 import { SealSettings } from "./seal-settings";
@@ -260,11 +260,7 @@ function GitLabSettings() {
           >
             {save.kind === "saving" ? (
               <>
-                <HugeiconsIcon
-                  icon={Loading02Icon}
-                  className="size-4 animate-spin"
-                  strokeWidth={1.8}
-                />{" "}
+                <FadeArc className="size-4" />{" "}
                 Saving…
               </>
             ) : (
@@ -389,11 +385,7 @@ function LinearSettings() {
           >
             {save.kind === "saving" ? (
               <>
-                <HugeiconsIcon
-                  icon={Loading02Icon}
-                  className="size-4 animate-spin"
-                  strokeWidth={1.8}
-                />{" "}
+                <FadeArc className="size-4" />{" "}
                 Saving…
               </>
             ) : (

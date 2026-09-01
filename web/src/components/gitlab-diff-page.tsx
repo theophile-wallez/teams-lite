@@ -7,7 +7,6 @@ import {
   LayoutThreeRowIcon,
   LayoutTwoColumnIcon,
   Link01Icon,
-  Loading02Icon,
 } from "@hugeicons/core-free-icons";
 import {
   DIFF_CODE_MIN_WIDTH,
@@ -42,6 +41,7 @@ import { DiffSymbolsPanel } from "./gitlab-diff-symbols";
 import { DiffReviewView } from "./gitlab-review-view";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { TrackerProjectProvider } from "./tracker-refs-context";
 
 /** The custom properties the two side columns take their width from.
@@ -402,11 +402,15 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
                         loading && "opacity-60",
                       )}
                     >
-                      <HugeiconsIcon
-                        icon={loading ? Loading02Icon : ArrowRight01Icon}
-                        className={cn("size-3.5", loading && "animate-spin")}
-                        strokeWidth={1.8}
-                      />
+                      {loading ? (
+                        <FadeArc className="size-3.5" />
+                      ) : (
+                        <HugeiconsIcon
+                          icon={ArrowRight01Icon}
+                          className="size-3.5"
+                          strokeWidth={1.8}
+                        />
+                      )}
                       {expand.label}
                     </button>
                     {/* The cost, before the press — the rule the update button follows for its
@@ -605,7 +609,7 @@ function DiffLoading(props: { label: string }) {
       className="flex h-full flex-1 items-center justify-center p-8"
     >
       <span className="flex items-center gap-2 text-[12px] text-text-faint">
-        <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
+        <FadeArc className="size-3.5" />
         {props.label}
       </span>
     </div>

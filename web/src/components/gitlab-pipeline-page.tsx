@@ -3,7 +3,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
   Link01Icon,
-  Loading02Icon,
 } from "@hugeicons/core-free-icons";
 import {
   formatJobDuration,
@@ -32,6 +31,7 @@ import {
   ToneDot,
   TONE_WORDS,
 } from "./gitlab-pipeline-graph";
+import { FadeArc } from "./loading-ui/fade-arc";
 
 // PIPELINES: one of the four pages of a merge request (`/mr/<id>/pipelines`), and the graph in
 // it. The pane draws it under the header that names the merge request and the sub-header that
@@ -364,7 +364,7 @@ function Segmented(props: {
 function Loading(props: { label: string }) {
   return (
     <p className="flex flex-1 items-center justify-center gap-2 p-8 text-[13px] text-text-faint">
-      <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.6} />
+      <FadeArc className="size-4" />
       {props.label}
     </p>
   );

@@ -16,9 +16,10 @@
 
 import { useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Loading02Icon, SquareLock02Icon } from "@hugeicons/core-free-icons";
+import { SquareLock02Icon } from "@hugeicons/core-free-icons";
 import { Button } from "./ui/button";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { writeLockNotice } from "~/lib/write-lock";
 
 export function WriteLockBanner() {
@@ -80,7 +81,7 @@ export function WriteLockBanner() {
         >
           {checking ? (
             <>
-              <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.8} />{" "}
+              <FadeArc className="size-4" />{" "}
               Checking…
             </>
           ) : (

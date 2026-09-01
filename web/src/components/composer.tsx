@@ -5,7 +5,6 @@ import {
   Cancel01Icon,
   Clock01Icon,
   ImageAdd01Icon,
-  Loading02Icon,
   SentIcon,
   SquareLock02Icon,
   TextFontIcon,
@@ -37,6 +36,7 @@ import {
 import { copyableMessageText } from "~/lib/protocol";
 import { replyHeading } from "~/lib/threads";
 import { cn } from "~/lib/utils";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { ScheduleSendMenu } from "./schedule-send-menu";
 import { ScheduledMessagesDialog } from "./scheduled-messages-dialog";
 import { useAppState, useController } from "./controller-context";
@@ -715,11 +715,7 @@ export function Composer(props: {
                 className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-50"
               >
                 {imageLoading ? (
-                  <HugeiconsIcon
-                    icon={Loading02Icon}
-                    className="size-4 animate-spin"
-                    strokeWidth={1.6}
-                  />
+                  <FadeArc className="size-4" />
                 ) : (
                   <HugeiconsIcon icon={ImageAdd01Icon} className="size-4" strokeWidth={1.6} />
                 )}
@@ -751,11 +747,7 @@ export function Composer(props: {
                 )}
               >
                 {sending ? (
-                  <HugeiconsIcon
-                    icon={Loading02Icon}
-                    className="size-4 animate-spin"
-                    strokeWidth={1.8}
-                  />
+                  <FadeArc className="size-4" />
                 ) : (
                   <HugeiconsIcon icon={SentIcon} className="size-4" strokeWidth={1.8} />
                 )}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Loading02Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
+import { Refresh01Icon } from "@hugeicons/core-free-icons";
 import {
   checkView,
   restartForces,
@@ -14,6 +14,7 @@ import {
 import { cn } from "~/lib/utils";
 import { Button } from "./ui/button";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 
 /**
  * The two things the user can do to the app itself: ask whether a newer build exists, and
@@ -197,9 +198,7 @@ function MaintenanceRow(props: {
         onClick={props.onPress}
         className="shrink-0"
       >
-        {view.busy && (
-          <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={2} />
-        )}
+        {view.busy && <FadeArc className="size-4" />}
         {view.label}
       </Button>
     </div>

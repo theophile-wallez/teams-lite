@@ -7,7 +7,6 @@ import {
   ChessPawnIcon,
   CpuIcon,
   Download04Icon,
-  Loading02Icon,
   LockIcon,
   MoreHorizontalIcon,
 } from "@hugeicons/core-free-icons";
@@ -67,6 +66,7 @@ import {
   conversationHoldsEngineChess,
 } from "~/lib/chess-menu";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { SealDialog } from "./seal-dialog";
 import {
   DropdownMenu,
@@ -1108,13 +1108,7 @@ export function ConversationMenu(props: {
             onSelect={(event) => event.preventDefault()}
           >
             Answer here
-            {busy && (
-              <HugeiconsIcon
-                icon={Loading02Icon}
-                className="ml-auto size-3.5 animate-spin"
-                strokeWidth={1.8}
-              />
-            )}
+            {busy && <FadeArc className="ml-auto size-3.5" />}
           </DropdownMenuCheckboxItem>
 
           {/* One line, two meanings — so the colour has to say which one it is. A refused write

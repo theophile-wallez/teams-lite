@@ -15,9 +15,10 @@
 
 import { useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Loading02Icon, SecurityIcon } from "@hugeicons/core-free-icons";
+import { SecurityIcon } from "@hugeicons/core-free-icons";
 import { Button } from "./ui/button";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { brokerNeedsAttention } from "~/lib/protocol";
 import { brokerRemedy } from "~/lib/signin";
 
@@ -113,11 +114,7 @@ export function BrokerBanner() {
           >
             {busy ? (
               <>
-                <HugeiconsIcon
-                  icon={Loading02Icon}
-                  className="size-4 animate-spin"
-                  strokeWidth={1.8}
-                />{" "}
+                <FadeArc className="size-4" />{" "}
                 Repairing…
               </>
             ) : (

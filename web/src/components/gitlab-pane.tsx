@@ -10,7 +10,6 @@ import {
   Edit02Icon,
   GitMergeIcon,
   Link01Icon,
-  Loading02Icon,
   Message01Icon,
   RefreshIcon,
   Tick02Icon,
@@ -55,6 +54,7 @@ import {
 import { Panel } from "./gitlab-panel";
 import { GitLabPipelinePage } from "./gitlab-pipeline-page";
 import { PipelineGraphView, PipelineStatusBadge } from "./gitlab-pipeline-graph";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { RichNodes } from "./rich-content";
 import { TrackerProjectProvider } from "./tracker-refs-context";
 
@@ -189,11 +189,11 @@ export function GitLabPane(props: {
           onClick={() => void controller.reloadMergeRequest()}
           className="grid size-8 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
         >
-          <HugeiconsIcon
-            icon={loading ? Loading02Icon : RefreshIcon}
-            className={cn("size-4", loading && "animate-spin")}
-            strokeWidth={1.6}
-          />
+          {loading ? (
+            <FadeArc className="size-4" />
+          ) : (
+            <HugeiconsIcon icon={RefreshIcon} className="size-4" strokeWidth={1.6} />
+          )}
         </button>
         {detail?.web_url && (
           <a
@@ -239,11 +239,7 @@ export function GitLabPane(props: {
               </p>
             ) : !detail ? (
               <p className="flex items-center gap-2 py-6 text-[13px] text-text-faint">
-                <HugeiconsIcon
-                  icon={Loading02Icon}
-                  className="size-3.5 animate-spin"
-                  strokeWidth={1.6}
-                />
+                <FadeArc className="size-3.5" />
                 Loading the merge request…
               </p>
             ) : (
@@ -636,7 +632,7 @@ function PipelinePanel(props: { onOpenPipeline: () => void }) {
     return (
       <Panel title="Pipeline" testId="gitlab-pipeline">
         <p className="flex items-center gap-2 text-[12px] text-text-faint">
-          <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
+          <FadeArc className="size-3.5" />
           Reading the pipeline…
         </p>
       </Panel>
@@ -763,11 +759,11 @@ function MergeRequestActions(props: {
             !!acting && "opacity-60",
           )}
         >
-          <HugeiconsIcon
-            icon={approving ? Loading02Icon : Tick02Icon}
-            className={cn("size-3.5 shrink-0", approving && "animate-spin")}
-            strokeWidth={1.8}
-          />
+          {approving ? (
+            <FadeArc className="size-3.5 shrink-0" />
+          ) : (
+            <HugeiconsIcon icon={Tick02Icon} className="size-3.5 shrink-0" strokeWidth={1.8} />
+          )}
           {/* The word goes below `sm`, never the control: a phone's header already carries a
               back button, the title and two icons, and a label that squeezed the title to
               nothing would cost the reader which merge request they are on. */}
@@ -801,11 +797,11 @@ function MergeRequestActions(props: {
             (!verdict.can || !!acting) && "cursor-not-allowed opacity-50",
           )}
         >
-          <HugeiconsIcon
-            icon={merging ? Loading02Icon : GitMergeIcon}
-            className={cn("size-4 shrink-0", merging && "animate-spin")}
-            strokeWidth={1.8}
-          />
+          {merging ? (
+            <FadeArc className="size-4 shrink-0" />
+          ) : (
+            <HugeiconsIcon icon={GitMergeIcon} className="size-4 shrink-0" strokeWidth={1.8} />
+          )}
           {props.armed ? (
             <>
               {/* The armed press says what it costs ON the button, because that is where the
@@ -940,11 +936,11 @@ function ActionPanel(props: {
                 !!acting && "opacity-60",
               )}
             >
-              <HugeiconsIcon
-                icon={changing ? Loading02Icon : XVariableCircleIcon}
-                className={cn("size-4", changing && "animate-spin")}
-                strokeWidth={1.8}
-              />
+              {changing ? (
+                <FadeArc className="size-4" />
+              ) : (
+                <HugeiconsIcon icon={XVariableCircleIcon} className="size-4" strokeWidth={1.8} />
+              )}
               {change === "close" ? "Close" : "Reopen"}
             </button>
           </div>
@@ -1219,11 +1215,11 @@ function NoteBubble(props: { note: GitLabNote }) {
                 armed ? "bg-destructive/12 text-destructive" : "text-text-faint hover:text-text-dim",
               )}
             >
-              <HugeiconsIcon
-                icon={deleting ? Loading02Icon : Delete02Icon}
-                className={cn("size-3", deleting && "animate-spin")}
-                strokeWidth={1.8}
-              />
+              {deleting ? (
+                <FadeArc className="size-3" />
+              ) : (
+                <HugeiconsIcon icon={Delete02Icon} className="size-3" strokeWidth={1.8} />
+              )}
               {armed ? "Delete for everybody" : "Delete"}
             </button>
           </div>
@@ -1342,11 +1338,11 @@ function CommentComposer() {
             (empty || !!acting) && "cursor-not-allowed opacity-50",
           )}
         >
-          <HugeiconsIcon
-            icon={posting ? Loading02Icon : Message01Icon}
-            className={cn("size-3.5", posting && "animate-spin")}
-            strokeWidth={1.8}
-          />
+          {posting ? (
+            <FadeArc className="size-3.5" />
+          ) : (
+            <HugeiconsIcon icon={Message01Icon} className="size-3.5" strokeWidth={1.8} />
+          )}
           {replyTo ? "Reply" : "Comment"}
         </button>
         <span className="text-[11px] text-text-faint">

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ImageUpload01Icon, Loading02Icon, Undo02Icon } from "@hugeicons/core-free-icons";
+import { ImageUpload01Icon, Undo02Icon } from "@hugeicons/core-free-icons";
 import type { PersonOverride } from "~/lib/protocol";
 import {
   loadPersonAvatar,
@@ -11,6 +11,7 @@ import {
 import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -275,9 +276,7 @@ export function PersonEditDialog(props: {
             onClick={() => void save()}
             disabled={!dirty || saving || override === undefined}
           >
-            {saving && (
-              <HugeiconsIcon icon={Loading02Icon} className="animate-spin" strokeWidth={1.8} />
-            )}
+            {saving && <FadeArc />}
             Save
           </Button>
         </div>

@@ -2,7 +2,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
   ArrowRight01Icon,
-  Loading02Icon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import {
@@ -17,6 +16,7 @@ import {
 import { formatDiffStat, type GitLabDiff, type GitLabDiffFile } from "~/lib/gitlab-diff";
 import { formatMessageTime } from "~/lib/message-time";
 import { cn } from "~/lib/utils";
+import { FadeArc } from "./loading-ui/fade-arc";
 
 // The THEMES view of a diff: the changed files grouped by what the branch is DOING, with the
 // reading's own thought process written around them.
@@ -287,11 +287,11 @@ function RunButton(props: { busy: boolean; onRun: () => void; label: string }) {
         props.busy && "opacity-70",
       )}
     >
-      <HugeiconsIcon
-        icon={props.busy ? Loading02Icon : SparklesIcon}
-        className={cn("size-3.5", props.busy && "animate-spin")}
-        strokeWidth={1.8}
-      />
+      {props.busy ? (
+        <FadeArc className="size-3.5" />
+      ) : (
+        <HugeiconsIcon icon={SparklesIcon} className="size-3.5" strokeWidth={1.8} />
+      )}
       {/* A run is tens of seconds, so the button says it is going rather than looking pressed and
           idle — the reader has no other signal that anything is happening. */}
       {props.busy ? "Reading the changes…" : props.label}

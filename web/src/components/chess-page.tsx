@@ -49,7 +49,7 @@
  */
 
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ChevronLeftIcon, Loading02Icon } from "@hugeicons/core-free-icons";
+import { ChevronLeftIcon } from "@hugeicons/core-free-icons";
 import { useNavigate } from "@tanstack/react-router";
 import { useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -62,6 +62,7 @@ import { ChessBoard } from "./chess-board";
 import { ChessRematchButton, ChessSeat, scoreSheetLine, useChessSeries } from "./chess-game-card";
 import { ChessMoveNav, ChessScoreSheet } from "./chess-score-sheet";
 import { ConversationChatPanel } from "./conversation-chat-panel";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { useCallOwnsComposer } from "./call-stage-context";
 import { useAppState } from "./controller-context";
 import { useChessGame } from "./use-chess-game";
@@ -85,7 +86,7 @@ export function ChessPage(props: {
     return (
       <ChessPageShell onBack={props.onBack} title="Chess">
         <div className="flex flex-1 items-center justify-center gap-2 text-sm text-text-faint">
-          <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.8} />
+          <FadeArc className="size-4" />
           Opening the conversation…
         </div>
       </ChessPageShell>

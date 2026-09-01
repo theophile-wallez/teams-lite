@@ -3,7 +3,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ChevronLeftIcon,
   Download04Icon,
-  Loading02Icon,
   Mail01Icon,
 } from "@hugeicons/core-free-icons";
 import {
@@ -22,6 +21,7 @@ import { cn } from "~/lib/utils";
 import { Avatar, mailAddressPhoto, mailAvatarInitials, mailAvatarSeed } from "./avatar";
 import { useAppState, useController } from "./controller-context";
 import { FileTypeIcon } from "./file-type-icon";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { MailBody } from "./mail-body";
 
 // The reading pane for one mail. Occupies the same slot as `MessagePane`, so the
@@ -94,11 +94,7 @@ export function MailPane(props: { onBack?: () => void }) {
             </p>
           ) : bodyLoading || !body ? (
             <p className="flex items-center gap-2 py-6 text-[13px] text-text-faint">
-              <HugeiconsIcon
-                icon={Loading02Icon}
-                className="size-3.5 animate-spin"
-                strokeWidth={1.6}
-              />
+              <FadeArc className="size-3.5" />
               Loading message…
             </p>
           ) : (

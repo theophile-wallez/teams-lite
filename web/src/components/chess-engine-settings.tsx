@@ -10,10 +10,11 @@
  */
 
 import { HugeiconsIcon } from "@hugeicons/react";
-import { CpuIcon, Loading02Icon } from "@hugeicons/core-free-icons";
+import { CpuIcon } from "@hugeicons/core-free-icons";
 import { useState } from "react";
 import { chessEngineRowLabel, megabytes } from "~/lib/chess-engine";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { Button } from "./ui/button";
 
 export function ChessEngineSettings() {
@@ -63,7 +64,7 @@ export function ChessEngineSettings() {
             }}
           >
             {busy ? (
-              <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.8} />
+              <FadeArc className="size-4" />
             ) : (
               "Remove"
             )}
@@ -125,7 +126,7 @@ function ChessSoundsRow() {
           }}
         >
           {busy ? (
-            <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.8} />
+            <FadeArc className="size-4" />
           ) : (
             "Remove"
           )}

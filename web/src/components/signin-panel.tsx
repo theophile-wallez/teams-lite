@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { CheckmarkCircle02Icon, Loading02Icon, SecurityIcon } from "@hugeicons/core-free-icons";
+import { CheckmarkCircle02Icon, SecurityIcon } from "@hugeicons/core-free-icons";
 import {
   FRAME_INTERVAL_MS,
   STATUS_INTERVAL_MS,
@@ -12,6 +12,7 @@ import {
 } from "~/lib/signin";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -188,7 +189,7 @@ export function SigninPanel() {
 
         {view.busy && (
           <div className="flex items-center gap-2 text-xs text-text-dim">
-            <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.8} />
+            <FadeArc className="size-4" />
             Waiting for Microsoft…
           </div>
         )}

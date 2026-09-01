@@ -5,7 +5,6 @@ import {
   ChevronRightIcon,
   EyeIcon,
   EyeOffIcon,
-  Loading02Icon,
 } from "@hugeicons/core-free-icons";
 import {
   WEEK_STARTS_ON,
@@ -32,6 +31,7 @@ import { calendarColor, calendarLabel, type CalendarEvent, type CalendarInfo } f
 import { cn } from "~/lib/utils";
 import { EventItem, useCalendarColors } from "./calendar-event";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 
 // The Calendar tab's sidebar: the mini month for jumping around, the calendar list
 // with its colour swatches, and what is still to come.
@@ -87,7 +87,7 @@ export function CalendarSidebar() {
   if (calendars.length === 0) {
     return (
       <p className="flex items-center justify-center gap-2 px-4 py-6 text-[13px] text-text-faint">
-        <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
+        <FadeArc className="size-3.5" />
         Loading calendars…
       </p>
     );
@@ -391,7 +391,7 @@ function UpNext(props: { events: CalendarEvent[]; loading: boolean }) {
       <h3 className="flex items-center gap-1.5 px-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wider text-text-faint">
         Up next
         {props.loading && (
-          <HugeiconsIcon icon={Loading02Icon} className="size-3 animate-spin" strokeWidth={1.6} />
+          <FadeArc className="size-3" />
         )}
       </h3>
       {next.map((event) => (

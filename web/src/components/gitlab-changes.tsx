@@ -1,9 +1,10 @@
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Alert02Icon, ArrowRight01Icon, Loading02Icon } from "@hugeicons/core-free-icons";
+import { Alert02Icon, ArrowRight01Icon } from "@hugeicons/core-free-icons";
 import { diffSummary, diffTruncationNotice, type GitLabDiff } from "~/lib/gitlab-diff";
 import { cn } from "~/lib/utils";
 import { useAppState } from "./controller-context";
 import { Panel } from "./gitlab-panel";
+import { FadeArc } from "./loading-ui/fade-arc";
 import type { MergeRequestDetail } from "~/lib/gitlab-mr";
 
 // The Changes section of the merge-request page: what changed, in one line, and the way IN.
@@ -95,9 +96,7 @@ function ReviewButton(props: {
   if (!props.diff) {
     return (
       <p className="flex items-center gap-2 text-[12px] text-text-faint">
-        {props.loading && (
-          <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
-        )}
+        {props.loading && <FadeArc className="size-3.5" />}
         {props.loading ? "Reading the changes…" : "The changes could not be read."}
       </p>
     );

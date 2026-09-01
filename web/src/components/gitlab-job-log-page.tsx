@@ -9,7 +9,6 @@ import {
   Cancel01Icon,
   ChevronLeftIcon,
   Link01Icon,
-  Loading02Icon,
   RefreshIcon,
   Search01Icon,
 } from "@hugeicons/core-free-icons";
@@ -33,6 +32,7 @@ import { useAppState, useController } from "./controller-context";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
 import { ToneDot, TONE_WORDS } from "./gitlab-pipeline-graph";
+import { FadeArc } from "./loading-ui/fade-arc";
 
 // ONE JOB'S LOG, as a page of its own (`/mr/<id>/jobs/<jobId>` — see
 // routes/_app.mr.$mergeRequestId.jobs.$jobId.tsx). It is where a job card on the Pipelines page
@@ -383,11 +383,11 @@ function LogControls(props: {
           props.loading && "opacity-60",
         )}
       >
-        <HugeiconsIcon
-          icon={props.loading ? Loading02Icon : RefreshIcon}
-          className={cn("size-3.5", props.loading && "animate-spin")}
-          strokeWidth={1.8}
-        />
+        {props.loading ? (
+          <FadeArc className="size-3.5" />
+        ) : (
+          <HugeiconsIcon icon={RefreshIcon} className="size-3.5" strokeWidth={1.8} />
+        )}
       </button>
     </div>
   );
@@ -688,7 +688,7 @@ function JobLogLoading(props: { label: string }) {
       className="flex h-full flex-1 items-center justify-center p-8"
     >
       <span className="flex items-center gap-2 text-[12px] text-text-faint">
-        <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
+        <FadeArc className="size-3.5" />
         {props.label}
       </span>
     </div>

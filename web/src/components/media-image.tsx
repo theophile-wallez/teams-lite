@@ -5,7 +5,6 @@ import {
   ExternalLinkIcon,
   Film01Icon,
   ImageNotFound01Icon,
-  Loading02Icon,
   PlayIcon,
 } from "@hugeicons/core-free-icons";
 import { drawnPictureBox } from "~/lib/media-size";
@@ -14,6 +13,7 @@ import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
 import { FileTypeIcon } from "./file-type-icon";
 import { ImageLightbox } from "./image-lightbox";
+import { FadeArc } from "./loading-ui/fade-arc";
 
 /** Bytes this app fetches ITSELF, for a picture the browser could not load at all: the key it
  *  is cached and retained under, and the call that resolves it to a blob object URL. The
@@ -121,11 +121,7 @@ export function MediaImage(props: {
           box ? { aspectRatio: `${box.width} / ${box.height}`, maxWidth: box.width } : undefined
         }
       >
-        <HugeiconsIcon
-          icon={Loading02Icon}
-          className="size-4 animate-spin text-text-faint"
-          strokeWidth={1.6}
-        />
+        <FadeArc className="size-4 text-text-faint" />
       </div>
     );
   }
@@ -201,11 +197,7 @@ export function FileAttachment(props: { attachment: Attachment }) {
       className="flex items-center gap-2 rounded-lg bg-element/80 px-3 py-2 text-left text-xs text-foreground shadow-chip transition-colors hover:bg-element"
     >
       {busy ? (
-        <HugeiconsIcon
-          icon={Loading02Icon}
-          className="size-4 shrink-0 animate-spin text-text-faint"
-          strokeWidth={1.6}
-        />
+        <FadeArc className="size-4 shrink-0 text-text-faint" />
       ) : (
         <FileTypeIcon
           name={props.attachment.name}
@@ -290,11 +282,7 @@ export function RecordingAttachment(props: { attachment: Attachment }) {
           />
         ) : hasThumb && !posterFailed ? (
           <div className="absolute inset-0 flex items-center justify-center">
-            <HugeiconsIcon
-              icon={Loading02Icon}
-              className="size-5 animate-spin text-text-faint"
-              strokeWidth={1.6}
-            />
+            <FadeArc className="size-5 text-text-faint" />
           </div>
         ) : (
           <div className="absolute inset-0 flex items-center justify-center">

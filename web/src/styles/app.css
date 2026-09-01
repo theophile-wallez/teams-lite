@@ -142,6 +142,23 @@
   }
 }
 
+/* loading-ui's Fade Arc (components/loading-ui/fade-arc.tsx) — the app's one loader, and
+ * the one turn every spinner in it makes. The vendor injects this rule as an inline <style>
+ * of its own; it lives here for the reason ShineBorder's `shine` does, and for one more of
+ * its own: that shape is a <style> element PER INSTANCE, keyed on nothing React can dedupe,
+ * and a loader mounts and unmounts constantly here — inside a virtualized history among
+ * other places. One rule, held once.
+ *
+ * The component declares the animation INLINE, so the global prefers-reduced-motion rule
+ * BELOW is what holds the arc still: an important author declaration beats a normal inline
+ * one. Nothing fills forwards, so a still arc rests at 0deg — which is exactly where
+ * `animate-spin` left the glyph this replaced. */
+@keyframes loading-ui-fade-arc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* The app shell is exactly one dynamic viewport tall. `dvh` tracks the space the
  * browser leaves for retractable chrome and supported on-screen keyboards. This
  * lives OUTSIDE `@layer` so it wins over the `h-full` (height:100%) utility that

@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Attachment01Icon, ChevronDownIcon, Loading02Icon } from "@hugeicons/core-free-icons";
+import { Attachment01Icon, ChevronDownIcon } from "@hugeicons/core-free-icons";
 import {
   mailFolderLabel,
   mailReceivedMs,
@@ -14,6 +14,7 @@ import {
 import { cn } from "~/lib/utils";
 import { Avatar, mailAddressPhoto, mailAvatarInitials, mailAvatarSeed } from "./avatar";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -142,11 +143,7 @@ export function MailList() {
           </div>
           {loadingOlder && (
             <p className="flex items-center justify-center gap-2 py-3 text-[12px] text-text-faint">
-              <HugeiconsIcon
-                icon={Loading02Icon}
-                className="size-3.5 animate-spin"
-                strokeWidth={1.6}
-              />
+              <FadeArc className="size-3.5" />
               Loading earlier mail…
             </p>
           )}

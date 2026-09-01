@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useRef } from "react";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { Loading02Icon } from "@hugeicons/core-free-icons";
 import { chessWireIn } from "~/lib/chess-wire";
 import { petWireIn } from "~/lib/pet-wire";
 import { bodyFormat, mentionsByItemId, type ChatMessage } from "~/lib/protocol";
@@ -8,6 +6,7 @@ import { agentAuthorship } from "~/lib/agent-message";
 import { Avatar } from "./avatar";
 import { Composer } from "./composer";
 import { useAppState } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { RichContent } from "./rich-content";
 import { SystemEventLine } from "./system-event-line";
 import { cn } from "~/lib/utils";
@@ -67,7 +66,7 @@ export function ConversationChatPanel(props: {
         <ChatTranscript messages={messages} testId={props.transcriptTestId} />
       ) : (
         <div className="flex flex-1 items-center justify-center gap-2 text-xs text-text-faint">
-          <HugeiconsIcon icon={Loading02Icon} className="size-4 animate-spin" strokeWidth={1.8} />
+          <FadeArc className="size-4" />
           Opening the conversation…
         </div>
       )}

@@ -4,7 +4,6 @@ import {
   Alert02Icon,
   Copy01Icon,
   Delete02Icon,
-  Loading02Icon,
   SquareLock02Icon,
   ViewIcon,
   ViewOffIcon,
@@ -25,6 +24,7 @@ import {
 } from "~/lib/seal";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -382,9 +382,7 @@ export function SealDialog(props: {
               disabled={busy}
               onClick={() => void applyPassphrase()}
             >
-              {busy && (
-                <HugeiconsIcon icon={Loading02Icon} className="animate-spin" strokeWidth={1.8} />
-              )}
+              {busy && <FadeArc />}
               {pressLabel}
             </Button>
           )}
@@ -546,9 +544,7 @@ function SealKeyRow(props: { conversationId: string; keyRecord: SealKeyRecord })
               disabled={busy}
               onClick={() => void forget()}
             >
-              {busy && (
-                <HugeiconsIcon icon={Loading02Icon} className="animate-spin" strokeWidth={1.8} />
-              )}
+              {busy && <FadeArc />}
               Forget it for good
             </Button>
             <Button

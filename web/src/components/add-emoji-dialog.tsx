@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ImageUpload01Icon, Loading02Icon } from "@hugeicons/core-free-icons";
+import { ImageUpload01Icon } from "@hugeicons/core-free-icons";
 import {
   COMPOSER_IMAGE_TYPES,
   loadComposerImage,
@@ -14,6 +14,7 @@ import {
 } from "~/lib/custom-emoji";
 import { cn } from "~/lib/utils";
 import { useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -407,7 +408,7 @@ export function AddEmojiDialog(props: {
                 disabled={!canSaveUpload || saving}
               >
                 {saving && (
-                  <HugeiconsIcon icon={Loading02Icon} className="animate-spin" strokeWidth={1.8} />
+                  <FadeArc />
                 )}
                 Save
               </Button>
@@ -467,7 +468,7 @@ export function AddEmojiDialog(props: {
                 disabled={!canSavePackImport || saving}
               >
                 {saving && (
-                  <HugeiconsIcon icon={Loading02Icon} className="animate-spin" strokeWidth={1.8} />
+                  <FadeArc />
                 )}
                 Add Pack
               </Button>

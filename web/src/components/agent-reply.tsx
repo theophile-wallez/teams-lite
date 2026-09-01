@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Alert02Icon, ArrowRight01Icon, CheckIcon, Loading02Icon, StopIcon } from "@hugeicons/core-free-icons";
+import { Alert02Icon, ArrowRight01Icon, CheckIcon, StopIcon } from "@hugeicons/core-free-icons";
 import { agentMarkdownToHtml } from "~/lib/agent-markdown";
 import {
   agentPhaseLabel,
@@ -17,6 +17,7 @@ import { cn } from "~/lib/utils";
 import { AgentCoin, agentShineColor } from "./agent-logo";
 import { useAppState } from "./controller-context";
 import { RichContent } from "./rich-content";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { ShineBorder } from "./magicui/shine-border";
 
 /**
@@ -726,12 +727,16 @@ function AgentToolRow(props: {
       // through the bubble's edge instead of ellipsising inside it.
       className="flex min-w-0 max-w-full items-center gap-1.5 self-start rounded-md bg-black/5 px-1.5 py-0.5 text-[11px] text-text-dim dark:bg-white/10"
     >
-      <HugeiconsIcon
-        icon={step.done ? CheckIcon : Loading02Icon}
-        className={cn("size-3 shrink-0", !step.done && "animate-spin")}
-        strokeWidth={1.8}
-        aria-hidden
-      />
+      {step.done ? (
+        <HugeiconsIcon
+          icon={CheckIcon}
+          className="size-3 shrink-0"
+          strokeWidth={1.8}
+          aria-hidden
+        />
+      ) : (
+        <FadeArc className="size-3 shrink-0" aria-hidden />
+      )}
       <span className="font-medium">{step.tool}</span>
       {step.target ? (
         <span className="min-w-0 truncate font-mono opacity-80">{step.target}</span>

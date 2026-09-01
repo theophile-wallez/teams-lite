@@ -3,7 +3,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
-  Loading02Icon,
   LockIcon,
 } from "@hugeicons/core-free-icons";
 import {
@@ -25,6 +24,7 @@ import { CalendarMonth } from "./calendar-month";
 import { CalendarTimeGrid } from "./calendar-time-grid";
 import { CalendarViewMenu } from "./calendar-view-menu";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 
 // The calendar surface, in the same detail-pane slot as `MessagePane` and `MailPane`
 // — so the two-column layout, the mobile full-screen page and the back button behave
@@ -214,11 +214,9 @@ export function CalendarPane(props: { onBack?: () => void }) {
             Read-only
           </span>
           {loading && (
-            <HugeiconsIcon
-              icon={Loading02Icon}
+            <FadeArc
               data-testid="calendar-loading"
-              className="size-3.5 shrink-0 animate-spin text-text-faint"
-              strokeWidth={1.6}
+              className="size-3.5 shrink-0 text-text-faint"
             />
           )}
         </div>

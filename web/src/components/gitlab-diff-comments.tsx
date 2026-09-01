@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Delete02Icon, Edit02Icon, Loading02Icon, SentIcon } from "@hugeicons/core-free-icons";
+import { Delete02Icon, Edit02Icon, SentIcon } from "@hugeicons/core-free-icons";
 import {
   diffCommentTargetLabel,
   diffThreadLabel,
@@ -16,6 +16,7 @@ import { cn } from "~/lib/utils";
 import type { GitLabNote } from "~/lib/gitlab-mr";
 import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { RichNodes } from "./rich-content";
 
 // What hangs UNDER a line of a diff: a thread that is already there, and the box for one being
@@ -95,11 +96,11 @@ export function DiffLineComposer(props: { target: DiffCommentTarget }) {
             (empty || busy) && "opacity-50",
           )}
         >
-          <HugeiconsIcon
-            icon={busy ? Loading02Icon : SentIcon}
-            className={cn("size-3.5", busy && "animate-spin")}
-            strokeWidth={1.8}
-          />
+          {busy ? (
+            <FadeArc className="size-3.5" />
+          ) : (
+            <HugeiconsIcon icon={SentIcon} className="size-3.5" strokeWidth={1.8} />
+          )}
           Comment
         </button>
         <button
@@ -255,11 +256,11 @@ export function DiffLineThread(props: { thread: DiffThread }) {
                 (reply.trim() === "" || busy) && "opacity-50",
               )}
             >
-              <HugeiconsIcon
-                icon={busy ? Loading02Icon : SentIcon}
-                className={cn("size-3.5", busy && "animate-spin")}
-                strokeWidth={1.8}
-              />
+              {busy ? (
+                <FadeArc className="size-3.5" />
+              ) : (
+                <HugeiconsIcon icon={SentIcon} className="size-3.5" strokeWidth={1.8} />
+              )}
               Reply
             </button>
             <button
@@ -416,11 +417,11 @@ function DiffNote(props: { note: GitLabNote; discussionId: string }) {
                 (draft.trim() === "" || busy) && "opacity-50",
               )}
             >
-              <HugeiconsIcon
-                icon={busy ? Loading02Icon : Edit02Icon}
-                className={cn("size-3.5", busy && "animate-spin")}
-                strokeWidth={1.8}
-              />
+              {busy ? (
+                <FadeArc className="size-3.5" />
+              ) : (
+                <HugeiconsIcon icon={Edit02Icon} className="size-3.5" strokeWidth={1.8} />
+              )}
               Save
             </button>
             <button

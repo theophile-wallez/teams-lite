@@ -3,7 +3,6 @@ import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  Loading02Icon,
   Message01Icon,
   RefreshIcon,
   ThumbsUpIcon,
@@ -23,6 +22,7 @@ import { cn } from "~/lib/utils";
 import { Avatar } from "./avatar";
 import { useAppState, useController } from "./controller-context";
 import { GitLabLogo, GitLabLogoOutline } from "./gitlab-logo";
+import { FadeArc } from "./loading-ui/fade-arc";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -274,11 +274,11 @@ function GitLabFilter(props: {
         onClick={props.onReload}
         className="grid size-7 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground"
       >
-        <HugeiconsIcon
-          icon={props.loading ? Loading02Icon : RefreshIcon}
-          className={cn("size-3.5", props.loading && "animate-spin")}
-          strokeWidth={1.6}
-        />
+        {props.loading ? (
+          <FadeArc className="size-3.5" />
+        ) : (
+          <HugeiconsIcon icon={RefreshIcon} className="size-3.5" strokeWidth={1.6} />
+        )}
       </button>
     </div>
   );

@@ -15,7 +15,6 @@ import {
   ChevronLeftIcon,
   ArrowTurnBackwardIcon,
   ChevronRightIcon,
-  Loading02Icon,
   MessageMultiple01Icon,
   WifiDisconnected01Icon,
 } from "@hugeicons/core-free-icons";
@@ -74,6 +73,7 @@ import {
 import { ChannelThreadsPanel } from "./channel-threads-panel";
 import { Composer } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { TypingIndicator } from "./typing-indicator";
 import { Button } from "./ui/button";
 import { cn } from "~/lib/utils";
@@ -1337,11 +1337,7 @@ export function MessagePane(props: { onBack?: () => void }) {
                   >
                     {loadingOlder ? (
                       <span className="flex items-center gap-2 text-xs text-text-faint">
-                        <HugeiconsIcon
-                          icon={Loading02Icon}
-                          className="size-3 animate-spin"
-                          strokeWidth={1.6}
-                        />{" "}
+                        <FadeArc className="size-3" />{" "}
                         Loading earlier messages…
                       </span>
                     ) : olderError ? (
@@ -1812,11 +1808,7 @@ function EmptyState(props: { loading: boolean; error: string | null; onRetry: ()
   if (props.loading) {
     return (
       <div className="flex h-full items-center justify-center gap-2 text-sm text-text-faint">
-        <HugeiconsIcon
-          icon={Loading02Icon}
-          className="size-4 animate-spin"
-          strokeWidth={1.6}
-        />{" "}
+        <FadeArc className="size-4" />{" "}
         Loading messages…
       </div>
     );
