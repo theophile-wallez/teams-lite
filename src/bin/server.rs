@@ -14309,6 +14309,48 @@ mod tests {
         );
     }
 
+    /// EVERY GATED METHOD MUST BE CALLED THROUGH THE CLIENT'S OWN `writeRequest`.
+    ///
+    /// `ws-client.ts` has two call paths: `request`, which sends the params as they are, and
+    /// `writeRequest`, which attaches the write token this backend published. Every
+    /// [`OUTWARD_METHODS`] and [`MACHINE_METHODS`] entry has to go down the second one — sending one
+    /// as a plain `request` is not a degraded call but a REFUSED one, and the reader meets the
+    /// write-lock refusal in place of the feature.
+    ///
+    /// **It is pinned here because NOTHING ELSE CAN CATCH IT.** `web/mock/server.ts` does not enforce
+    /// the token — it is a mock of the surface, not of the lock — so the whole E2E suite passes
+    /// against a page whose button is refused in production. That is exactly what shipped for
+    /// `gitlab_mr_review_run`: 77 GitLab specs green, and the real app answered
+    /// "needs the write token this backend published for the user's own frontends" on the first
+    /// press. A mock that accepts what the backend refuses hides the bug instead of failing a test,
+    /// which is the rule § Pictures in a message already states for the composer's own ceilings.
+    ///
+    /// The scan reads BACKWARDS from each method name to whichever call it belongs to. `this.request`
+    /// is not a substring of `this.writeRequest`, so the two cannot be confused.
+    #[test]
+    fn every_gated_method_is_called_with_the_write_token() {
+        let client = include_str!("../../web/src/lib/ws-client.ts");
+        for method in OUTWARD_METHODS.iter().chain(MACHINE_METHODS.iter()) {
+            let quoted = format!("\"{method}\"");
+            let mut seen = false;
+            for (at, _) in client.match_indices(&quoted) {
+                seen = true;
+                let before = &client[..at];
+                let plain = before.rfind("this.request");
+                let gated = before.rfind("this.writeRequest");
+                assert!(
+                    gated.is_some() && gated > plain,
+                    "{method} is gated, but ws-client.ts calls it through `request` rather than \
+                     `writeRequest` — the backend will refuse it and the reader will meet the \
+                     write-lock refusal instead of the feature",
+                );
+            }
+            // Not every gated method has a client wrapper (some are only ever called by a script or
+            // a probe), so an absent one is fine — a MISDIRECTED one is not.
+            let _ = seen;
+        }
+    }
+
     /// The page's staleness window must be several keepalives wide.
     ///
     /// The two numbers sit on opposite sides of the socket and only mean something

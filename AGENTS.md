@@ -2778,6 +2778,18 @@ the whole run, and a stored reading outlives the page. `cd web && bun run previe
 --diff-review` captures the offer and its cost in both themes, the reading in both themes, the
 leftovers cropped, a stale reading, a refused run and a phone's width.
 
+**THE MOCK DOES NOT ENFORCE THE WRITE TOKEN, AND THAT BLIND SPOT SHIPPED A REFUSED BUTTON.**
+`ws-client.ts` has two call paths — `request`, and `writeRequest`, which attaches the token this
+backend published — and this method went out on the first one. Every one of the 77 GitLab specs
+passed, because `web/mock/server.ts` mocks the SURFACE and not the lock, and the real app answered
+`gitlab_mr_review_run needs the write token this backend published` on the first press: the reader
+met the write-lock refusal in place of the feature. It is the rule § Pictures in a message already
+states for the composer's ceilings — a mock that accepts what the backend refuses hides the bug
+instead of failing a test. So the pairing is pinned in RUST instead, where the authoritative lists
+live: `every_gated_method_is_called_with_the_write_token` reads `ws-client.ts` through
+`include_str!` and holds every `OUTWARD_METHODS` and `MACHINE_METHODS` entry to the gated path. It
+is the one test that can catch this, and no E2E run ever will.
+
 **What is UNVERIFIED against the tenant is the RUN.** The prompt, the parse and every bound are
 pinned in Rust, the surface is pinned against the mock, and the diff reads it is built on are measured
 (§ The DIFF is a PAGE) — but no real agent has read a real merge request here, because that needs the

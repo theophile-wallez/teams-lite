@@ -1644,11 +1644,17 @@ export class Backend {
 
   /** MAKE that reading: one agent run over the diff, on this machine.
    *
-   *  Gated (`MACHINE_METHODS`): it starts a program here and puts the code in a prompt that reaches
-   *  a model provider. It is slow by nature — a run is tens of seconds — so it carries no timeout of
-   *  its own and the page states that it is running. */
+   *  It goes through {@link writeRequest} because it is a `MACHINE_METHODS` entry — it starts a
+   *  program here and puts the code in a prompt that reaches a model provider — so the backend
+   *  refuses it without this backend's own write token. Sending it as a plain `request` is not a
+   *  degraded call but a REFUSED one: the reader presses the button and is handed the write-lock
+   *  refusal, which names a token and tells a frontend to go and read it. That shipped, and it is
+   *  the only thing between this method and the wrong call path.
+   *
+   *  It is slow by nature — a run is tens of seconds — so it carries no timeout of its own and the
+   *  page says that it is running. */
   gitlabRunMergeRequestReview(key: MergeRequestKey): Promise<{ review: GitLabReview }> {
-    return this.request<{ review: GitLabReview }>("gitlab_mr_review_run", {
+    return this.writeRequest<{ review: GitLabReview }>("gitlab_mr_review_run", {
       project_path: key.projectPath,
       iid: key.iid,
     });
