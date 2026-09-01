@@ -1745,6 +1745,143 @@ test.describe.serial("the GitLab merge-request page", () => {
     await setMergeRequestControl(page, { clear: true });
   });
 
+  // ---- ASKING A FOLLOW-UP about the reading -------------------------------------
+  //
+  // The same agent run, narrowed to what the reader TAGGED. Its whole point over asking in a chat is
+  // that the reader can point at a theme and some files, and see from their own chips what leaves the
+  // machine before they press.
+
+  test("asks a follow-up, and what it was TOLD is what the answer says it read", async ({ page }) => {
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const chat = page.locator('[data-testid="gitlab-review-chat"]');
+    await expect(chat).toHaveAttribute("data-turns", "0");
+    // With nothing asked, the panel says how to point at something rather than sitting empty.
+    await expect(page.locator('[data-testid="gitlab-review-chat-empty"]')).toContainText("@");
+
+    // "@" opens the list, THEMES above the files — the shape the composer's own "@" has.
+    const field = page.locator('[data-testid="gitlab-review-chat-field"]');
+    await field.click();
+    await field.type("@");
+    const options = page.locator('[data-testid="gitlab-review-chat-option"]');
+    await expect(options.first()).toHaveAttribute("data-kind", "theme");
+    // Narrowing by a SUBSTRING of a path, which is how a file is really found.
+    await field.type("health");
+    await expect(options).toHaveCount(1);
+    await expect(options.first()).toHaveAttribute("data-kind", "file");
+    await options.first().click();
+
+    // The pick is a CHIP, and the "@…" is out of the words: what will travel is visible before the
+    // press, which is the whole reason the tags are chips rather than a syntax inside the question.
+    const tags = page.locator('[data-testid="gitlab-review-chat-tag"]');
+    await expect(tags).toHaveCount(1);
+    await expect(tags.first()).toHaveAttribute("data-kind", "file");
+    await expect(field).toHaveValue("");
+
+    await field.type("Why is the draining check first?");
+    await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
+
+    await expect(chat).toHaveAttribute("data-turns", "1", { timeout: 20_000 });
+    const turn = page.locator('[data-testid="gitlab-review-turn"]').first();
+    await expect(turn).toContainText("Why is the draining check first?");
+    // The turn says what really TRAVELLED, from what the backend recorded.
+    await expect(turn.locator('[data-testid="gitlab-review-turn-context"]')).toContainText(
+      "src/server/health.ts",
+    );
+    // The answer is MARKDOWN, through the same parser the reading's own prose goes through.
+    const answer = turn.locator('[data-testid="gitlab-review-turn-answer"]');
+    await expect(answer.locator("code").first()).toBeVisible();
+    expect(await answer.innerText()).not.toContain("```");
+
+    // A question that WORKED takes back the words and the tags, and only then.
+    await expect(field).toHaveValue("");
+    await expect(tags).toHaveCount(0);
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("a question the diff cannot answer for is refused AT the box, with the words kept", async ({
+    page,
+  }) => {
+    await setMergeRequestControl(page, {
+      review: "stored",
+      refuse_ask: "claude is not on this machine's PATH",
+    });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const field = page.locator('[data-testid="gitlab-review-chat-field"]');
+    await field.click();
+    await field.type("why?");
+    await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
+
+    // The composer's own contract: an action that did not happen must never look like it did.
+    await expect(page.locator('[data-testid="gitlab-review-chat-error"]')).toContainText(
+      "not on this machine's PATH",
+    );
+    // And the words are KEPT, so it is one press from being asked again.
+    await expect(field).toHaveValue("why?");
+    await expect(page.locator('[data-testid="gitlab-review-chat"]')).toHaveAttribute(
+      "data-turns",
+      "0",
+    );
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("a conversation this machine already had is there without asking anything", async ({
+    page,
+  }) => {
+    // It is stored per merge request on the backend, in a row of its OWN — so a fresh reading does
+    // not throw away the questions somebody asked.
+    await setMergeRequestControl(page, { review: "stored", chat: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    await expect(page.locator('[data-testid="gitlab-review-chat"]')).toHaveAttribute(
+      "data-turns",
+      "1",
+    );
+    await expect(page.locator('[data-testid="gitlab-review-turn"]')).toContainText("draining");
+
+    // A fresh READING keeps it, which is what the separate store row buys.
+    await page.locator('[data-testid="gitlab-review-run"]').click();
+    await expect(page.locator('[data-testid="gitlab-review-document"]')).toHaveAttribute(
+      "data-has-review",
+      "yes",
+      { timeout: 20_000 },
+    );
+    await expect(page.locator('[data-testid="gitlab-review-chat"]')).toHaveAttribute(
+      "data-turns",
+      "1",
+    );
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("offers no conversation until there is a reading to ask about", async ({ page }) => {
+    // The backend refuses a question with no reading, and this app draws nothing rather than a
+    // control that reports a refusal.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    await expect(page.locator('[data-testid="gitlab-review-document"]')).toHaveAttribute(
+      "data-has-review",
+      "no",
+    );
+    await expect(page.locator('[data-testid="gitlab-review-chat"]')).toHaveCount(0);
+  });
+
   test("offers the split layout where two columns of code fit, and remembers it", async ({
     page,
   }) => {

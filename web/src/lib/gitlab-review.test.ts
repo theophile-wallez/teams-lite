@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  matchReviewTags,
+  MAX_REVIEW_TAG_FILES,
   patchTextLineCount,
   REVIEW_PATCH_OPEN_LINES,
   REVIEW_PATCHES_SHOWN,
@@ -10,9 +12,17 @@ import {
   reviewGroups,
   reviewIsStale,
   reviewLimits,
+  reviewQuestionCanBeAsked,
   reviewSectionId,
+  reviewTagKey,
+  reviewTagLimit,
+  reviewTags,
+  reviewTagsToWire,
+  turnContext,
   UNPLACED_TITLE,
   type GitLabReview,
+  type GitLabReviewTurn,
+  type ReviewTag,
 } from "./gitlab-review";
 import type { GitLabDiff, GitLabDiffFile } from "./gitlab-diff";
 
@@ -329,5 +339,137 @@ describe("reviewSectionId", () => {
     // two sticky headings behind one anchor.
     expect(reviewSectionId(0)).not.toBe(reviewSectionId(1));
     expect(reviewSectionId(0)).toMatch(/^gitlab-review-section-/);
+  });
+});
+
+describe("asking a FOLLOW-UP: what a question can be tagged with", () => {
+  const withThemes = review({
+    themes: [
+      { title: "Draining", summary: "S", files: [{ path: "a.ts" }] },
+      { title: "The chart", summary: "S", files: [{ path: "b.yaml" }] },
+    ],
+  });
+
+  it("offers the THEMES first and the files after them", () => {
+    // The argument the composer's own "@" makes: a short fixed list a reader learns once comes
+    // first, and the growing one after it — so the first row does not move as files are added.
+    const tags = reviewTags(withThemes, diff(["a.ts", "b.yaml"]));
+    expect(tags.map((tag) => tag.kind)).toEqual(["theme", "theme", "file", "file"]);
+    expect(tags.map((tag) => tag.label)).toEqual(["Draining", "The chart", "a.ts", "b.yaml"]);
+  });
+
+  it("offers only the files the DIFF holds", () => {
+    // Those are the only ones whose code can travel (`build_chat_prompt` drops any other), so a row
+    // that could not be honoured is never drawn.
+    const tags = reviewTags(withThemes, diff(["a.ts"]));
+    expect(tags.filter((tag) => tag.kind === "file").map((tag) => tag.label)).toEqual(["a.ts"]);
+  });
+
+  it("offers nothing without a reading or without a diff", () => {
+    expect(reviewTags(null, diff(["a.ts"]))).toEqual([]);
+    expect(reviewTags(withThemes, null)).toEqual([]);
+  });
+
+  it("keys a theme on its INDEX, so two with one title are two tags", () => {
+    const twins = review({
+      themes: [
+        { title: "Same", summary: "S", files: [{ path: "a.ts" }] },
+        { title: "Same", summary: "S", files: [{ path: "b.yaml" }] },
+      ],
+    });
+    const tags = reviewTags(twins, diff(["a.ts", "b.yaml"]));
+    expect(reviewTagKey(tags[0]!)).not.toBe(reviewTagKey(tags[1]!));
+  });
+});
+
+describe("matchReviewTags", () => {
+  const tags = () => reviewTags(review(), diff(["src/server/health.ts", "b.yaml"]));
+
+  it("matches a SUBSTRING, not a prefix", () => {
+    // A path is `src/server/health.ts` and nobody types the directory to find the file.
+    expect(matchReviewTags(tags(), "health", new Set()).map((t) => t.label)).toEqual([
+      "src/server/health.ts",
+    ]);
+    expect(matchReviewTags(tags(), "HEALTH", new Set()).map((t) => t.label)).toEqual([
+      "src/server/health.ts",
+    ]);
+  });
+
+  it("offers everything for an empty query, bounded", () => {
+    expect(matchReviewTags(tags(), "", new Set()).length).toBe(tags().length);
+    expect(matchReviewTags(tags(), "", new Set(), 1).length).toBe(1);
+  });
+
+  it("leaves out what is already picked", () => {
+    // A control that changes nothing reads as a bug, and picking one twice sends it once anyway.
+    const all = tags();
+    const picked = new Set([reviewTagKey(all[0]!)]);
+    expect(matchReviewTags(all, "", picked).map(reviewTagKey)).not.toContain(reviewTagKey(all[0]!));
+  });
+});
+
+describe("reviewTagsToWire", () => {
+  it("splits the picks into the two lists the wire carries", () => {
+    const wire = reviewTagsToWire([
+      { kind: "theme", index: 1, label: "T" },
+      { kind: "file", path: "a.ts", label: "a.ts" },
+    ]);
+    expect(wire).toEqual({ themes: [1], paths: ["a.ts"] });
+  });
+
+  it("bounds the FILES, and states the bound before a send", () => {
+    // A question tagged with every file of a 149-file branch is a fresh reading wearing a question's
+    // clothes — and the reader is told rather than having a tag silently dropped.
+    const many: ReviewTag[] = Array.from({ length: MAX_REVIEW_TAG_FILES + 3 }, (_, i) => ({
+      kind: "file" as const,
+      path: `f${i}.ts`,
+      label: `f${i}.ts`,
+    }));
+    expect(reviewTagsToWire(many).paths.length).toBe(MAX_REVIEW_TAG_FILES);
+    expect(reviewTagLimit(many)).toContain(String(MAX_REVIEW_TAG_FILES));
+    // Themes are NOT bounded here: there are at most `MAX_THEMES` of them by construction.
+    const themes: ReviewTag[] = Array.from({ length: 8 }, (_, i) => ({
+      kind: "theme" as const,
+      index: i,
+      label: `T${i}`,
+    }));
+    expect(reviewTagsToWire(themes).themes.length).toBe(8);
+    expect(reviewTagLimit(themes)).toBeNull();
+  });
+});
+
+describe("reviewQuestionCanBeAsked", () => {
+  it("needs a reading to be about, and words", () => {
+    // The backend refuses a question with no reading, so the page must not offer a press that
+    // reports that refusal.
+    expect(reviewQuestionCanBeAsked(review(), "why?")).toBe(true);
+    expect(reviewQuestionCanBeAsked(null, "why?")).toBe(false);
+    expect(reviewQuestionCanBeAsked(review(), "   ")).toBe(false);
+  });
+});
+
+describe("turnContext", () => {
+  const turn = (over: Partial<GitLabReviewTurn> = {}): GitLabReviewTurn => ({
+    question: "why?",
+    answer: "because",
+    themes: [],
+    paths: [],
+    asked_ms: 1,
+    ...over,
+  });
+
+  it("names the theme by its title and the file by its path", () => {
+    expect(turnContext(turn({ themes: [0], paths: ["a.ts"] }), review())).toBe("Draining · a.ts");
+  });
+
+  it("says nothing when the question was told nothing in particular", () => {
+    expect(turnContext(turn(), review())).toBeNull();
+  });
+
+  it("drops a theme the reading no longer holds rather than naming an index", () => {
+    // A fresh reading replaces the reading and keeps the questions, so a stored turn can name a
+    // theme that has gone — and "theme 4" is a line nobody can read.
+    expect(turnContext(turn({ themes: [9], paths: ["a.ts"] }), review())).toBe("a.ts");
+    expect(turnContext(turn({ themes: [0] }), null)).toBeNull();
   });
 });

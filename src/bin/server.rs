@@ -485,7 +485,7 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// authenticates as the user, `signin_frame` answers with a picture of a sign-in page, and
 /// `signin_input` presses keys into it. `signin_frame` is gated as hard as the rest for that
 /// reason: a read whose answer is the pixels of somebody's password field is not a read.
-const MACHINE_METHODS: [&str; 34] = [
+const MACHINE_METHODS: [&str; 35] = [
     "repair_broker",
     "signin_start",
     "signin_frame",
@@ -521,6 +521,8 @@ const MACHINE_METHODS: [&str; 34] = [
     // signed in to — so it is gated exactly as `agent_set_mode` is, and for the same reason. Reading
     // whether a reading already EXISTS stays open (`gitlab_mr_review`): that answer starts nothing.
     "gitlab_mr_review_run",
+    // And a FOLLOW-UP question about that reading, which is the same run with a narrower prompt.
+    "gitlab_mr_review_ask",
     "agent_persona_save",
     "agent_persona_remove",
     "set_person_name",
@@ -617,6 +619,11 @@ fn machine_effect(method: &str) -> &'static str {
         "gitlab_mr_review_run" => {
             "runs a local agent over a merge request's diff, which puts that code in a prompt \
              reaching the model provider the default CLI is signed in to"
+        }
+        "gitlab_mr_review_ask" => {
+            "runs a local agent to answer a question about a merge request's diff, which puts the \
+             code it was pointed at in a prompt reaching the model provider the default CLI is \
+             signed in to"
         }
         "agent_stop" => "stops a local agent this machine is running mid-answer",
         "seal_set" => {
@@ -6713,6 +6720,55 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             gitlab_review_run(ctx, project_path, iid).await
         }
 
+        // The CONVERSATION about that reading, if the reader has asked anything. An ordinary OPEN
+        // read like the reading itself: a `get_setting`, which starts nothing, publishes nothing and
+        // makes no request — so a page can draw the questions it already paid for even on a
+        // read-only backend.
+        "gitlab_mr_review_chat" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let store = ctx.store()?;
+            let stored =
+                store.get_setting(&gitlab_review::chat_setting_key(&project_path, iid))?;
+            let chat = stored
+                .and_then(|raw| serde_json::from_str::<gitlab_review::ReviewChat>(&raw).ok())
+                .unwrap_or_default();
+            Ok(json!({ "chat": chat }))
+        }
+
+        // ASK one. A `MACHINE_METHODS` entry beside the run above, and for its exact reason: it is
+        // the same program, started the same way, sending the same reader's code to the same
+        // provider. What differs is that the prompt is narrowed to what the reader tagged.
+        "gitlab_mr_review_ask" => {
+            let (project_path, iid) = gitlab_merge_request_params(params)?;
+            let question = param_str(params, "question")?;
+            // The two tag lists are bounded and SHAPE-checked here rather than trusted: a theme is
+            // an index into the reading and a path has to be one the diff holds, which
+            // `build_chat_prompt` re-checks against the real files.
+            let themes: Vec<usize> = params
+                .get("themes")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_u64)
+                        .map(|index| index as usize)
+                        .take(gitlab_review::MAX_THEMES)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let paths: Vec<String> = params
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .take(MAX_QUESTION_FILES)
+                        .collect()
+                })
+                .unwrap_or_default();
+            gitlab_review_ask(ctx, project_path, iid, question, themes, paths).await
+        }
+
         // The head pipeline and its jobs. THE live read: the page repeats it while CI is
         // running, so its cache window is seconds rather than half a minute — long enough
         // that two open pages cost one request, short enough that a job turning green shows
@@ -8668,6 +8724,52 @@ async fn gitlab_cached(
 ///
 /// **It resumes no session and stores none.** A reading of a diff is one question with one answer,
 /// and a session would carry the last branch's code into the next branch's review.
+/// The most files one follow-up question may tag.
+///
+/// A bound on the SHAPE rather than on the bytes — `MAX_CHAT_PATCH_BYTES` already bounds those — and
+/// it is here because the list arrives from a client: a question tagged with every file of a
+/// 149-file branch is a fresh reading wearing a question's clothes, and it would cost the reader
+/// that without saying so. Eight is more files than any one question is really about.
+const MAX_QUESTION_FILES: usize = 8;
+
+/// WHICH program answers an AI reading, and with which model and workspace.
+///
+/// Shared by the reading and by a FOLLOW-UP question about it, because they are the same run with a
+/// different prompt: the user's own Settings › AI providers choice decides, a provider they switched
+/// off answers nothing, and a CLI this machine has not got says so rather than failing inside the
+/// run. Two copies of this would be two answers to "may this machine start an agent", drifting apart
+/// at the first gate anybody adds.
+fn review_agent(
+    ctx: &Ctx,
+) -> Result<(&'static agent_policy::Backend, Option<String>, std::path::PathBuf)> {
+    let store = ctx.store()?;
+    let providers = agent_policy::Providers::parse(
+        store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
+    );
+    let backend = agent_policy::default_backend(
+        store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
+    );
+    if !providers.is_enabled(backend.name) {
+        anyhow::bail!(
+            "{} is switched off in Settings › AI providers, so nothing can read this diff",
+            backend.name
+        );
+    }
+    if !agent::is_available(backend) {
+        anyhow::bail!(
+            "`{}` is not on this machine's PATH, so it cannot read this diff",
+            backend.program
+        );
+    }
+    let workspace = store
+        .get_setting(agent::SETTING_WORKSPACE)?
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(agent::default_workspace);
+    Ok((backend, providers.model(backend.name), workspace))
+}
+
 async fn gitlab_review_run(ctx: &Ctx, project_path: String, iid: u64) -> Result<Value> {
     // The two reads the page already holds. `refresh: false`, because the reader asked for a reading
     // of what they are LOOKING at.
@@ -8712,37 +8814,7 @@ async fn gitlab_review_run(ctx: &Ctx, project_path: String, iid: u64) -> Result<
         anyhow::bail!("this merge request changes no files");
     }
 
-    // WHICH program answers is the user's own Settings choice, and every gate there applies: a
-    // provider they switched off answers nothing, and one this machine has no CLI for says so
-    // rather than failing inside the run.
-    let (backend, model, workspace) = {
-        let store = ctx.store()?;
-        let providers = agent_policy::Providers::parse(
-            store.get_setting(agent_policy::SETTING_PROVIDERS)?.as_deref(),
-        );
-        let backend = agent_policy::default_backend(
-            store.get_setting(agent_policy::SETTING_DEFAULT_PROVIDER)?.as_deref(),
-        );
-        if !providers.is_enabled(backend.name) {
-            anyhow::bail!(
-                "{} is switched off in Settings › AI providers, so nothing can read this diff",
-                backend.name
-            );
-        }
-        if !agent::is_available(backend) {
-            anyhow::bail!(
-                "`{}` is not on this machine's PATH, so it cannot read this diff",
-                backend.program
-            );
-        }
-        let workspace = store
-            .get_setting(agent::SETTING_WORKSPACE)?
-            .map(|path| path.trim().to_string())
-            .filter(|path| !path.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(agent::default_workspace);
-        (backend, providers.model(backend.name), workspace)
-    };
+    let (backend, model, workspace) = review_agent(ctx)?;
 
     let input = gitlab_review::build_prompt(&files, &title);
     let request = agent::Request {
@@ -8784,6 +8856,108 @@ async fn gitlab_review_run(ctx: &Ctx, project_path: String, iid: u64) -> Result<
         )?;
     }
     Ok(json!({ "review": review }))
+}
+
+/// A FOLLOW-UP question about a reading this machine already made.
+///
+/// The same run as [`gitlab_review_run`], narrowed: the reading is the context, the reader's own tags
+/// decide which theme's prose and which files' code travel with the question, and the answer is
+/// PROSE rather than JSON because a person reads it. Every gate on the reading applies unchanged —
+/// `review_agent` is the one place that decides which program may start.
+async fn gitlab_review_ask(
+    ctx: &Ctx,
+    project_path: String,
+    iid: u64,
+    question: String,
+    themes: Vec<usize>,
+    paths: Vec<String>,
+) -> Result<Value> {
+    let question = gitlab_review::check_question(&question)?;
+    // The reading is what the question is ABOUT, so there is nothing to ask without one. It says so
+    // rather than starting a run that would answer about a branch it was never told.
+    let (review, chat) = {
+        let store = ctx.store()?;
+        let stored = store.get_setting(&gitlab_review::setting_key(&project_path, iid))?;
+        let Some(stored) = stored else {
+            anyhow::bail!("read the changes first — a question needs a reading to be about");
+        };
+        let review: gitlab_review::Review = serde_json::from_str(&stored)
+            .context("the stored reading could not be read, so read the changes again")?;
+        let chat = store
+            .get_setting(&gitlab_review::chat_setting_key(&project_path, iid))?
+            .and_then(|raw| serde_json::from_str::<gitlab_review::ReviewChat>(&raw).ok())
+            .unwrap_or_default();
+        (review, chat)
+    };
+
+    // The diff the page is looking at, from the cache the reading itself used — so a tagged file is
+    // checked against what is really changed rather than against what a client claimed.
+    let diff_json = gitlab_cached(
+        ctx,
+        gitlab_mr::cache_key(&project_path, iid, gitlab_mr::DiffDepth::Listed.cache_kind()),
+        GITLAB_DIFF_TTL,
+        false,
+        GitLabRead::Diff {
+            project_path: project_path.clone(),
+            iid,
+            depth: gitlab_mr::DiffDepth::Listed,
+        },
+    )
+    .await?;
+    let files: Vec<gitlab_review::ReviewDiffFile> = diff_json
+        .get("files")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .context("this merge request's changes could not be read")?
+        .unwrap_or_default();
+
+    let (backend, model, workspace) = review_agent(ctx)?;
+    let input =
+        gitlab_review::build_chat_prompt(&review, &files, &chat, &question, &themes, &paths);
+    let request = agent::Request {
+        backend,
+        prompt: input.prompt.clone(),
+        system_prompt: gitlab_review::chat_system_prompt(),
+        // One question, one answer. The conversation travels IN the prompt rather than as a resumed
+        // session, so nothing about the last branch can reach this one — the rule the reading holds.
+        resume_session: None,
+        workspace,
+        // NO tools, exactly as the reading has none. A follow-up is not a reason to widen what a run
+        // may reach: the code it is allowed to look at is what the reader tagged.
+        permissions: agent::Permissions::Granted(Vec::new()),
+        model: model.clone(),
+    };
+    eprintln!(
+        "[gitlab-review] {project_path}!{iid} question — {} themes, {} files, {} bytes{}",
+        themes.len(),
+        input.paths.len(),
+        input.prompt.len(),
+        if input.truncated { " (code cut)" } else { "" },
+    );
+    let (progress, _watch) = tokio::sync::watch::channel(agent::Progress::default());
+    let outcome = agent::run(&request, &progress).await?;
+    let answer = gitlab_review::chat_answer(&outcome.text)?;
+
+    // The turn records what really TRAVELLED, not what was asked for: a tagged path the diff does not
+    // hold never reached the model, so a transcript claiming it did would misstate what the answer
+    // was based on.
+    let mut chat = chat;
+    chat.push(gitlab_review::ChatTurn {
+        question,
+        answer,
+        themes,
+        paths: input.paths,
+        asked_ms: now_ms(),
+    });
+    {
+        let store = ctx.store()?;
+        store.set_setting(
+            &gitlab_review::chat_setting_key(&project_path, iid),
+            &serde_json::to_string(&chat)?,
+        )?;
+    }
+    Ok(json!({ "chat": chat }))
 }
 
 /// How long a folded roster of Teams people is reused before it is built again.
@@ -14327,6 +14501,40 @@ mod tests {
     ///
     /// The scan reads BACKWARDS from each method name to whichever call it belongs to. `this.request`
     /// is not a substring of `this.writeRequest`, so the two cannot be confused.
+    /// Every gated method is NAMED in the automation guard's own script scan.
+    ///
+    /// `.claude/hooks/guard-live-automation.sh` blocks a script, an ad-hoc driver or a cargo example
+    /// that names one of these RPCs against a live port (§ Automation safety). That list is spelled by
+    /// hand, in a shell alternation, on the other side of a process boundary — so nothing but this
+    /// test can notice a gated method that is missing from it, and a missing one is a hole: tooling
+    /// could drive it against the user's own account.
+    ///
+    /// It was a real hole rather than a hypothetical. Adding `gitlab_mr_review_ask` and going to look
+    /// found FIVE others already absent — `gitlab_mr_edit_comment` among them, which rewrites a
+    /// comment everybody watching a merge request can see.
+    ///
+    /// One direction only. A name in the hook that is no longer gated costs nothing: it blocks a
+    /// string no backend answers, which is noise rather than a fault, and there are a few
+    /// (`set_calling`, `mail_mark_read`) left from methods that have gone.
+    #[test]
+    fn every_gated_method_is_named_in_the_automation_guard() {
+        let hook = include_str!("../../.claude/hooks/guard-live-automation.sh");
+        for method in OUTWARD_METHODS.iter().chain(MACHINE_METHODS.iter()) {
+            // Matched as a whole alternation member — `|send|`, not `send` — so a method whose name
+            // is a substring of another (`edit` inside `gitlab_mr_edit_comment`) is not counted as
+            // present because of it.
+            let bounded = format!("|{method}|");
+            let opens = format!("({method}|");
+            let closes = format!("|{method})");
+            assert!(
+                hook.contains(&bounded) || hook.contains(&opens) || hook.contains(&closes),
+                "{method} is gated but .claude/hooks/guard-live-automation.sh does not name it, so a \
+                 script could drive it against a live backend — add it to BOTH alternations of the \
+                 script scan"
+            );
+        }
+    }
+
     #[test]
     fn every_gated_method_is_called_with_the_write_token() {
         let client = include_str!("../../web/src/lib/ws-client.ts");

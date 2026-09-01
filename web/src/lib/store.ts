@@ -172,7 +172,7 @@ import {
   type PierreSide,
 } from "./gitlab-diff-comment";
 import { symbolIsSearchable, type DiffSymbolTarget } from "./gitlab-diff-symbols";
-import type { GitLabReview } from "./gitlab-review";
+import { reviewTagsToWire, type GitLabReview, type GitLabReviewChat, type ReviewTag } from "./gitlab-review";
 import { jobLogIsLive } from "./gitlab-job-log";
 import {
   isNotMerged,
@@ -887,6 +887,15 @@ export type AppState = {
   /** Why a reading did not happen, in the CLI's or the backend's own words, reported where the press
    *  was made — the contract every outward-ish action in this app holds. */
   gitlabReviewError: string | null;
+  /** The FOLLOW-UP questions asked about that reading, oldest first. Its own field rather than one
+   *  on the reading, for the reason it is its own store row: a fresh reading replaces the reading and
+   *  must not throw away the questions somebody asked. */
+  gitlabReviewChat: GitLabReviewChat;
+  /** Whether a question is in flight. One at a time, for the reason a reading is. */
+  gitlabReviewAsking: boolean;
+  /** Why a question was not answered, in the CLI's or the backend's own words, reported at the box
+   *  the words are still in — the composer's own contract. */
+  gitlabReviewAskError: string | null;
   /** How wide the two side columns of the diff page are, in pixels — the reader's own drag,
    *  persisted per browser beside the layout above and for its reason: a per-screen decision with
    *  no upstream to write it to.
@@ -1030,6 +1039,12 @@ const CALENDAR_SETTINGS_KEY = "teams-lite:calendar-settings";
 // preferences and for the same reason: it is a per-screen decision and there is no upstream
 // to write it to. What is deliberately NOT here is the expanded read — that is per merge
 // request, because its cost is (see `canExpandDiff`).
+/** The empty conversation, shared.
+ *
+ *  ONE frozen object rather than a fresh `{turns: []}` per reset: this is read by a selector, and a
+ *  new array on every unrelated change would re-render the transcript for nothing. */
+const EMPTY_REVIEW_CHAT: GitLabReviewChat = Object.freeze({ turns: [] });
+
 const GITLAB_DIFF_LAYOUT_KEY = "teams-lite:gitlab-diff-layout";
 // How wide the diff page's two side columns are. Client-only for the same reason the layout is —
 // a per-screen decision with no upstream — and stored as the reader ASKED rather than as drawn, so
@@ -1222,6 +1237,9 @@ function initialState(): AppState {
     gitlabReview: null,
     gitlabReviewBusy: false,
     gitlabReviewError: null,
+    gitlabReviewChat: EMPTY_REVIEW_CHAT,
+    gitlabReviewAsking: false,
+    gitlabReviewAskError: null,
     gitlabDiffFilesWidth: FILES_COLUMN_DEFAULT_WIDTH,
     gitlabDiffSymbolsWidth: SYMBOLS_PANEL_DEFAULT_WIDTH,
     gitlabDiffSelection: null,
@@ -4026,6 +4044,9 @@ export class TeamsController {
       gitlabReview: null,
       gitlabReviewBusy: false,
       gitlabReviewError: null,
+      gitlabReviewChat: EMPTY_REVIEW_CHAT,
+      gitlabReviewAsking: false,
+      gitlabReviewAskError: null,
       // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
       // piece of this page that would be read as current when it is minutes old.
       gitlabPipeline: null,
@@ -4090,6 +4111,7 @@ export class TeamsController {
     // The reading this machine has already made. A local `get_setting`, so it costs no network and
     // rides the page's own load like the reads beside it.
     void this.loadGitLabReview(key);
+    void this.loadGitLabReviewChat(key);
 
     const notes = this.backend
       .gitlabMergeRequestNotes(key, refresh)
@@ -4405,6 +4427,48 @@ export class TeamsController {
     }
   }
 
+  /** Read the FOLLOW-UP questions this machine has already asked about the open merge request.
+   *
+   *  Open like the reading's own read — a `get_setting`, so no network and no agent — and SILENT on a
+   *  failure for its reason: a conversation nobody has had and a read that failed both mean there is
+   *  nothing to draw, and the composer is what the reader acts on either way. */
+  private async loadGitLabReviewChat(key: MergeRequestKey): Promise<void> {
+    try {
+      const { chat } = await this.backend.gitlabMergeRequestReviewChat(key);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) this.set({ gitlabReviewChat: chat });
+    } catch {
+      /* nothing to draw either way */
+    }
+  }
+
+  /**
+   * Ask a FOLLOW-UP about the reading: the same agent run, narrowed to what the reader tagged.
+   *
+   * The words are NOT cleared here. That is the composer's own contract, and it is what makes a
+   * refusal recoverable: a question that did not reach the model must be left where the reader can
+   * press again, and one that did is cleared by the caller once the turn is really there.
+   */
+  async askGitLabReview(question: string, tags: ReviewTag[]): Promise<boolean> {
+    const key = this.get().openMergeRequest;
+    if (!key || this.get().gitlabReviewAsking) return false;
+    this.set({ gitlabReviewAsking: true, gitlabReviewAskError: null });
+    try {
+      const wire = reviewTagsToWire(tags);
+      const { chat } = await this.backend.gitlabAskMergeRequestReview(key, question, wire);
+      if (sameMergeRequest(this.get().openMergeRequest, key)) this.set({ gitlabReviewChat: chat });
+      return true;
+    } catch (e) {
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        this.set({ gitlabReviewAskError: errText(e) });
+      }
+      return false;
+    } finally {
+      if (sameMergeRequest(this.get().openMergeRequest, key)) {
+        this.set({ gitlabReviewAsking: false });
+      }
+    }
+  }
+
   /**
    * Ask for a reading of the open merge request's diff: ONE agent run, on this machine.
    *
@@ -4709,6 +4773,9 @@ export class TeamsController {
       gitlabReview: null,
       gitlabReviewBusy: false,
       gitlabReviewError: null,
+      gitlabReviewChat: EMPTY_REVIEW_CHAT,
+      gitlabReviewAsking: false,
+      gitlabReviewAskError: null,
       // A comment being written belongs to one line of one file, so opening another merge
       // request — or leaving this one — takes it away rather than carrying it over to a line
       // that means something else there.

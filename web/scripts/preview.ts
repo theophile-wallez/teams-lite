@@ -3794,6 +3794,47 @@ if (import.meta.main) {
         await page.waitForSelector('[data-testid="gitlab-review-error"]');
         await shot(`${out}-refused-light.png`);
 
+        // ASKING A FOLLOW-UP: the panel beside the document, the "@" list that offers a theme above
+        // the files, the chips that say what will travel before the press, and the answer it lands
+        // as. Everything through the mock's own `gitlab_mr_review_ask`, so no CLI runs.
+        await emit({ kind: "gitlab_mr", clear: true });
+        await emit({ kind: "gitlab_mr", review: "stored" });
+        await reopenThemes(page);
+        const field = '[data-testid="gitlab-review-chat-field"]';
+        await page.locator(field).click();
+        await page.locator(field).type("@");
+        await page.waitForSelector('[data-testid="gitlab-review-chat-option"]');
+        await shot(`${out}-tags-light.png`, '[data-testid="gitlab-review-chat"]');
+        await setTheme("dark");
+        await shot(`${out}-tags-dark.png`, '[data-testid="gitlab-review-chat"]');
+        await setTheme("light");
+        // Narrowed to a FILE by a substring of its path, which is how one is really found.
+        await page.locator(field).type("health");
+        await page.locator('[data-testid="gitlab-review-chat-option"]').first().click();
+        await page.locator(field).type("Why is the draining check first?");
+        await shot(`${out}-question-light.png`, '[data-testid="gitlab-review-chat"]');
+        await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
+        await page.waitForSelector('[data-testid="gitlab-review-chat"][data-turns="1"]', {
+          timeout: 20_000,
+        });
+        await page.waitForTimeout(400);
+        await shot(`${out}-answer-light.png`, '[data-testid="gitlab-review-chat"]');
+        await setTheme("dark");
+        await shot(`${out}-answer-dark.png`, '[data-testid="gitlab-review-chat"]');
+        await setTheme("light");
+        // The whole page with the conversation beside it, which is the shape a wide screen takes.
+        await shot(`${out}-with-chat-light.png`);
+
+        // A refused QUESTION, reported at the box the words are still in.
+        await emit({ kind: "gitlab_mr", refuse_ask: "claude is not on this machine's PATH" });
+        await page.locator(field).click();
+        await page.locator(field).type("and the grace period?");
+        await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
+        await page.waitForSelector('[data-testid="gitlab-review-chat-error"]');
+        await shot(`${out}-ask-refused-light.png`, '[data-testid="gitlab-review-chat"]');
+        await emit({ kind: "gitlab_mr", clear: true });
+        await emit({ kind: "gitlab_mr", review: "stored", chat: "stored" });
+
         // And a PHONE, which is where the two measures matter most: the prose has to stay readable
         // and the code has to be the one thing allowed to scroll sideways.
         await emit({ kind: "gitlab_mr", clear: true });
@@ -3805,6 +3846,10 @@ if (import.meta.main) {
         });
         await page.waitForTimeout(400);
         await shot(`${out}-mobile-light.png`);
+        // And the CONVERSATION at that width, which is below the document rather than beside it.
+        await page.locator('[data-testid="gitlab-review-chat"]').scrollIntoViewIfNeeded();
+        await page.waitForTimeout(300);
+        await shot(`${out}-mobile-chat-light.png`);
         await page.setViewportSize(VIEWPORT);
 
         // One mock process serves the whole run, and a stored reading outlives the page.
@@ -3813,8 +3858,10 @@ if (import.meta.main) {
         console.log(
           `[preview] wrote ${out}-offer-{light,dark}.png, ${out}-{light,dark}.png, ` +
             `${out}-file-{light,dark}.png, ${out}-sticky-light.png, ${out}-folded-light.png, ` +
-            `${out}-unplaced-light.png, ${out}-stale-light.png, ${out}-refused-light.png and ` +
-            `${out}-mobile-light.png`,
+            `${out}-unplaced-light.png, ${out}-stale-light.png, ${out}-refused-light.png, ` +
+            `${out}-tags-{light,dark}.png, ${out}-question-light.png, ` +
+            `${out}-answer-{light,dark}.png, ${out}-with-chat-light.png, ` +
+            `${out}-ask-refused-light.png and ${out}-mobile{,-chat}-light.png`,
         );
       },
       { deviceScaleFactor: dpr },

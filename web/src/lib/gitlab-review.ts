@@ -320,6 +320,156 @@ export function reviewCanBeAsked(diff: GitLabDiff | null | undefined): boolean {
   return (diff?.files.length ?? 0) > 0;
 }
 
+// ---- asking a FOLLOW-UP about the reading -------------------------------------
+//
+// The reading answers "what does this branch do". The next question is always narrower — "why is the
+// 503 before the ready check", "what breaks if I drop the budget" — and the point of asking it HERE
+// rather than in a chat is that the reader can POINT at what they mean: a theme, some files, and the
+// question travels with exactly those.
+//
+// A mirror of the `ChatTurn` / `ReviewChat` half of `src/gitlab_review.rs`, plus the pure rules the
+// composer is built from. Nothing here reaches a model: the backend runs the same agent the reading
+// runs, with the same permissions and the same gate.
+
+/** One question and its answer. Mirrors `gitlab_review::ChatTurn`. */
+export type GitLabReviewTurn = {
+  question: string;
+  /** The answer as the MARKDOWN the model wrote, rendered through this app's own GFM parser. */
+  answer: string;
+  /** The themes the question was tagged with, by their index in the reading. */
+  themes: number[];
+  /** The files whose code really travelled — what the backend recorded, not what was asked for. */
+  paths: string[];
+  asked_ms: number;
+};
+
+/** A whole conversation. Mirrors `gitlab_review::ReviewChat`. */
+export type GitLabReviewChat = { turns: GitLabReviewTurn[] };
+
+/** One thing a question can be tagged with: a theme of the reading, or a changed file.
+ *
+ *  ONE type for both, because they are picked from one list and drawn as one kind of chip — the
+ *  shape the composer's own "@" already has for a channel above the people, and for the providers
+ *  above the personas. */
+export type ReviewTag =
+  | { kind: "theme"; index: number; label: string }
+  | { kind: "file"; path: string; label: string };
+
+/** A tag's own key, for a React list and for keeping a picked set unique.
+ *
+ *  A theme is keyed on its INDEX and a file on its PATH, so two themes titled the same thing are two
+ *  tags — the reason `reviewSectionId` is keyed on the index too. */
+export function reviewTagKey(tag: ReviewTag): string {
+  return tag.kind === "theme" ? `theme:${tag.index}` : `file:${tag.path}`;
+}
+
+/** The most tags one question may carry.
+ *
+ *  It mirrors the backend's own `MAX_QUESTION_FILES` for the files, and the point of stating it here
+ *  is that the composer refuses the ninth rather than letting a send drop it — the rule the
+ *  composer's picture ceilings hold: what the backend enforces, the page states. */
+export const MAX_REVIEW_TAG_FILES = 8;
+
+/** Everything a question can be tagged with, themes first.
+ *
+ *  The order is the argument the composer's own "@" makes: the THEMES are a short fixed list a
+ *  reader learns once, and the files grow — so a list whose first row moved as files were added
+ *  would have to be read every time. Within each, the reading's own order.
+ *
+ *  Only the files the DIFF holds are offered, because those are the only ones whose code can travel
+ *  (`build_chat_prompt` drops any other) — so a row that could not be honoured is never drawn. */
+export function reviewTags(
+  review: GitLabReview | null | undefined,
+  diff: GitLabDiff | null | undefined,
+): ReviewTag[] {
+  if (!review || !diff) return [];
+  const tags: ReviewTag[] = review.themes.map((theme, index) => ({
+    kind: "theme" as const,
+    index,
+    label: theme.title,
+  }));
+  for (const file of diff.files) {
+    tags.push({ kind: "file" as const, path: file.path, label: file.path });
+  }
+  return tags;
+}
+
+/** The tags whose label matches what has been typed after the trigger, bounded.
+ *
+ *  Case-insensitive and a SUBSTRING rather than a prefix, because a path is `src/server/health.ts`
+ *  and nobody types the directory to find the file — the rule the emoji typeahead's own search
+ *  follows for an alias. Already-picked tags are left out: a control that changes nothing reads as a
+ *  bug, and picking one twice sends it once anyway. */
+export function matchReviewTags(
+  tags: ReviewTag[],
+  query: string,
+  picked: ReadonlySet<string>,
+  limit = 8,
+): ReviewTag[] {
+  const needle = query.trim().toLowerCase();
+  const out: ReviewTag[] = [];
+  for (const tag of tags) {
+    if (picked.has(reviewTagKey(tag))) continue;
+    if (needle && !tag.label.toLowerCase().includes(needle)) continue;
+    out.push(tag);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** What a set of picked tags becomes on the wire: the theme indices and the file paths.
+ *
+ *  The FILES are bounded here as well as in the backend, and the two numbers are the same one:
+ *  a question tagged with every file of a 149-file branch is a fresh reading wearing a question's
+ *  clothes. What is over the bound is DROPPED rather than silently sent, and `reviewTagLimit` is what
+ *  the composer states before a send. */
+export function reviewTagsToWire(tags: ReviewTag[]): { themes: number[]; paths: string[] } {
+  const themes: number[] = [];
+  const paths: string[] = [];
+  for (const tag of tags) {
+    if (tag.kind === "theme") themes.push(tag.index);
+    else if (paths.length < MAX_REVIEW_TAG_FILES) paths.push(tag.path);
+  }
+  return { themes, paths };
+}
+
+/** The sentence a composer shows when it is holding as many files as it may, or `null`.
+ *
+ *  Stated BEFORE the send rather than after it, which is the rule the composer's own picture
+ *  ceilings hold: a refusal a reader meets by pressing Send is one they cannot plan around. */
+export function reviewTagLimit(tags: ReviewTag[]): string | null {
+  const files = tags.filter((tag) => tag.kind === "file").length;
+  if (files < MAX_REVIEW_TAG_FILES) return null;
+  return `A question carries at most ${MAX_REVIEW_TAG_FILES} files. Ask about these, then ask again.`;
+}
+
+/** Whether a question can be asked at all.
+ *
+ *  It needs a reading to be about — the backend refuses one without it, and the page must not offer a
+ *  press that reports that refusal — and it needs words. */
+export function reviewQuestionCanBeAsked(
+  review: GitLabReview | null | undefined,
+  question: string,
+): boolean {
+  return !!review && question.trim().length > 0;
+}
+
+/** What one turn says it was told, for the line under a question, or `null` when it was told nothing
+ *  in particular.
+ *
+ *  It names what really TRAVELLED, which the backend recorded rather than the page assuming: a
+ *  tagged file the diff does not hold never reached the model, and a transcript claiming it did would
+ *  misstate what the answer rests on. */
+export function turnContext(turn: GitLabReviewTurn, review: GitLabReview | null): string | null {
+  const parts: string[] = [];
+  for (const index of turn.themes) {
+    const title = review?.themes[index]?.title;
+    if (title) parts.push(title);
+  }
+  for (const path of turn.paths) parts.push(path);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 /** The id one section of the document hangs off, so the sticky heading, the tab's own panel and
  *  anything that later points AT a theme all spell it once.
  *

@@ -5309,9 +5309,64 @@ let mockGitLabTokenMissing = false;
 let mockGitLabDiffRefusal: string | null = null;
 /** Why the next AI reading of a diff refuses, when a spec has armed one. */
 let mockGitLabReviewRefusal: string | null = null;
+/** A follow-up QUESTION this mock refuses, so the page's own report of one is reachable — the twin
+ *  of `mockGitLabReviewRefusal` beside it. */
+let mockGitLabAskRefusal: string | null = null;
 /** The readings this machine has "made", keyed the way the backend keys its own stored one:
  *  `<project>!<iid>`, ONE per merge request, with the head sha inside the payload. */
 const mockReviews = new Map<string, MockReview>();
+
+/** The FOLLOW-UP conversations, per merge request. The real backend keeps these in a store row of
+ *  their own (`gitlab_review_chat:…`), for the reason it does: a fresh reading replaces the reading
+ *  and must not throw away the questions somebody asked. */
+const mockReviewChats = new Map<string, MockReviewChat>();
+type MockReviewTurn = {
+  question: string;
+  answer: string;
+  themes: number[];
+  paths: string[];
+  asked_ms: number;
+};
+type MockReviewChat = { turns: MockReviewTurn[] };
+
+/** How many turns one conversation keeps — the backend's own `MAX_CHAT_TURNS`. */
+const MOCK_CHAT_TURNS = 12;
+
+/** What the mock answers a question with, in the MARKDOWN a model would write.
+ *
+ *  It ECHOES what the question was told — the themes by title and the files by path — because that
+ *  is the half a page can get wrong: a transcript that claimed a file which never travelled would
+ *  misstate what the answer rests on, and a fixture that said nothing about its context could not
+ *  show it. The words are otherwise fixed: nothing here reaches a model, and a mock that varied its
+ *  prose would make every capture a different picture. */
+function mockReviewAnswer(
+  review: MockReview,
+  themes: number[],
+  paths: string[],
+  question: string,
+): string {
+  const named: string[] = [];
+  for (const index of themes) {
+    const title = review.themes[index]?.title;
+    if (title) named.push(`the theme **${title}**`);
+  }
+  for (const path of paths) named.push(`\`${path}\``);
+  const told =
+    named.length > 0
+      ? `You pointed me at ${named.join(", ")}, so that is what I read.`
+      : "You tagged nothing, so I answered from the reading alone rather than from the code.";
+  return (
+    `${told}\n\n` +
+    "The order is what matters here: `draining` is checked *before* `ready`, so a replica that has " +
+    "been told to go answers `503` even while it is still healthy. That is what makes the load " +
+    "balancer stop sending it new connections.\n\n" +
+    "```ts\nif (server.draining) return 503;\nif (!server.ready) return 503;\n```\n\n" +
+    "Two things I would check:\n\n" +
+    "- nothing else probes `READY_PATH`, which moved to `/readyz`;\n" +
+    "- the grace period is longer than the longest request you serve.\n\n" +
+    `(You asked: ${question.slice(0, 80)})`
+  );
+}
 
 type MockReview = {
   head_sha: string;
@@ -6185,6 +6240,21 @@ function requireString(params: unknown, key: string): string {
   const v = asObject(params)[key];
   if (typeof v !== "string") throw new Error(`missing param: ${key}`);
   return v;
+}
+
+/** A list of strings, or an empty one. Absent, wrong-typed and holding a non-string are all the
+ *  same thing here — the value came from a client, and the backend narrows it the same way. */
+function stringList(params: unknown, key: string): string[] {
+  const v = asObject(params)[key];
+  return Array.isArray(v) ? v.filter((item): item is string => typeof item === "string") : [];
+}
+
+/** A list of numbers, on the terms above. */
+function numberList(params: unknown, key: string): number[] {
+  const v = asObject(params)[key];
+  return Array.isArray(v)
+    ? v.filter((item): item is number => typeof item === "number" && Number.isInteger(item))
+    : [];
 }
 
 function requireNumber(params: unknown, key: string): number {
@@ -9383,6 +9453,53 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return { review };
     }
 
+    // The CONVERSATION about that reading. Open like the reading's own read.
+    case "gitlab_mr_review_chat": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      return { chat: mockReviewChats.get(`${projectPath}!${iid}`) ?? { turns: [] } };
+    }
+
+    // ASK one. It mirrors every REFUSAL the backend makes rather than only the happy path — a
+    // question with no words, one past the bound, and one asked before any reading exists — because
+    // a mock that accepted what the backend refuses hides the bug instead of failing a test. What it
+    // deliberately does NOT mirror is the write TOKEN: `ws-client.ts`'s two call paths are pinned in
+    // Rust instead, where the authoritative lists live (see § THE MOCK DOES NOT ENFORCE THE WRITE
+    // TOKEN).
+    case "gitlab_mr_review_ask": {
+      const projectPath = requireString(params, "project_path");
+      const iid = requireNumber(params, "iid");
+      const key = `${projectPath}!${iid}`;
+      const question = requireString(params, "question").trim();
+      if (!question) throw new Error("a question with no words in it asks nothing");
+      if (question.length > 2000) {
+        throw new Error(`a question is at most 2000 characters — this one is ${question.length}`);
+      }
+      const review = mockReviews.get(key);
+      if (!review) {
+        throw new Error("read the changes first — a question needs a reading to be about");
+      }
+      if (mockGitLabAskRefusal) throw new Error(mockGitLabAskRefusal);
+      const themes = numberList(params, "themes").slice(0, 8);
+      // Only a path the DIFF holds travels, exactly as `build_chat_prompt` decides: a client cannot
+      // make this read a file the merge request never changed, and the turn records what really went.
+      const changed = new Set((mockDiffFiles.get(key) ?? []).map((file) => file.path));
+      const paths = stringList(params, "paths")
+        .filter((path) => changed.has(path))
+        .slice(0, 8);
+      const chat = mockReviewChats.get(key) ?? { turns: [] };
+      chat.turns.push({
+        question,
+        answer: mockReviewAnswer(review, themes, paths, question),
+        themes,
+        paths,
+        asked_ms: Date.now(),
+      });
+      while (chat.turns.length > MOCK_CHAT_TURNS) chat.turns.shift();
+      mockReviewChats.set(key, chat);
+      return { chat };
+    }
+
     // One PICTURE a description or a comment points at. The real backend asks GitLab's own
     // upload API with the token, sniffs the bytes and hands them over base64; this answers with
     // a picture it draws itself, so the whole surface is reviewable with no GitLab and no
@@ -12380,6 +12497,10 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         // Every stored READING goes too: a reading outlives the page, so one left behind would put
         // a themes view in front of every later spec that opens that merge request.
         mockReviews.clear();
+        // And every CONVERSATION: a question outlives the page exactly as a reading does, so one
+        // left behind would put a transcript in front of every later spec.
+        mockReviewChats.clear();
+        mockGitLabAskRefusal = null;
         // Every job log goes back too: the running one's length grows on each read, so a spec
         // that wants to watch a live log has to start from a known number of lines.
         resetMockJobLogs();
@@ -12399,6 +12520,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       mockGitLabJobLogTruncated = body.truncate_job_log === true;
       mockGitLabReviewRefusal =
         typeof body.refuse_review === "string" ? body.refuse_review : null;
+      mockGitLabAskRefusal = typeof body.refuse_ask === "string" ? body.refuse_ask : null;
       // A reading the machine has ALREADY made, so a spec can reach the stored path without
       // pressing anything — and `stale: true` makes it a reading of another commit.
       if (body.review === "stored" || body.review === "stale") {
@@ -12408,6 +12530,32 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
             if (body.review === "stale") review.head_sha = "0000000000000000000000000000000000000000";
             mockReviews.set(`${mr.project_path}!${mr.iid}`, review);
           }
+        }
+      }
+      // A conversation the reader has ALREADY had, so a spec and a capture can reach a transcript
+      // without paying for a turn per picture. It needs a reading, so it implies one.
+      if (body.chat === "stored") {
+        for (const mr of mockMergeRequests) {
+          const key = `${mr.project_path}!${mr.iid}`;
+          if (!mockDiffFiles.has(key)) continue;
+          const review = mockReviews.get(key) ?? mockReviewFor(mr);
+          mockReviews.set(key, review);
+          mockReviewChats.set(key, {
+            turns: [
+              {
+                question: "Why is the draining check before the ready one?",
+                answer: mockReviewAnswer(
+                  review,
+                  [0],
+                  ["src/server/health.ts"],
+                  "Why is the draining check before the ready one?",
+                ),
+                themes: [0],
+                paths: ["src/server/health.ts"],
+                asked_ms: Date.now() - 90_000,
+              },
+            ],
+          });
         }
       }
       return Response.json(
@@ -12421,7 +12569,9 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           refuse_trace: mockGitLabTraceRefusal,
           truncate_job_log: mockGitLabJobLogTruncated,
           refuse_review: mockGitLabReviewRefusal,
+          refuse_ask: mockGitLabAskRefusal,
           reviews: mockReviews.size,
+          chats: mockReviewChats.size,
         },
         { status: 200 },
       );

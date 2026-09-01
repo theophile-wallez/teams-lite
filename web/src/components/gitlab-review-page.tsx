@@ -30,6 +30,7 @@ import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
+import { ReviewChatPanel } from "./gitlab-review-chat";
 import { RichNodes } from "./rich-content";
 import { TrackerProjectProvider } from "./tracker-refs-context";
 
@@ -149,16 +150,34 @@ export function GitLabReviewPage(props: { onBack: () => void; onOpenFile: (path:
               This merge request changes no files, so there is nothing to read.
             </p>
           ) : (
-            <ReviewDocument
-              review={review}
-              diff={diff}
-              project={detail?.project_path}
-              headSha={detail?.diff_refs?.head_sha ?? null}
-              busy={busy}
-              error={error}
-              onRun={() => void controller.runGitLabReview()}
-              onOpenFile={props.onOpenFile}
-            />
+            // THE DOCUMENT, and — once there is a reading to ask about — the CONVERSATION beside it.
+            // Two columns on a wide screen and one above the other on a phone, which is the shape
+            // the diff page's own two take: a document of prose and code cannot share 390px with a
+            // transcript, and below `md` the conversation follows the words it is about.
+            <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+              <ReviewDocument
+                review={review}
+                diff={diff}
+                project={detail?.project_path}
+                headSha={detail?.diff_refs?.head_sha ?? null}
+                busy={busy}
+                error={error}
+                onRun={() => void controller.runGitLabReview()}
+                onOpenFile={props.onOpenFile}
+              />
+              {review && (
+                // On a phone it is BOUNDED and the document keeps the rest, because a transcript of
+                // five turns would otherwise take the whole screen and leave the words it is about
+                // nowhere — and each half scrolls itself, so both stay reachable. On a wide screen it
+                // is a full-height column of its own.
+                <div className="flex max-h-[55%] min-h-0 shrink-0 flex-col border-t border-border-subtle md:max-h-none md:w-[26rem] md:border-l md:border-t-0">
+                  <h2 className="shrink-0 border-b border-border-subtle px-4 py-3 text-[13px] font-medium text-foreground md:px-5">
+                    Ask about it
+                  </h2>
+                  <ReviewChatPanel review={review} diff={diff} project={detail?.project_path} />
+                </div>
+              )}
+            </div>
           )}
         </div>
       </section>

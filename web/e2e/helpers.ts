@@ -754,6 +754,14 @@ export async function setMergeRequestControl(
      *  machine's PATH, a provider the user switched off. It has to be reported beside the button
      *  that was pressed. */
     refuse_review?: string;
+    /** Make the next FOLLOW-UP question refuse with this sentence. Its own switch beside the
+     *  reading's, because the two are reported in different places: a refused reading at the button
+     *  and a refused question at the box the words are still in. */
+    refuse_ask?: string;
+    /** Put a CONVERSATION about the reading in place without asking anything, so a spec and a
+     *  capture can reach a transcript without paying for a turn per picture. It needs a reading, so
+     *  it implies one. */
+    chat?: "stored";
     /** Put a reading of every mock diff in place WITHOUT a run, so a spec can reach the stored path
      *  without pressing anything — and `"stale"` makes it a reading of another commit, which the
      *  page has to say rather than drawing a grouping of files that may have moved. */

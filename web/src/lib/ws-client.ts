@@ -15,7 +15,7 @@ import type { ChessEngineState } from "./chess-engine";
 import type { ChessSoundsState } from "./chess-sound";
 import type { SendImage } from "./composer-image";
 import type { DiffDepth, GitLabDiff } from "./gitlab-diff";
-import type { GitLabReview } from "./gitlab-review";
+import type { GitLabReview, GitLabReviewChat } from "./gitlab-review";
 import type { WireDiffPosition } from "./gitlab-diff-comment";
 import type {
   GitLabDiscussionList,
@@ -1657,6 +1657,40 @@ export class Backend {
     return this.writeRequest<{ review: GitLabReview }>("gitlab_mr_review_run", {
       project_path: key.projectPath,
       iid: key.iid,
+    });
+  }
+
+  /** The CONVERSATION about that reading, if the reader has asked anything.
+   *
+   *  Open like the reading's own read: a `get_setting` on the backend, so it starts nothing and
+   *  makes no request. */
+  gitlabMergeRequestReviewChat(key: MergeRequestKey): Promise<{ chat: GitLabReviewChat }> {
+    return this.request<{ chat: GitLabReviewChat }>("gitlab_mr_review_chat", {
+      project_path: key.projectPath,
+      iid: key.iid,
+    });
+  }
+
+  /** ASK a follow-up about the reading.
+   *
+   *  `writeRequest` for the reason the run above uses it, which is the same reason: this is the same
+   *  program started the same way, sending the reader's code to the same provider. Sent as a plain
+   *  `request` it is REFUSED, and the reader meets the write-lock refusal in place of the feature —
+   *  which is exactly what shipped once for the run (see the note there).
+   *
+   *  The TAGS are what decide how much of the branch travels: the themes by index, the files by
+   *  path, both re-checked against the real diff in the backend. */
+  gitlabAskMergeRequestReview(
+    key: MergeRequestKey,
+    question: string,
+    tags: { themes: number[]; paths: string[] },
+  ): Promise<{ chat: GitLabReviewChat }> {
+    return this.writeRequest<{ chat: GitLabReviewChat }>("gitlab_mr_review_ask", {
+      project_path: key.projectPath,
+      iid: key.iid,
+      question,
+      themes: tags.themes,
+      paths: tags.paths,
     });
   }
 

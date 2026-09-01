@@ -2777,6 +2777,97 @@ needs two columns of code, and here the code sits inside a column of prose set a
 so split would be two columns of eight characters, which is the reason `effectiveDiffLayout` refuses
 it on a phone. The toggle stays on the Diffs page, where it changes something.
 
+#### AND THE READER CAN ASK ABOUT IT (a follow-up, tagging a theme or a file)
+
+The reading answers "what does this branch do". The next question is always narrower — "why is the
+503 before the ready check", "what breaks if I drop the budget" — and until this the only place to
+ask it was a chat with the diff pasted in by hand. The document now has a conversation beside it:
+`src/gitlab_review.rs` holds the prompt, the transcript and every bound, `web/src/lib/gitlab-review.ts`
+the pure decisions the composer is built from, and `web/src/components/gitlab-review-chat.tsx` draws it.
+
+**IT IS THE SAME RUN, NARROWED, and it adds no way to reach a model.** The CLI, the provider, the
+model and `Permissions::Granted(vec![])` are the reading's own — `review_agent` in src/bin/server.rs
+is the ONE place that decides which program may start, shared by both, because two copies of that
+check would be two answers to "may this machine start an agent" drifting apart at the first gate
+anybody adds. So the cost is the same cost, which is why the page states it once at the top rather
+than again in the panel, and `gitlab_mr_review_ask` is a `MACHINE_METHODS` entry beside
+`gitlab_mr_review_run` for that reason. Reading the transcript (`gitlab_mr_review_chat`) is OPEN: a
+`get_setting`, which starts nothing.
+
+**WHAT THE READER TAGS IS WHAT LEAVES THE MACHINE**, and that is the whole reason to ask here rather
+than in a chat. A question tagged with a theme and two files carries that theme's own prose and those
+two patches and nothing else; a question with NO tags carries the reading and no code at all. The tags
+are drawn as CHIPS rather than as a syntax inside the words, so the reader can see what will travel
+before they press.
+
+Eleven rules hold it, and each is pinned by `gitlab_review::tests`,
+`web/src/lib/gitlab-review.test.ts` or `web/e2e/gitlab.spec.ts`:
+
+- **A question needs a READING to be about.** The backend refuses one without it, so the panel is not
+  drawn at all until there is one — a control that reports a refusal is what this app draws nothing
+  instead of.
+- **THE TRANSCRIPT IS ITS OWN STORE ROW** (`gitlab_review_chat:{project}!{iid}`), because the two have
+  different lifetimes: a fresh reading REPLACES the reading and must not throw away the questions
+  somebody asked — those were about this branch and are still worth reading. A spec presses "Read it
+  again" and holds the turns to surviving.
+- **Only a path the DIFF really holds travels.** `build_chat_prompt` drops any other, which is the
+  rail `from_answer` holds for a path the MODEL invented applied to one a CLIENT asked for: nothing
+  here can be made to read a file the merge request never changed. The composer only ever OFFERS
+  those, so a row that could not be honoured is never drawn.
+- **THE TURN RECORDS WHAT REALLY WENT, not what was asked for.** A tagged file the diff does not hold
+  never reached the model, so a transcript claiming it did would misstate what the answer rests on —
+  and `turnContext` is what the line under each question is built from. A theme the reading no longer
+  holds is DROPPED from that line rather than drawn as an index, because "theme 4" is a line nobody
+  can read.
+- **A tagged file with NO patch is STATED rather than skipped in silence.** The reader pointed at a
+  binary file or a pure rename, so the answer has to be able to say it had nothing to look at instead
+  of answering as though it had.
+- **FOUR BOUNDS, and each catches a different mistake.** The question is 2 000 characters
+  (`MAX_QUESTION_CHARS` — it catches a whole file pasted into the box), the code one question carries
+  is 64 KiB (`MAX_CHAT_PATCH_BYTES`, deliberately smaller than the reading's own 256 KiB: a follow-up
+  about a part must not quietly cost what a fresh reading costs), the files it may tag are 8
+  (`MAX_QUESTION_FILES`, mirrored by `MAX_REVIEW_TAG_FILES` — a question tagged with every file of a
+  149-file branch is a fresh reading wearing a question's clothes), and the transcript keeps 12 turns
+  (`MAX_CHAT_TURNS`). **The last one is quadratic in what reaches the provider**, since every turn is
+  re-sent as context on the next question, and what falls off is the OLDEST so the exchange the reader
+  is in the middle of always travels. **The composer STATES the file bound before a send**
+  (`reviewTagLimit`), which is the rule the composer's own picture ceilings hold.
+- **The answer is PROSE, and an EMPTY one is an error.** Markdown rather than the reading's JSON,
+  because a person reads it — an envelope round a paragraph would be parsed away and rendered
+  identically at the cost of an answer that fails to parse becoming an error instead of an answer. An
+  empty answer drawn as a success would tell the reader their question has no answer, which is a claim
+  about their branch rather than about a run that said nothing.
+- **"@" OPENS THE LIST, themes above files.** The shape the composer's own "@" has for a channel above
+  the people and the providers above the personas: a short fixed list a reader learns once comes
+  first, and the growing one after it. The match is a SUBSTRING and case-insensitive, because a path
+  is `src/server/health.ts` and nobody types the directory to find the file. **A row is activated on
+  `mousemove`, never `mouseenter`** — this list opens right over the field the reader just clicked, so
+  a row appearing under a stationary cursor would take the active row away from the keyboard, which is
+  the defect both composer typeaheads were fixed for. Escape leaves the "@" as text.
+- **A refusal is reported AT the box, and the words are KEPT.** The composer's contract: a question
+  that did not reach the model must never look like it did, and it is one press from being asked again.
+- **A question that WORKED takes back the words and the tags, and only then** — cleared on the press,
+  a question the model never saw would be lost.
+- **The panel is BESIDE the document on a wide screen and BELOW it on a phone.** A document of prose
+  and code cannot share 390 px with a transcript, and below `md` the conversation follows the words it
+  is about — the shape the diff page's own two columns take.
+
+`web/mock/server.ts` reproduces the whole flow with no CLI and no model (`mockReviewAnswer`, which
+ECHOES what the question was told — the themes by title and the files by path — because that is the
+half a page can get wrong, and otherwise answers fixed prose so every capture is the same picture). It
+mirrors every REFUSAL the backend makes rather than only the happy path: a question with no words, one
+past the bound, and one asked before any reading exists. Its `{kind:"gitlab_mr"}` hook gains
+`refuse_ask` and `chat: "stored"`, and **a spec MUST clear it** — a question outlives the page exactly
+as a reading does. What the mock deliberately does NOT enforce is the write TOKEN, which is why
+`gitlabAskMergeRequestReview` goes out through `writeRequest` and the pairing is pinned in Rust: see
+§ THE MOCK DOES NOT ENFORCE THE WRITE TOKEN, which is the defect this method's own sibling shipped.
+
+**What is UNVERIFIED against the tenant is the RUN, exactly as it is for the reading.** The prompt,
+the parse and every bound are pinned in Rust and the surface against the mock; no real agent has
+answered a real question here, because that needs the user's own CLI and their own press. The failure
+mode if the model answers something unexpected is a refusal reported at the box with the words still
+in it, never a transcript claiming code it was never given.
+
 **THE PROGRAM IS THE ONE `agent.rs` ALREADY RUNS**, and neither module adds a way to reach a model.
 The CLI, the provider, the model and every permission decision stay § The local agent's: the user's
 own Settings › AI providers choice answers, a provider they switched off answers nothing, and a
@@ -3578,6 +3669,19 @@ user. Two independent mechanisms enforce that split:
   `grep` whose pattern names a launcher runs nothing, and a guard that fired on it
   would only teach its next reader to phrase around the guard.
 
+- **THE GUARD'S OWN LIST OF WRITE RPCs IS PINNED AGAINST THE AUTHORITATIVE ONE, and it had FIVE
+  holes in it.** That list is a shell alternation spelled by hand, on the other side of a process
+  boundary from `OUTWARD_METHODS` and `MACHINE_METHODS` — so nothing but a test could notice a gated
+  method missing from it, and a missing one means tooling can drive that method against the user's own
+  account. Adding one and going to look found five already absent: `gitlab_mr_edit_comment` (which
+  rewrites a comment everybody watching a merge request can see), `gitlab_mr_resolve_thread`,
+  `call_answer_media`, `call_subscribe` and `repair_broker`.
+  `every_gated_method_is_named_in_the_automation_guard` (in src/bin/server.rs, over `include_str!`)
+  holds every gated method to being named there, and it matches a whole ALTERNATION MEMBER rather than
+  a substring — `edit` appears inside `gitlab_mr_edit_comment`, so a check for the bare word would
+  have called it present. It pins ONE direction: a name in the hook that is no longer gated blocks a
+  string no backend answers, which is noise rather than a fault, and a few are left over that way.
+
 - **Never hand-roll browser automation.** `web/scripts/preview.ts` is the only
   sanctioned way to drive the web UI: it starts its own mock, points the dev
   server at it, and asserts the `MOCK` sentinel badge before it types — and again
@@ -3629,10 +3733,14 @@ user. Two independent mechanisms enforce that split:
   fifth PAGE of a merge request — the offer and the cost it names in both themes, the document in both
   themes, ONE FILE's box cropped to itself in both themes, the theme heading STICKING while the code
   scrolls under it, the long diff folded with the count in its label, the files nothing grouped cropped
-  to themselves, a reading of an earlier commit, a refused run and a phone's width:
+  to themselves, a reading of an earlier commit, a refused run, a phone's width — and the FOLLOW-UP
+  conversation beside it: the "@" list offering a theme above the files in both themes, the chips that
+  say what will travel, the answer it lands as in both themes, the whole page with the conversation
+  beside it, a refused question, and that panel at a phone's width where it is BELOW the document:
   `bun run preview -- --out /tmp/rev --diff-review`, or `openReview` from the same file (everything
   goes through the mock's own `gitlab_mr_review*`, so no CLI runs and no model is reached — and that
-  run RESETS the `{kind:"gitlab_mr"}` hook at the end, because a stored reading outlives the page). For a COMMENT on a diff line — the
+  run RESETS the `{kind:"gitlab_mr"}` hook at the end, because a stored reading and a stored
+  conversation both outlive the page). For a COMMENT on a diff line — the
   affordance in the gutter, the box on one line, the span a drag covers, the thread it lands as, a
   comment being rewritten and the fold a resolved thread takes:
   `bun run preview -- --out /tmp/dc --diff-comment`, or `diffGutterLine` / `dragDiffLines` from
@@ -7664,8 +7772,10 @@ user's. What changes is only what is asked.
   person on EITHER tracker is in the user's own Teams
   (`src/tracker_people.rs`, see § A tracker user who is also a colleague) — plus the approval
   those trackers got first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
-  and an AI READING of a merge request's diff, which is a PROMPT and a PARSE rather than a way to
-  reach a model — the CLI, the provider and every permission stay the local agent's, and the run is
+  and an AI READING of a merge request's diff — drawn as a page of its own, with the
+  branch's real patches in it, and a FOLLOW-UP conversation beside it that carries exactly the theme
+  and the files the reader tagged — which is a PROMPT and a PARSE rather than a way to
+  reach a model: the CLI, the provider and every permission stay the local agent's, and both runs are
   granted no tools at all (`src/gitlab_review.rs`, see § AN AI READING OF THE DIFF),
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
