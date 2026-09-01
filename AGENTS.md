@@ -2802,9 +2802,9 @@ than again in the panel, and `gitlab_mr_review_ask` is a `MACHINE_METHODS` entry
 
 **WHAT THE READER TAGS IS WHAT LEAVES THE MACHINE**, and that is the whole reason to ask here rather
 than in a chat. A question tagged with a theme and two files carries that theme's own prose and those
-two patches and nothing else; a question with NO tags carries the reading and no code at all. The tags
-are drawn as CHIPS rather than as a syntax inside the words, so the reader can see what will travel
-before they press.
+two patches and nothing else; a question with NO tags carries the reading and no code at all. A tag is
+WORDS IN THE QUESTION — the reader sees what will travel in the sentence they wrote, and the rule below
+says why that is the shape rather than a chip row beside the field.
 
 Fourteen rules hold it, and each is pinned by `gitlab_review::tests`,
 `web/src/lib/gitlab-review.test.ts`, `web/src/lib/ws-client.test.ts` or `web/e2e/gitlab.spec.ts`:
@@ -3090,13 +3090,20 @@ write it to. Every number and every rule is in `gitlab-diff.ts` beside `diffPage
   and the STORE is written ONCE at the end; React then renders a number that is already on screen, so
   nothing moves at the handover. The host element is PASSED rather than found, because sniffing for it
   in the DOM would break the day the host moved the declaration.
-- **Five rails hold the gesture, and every one is a bug this app has already had** (§ A COMPANION,
+- **SIX rails hold the gesture, and every one is a bug this app has already had** (§ A COMPANION,
   whose vendored engine states each in full): the grabbing `pointerId` is remembered and every later
   handler gated on it; only a PRIMARY press of button 0 starts a drag; `pointercancel` ends it as a
   CANCEL and puts the column back, because a gesture the browser took away did not happen; a
   `pointerup` whose button is not 0 is ignored, since right-clicking mid-drag fires one for the same
-  pointer; and a release that never arrives is ended by the next PRIMARY press anywhere, from a
-  capture-phase listener, NOT keyed on the pointer id because every touch gets a fresh one.
+  pointer; a release that never arrives is ended by the next PRIMARY press anywhere, from a
+  capture-phase listener, NOT keyed on the pointer id because every touch gets a fresh one; **and
+  UNMOUNTING is an ending too, which is the one `end` never heard about** — so the rule this component
+  states for itself, one ending for every way out, was not true of it. A handle really does go while a
+  drag is on: the window narrows past the two-column width (tiling it with a keyboard shortcut, or
+  Ctrl+wheel zoom, does it with the button still down and fires no `pointercancel`), or the panel
+  beside it closes. The listeners went with it and `document.body` was left holding
+  `cursor: col-resize` and `user-select: none` for the whole page until somebody dragged something
+  else. It is a CANCEL rather than a commit, because a gesture the page took away did not happen.
 - **The CODE keeps `DIFF_CODE_MIN_WIDTH`, and the OCCURRENCES panel is what gives way first.** The
   two side widths are resolved together (`resolveDiffColumnWidths`) because they are not independent:
   the panel is the transient one — opened by a press a moment ago and closed by another — while the
