@@ -20,6 +20,7 @@ import { Route as AppMrMergeRequestIdIndexRouteImport } from './routes/_app.mr.$
 import { Route as AppMrMergeRequestIdCommitsRouteImport } from './routes/_app.mr.$mergeRequestId.commits'
 import { Route as AppMrMergeRequestIdDiffRouteImport } from './routes/_app.mr.$mergeRequestId.diff'
 import { Route as AppMrMergeRequestIdPipelinesRouteImport } from './routes/_app.mr.$mergeRequestId.pipelines'
+import { Route as AppMrMergeRequestIdReviewRouteImport } from './routes/_app.mr.$mergeRequestId.review'
 import { Route as AppCConversationIdChessGameIdRouteImport } from './routes/_app.c.$conversationId.chess.$gameId'
 import { Route as AppMrMergeRequestIdJobsJobIdRouteImport } from './routes/_app.mr.$mergeRequestId.jobs.$jobId'
 
@@ -80,6 +81,12 @@ const AppMrMergeRequestIdPipelinesRoute =
     path: '/pipelines',
     getParentRoute: () => AppMrMergeRequestIdRoute,
   } as any)
+const AppMrMergeRequestIdReviewRoute =
+  AppMrMergeRequestIdReviewRouteImport.update({
+    id: '/review',
+    path: '/review',
+    getParentRoute: () => AppMrMergeRequestIdRoute,
+  } as any)
 const AppCConversationIdChessGameIdRoute =
   AppCConversationIdChessGameIdRouteImport.update({
     id: '/chess/$gameId',
@@ -102,6 +109,7 @@ export interface FileRoutesByFullPath {
   '/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
   '/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
   '/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
+  '/mr/$mergeRequestId/review': typeof AppMrMergeRequestIdReviewRoute
   '/c/$conversationId/': typeof AppCConversationIdIndexRoute
   '/mr/$mergeRequestId/': typeof AppMrMergeRequestIdIndexRoute
   '/c/$conversationId/chess/$gameId': typeof AppCConversationIdChessGameIdRoute
@@ -114,6 +122,7 @@ export interface FileRoutesByTo {
   '/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
   '/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
   '/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
+  '/mr/$mergeRequestId/review': typeof AppMrMergeRequestIdReviewRoute
   '/c/$conversationId': typeof AppCConversationIdIndexRoute
   '/mr/$mergeRequestId': typeof AppMrMergeRequestIdIndexRoute
   '/c/$conversationId/chess/$gameId': typeof AppCConversationIdChessGameIdRoute
@@ -130,6 +139,7 @@ export interface FileRoutesById {
   '/_app/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
   '/_app/mr/$mergeRequestId/diff': typeof AppMrMergeRequestIdDiffRoute
   '/_app/mr/$mergeRequestId/pipelines': typeof AppMrMergeRequestIdPipelinesRoute
+  '/_app/mr/$mergeRequestId/review': typeof AppMrMergeRequestIdReviewRoute
   '/_app/c/$conversationId/': typeof AppCConversationIdIndexRoute
   '/_app/mr/$mergeRequestId/': typeof AppMrMergeRequestIdIndexRoute
   '/_app/c/$conversationId/chess/$gameId': typeof AppCConversationIdChessGameIdRoute
@@ -146,6 +156,7 @@ export interface FileRouteTypes {
     | '/mr/$mergeRequestId/commits'
     | '/mr/$mergeRequestId/diff'
     | '/mr/$mergeRequestId/pipelines'
+    | '/mr/$mergeRequestId/review'
     | '/c/$conversationId/'
     | '/mr/$mergeRequestId/'
     | '/c/$conversationId/chess/$gameId'
@@ -158,6 +169,7 @@ export interface FileRouteTypes {
     | '/mr/$mergeRequestId/commits'
     | '/mr/$mergeRequestId/diff'
     | '/mr/$mergeRequestId/pipelines'
+    | '/mr/$mergeRequestId/review'
     | '/c/$conversationId'
     | '/mr/$mergeRequestId'
     | '/c/$conversationId/chess/$gameId'
@@ -173,6 +185,7 @@ export interface FileRouteTypes {
     | '/_app/mr/$mergeRequestId/commits'
     | '/_app/mr/$mergeRequestId/diff'
     | '/_app/mr/$mergeRequestId/pipelines'
+    | '/_app/mr/$mergeRequestId/review'
     | '/_app/c/$conversationId/'
     | '/_app/mr/$mergeRequestId/'
     | '/_app/c/$conversationId/chess/$gameId'
@@ -262,6 +275,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppMrMergeRequestIdPipelinesRouteImport
       parentRoute: typeof AppMrMergeRequestIdRoute
     }
+    '/_app/mr/$mergeRequestId/review': {
+      id: '/_app/mr/$mergeRequestId/review'
+      path: '/review'
+      fullPath: '/mr/$mergeRequestId/review'
+      preLoaderRoute: typeof AppMrMergeRequestIdReviewRouteImport
+      parentRoute: typeof AppMrMergeRequestIdRoute
+    }
     '/_app/c/$conversationId/chess/$gameId': {
       id: '/_app/c/$conversationId/chess/$gameId'
       path: '/chess/$gameId'
@@ -296,6 +316,7 @@ interface AppMrMergeRequestIdRouteChildren {
   AppMrMergeRequestIdCommitsRoute: typeof AppMrMergeRequestIdCommitsRoute
   AppMrMergeRequestIdDiffRoute: typeof AppMrMergeRequestIdDiffRoute
   AppMrMergeRequestIdPipelinesRoute: typeof AppMrMergeRequestIdPipelinesRoute
+  AppMrMergeRequestIdReviewRoute: typeof AppMrMergeRequestIdReviewRoute
   AppMrMergeRequestIdIndexRoute: typeof AppMrMergeRequestIdIndexRoute
   AppMrMergeRequestIdJobsJobIdRoute: typeof AppMrMergeRequestIdJobsJobIdRoute
 }
@@ -304,6 +325,7 @@ const AppMrMergeRequestIdRouteChildren: AppMrMergeRequestIdRouteChildren = {
   AppMrMergeRequestIdCommitsRoute: AppMrMergeRequestIdCommitsRoute,
   AppMrMergeRequestIdDiffRoute: AppMrMergeRequestIdDiffRoute,
   AppMrMergeRequestIdPipelinesRoute: AppMrMergeRequestIdPipelinesRoute,
+  AppMrMergeRequestIdReviewRoute: AppMrMergeRequestIdReviewRoute,
   AppMrMergeRequestIdIndexRoute: AppMrMergeRequestIdIndexRoute,
   AppMrMergeRequestIdJobsJobIdRoute: AppMrMergeRequestIdJobsJobIdRoute,
 }

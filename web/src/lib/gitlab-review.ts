@@ -8,12 +8,19 @@
 // Everything here is pure: no DOM, no network, no React, and nothing from `@pierre/diffs`. That is
 // the split `gitlab-diff.ts` already holds and for its reason.
 //
-// **THE READING IS A SECOND VIEW OF ONE READ, not a second surface.** The diff page draws the files
-// as a FEED or as these THEMES, from the same `gitlabDiff` — which is the shape the Pipelines page
-// already has for its graph and its job list (§ The pipeline is a GRAPH: "JOBS are a second view of
-// one read"). So it is a control in the page's own header rather than a route of its own: there is
-// one diff, read two ways, and a second URL for the same read would be a second thing to keep in
-// step.
+// **THE READING IS A PAGE, and that reverses what this file said when it shipped.** It was a second
+// VIEW of one read — a control in the diff page's header, on the argument the Pipelines page makes
+// for its graph beside its job list ("JOBS are a second view of one read, not a second surface").
+// That argument held while the view was a MAP: a list of headings over the same file names the tree
+// was already showing, with a press that took the reader to the feed. It stops holding the moment
+// the reading became a DOCUMENT — its own prose, its own code (the real patches, in flow, under the
+// paragraph that explains them) and its own conversation. Those are different content read a
+// different way, which is the definition of a second surface rather than a second view, so it is
+// `/mr/<id>/review` and the three things a URL gives are the point: it survives a reload, it can be
+// sent to whoever is being asked to review, and the browser's own Back leaves it.
+//
+// What that costs is one more tab in a strip of four, and the strip APPENDS rather than inserts so
+// no tab a reader has learned moves (see `MERGE_REQUEST_PAGES`).
 //
 // **A READING CAN GO STALE, and saying so is the whole of what makes it trustworthy.** It is a
 // reading of one COMMIT: the backend stores the `head_sha` it read, and if the branch has moved
@@ -92,13 +99,89 @@ export function reviewLimits(review: GitLabReview): string | null {
   return `This branch was too large to read whole: ${files} never reached the model, so nothing here is about them.`;
 }
 
+// ---- the DOCUMENT: how much of each patch is drawn in flow -------------------
+//
+// The reading draws the REAL PATCH of every file it names, under the prose about it — which is
+// what makes it a read-through rather than an index. Three things follow, and the last two are
+// why there are budgets here at all:
+//
+//   - **The code is the diff's, never the model's.** A model asked to quote the change would
+//     paraphrase it, and a paraphrased patch is invented code presented as somebody's branch.
+//     So the page renders the patch the read already holds and the model only ever NAMES files —
+//     the rule `from_answer` holds for a path, applied to the code itself.
+//   - **A patch is not a paragraph.** Measured on this instance, one file's patch runs to 900
+//     lines and a theme can hold several. Drawn whole, the document that was meant to be readable
+//     would be the diff feed with headings in it — while the FEED, one press away on the strip, is
+//     the surface built for reading a patch at length: it virtualizes, and this does not.
+//   - **AND NOTHING HERE VIRTUALIZES, which is what makes the second budget a correctness rule
+//     rather than a taste.** Every shown patch is a mounted `FileDiff` with a shadow root and a
+//     highlighter of its own, all of them at once. A reading of a 149-file branch can name forty
+//     small files, and forty of those on one first paint is a page that hangs before a word of the
+//     prose is legible — so the DOCUMENT has a ceiling as well as each file.
+//
+// Both budgets are the reader's to overrule, per file, from then on.
+
+/** The most lines of patch text a file may hold and still open with its code SHOWN.
+ *
+ *  A screen and a half: enough that an ordinary change — a handler, a chart value, a test — is
+ *  read without a press, and small enough that a 900-line file is a decision the reader makes. */
+export const REVIEW_PATCH_OPEN_LINES = 80;
+
+/** The most patches the document opens SHOWN, over the whole reading.
+ *
+ *  Twelve, which is more code than anybody reads in one pass and few enough to mount at once. Past
+ *  it the patches are folded and say so, and the count of what folded is stated — a document that
+ *  quietly stopped showing code would read as a reading that ran out of things to say. */
+export const REVIEW_PATCHES_SHOWN = 12;
+
+/** What one file's patch is worth drawing, or `null` when there is nothing to draw at all.
+ *
+ *  Four of the five states a file arrives in carry no patch (§ The DIFF is a PAGE) — a binary
+ *  file, a pure rename, one GitLab collapsed — and those have no code, no fold and no count. The
+ *  header note says which state it is, exactly as it does in the feed. */
+export type ReviewPatch = {
+  /**
+   * How many lines the patch's own TEXT holds.
+   *
+   * The patch's lines rather than the renderer's rows, which is what a reader is really being
+   * warned about — and it is countable here, with no `@pierre/diffs` anywhere near this file,
+   * which is the split this module exists to keep. The two differ by the git header this app's
+   * backend writes and by whatever context the renderer lets the reader open, so the number is
+   * named for what it counts.
+   */
+  lines: number;
+  /** Whether the document opens with this code SHOWN. False for a patch over
+   *  {@link REVIEW_PATCH_OPEN_LINES}, and for every patch past {@link REVIEW_PATCHES_SHOWN}
+   *  however short it is. */
+  shown: boolean;
+};
+
+/** How many lines of text a patch holds, or 0 for a file that carries none. */
+export function patchTextLineCount(patch: string | null | undefined): number {
+  if (!patch) return 0;
+  // A trailing newline terminates the last line rather than starting an empty one — the trap
+  // `patchTextLines` already states for its own walk.
+  const body = patch.endsWith("\n") ? patch.slice(0, -1) : patch;
+  if (body.length === 0) return 0;
+  let lines = 1;
+  for (let at = 0; at < body.length; at += 1) if (body.charCodeAt(at) === 10) lines += 1;
+  return lines;
+}
+
+/** One file of a group: the real changed file, whatever the reading said about it, and how much of
+ *  its code the document opens with. */
+export type ReviewGroupFile = {
+  file: GitLabDiffFile;
+  note?: string;
+  /** `null` for a file that carries no patch at all. */
+  patch: ReviewPatch | null;
+};
+
 /** One group as the view draws it: a theme, or the leftovers.
  *
  *  The two are ONE type because they are drawn the same way — a heading, some prose, and the files
  *  under it — and because the leftovers are not a footnote: a reviewer has to read those files too,
  *  so they are a group at the END rather than a sentence at the bottom. */
-/** One file of a group: the real changed file, and whatever the reading said about it. */
-export type ReviewGroupFile = { file: GitLabDiffFile; note?: string };
 
 export type ReviewGroup = {
   /** `null` for the leftovers, which are not a theme the model stated. */
@@ -127,6 +210,11 @@ export const UNPLACED_TITLE = "Not grouped";
  * page is not drawing. Dropping it is what stops the view from drawing a heading over nothing.
  *
  * A theme left with no files at all is dropped whole, for the reason the Rust parse drops one.
+ *
+ * **The patch budgets are spent HERE**, because this is the one walk that goes through the document
+ * in the order a reader meets it — and "how many patches has this page already opened" is a fact
+ * about the document rather than about any one file. A component asking per file could only answer
+ * the per-file half.
  */
 export function reviewGroups(
   review: GitLabReview | null | undefined,
@@ -141,13 +229,29 @@ export function reviewGroups(
   // reviewed twice, and it would make `reviewCoverage` claim to account for more files than the diff
   // holds.
   const claimed = new Set<string>();
+  // How many patches the document has opened so far, across every group.
+  let shown = 0;
+  const entryFor = (file: GitLabDiffFile, note?: string): ReviewGroupFile => {
+    const lines = patchTextLineCount(file.patch);
+    let patch: ReviewPatch | null = null;
+    if (lines > 0) {
+      // Both budgets, in the one place they can be spent together: short enough to read, AND
+      // inside the document's own ceiling. A long patch does not spend the ceiling — it was never
+      // going to be mounted — so a document of long files still opens twelve of its short ones.
+      const fits = lines <= REVIEW_PATCH_OPEN_LINES;
+      const room = shown < REVIEW_PATCHES_SHOWN;
+      patch = { lines, shown: fits && room };
+      if (patch.shown) shown += 1;
+    }
+    return { file, ...(note ? { note } : {}), patch };
+  };
   for (const theme of review.themes) {
     const files = theme.files
       .map((entry): ReviewGroupFile | null => {
         const file = byPath.get(entry.path);
         if (!file || claimed.has(entry.path)) return null;
         claimed.add(entry.path);
-        return { file, ...(entry.note ? { note: entry.note } : {}) };
+        return entryFor(file, entry.note);
       })
       .filter((entry): entry is ReviewGroupFile => entry !== null);
     if (files.length === 0) continue;
@@ -161,11 +265,33 @@ export function reviewGroups(
     groups.push({
       title: UNPLACED_TITLE,
       summary: UNPLACED_SUMMARY,
-      files: leftovers.map((file) => ({ file })),
+      // The leftovers get the same budget rather than a rule of their own: the reading had nothing
+      // to say about them, so their code is the only thing on the page that speaks for them.
+      files: leftovers.map((file) => entryFor(file)),
       unplaced: true,
     });
   }
   return groups;
+}
+
+/** How many of the document's patches are FOLDED, and how many it holds in all.
+ *
+ *  Drawn once, at the top: a document that quietly stopped showing code past its twelfth patch
+ *  would read as a reading that ran out of things to say, and the reader would not know there was a
+ *  press to make. `null` when every patch the reading holds is shown. */
+export function reviewFoldedPatches(
+  groups: ReviewGroup[],
+): { folded: number; total: number } | null {
+  let folded = 0;
+  let total = 0;
+  for (const group of groups) {
+    for (const entry of group.files) {
+      if (!entry.patch) continue;
+      total += 1;
+      if (!entry.patch.shown) folded += 1;
+    }
+  }
+  return folded > 0 ? { folded, total } : null;
 }
 
 /** How many files a reading really accounts for, over how many the diff holds.
@@ -194,6 +320,12 @@ export function reviewCanBeAsked(diff: GitLabDiff | null | undefined): boolean {
   return (diff?.files.length ?? 0) > 0;
 }
 
-/** Which view of the diff the reader is in. Kept as its own type because the choice is the
- *  reader's and is remembered for the session. */
-export type DiffView = "files" | "themes";
+/** The id one section of the document hangs off, so the sticky heading, the tab's own panel and
+ *  anything that later points AT a theme all spell it once.
+ *
+ *  Keyed on the INDEX rather than on the title: two themes may be titled the same thing (the
+ *  parse bounds the words and does not make them unique), and an id that collided would put two
+ *  headings behind one anchor. */
+export function reviewSectionId(index: number): string {
+  return `gitlab-review-section-${index}`;
+}

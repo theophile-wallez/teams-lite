@@ -13,24 +13,25 @@ import { cn } from "~/lib/utils";
 import { GitLabLogo } from "./gitlab-logo";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 
-// The SUB-HEADER of a merge request: the four pages it has, under the header that names it.
+// The SUB-HEADER of a merge request: the pages it has, under the header that names it.
 //
-// One merge request is four surfaces, exactly as GitLab's own is — Overview, Commits,
-// Pipelines, Diffs — and each is a ROUTE (see `lib/gitlab-mr-pages.ts` for the set, and the
-// four files under `src/routes`). Four rules hold the strip together:
+// Four of them are GitLab's own, in GitLab's own order — Overview, Commits, Pipelines, Diffs —
+// and the fifth is this app's: the READING (§ THE READING IS A PAGE). Each is a ROUTE (see
+// `lib/gitlab-mr-pages.ts` for the set, and the files under `src/routes`). Four rules hold the
+// strip together:
 //
 //   - **It navigates; it never swaps a piece of state.** Every page therefore survives a
 //     reload, can be sent to a colleague, and is behind the browser's own Back — the reason
-//     the diff was a route before this strip existed.
-//   - **It is on EVERY one of the four**, the full-screen diff page included. A strip that
-//     named the pages of a merge request and then vanished on one of them would leave the
-//     reader with a Back button where they wanted a Commits tab.
-//   - **All four are always offered, whatever a read answered.** A tab is where the reader
+//     the diff was a route before this strip existed, and the reason the reading became one.
+//   - **It is on EVERY page**, the two full-screen ones included. A strip that named the pages
+//     of a merge request and then vanished on one of them would leave the reader with a Back
+//     button where they wanted a Commits tab.
+//   - **All of them are always offered, whatever a read answered.** A tab is where the reader
 //     goes, not an invitation into content, so a strip whose shape changed per merge request
 //     would move the target between two of them. What a page could not read, that page says
 //     — which is why a diff nobody could read still has its tab and still opens a screen
 //     that explains itself.
-//   - **Two of the four hold nothing yet, and they SAY so** (`UnbuiltMergeRequestPage`),
+//   - **One of them holds nothing yet, and it SAYS so** (`UnbuiltMergeRequestPage`),
 //     with the one thing left: GitLab's own page for what is missing. A page drawn blank
 //     reads as a failed read.
 //
@@ -41,8 +42,8 @@ import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 //     is two nested surfaces for one thing, and this row already has its own bottom border. The
 //     wash stays on the CURRENT tab, which is what it is for: saying which page is open.
 //   - **`aria-controls` is kept true.** Every trigger points at a panel id, so the CONTENT of
-//     each page carries it (`mergeRequestPagePanel`) — it resolves inside one document on all
-//     four, because each page draws its own strip beside its own content.
+//     each page carries it (`mergeRequestPagePanel`) — it resolves inside one document on every
+//     page, because each draws its own strip beside its own content.
 //
 // The value is the URL and `onValueChange` NAVIGATES, so arrowing along the strip walks the
 // pages: automatic activation is the primitive's own behaviour, and it costs nothing here
@@ -53,6 +54,7 @@ import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 export function useMergeRequestPage(): MergeRequestPage {
   const matchRoute = useMatchRoute();
   if (matchRoute({ to: "/mr/$mergeRequestId/diff" })) return "diffs";
+  if (matchRoute({ to: "/mr/$mergeRequestId/review" })) return "review";
   if (matchRoute({ to: "/mr/$mergeRequestId/commits" })) return "commits";
   // A JOB's log hangs under the Pipelines page, so the strip keeps Pipelines current there: a
   // reader inside a job is inside that run.
@@ -121,11 +123,14 @@ export function MergeRequestPageStrip(props: { current: MergeRequestPage; classN
       case "diffs":
         void navigate({ to: "/mr/$mergeRequestId/diff", params });
         return;
+      case "review":
+        void navigate({ to: "/mr/$mergeRequestId/review", params });
+        return;
     }
   };
 
   return (
-    // The row scrolls sideways rather than widening: four labels are wider than a 320 px
+    // The row scrolls sideways rather than widening: five labels are wider than a 320 px
     // phone, and a header that grows past its column takes the page's own controls off the
     // right of the screen (the `min-w-0` lesson the long title already taught this page).
     //

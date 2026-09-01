@@ -625,6 +625,25 @@ export async function openChanges(page: Page): Promise<void> {
   await page.waitForTimeout(800);
 }
 
+/** Open THE READING — the merge request's fifth page — from the strip, which is the way a reader
+ *  gets there.
+ *
+ *  It waits for the DOCUMENT rather than only the page, because the page draws its header and its
+ *  strip from the URL alone and the document waits on the diff read. A shot taken between the two is
+ *  a shot of "Reading the changes…".
+ *
+ *  Note the older `gitlab-review-changes` above is a different control — the Overview's own press
+ *  into the diff — and shares nothing with this page but a prefix. */
+export async function openReview(page: Page): Promise<void> {
+  await page.locator('[data-testid="gitlab-mr-page-review"]').click();
+  await page.waitForSelector('[data-testid="gitlab-review-page"]', {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+  await page.waitForSelector('[data-testid="gitlab-review-document"]', {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+}
+
 /** Bring one file of the feed to the top by clicking its row in the tree.
  *
  *  The tree renders inside a shadow root, and Playwright's CSS engine pierces an open one — so
@@ -3668,76 +3687,123 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // The AI READING of a diff: the offer and what it costs, the run, and the themes it groups the
-  // files into with the thought process written around them.
+  // THE READING, which is the fifth PAGE of a merge request: the offer and what it costs, then the
+  // branch written up — a headline, a section per theme whose heading sticks, the reading's own
+  // prose as real markdown, and the real patches under it.
   //
   // Everything goes through the mock's own `gitlab_mr_review*`, so no CLI runs, no model is reached
   // and nothing leaves the machine — which is what makes this surface reviewable at all.
   if (args.includes("--diff-review")) {
     await withPreview(
       async ({ page, shot, setTheme, emit }) => {
-        // A RELOAD lands straight back on the diff's own route, so there is no "Review the
-        // changes" press to make: the page is already here. Waiting for the TREE is what says the
-        // read has landed, exactly as `openChanges` does after its click.
+        // A RELOAD lands straight back on the reading's own route, so there is nothing to press:
+        // the page is already here. That is what the URL buys, and it is why this helper is a
+        // reload rather than a walk back through the strip.
         const reopenThemes = async (target: typeof page) => {
           await target.reload();
-          await target.waitForSelector('[data-testid="gitlab-diff-page"]');
-          await target.waitForSelector('[data-testid="gitlab-diff-view-themes"]');
-          await target.locator('[data-testid="gitlab-diff-view-themes"]').click();
+          await target.waitForSelector('[data-testid="gitlab-review-page"]');
+          await target.waitForSelector('[data-testid="gitlab-review-document"]');
         };
 
         await openGitLabTab(page);
         await openMergeRequestAt(page, 0);
-        await openChanges(page);
+        await openReview(page);
 
         // The OFFER: what the press does, and what it costs before it is made. The cost is the one
         // fact the reader cannot undo after — their branch's code reaches a model provider.
-        await page.locator('[data-testid="gitlab-diff-view-themes"]').click();
-        await page.waitForSelector('[data-testid="gitlab-diff-review"][data-has-review="no"]');
+        await page.waitForSelector('[data-testid="gitlab-review-document"][data-has-review="no"]');
         await shot(`${out}-offer-light.png`);
         await setTheme("dark");
         await shot(`${out}-offer-dark.png`);
         await setTheme("light");
 
-        // The RUN, and the reading it lands as: a headline, the themes, the prose, and the files
-        // each theme groups — with the ones nothing grouped in a group of their own at the end.
-        await page.locator('[data-testid="gitlab-diff-review-run"]').click();
-        await page.waitForSelector('[data-testid="gitlab-diff-review"][data-has-review="yes"]', {
+        // The RUN, and the document it lands as: the headline, the sticky theme headings, the prose
+        // and the code under it.
+        await page.locator('[data-testid="gitlab-review-run"]').click();
+        await page.waitForSelector('[data-testid="gitlab-review-document"][data-has-review="yes"]', {
           timeout: 20_000,
         });
-        await page.waitForTimeout(400);
+        // The first patch really RENDERED, not a placeholder: this page's whole claim is that the
+        // code is there, so a capture taken before the highlighter landed would show none of it.
+        await page.waitForSelector('[data-testid="gitlab-review-patch"] diffs-container', {
+          timeout: 20_000,
+        });
+        await page.waitForTimeout(500);
         await shot(`${out}-light.png`);
         await setTheme("dark");
         await shot(`${out}-dark.png`);
         await setTheme("light");
 
-        // The leftovers, cropped: the group the view must never hide.
+        // ONE FILE's box cropped to itself, in both themes: its own bar naming it, the stat, the
+        // fold, and the code under it. It is the FILE rather than the section, because a section is
+        // taller than the viewport and a crop of one inside this page's own scroller comes back
+        // mostly blank (measured) — the document's shape is what the full-page shots above are for.
+        //
+        // It waits for EVERY shown patch to have a renderer, not only the first: taken one frame
+        // after the first `diffs-container` appeared, the later files were still resolving their
+        // grammars and the crop was an empty box with a screenful of reserved room under it
+        // (measured). The count comes from the page's own rows, so a fixture change moves it.
+        // A STRING, like every other in-page predicate in this file: `tsconfig.node.json` carries no
+        // DOM lib, so a closure naming `document` does not typecheck here.
+        await page.waitForFunction(
+          `(() => {` +
+            `const shown = document.querySelectorAll('[data-testid="gitlab-review-file"][data-patch="shown"]').length;` +
+            `const drawn = document.querySelectorAll('[data-testid="gitlab-review-patch"] diffs-container').length;` +
+            `return shown > 0 && drawn === shown;` +
+            `})()`,
+          undefined,
+          { timeout: 30_000 },
+        );
+        await page.waitForTimeout(600);
+        const firstFile = '[data-testid="gitlab-review-file"][data-patch="shown"]';
+        await shot(`${out}-file-light.png`, firstFile);
+        await setTheme("dark");
+        await shot(`${out}-file-dark.png`, firstFile);
+        await setTheme("light");
+
+        // The heading STICKING, which is the one thing a still picture of the top of the page
+        // cannot show: scrolled well past the start of a section, its name is still at the top.
+        await page
+          .locator('[data-testid="gitlab-review-document"]')
+          .evaluate((el) => el.scrollBy(0, 700));
+        await page.waitForTimeout(300);
+        await shot(`${out}-sticky-light.png`);
+
+        // The LONG diff, folded on open, with the count in its label — and the leftovers, the
+        // section the document must never hide.
+        await shot(
+          `${out}-folded-light.png`,
+          '[data-testid="gitlab-review-file"][data-patch="folded"]',
+        );
         await shot(
           `${out}-unplaced-light.png`,
-          '[data-testid="gitlab-diff-review-group"][data-unplaced="yes"]',
+          '[data-testid="gitlab-review-section"][data-unplaced="yes"]',
         );
 
         // A reading of an EARLIER commit. It is not thrown away — it is still the best account
-        // anybody has — but the reader is told the files below may have moved.
+        // anybody has — but the reader is told the code below may have moved.
         await emit({ kind: "gitlab_mr", review: "stale" });
         await reopenThemes(page);
-        await page.waitForSelector('[data-testid="gitlab-diff-review"][data-stale="yes"]');
-        await shot(`${out}-stale-light.png`, '[data-testid="gitlab-diff-review"]');
+        await page.waitForSelector('[data-testid="gitlab-review-document"][data-stale="yes"]');
+        await shot(`${out}-stale-light.png`);
 
         // A run that was REFUSED, reported beside the button that was pressed.
         await emit({ kind: "gitlab_mr", refuse_review: "claude is not on this machine's PATH" });
         await reopenThemes(page);
-        await page.locator('[data-testid="gitlab-diff-review-run"]').click();
-        await page.waitForSelector('[data-testid="gitlab-diff-review-error"]');
-        await shot(`${out}-refused-light.png`, '[data-testid="gitlab-diff-review"]');
+        await page.locator('[data-testid="gitlab-review-run"]').click();
+        await page.waitForSelector('[data-testid="gitlab-review-error"]');
+        await shot(`${out}-refused-light.png`);
 
-        // And a PHONE, where the reading is the one view of a diff that really suits one: it is
-        // prose and a list rather than two columns of code.
+        // And a PHONE, which is where the two measures matter most: the prose has to stay readable
+        // and the code has to be the one thing allowed to scroll sideways.
         await emit({ kind: "gitlab_mr", clear: true });
         await emit({ kind: "gitlab_mr", review: "stored" });
         await page.setViewportSize({ width: 390, height: 844 });
         await reopenThemes(page);
-        await page.waitForSelector('[data-testid="gitlab-diff-review"][data-has-review="yes"]');
+        await page.waitForSelector('[data-testid="gitlab-review-patch"] diffs-container', {
+          timeout: 20_000,
+        });
+        await page.waitForTimeout(400);
         await shot(`${out}-mobile-light.png`);
         await page.setViewportSize(VIEWPORT);
 
@@ -3746,6 +3812,7 @@ if (import.meta.main) {
 
         console.log(
           `[preview] wrote ${out}-offer-{light,dark}.png, ${out}-{light,dark}.png, ` +
+            `${out}-file-{light,dark}.png, ${out}-sticky-light.png, ${out}-folded-light.png, ` +
             `${out}-unplaced-light.png, ${out}-stale-light.png, ${out}-refused-light.png and ` +
             `${out}-mobile-light.png`,
         );

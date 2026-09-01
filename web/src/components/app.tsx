@@ -12,6 +12,7 @@ import { SettingsDialog } from "./settings-dialog";
 import { CallBar } from "./call-bar";
 import { CallStageProvider, useCallStage } from "./call-stage-context";
 import { GitLabDiffPage } from "./gitlab-diff-page";
+import { GitLabReviewPage } from "./gitlab-review-page";
 import { GitLabJobLogPage } from "./gitlab-job-log-page";
 import { IncomingCallBanner } from "./incoming-call-banner";
 import { AppToaster } from "./app-toaster";
@@ -107,6 +108,10 @@ function AppInner() {
   // of them — so it takes the whole screen rather than the detail pane: a third column of chat
   // rows beside it would leave neither of its own two enough room (see gitlab-diff-page.tsx).
   const onDiffRoute = !!matchRoute({ to: "/mr/$mergeRequestId/diff" });
+  // THE READING takes the whole screen for the diff's own reason and one of its own: it is a long
+  // document with real patches in it, so a column of chat rows beside it would leave the prose
+  // nowhere near a readable measure and the code narrower still.
+  const onReviewRoute = !!matchRoute({ to: "/mr/$mergeRequestId/review" });
   // ONE job's LOG takes the whole screen for the diff's own reason: it is 4 000 lines of
   // monospace, one of which measured 22 KB, and a column of chat rows beside it would leave it
   // none of the width it needs. A malformed id resolves to null, which reads as "no job open" —
@@ -414,6 +419,20 @@ function AppInner() {
         <div className="flex min-h-0 flex-1">
           <GitLabDiffPage
             onBack={() => (mergeRequestId ? goToMergeRequest(mergeRequestId) : goToList())}
+          />
+        </div>
+      ) : onReviewRoute ? (
+        <div className="flex min-h-0 flex-1">
+          {/* A press on a file name in the reading opens that file in the FEED, which is the
+              surface built for reading a patch at length. The file is named to the controller
+              first, because the diff page reads where to OPEN from that state (`openAt`) — so
+              navigating without it would land the reader at the top of the branch instead. */}
+          <GitLabReviewPage
+            onBack={() => (mergeRequestId ? goToMergeRequest(mergeRequestId) : goToList())}
+            onOpenFile={(path) => {
+              controller.setGitLabDiffFile(path);
+              if (mergeRequestId) goToMergeRequestDiff(mergeRequestId);
+            }}
           />
         </div>
       ) : onChessRoute && routeConversationId && routeGameId ? (

@@ -12,23 +12,27 @@ import {
 
 const WEB_URL = "https://git.example.com/group/app/-/merge_requests/42";
 
+/** Every page, so a page added to the type and not to the list fails here rather than in a
+ *  component. */
+const ALL_PAGES: MergeRequestPage[] = ["overview", "commits", "pipelines", "diffs", "review"];
+
 describe("the pages of a merge request", () => {
-  it("offers GitLab's own four, in GitLab's own order", () => {
-    expect(MERGE_REQUEST_PAGES.map((entry) => entry.page)).toEqual([
-      "overview",
-      "commits",
-      "pipelines",
-      "diffs",
-    ]);
+  it("offers GitLab's own four in GitLab's own order, and APPENDS the reading", () => {
+    // The order is the whole rule: a fifth tab inserted anywhere else moves the four a reader has
+    // already learned, and this strip is a row of targets rather than a ranked list.
+    expect(MERGE_REQUEST_PAGES.map((entry) => entry.page)).toEqual(ALL_PAGES);
     expect(MERGE_REQUEST_PAGES.map((entry) => entry.label)).toEqual([
       "Overview",
       "Commits",
       "Pipelines",
       "Diffs",
+      // "Themes" rather than "Review": the Overview carries a real Approve and a real Merge, so a
+      // tab called Review beside them would promise the approval flow.
+      "Themes",
     ]);
   });
 
-  it("says what each page is for, because four one-word labels do not", () => {
+  it("says what each page is for, because five one-word labels do not", () => {
     // The rule `SCOPE_HINTS` already holds for the sidebar's own filter: a label with room
     // for one word needs somewhere to say which is which.
     for (const entry of MERGE_REQUEST_PAGES) {
@@ -43,6 +47,8 @@ describe("the pages of a merge request", () => {
     // PIPELINES is built: it draws the head pipeline as the graph of its jobs (see
     // `gitlab-pipeline-page.tsx`), so it says nothing about being missing.
     expect(unbuiltMergeRequestPage("pipelines")).toBeNull();
+    // And so is the READING, which draws the branch written up (see `gitlab-review-page.tsx`).
+    expect(unbuiltMergeRequestPage("review")).toBeNull();
     expect(unbuiltMergeRequestPage("commits")).toMatch(/not read here yet/);
   });
 
@@ -52,6 +58,19 @@ describe("the pages of a merge request", () => {
     expect(gitlabPageUrl(WEB_URL, "pipelines")).toBe(`${WEB_URL}/pipelines`);
     // GitLab calls the changes `/diffs`, whatever this app calls its own route.
     expect(gitlabPageUrl(WEB_URL, "diffs")).toBe(`${WEB_URL}/diffs`);
+  });
+
+  it("has no GitLab address for a page GitLab does not have", () => {
+    // The READING is this app's own, so there is nothing over there to link to — and
+    // `gitlabPageUrl` is what every failure on these pages offers as the one thing left, so an
+    // answer here would be a link to a page that does not exist, labelled with a feature GitLab
+    // does not have. The reading's own failure offers GitLab's CHANGES instead.
+    expect(gitlabPageUrl(WEB_URL, "review")).toBeNull();
+    expect(mergeRequestPageEntry("review").gitlabPath).toBeUndefined();
+    // Every other page still answers, so the absence is this one page's and not a broken helper.
+    for (const page of ALL_PAGES.filter((entry) => entry !== "review")) {
+      expect(gitlabPageUrl(WEB_URL, page)).not.toBeNull();
+    }
   });
 
   it("takes a trailing slash off rather than doubling it", () => {
@@ -72,25 +91,26 @@ describe("the pages of a merge request", () => {
   });
 
   it("answers for every page of the closed set", () => {
-    const pages: MergeRequestPage[] = ["overview", "commits", "pipelines", "diffs"];
-    for (const page of pages) {
+    for (const page of ALL_PAGES) {
       expect(mergeRequestPageEntry(page).page).toBe(page);
     }
+    // And the list holds nothing the type does not: a page in one and not the other is what
+    // `mergeRequestPageEntry`'s fallback exists to survive, and it must never really happen.
+    expect(MERGE_REQUEST_PAGES.length).toBe(ALL_PAGES.length);
   });
 
   it("pairs every tab with the panel it really controls", () => {
     // The strip is the app's own `Tabs` primitive, so each trigger points `aria-controls` at a
     // panel id — and that id has to be the one the page's content carries, or the promise is a
     // dangling reference. The two halves are spelled here so they cannot drift.
-    const pages: MergeRequestPage[] = ["overview", "commits", "pipelines", "diffs"];
     const ids = new Set<string>();
-    for (const page of pages) {
+    for (const page of ALL_PAGES) {
       const panel = mergeRequestPagePanel(page);
       expect(panel.role).toBe("tabpanel");
       expect(panel["aria-labelledby"]).toBe(mergeRequestPageTabId(page));
       ids.add(panel.id);
     }
     // One id per page: two pages sharing one would point two tabs at one panel.
-    expect(ids.size).toBe(pages.length);
+    expect(ids.size).toBe(ALL_PAGES.length);
   });
 });

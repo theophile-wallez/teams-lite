@@ -25,7 +25,6 @@ import {
   type DiffLayout,
 } from "~/lib/gitlab-diff";
 import { symbolOccurrences, symbolSelection } from "~/lib/gitlab-diff-symbols";
-import { reviewCanBeAsked, type DiffView } from "~/lib/gitlab-review";
 import {
   diffCommentAnchor,
   diffCommentableFiles,
@@ -38,7 +37,6 @@ import { ColumnSplitter } from "./column-splitter";
 import { useAppState, useController } from "./controller-context";
 import { DiffLineComposer, DiffLineThread } from "./gitlab-diff-comments";
 import { DiffSymbolsPanel } from "./gitlab-diff-symbols";
-import { DiffReviewView } from "./gitlab-review-view";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
 import { FadeArc } from "./loading-ui/fade-arc";
@@ -128,11 +126,6 @@ function useDiffState() {
     /** The name the reader pressed in the code, and how wide they have dragged the two side
      *  columns. */
     symbol: useAppState((s) => s.gitlabDiffSymbol),
-    /** The AI reading of this diff, and which view of the diff the reader is in. */
-    review: useAppState((s) => s.gitlabReview),
-    reviewBusy: useAppState((s) => s.gitlabReviewBusy),
-    reviewError: useAppState((s) => s.gitlabReviewError),
-    view: useAppState((s) => s.gitlabDiffView),
     filesWidth: useAppState((s) => s.gitlabDiffFilesWidth),
     symbolsWidth: useAppState((s) => s.gitlabDiffSymbolsWidth),
   };
@@ -153,10 +146,6 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
     symbol,
     filesWidth,
     symbolsWidth,
-    review,
-    reviewBusy,
-    reviewError,
-    view,
   } = useDiffState();
   const controller = useController();
 
@@ -278,17 +267,13 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
             <span data-testid="gitlab-diff-summary">{diff ? diffSummary(diff) : "Reading the changes…"}</span>
           </p>
         </div>
-        {/* Which VIEW of the diff: the feed of files, or the AI reading's own themes. It is a
-            control rather than a route because the two are one read drawn two ways — the shape the
-            Pipelines page already has for its graph and its job list. Drawn only where there is a
-            diff to read either way. */}
-        {reviewCanBeAsked(diff) && (
-          <ViewToggle view={view} onPick={(next) => controller.setGitLabDiffView(next)} />
-        )}
         {/* The layout toggle, where it applies. Split needs two columns of code — on a phone it
-            cannot, so it is not drawn at all rather than drawn dead. And it says nothing about the
-            THEMES view, which draws no code: a control that changes nothing reads as a bug. */}
-        {view === "files" && width >= SPLIT_MIN_WIDTH && diff && diff.files.length > 0 && (
+            cannot, so it is not drawn at all rather than drawn dead.
+            The reading used to sit beside it as a second state of this page ("Files | Themes").
+            It is a page of its own now, one press away on the strip below — see
+            `gitlab-review-page.tsx` for why a document with its own prose and its own code stopped
+            being a second view of this read. */}
+        {width >= SPLIT_MIN_WIDTH && diff && diff.files.length > 0 && (
           <LayoutToggle layout={layout} onPick={(next) => controller.setGitLabDiffLayout(next)} />
         )}
         {detail?.web_url && (
@@ -328,24 +313,6 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
           >
             This merge request changes no files.
           </p>
-        ) : view === "themes" ? (
-          // THE READING. It replaces both columns rather than joining them: it is a map of the
-          // whole branch, so a file tree beside it would be a second answer to "what is in this
-          // diff" — and a press on one of its files switches back to the feed, which is where code
-          // is read.
-          <DiffReviewView
-            review={review}
-            diff={diff}
-            headSha={detail?.diff_refs?.head_sha ?? null}
-            busy={reviewBusy}
-            error={reviewError}
-            onRun={() => void controller.runGitLabReview()}
-            onOpenFile={(picked) => {
-              controller.setGitLabDiffView("files");
-              showFile(picked);
-              setColumn("patch");
-            }}
-          />
         ) : (
           <div
             ref={columnHost}
@@ -612,46 +579,6 @@ function DiffLoading(props: { label: string }) {
         <FadeArc className="size-3.5" />
         {props.label}
       </span>
-    </div>
-  );
-}
-
-/** The FILES or the THEMES. Two states of one control, in the same shape the layout toggle beside
- *  it takes — so the header reads as one row of switches rather than as a row of shapes.
- *
- *  It carries WORDS rather than two glyphs: "a feed of files" and "an AI reading grouped by theme"
- *  are not two things a 14px mark can tell apart, and this is the one control on this page whose two
- *  states are different KINDS of answer rather than two arrangements of one. */
-function ViewToggle(props: { view: DiffView; onPick: (view: DiffView) => void }) {
-  return (
-    <div
-      data-testid="gitlab-diff-view"
-      data-view={props.view}
-      className="flex shrink-0 items-center gap-0.5 rounded-lg bg-element p-0.5"
-    >
-      {(
-        [
-          ["files", "Files", "Every changed file, one after another"],
-          ["themes", "Themes", "The changes grouped by what the branch does"],
-        ] as const
-      ).map(([option, label, hint]) => (
-        <button
-          key={option}
-          type="button"
-          data-testid={`gitlab-diff-view-${option}`}
-          aria-pressed={props.view === option}
-          title={hint}
-          onClick={() => props.onPick(option)}
-          className={cn(
-            "rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors",
-            props.view === option
-              ? "bg-card text-foreground shadow-chip"
-              : "text-text-faint hover:text-text-dim",
-          )}
-        >
-          {label}
-        </button>
-      ))}
     </div>
   );
 }

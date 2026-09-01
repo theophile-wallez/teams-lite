@@ -5343,30 +5343,42 @@ function mockReviewFor(mr: MockMergeRequest): MockReview {
   const half = Math.max(Math.ceil(grouped.length / 2), 1);
   return {
     head_sha: mr.sha,
+    // MARKDOWN, deliberately, in the headline, in both summaries and in the note. A model writes
+    // backticked identifiers and lists because that is how an engineer writes, and the page renders
+    // them through this app's own GFM parser — so a fixture of flat prose would let a page that
+    // printed the backticks literally pass every test. It is the rule the mock already holds for a
+    // merge request's own description.
     headline:
       "The user-facing pods can now be drained without dropping requests: the chart asks for a " +
-      "disruption budget and the health endpoint answers 503 while a replica finishes its work.",
+      "**PodDisruptionBudget** and `health()` answers `503` while a replica finishes its work.",
     themes: [
       {
         title: "A replica is drained before it goes",
         summary:
-          "The health endpoint gains a draining state and answers 503 for it, so the load " +
-          "balancer stops sending new connections before the pod is taken away. Look closely at " +
-          "the order of the two checks: draining has to win over ready, or a draining replica " +
-          "still reports itself healthy.",
+          "`health()` gains a draining state and answers `503` for it, so the load balancer stops " +
+          "sending new connections before the pod is taken away.\n\n" +
+          "Two things to look at closely:\n\n" +
+          "- the ORDER of the checks — `draining` has to win over `ready`, or a draining replica " +
+          "still reports itself healthy;\n" +
+          "- `READY_PATH` moved from `/ready` to `/readyz`, so anything probing the old path gets " +
+          "a 404 rather than a health answer.",
         files: grouped.slice(0, half).map((path, index) => ({
           path,
           ...(index === 0
-            ? { note: "The two 503s are deliberate and mean different things — worth a comment." }
+            ? {
+                note:
+                  "The two `503`s are deliberate and mean different things — the first is *draining*, " +
+                  "the second is *not ready yet*. Worth a comment in the code.",
+              }
             : {}),
         })),
       },
       {
         title: "The chart asks Kubernetes for the room to do it",
         summary:
-          "A PodDisruptionBudget and a longer termination grace period, so a node drain takes one " +
-          "replica at a time and waits for it. The budget is read from the same values the " +
-          "template renders, so the two move together.",
+          "A `PodDisruptionBudget` and a longer `terminationGracePeriodSeconds`, so a node drain " +
+          "takes one replica at a time and waits for it. The budget is read from the same values " +
+          "the template renders, so the two move together.",
         files: grouped.slice(half).map((path) => ({ path })),
       },
     ].filter((theme) => theme.files.length > 0),
@@ -5735,6 +5747,54 @@ type MockDiffFile = {
  *
  *  Deliberately several languages: the renderer resolves a Shiki grammar per extension, so a
  *  fixture of one language would never exercise a second load. */
+/** How many lines the fixture's one LONG patch adds.
+ *
+ *  Deliberately clear of `REVIEW_PATCH_OPEN_LINES` (80) rather than one over it: the reading's page
+ *  counts the git header this app's backend writes as part of the patch, so a fixture sitting on the
+ *  boundary would flip the fold if either number moved by a line. */
+const MOCK_LONG_PATCH_LINES = 96;
+
+/** A whole-file patch of `lines` added lines, in the shape the backend really writes one.
+ *
+ *  Built rather than typed out: ninety-six lines of literal fixture would bury the seven files
+ *  around it, and every line here is deterministic — no clock, no random — so a capture of it is the
+ *  same picture every run. The content is a plausible test file, because a reader looking at this
+ *  page is meant to be reading code. */
+function mockLongPatch(path: string, lines: number): string {
+  const body: string[] = [
+    '+import { afterEach, describe, expect, it, vi } from "vitest";',
+    '+import { drain, DRAIN_GRACE_MS } from "./drain";',
+    "+",
+  ];
+  let n = 0;
+  while (body.length < lines) {
+    n += 1;
+    body.push(
+      `+describe("drain — case ${n}", () => {`,
+      "+  afterEach(() => vi.useRealTimers());",
+      "+",
+      `+  it("answers 503 while it still holds connections (${n})", async () => {`,
+      `+    const server = { ready: true, draining: false, open: ${n} };`,
+      "+    const done = drain(server);",
+      "+    expect(server.draining).toBe(true);",
+      "+    await done;",
+      "+    expect(server.open).toBe(0);",
+      "+  });",
+      "+});",
+      "+",
+    );
+  }
+  const kept = body.slice(0, lines);
+  return (
+    `diff --git a/${path} b/${path}\n` +
+    "new file mode 100644\n" +
+    `--- /dev/null\n+++ b/${path}\n` +
+    `@@ -0,0 +1,${lines} @@\n` +
+    kept.join("\n") +
+    "\n"
+  );
+}
+
 const mockDiffFiles = new Map<string, MockDiffFile[]>([
   [
     "acme/webapp!596",
@@ -5869,6 +5929,21 @@ const mockDiffFiles = new Map<string, MockDiffFile[]>([
           '-      "version": "5.6.3",\n' +
           '+      "version": "5.7.2",\n' +
           '     },\n',
+      },
+      // A LONG patch, which is what makes the reading's own fold reachable at all: a new test file
+      // of `MOCK_LONG_PATCH_LINES` added lines, well past `REVIEW_PATCH_OPEN_LINES`, so the review
+      // page really opens with this one folded and the count in its label is a real number. A
+      // fixture where every patch is short could not show that state, and a state no capture can
+      // draw and no spec can find is one that ships broken.
+      //
+      // It is a NEW file rather than a lengthened existing one: the four the diff specs drive by
+      // name (the two YAMLs, `health.ts` for its tokens, the rename) keep every byte they had.
+      {
+        path: "src/server/drain.test.ts",
+        change: "new",
+        additions: MOCK_LONG_PATCH_LINES,
+        deletions: 0,
+        patch: mockLongPatch("src/server/drain.test.ts", MOCK_LONG_PATCH_LINES),
       },
       {
         path: "docs/runbooks/old-drain.md",

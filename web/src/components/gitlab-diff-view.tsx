@@ -7,7 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
+import { CodeView, FileDiff, type CodeViewHandle } from "@pierre/diffs/react";
 import {
   processFile,
   type ChangeTypes,
@@ -640,6 +640,73 @@ function GutterCommentButton(props: {
       <HugeiconsIcon icon={PlusSignIcon} className="size-3" strokeWidth={2.4} />
     </button>
   );
+}
+
+/** No file header, hoisted so the callback is stable across renders — a new closure per render is
+ *  handed to the instance and rebuilds it, which is the rule every callback at this seam follows. */
+const noHeader = () => null;
+
+/**
+ * ONE file's patch, drawn IN FLOW at whatever height it needs — the code inside the reading's
+ * document (see `gitlab-review-page.tsx`).
+ *
+ * It is `FileDiff` rather than `CodeView`, and the two are not interchangeable. `CodeView` is a
+ * feed: it OWNS a scroller and virtualizes what is in it, which is exactly right for 149 files
+ * read one after another and exactly wrong inside a scrolling document — a self-scrolling box in a
+ * scrolling page is two scrollers competing for one wheel. `FileDiff` renders one file and takes
+ * the height that file needs, which is what a paragraph of prose can sit above.
+ *
+ * **The metadata comes from the same `diffFeedMetadata` the feed uses**, so a file with no patch
+ * draws the same shape here as there and its header note says why there is nothing under it.
+ * Nothing about a patch is spelled twice.
+ *
+ * Three things it deliberately does NOT do, and each is a decision rather than an omission:
+ *
+ *   - **No comment gesture, and no press on a name.** Both are the Diffs page's, which is one
+ *     press away on the strip: this surface is a read-through, and a document that collected
+ *     comments in the margin would be a second place a review conversation lives.
+ *   - **Always UNIFIED.** A split patch needs two columns of code, and here the code is already
+ *     inside a column of prose set at a readable measure — so split would be two columns of eight
+ *     characters, which is the reason `effectiveDiffLayout` refuses it on a phone.
+ *   - **No sticky header.** The document's own theme heading is what sticks (its whole point is
+ *     saying which theme the reader is inside), and two sticky bands stacking would leave the code
+ *     reading out from under both.
+ *   - **NO FILE HEADER AT ALL, which is the opposite of the feed's own rule and for that rule's own
+ *     reason.** In the feed pierre's header is kept and this app draws none, because theirs is
+ *     sticky inside the scroller and is what says whose code is under the reader's eye. Here the
+ *     page has to draw one anyway: it carries the FOLD, and a folded patch mounts no renderer at all
+ *     — so a control living in their header would vanish exactly when it is needed. Keeping both
+ *     stated the path and the stat TWICE, three centimetres apart, which is the defect the first
+ *     capture of the feed showed and this one showed again. `renderCustomHeader` is the published
+ *     slot for replacing theirs, and returning nothing from it is what leaves the page's own row as
+ *     the single name.
+ */
+export function DiffFilePatch(props: {
+  file: GitLabDiffFile;
+  theme: ResolvedTheme;
+}) {
+  const fileDiff = useMemo(() => diffFeedMetadata(props.file), [props.file]);
+  const options = useMemo(
+    () => ({
+      diffStyle: "unified" as const,
+      theme: DIFF_THEMES,
+      // The app's own appearance, never the OS's — the mistake the module header states.
+      themeType: props.theme,
+      diffIndicators: "bars" as const,
+      lineDiffType: "word" as const,
+      hunkSeparators: "line-info" as const,
+      expandUnchanged: true,
+      overflow: "scroll" as const,
+      // The two gestures the feed arms are off here. See the note above.
+      enableLineSelection: false,
+      enableGutterUtility: false,
+      stickyHeaders: false,
+    }),
+    [props.theme],
+  );
+  // No test id here: `FileDiff` destructures the props it knows and drops the rest, so one passed
+  // in would be silently absent from the DOM. The page names the box it puts this in.
+  return <FileDiff fileDiff={fileDiff} options={options} renderCustomHeader={noHeader} />;
 }
 
 /** The changed files as a tree, tinted by what happened to each.

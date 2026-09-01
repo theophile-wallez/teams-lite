@@ -172,7 +172,7 @@ import {
   type PierreSide,
 } from "./gitlab-diff-comment";
 import { symbolIsSearchable, type DiffSymbolTarget } from "./gitlab-diff-symbols";
-import type { DiffView, GitLabReview } from "./gitlab-review";
+import type { GitLabReview } from "./gitlab-review";
 import { jobLogIsLive } from "./gitlab-job-log";
 import {
   isNotMerged,
@@ -887,8 +887,6 @@ export type AppState = {
   /** Why a reading did not happen, in the CLI's or the backend's own words, reported where the press
    *  was made — the contract every outward-ish action in this app holds. */
   gitlabReviewError: string | null;
-  /** Which view of the diff the reader is in: the feed of files, or the reading's themes. */
-  gitlabDiffView: DiffView;
   /** How wide the two side columns of the diff page are, in pixels — the reader's own drag,
    *  persisted per browser beside the layout above and for its reason: a per-screen decision with
    *  no upstream to write it to.
@@ -1224,7 +1222,6 @@ function initialState(): AppState {
     gitlabReview: null,
     gitlabReviewBusy: false,
     gitlabReviewError: null,
-    gitlabDiffView: "files",
     gitlabDiffFilesWidth: FILES_COLUMN_DEFAULT_WIDTH,
     gitlabDiffSymbolsWidth: SYMBOLS_PANEL_DEFAULT_WIDTH,
     gitlabDiffSelection: null,
@@ -4029,7 +4026,6 @@ export class TeamsController {
       gitlabReview: null,
       gitlabReviewBusy: false,
       gitlabReviewError: null,
-      gitlabDiffView: "files",
       // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
       // piece of this page that would be read as current when it is minutes old.
       gitlabPipeline: null,
@@ -4394,16 +4390,6 @@ export class TeamsController {
 
   // ---- the AI reading of the diff -------------------------------------------
 
-  /** Which view of the diff the reader is in: the FEED of files, or the reading's own themes.
-   *
-   *  Deliberately NOT persisted, unlike the unified/split layout beside it. A reading belongs to one
-   *  merge request, so opening the next one on a themes view would open it on a view with nothing in
-   *  it — and the control to get back is in the header of a page whose main column would be empty. */
-  setGitLabDiffView(view: DiffView): void {
-    if (this.get().gitlabDiffView === view) return;
-    this.set({ gitlabDiffView: view });
-  }
-
   /** Read the reading this machine has already made for the open merge request, if any.
    *
    *  It is a `get_setting` on the backend — no network, no agent — so it rides the page's own load
@@ -4438,7 +4424,7 @@ export class TeamsController {
         // The reading is shown the moment it lands, and the view switches to it: the reader pressed
         // a control that says "read this diff", so being left on the file feed would be a press
         // whose answer is somewhere they have to go and find.
-        this.set({ gitlabReview: review, gitlabDiffView: "themes" });
+        this.set({ gitlabReview: review });
       }
     } catch (e) {
       if (sameMergeRequest(this.get().openMergeRequest, key)) {
@@ -4723,7 +4709,6 @@ export class TeamsController {
       gitlabReview: null,
       gitlabReviewBusy: false,
       gitlabReviewError: null,
-      gitlabDiffView: "files",
       // A comment being written belongs to one line of one file, so opening another merge
       // request — or leaving this one — takes it away rather than carrying it over to a line
       // that means something else there.

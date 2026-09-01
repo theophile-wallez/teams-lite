@@ -1904,8 +1904,8 @@ real GitLab project**: doing that is the user's own click, in their own app.
 The sidebar's fifth tab is GitLab: the merge requests that are **not merged**, and one of
 them in full — its description, its live pipeline, its approvals, its comments — with the actions
 GitLab's own page offers, and its **diff** on a full-screen page of its own (§ The DIFF is a PAGE).
-One merge request is FOUR pages, named by a sub-header (§ The four PAGES of a merge request), and
-one JOB of its pipeline is a fifth surface under them (§ A job's LOG is a page of its own).
+One merge request is FIVE pages, named by a sub-header (§ The PAGES of a merge request), and
+one JOB of its pipeline is a surface UNDER them (§ A job's LOG is a page of its own).
 `src/gitlab_mr.rs` holds every READ, `src/gitlab_mr_write.rs` the six writes,
 `web/src/lib/gitlab-mr.ts` the pure decisions the surface is built from (`gitlab-diff.ts` the
 diff's own, `gitlab-mr-pages.ts` the page set's, `gitlab-pipeline-graph.ts` the pipeline graph's,
@@ -2299,13 +2299,15 @@ asks for that picture over the socket.
   nothing. Its interval (6 s) sits ABOVE the backend's 5 s window on purpose: below it, every
   poll would be served the same cached answer and the panel would look frozen.
 
-### The four PAGES of a merge request (a sub-header, and one that holds nothing yet)
+### The PAGES of a merge request (a sub-header, and one that holds nothing yet)
 
-One merge request is four surfaces, exactly as GitLab's own is: **Overview**, **Commits**,
-**Pipelines**, **Diffs** — named by a sub-header under the header that says WHICH merge
-request. `web/src/lib/gitlab-mr-pages.ts` holds the set and every pure fact about it,
+One merge request is FIVE surfaces. Four are GitLab's own, in GitLab's own order: **Overview**,
+**Commits**, **Pipelines**, **Diffs** — named by a sub-header under the header that says WHICH merge
+request. The fifth is this app's: **Themes**, the AI reading drawn as a document
+(§ AN AI READING OF THE DIFF), APPENDED so none of the four a reader has learned moves.
+`web/src/lib/gitlab-mr-pages.ts` holds the set and every pure fact about it,
 `web/src/components/gitlab-mr-pages.tsx` draws the strip and the page that holds nothing, and
-the four routes are the files under `web/src/routes/_app.mr.$mergeRequestId*`. **Pipelines is
+the routes are the files under `web/src/routes/_app.mr.$mergeRequestId*`. **Pipelines is
 the pipeline GRAPH** (§ The pipeline is a GRAPH); COMMITS is deliberately empty today, which is
 the shape this strip was built for — the strip and the routes came first, so the reads are added
 one page at a time without moving anything the reader has learned. Six rules hold it, and
@@ -2314,16 +2316,17 @@ one page at a time without moving anything the reader has learned. Six rules hol
 - **Every page is a ROUTE, never a piece of state.** Three things follow and none is available
   to a `useState`: a page survives a reload, it can be sent to a colleague, and the browser's
   own Back leaves it. That is the rule the diff already earned its own route with, applied to
-  all four — so `/mr/<id>` IS the Overview, and the other three hang off it.
-- **The strip is on ALL FOUR, the full-screen diff included** — and on a JOB's log, which hangs
+  all five — so `/mr/<id>` IS the Overview, and the others hang off it. The READING was the one
+  exception and stopped being one; § AN AI READING OF THE DIFF records why.
+- **The strip is on EVERY page, the two full-screen ones included** — and on a JOB's log, which hangs
   under Pipelines and keeps it current (§ A job's LOG is a page). A sub-header that named the
   pages of a merge request and then vanished on one of them would leave the reader with a Back
   button where they wanted a Commits tab. It is one component drawn everywhere, so there is one
-  spelling of the four routes.
+  spelling of the routes.
 - **It is drawn as soon as a merge request is OPEN, before its detail arrives.** The URL
   already says which merge request the pages belong to, and a strip that waited on a read
   would trap the reader on the page they are waiting on.
-- **All four are offered whatever a read answered.** A tab is where the reader goes rather
+- **All of them are offered whatever a read answered.** A tab is where the reader goes rather
   than an invitation into content, so a strip whose shape changed per merge request would move
   the target between two of them — and what a page could not read, that page says (the diff's
   own failure already does). The `ChangesPanel`'s "Review the changes" keeps the opposite rule,
@@ -2332,7 +2335,9 @@ one page at a time without moving anything the reader has learned. Six rules hol
   (`unbuiltMergeRequestPage`, `gitlabPageUrl` — built from the merge request's own `web_url`,
   never from the configured host and an assembled path). Drawn blank it would read as a read
   that failed. Only COMMITS says it today, and the sentence names the page rather than the app:
-  a reader is told what is missing, not that something went wrong.
+  a reader is told what is missing, not that something went wrong. **A page GitLab does not have at
+  all answers NO URL** rather than an assembled one (`gitlabPath`, absent on the READING) — a link
+  labelled "Open the themes in GitLab" would name a feature GitLab has not got.
 - **It IS the app's own `Tabs` primitive, and the tabs stand in the sub-header rather than in
   a CARD** (`TabsList surface={false}`). A card floating inside a header row is two nested
   surfaces for one thing, and the row already has its own bottom border. It is a PROP of the
@@ -2348,8 +2353,8 @@ one page at a time without moving anything the reader has learned. Six rules hol
 - **`aria-controls` is kept TRUE, which is what using the primitive costs.** Every trigger
   names a panel, so the CONTENT of each page carries that id (`mergeRequestPagePanel`, over
   the constant base id both halves share) — the Overview's scroller, the Pipelines graph, the
-  page that holds nothing, and whatever the diff page can draw. It resolves inside one
-  document on all four, because
+  page that holds nothing, the reading's own document, and whatever the diff page can draw. It
+  resolves inside one document on all five, because
   each page draws its own strip beside its own content, and a unit test pins the two spellings
   together. A dangling `aria-controls` is what a `nav` of buttons was chosen to avoid before
   the primitive was; wiring the panel is the better answer.
@@ -2677,22 +2682,100 @@ into `unsafeCSS` and re-injected on every press, and it would silently no-op whe
 boundaries do not coincide with the identifier. A cosmetic win with an invisible failure mode is not
 worth three undocumented attributes. The PANEL is where a name is marked exactly.
 
-### AN AI READING OF THE DIFF (the changes grouped by theme, with the thought process around them)
+### AN AI READING OF THE DIFF — the fifth PAGE (`/mr/<id>/review`), the branch written up
 
 A branch's diff arrives as a flat list of files in whatever order GitLab holds them, and that order
 says nothing about what the branch DOES: a chart value, the template that reads it, a handler that
-changed shape and a lockfile sit in one column with no relation stated. The **Themes** view asks the
-local agent to state the relation — a few themes, each naming some of the files and carrying the
-prose that says why they belong together and what to look at closely. `src/gitlab_review.rs` is the
-prompt, the parse and every bound; `web/src/lib/gitlab-review.ts` holds the pure decisions the view
-is built from and `web/src/components/gitlab-review-view.tsx` draws it.
+changed shape and a lockfile sit in one column with no relation stated. The **Themes** page asks the
+local agent to state the relation, and then draws the answer as a DOCUMENT — a sentence about the
+whole branch, a section per theme whose heading STICKS while its part is read, the reading's own
+prose as real markdown, and under that the real patches of the files it is about. A reviewer who has
+not opened the branch reads it top to bottom and knows what it does. `src/gitlab_review.rs` is the
+prompt, the parse and every bound; `web/src/lib/gitlab-review.ts` holds the pure decisions the page
+is built from and `web/src/components/gitlab-review-page.tsx` draws it.
 
-**IT IS A SECOND VIEW OF ONE READ, not a second surface.** The diff page draws the files as a FEED or
-as these THEMES from the same `gitlabDiff` — which is the shape the Pipelines page already has ("JOBS
-are a second view of one read, not a second surface"). So it is a control in the page's own header
-rather than a route: there is one diff, read two ways, and a second URL for one read would be a
-second thing to keep in step. The unified/split toggle is not drawn on it, because the themes view
-draws no code and a control that changes nothing reads as a bug.
+**IT IS A PAGE, AND THAT REVERSES WHAT SHIPPED FIRST — the reversal is recorded rather than tidied
+away, because the first argument was right when it was made.** The reading was a second VIEW of the
+diff: a control in that page's header, on the shape the Pipelines page has for its graph beside its
+job list ("JOBS are a second view of one read, not a second surface"). That held while the reading
+was a MAP — headings over the same file names the tree was already showing, with a press that took
+the reader to the feed. It stops holding the moment the reading has its OWN prose, its OWN code (the
+real patches, in flow, under the paragraph that explains them) and its own conversation: that is
+different content read a different way, which is what a second surface IS. So it is a route, and the
+three things a URL gives are the point — it survives a reload, it can be sent to whoever is being
+asked to review, and the browser's own Back leaves it.
+
+What it costs is one more tab in a strip of four, and the strip **APPENDS** rather than inserting so
+no tab a reader has learned moves (`MERGE_REQUEST_PAGES`). It is labelled **Themes** rather than
+"Review": the Overview page carries a real **Approve** and a real **Merge**, so a tab called Review
+beside them would promise the approval flow — and Themes is the name this feature already has in the
+store, in the mock, in every test id and in this file, so there is one word for one thing.
+
+**GITLAB HAS NO PAGE FOR IT, and `gitlabPath` is therefore ABSENT rather than empty.** That
+distinction is load-bearing: `gitlabPageUrl` is what every failure on these five pages offers as the
+one thing left, so a path here would produce a link to a page that does not exist, labelled with a
+feature GitLab does not have. A page with no path answers no URL, and the reading's own failure —
+which is really the DIFF read failing, since the reading is built on it — offers GitLab's own
+**changes** instead.
+
+Twelve rules hold the document, and each is pinned by `web/e2e/gitlab.spec.ts` or
+`web/src/lib/gitlab-review.test.ts`:
+
+- **The DOCUMENT scrolls and the page does not.** The header and the strip stay; one scroller under
+  them, which is what makes a sticky heading mean anything at all.
+- **A theme's heading STICKS**, opaque rather than translucent — code sliding under a wash reads as a
+  rendering fault. It is the one thing on screen that says which part of the branch the code under
+  the reader's eye belongs to, which is the job pierre's own sticky file header does in the feed, one
+  level up. The spec measures it at BOTH ends — below the scroller's top edge before the scroll, and
+  pinned to it after — because the second assertion alone passes on a heading that merely happened to
+  be there.
+- **The PROSE is real markdown**, through this app's own GFM parser (`parseGitLabMarkdown`) and its
+  own renderer — never a model's HTML. A model writes backticked identifiers and bulleted lists
+  because that is how an engineer writes, and the first version printed them literally with
+  `whitespace-pre-line`. **The mock's own fixture carries markdown for that reason**: flat prose
+  there would let a page that printed the backticks pass every test.
+- **Two MEASURES, one column.** The document is as wide as the CODE needs (`max-w-5xl`) and the words
+  are held narrower inside it (`max-w-prose`): a paragraph is unreadable past about 65 characters and
+  a unified patch is unreadable under about 90.
+- **THE CODE IS THE DIFF'S, NEVER THE MODEL'S.** A model asked to quote a change would paraphrase it,
+  and a paraphrased patch is invented code presented as somebody's branch — so the page renders the
+  patch the read already holds and the model only ever NAMES files, which is the rule `from_answer`
+  holds for a path applied to the code itself.
+- **ONE header per file, and it is this page's rather than the renderer's.** `DiffFilePatch` passes
+  `renderCustomHeader` and returns nothing from it, so pierre draws none. The page has to draw one
+  anyway — it carries the FOLD, and a folded patch mounts no renderer at all, so a control living in
+  their header would vanish exactly when it is needed. Keeping both stated the path and the stat
+  TWICE, three centimetres apart, which is the defect the first capture of the FEED showed and which
+  the first capture of this page showed again. Folded, the box IS that bar, which is the shape a
+  collapsed file takes everywhere.
+- **TWO PATCH BUDGETS, both spent in `reviewGroups`** — the one walk that goes through the document in
+  the order a reader meets it, because "how many patches has this page already opened" is a fact about
+  the document rather than about any one file. A patch over `REVIEW_PATCH_OPEN_LINES` (80) opens
+  folded, and so does everything past `REVIEW_PATCHES_SHOWN` (12) however short it is. **The second is
+  a correctness rule rather than a taste: nothing here virtualizes** — every shown patch is a mounted
+  `FileDiff` with a shadow root and a highlighter of its own, all on one first paint — and a reading
+  of a 149-file branch can name forty small files. A long patch does not spend the ceiling, since it
+  was never going to be mounted, so a document of long files still opens twelve of its short ones.
+- **What FOLDED is counted at the top** (`reviewFoldedPatches`), once. A document that quietly
+  stopped showing code past its twelfth patch reads as a reading that ran out of things to say, and
+  the reader would not know there was a press to make.
+- **THREE patch states, not a boolean** (`data-patch="shown" | "folded" | "none"`). "There is no code"
+  and "the code is folded" are different things a reader acts differently on, and a two-valued
+  attribute conflated them — the first capture of the fold cropped to a BINARY file, which has no
+  diff to unfold and is offered no control at all. A file with no patch says WHY instead
+  (`diffFileNotice`, the feed's own words).
+- **The reader's press wins from then on**, per file, in both directions.
+- **A press on a file NAME opens it in the FEED, at that file.** The reading explains; the feed is
+  built for reading a patch at length (it virtualizes, this does not). The controller is told the file
+  BEFORE the navigation, because the diff page reads where to open from that state (`openAt`) — so
+  navigating without it lands the reader at the top of the branch instead.
+- **Nothing is hidden.** Every changed file is in exactly one section, and the files no theme claimed
+  are a section of their own at the END rather than a footnote.
+
+**The unified/split toggle is not drawn on this page, and the patches are ALWAYS unified.** Split
+needs two columns of code, and here the code sits inside a column of prose set at a readable measure —
+so split would be two columns of eight characters, which is the reason `effectiveDiffLayout` refuses
+it on a phone. The toggle stays on the Diffs page, where it changes something.
 
 **THE PROGRAM IS THE ONE `agent.rs` ALREADY RUNS**, and neither module adds a way to reach a model.
 The CLI, the provider, the model and every permission decision stay § The local agent's: the user's
@@ -2774,9 +2857,28 @@ page really holds — a fixture naming a file the diff does not have would let a
 pass every test — and deliberately leaves the LAST file ungrouped, because a fixture where everything
 is grouped could not show the one state the view must never hide). Its `{kind:"gitlab_mr"}` hook gains
 `refuse_review` and `review: "stored" | "stale"`, and **a spec MUST clear it**: one mock process serves
-the whole run, and a stored reading outlives the page. `cd web && bun run preview -- --out /tmp/rev
---diff-review` captures the offer and its cost in both themes, the reading in both themes, the
-leftovers cropped, a stale reading, a refused run and a phone's width.
+the whole run, and a stored reading outlives the page.
+
+**THE DIFF FIXTURE GAINED ONE LONG PATCH, and that is what makes the fold reachable at all.** Its
+seven files were all short, so the document opened with every patch shown and no capture and no spec
+could see the state the budgets exist for — the shape § A COMPANION states as "a shape no capture can
+draw and no spec can find is one that ships broken". `src/server/drain.test.ts` is a NEW file of
+`MOCK_LONG_PATCH_LINES` (96) added lines, built by `mockLongPatch` rather than typed out (ninety-six
+literal lines would bury the seven files around it) and deterministic — no clock, no random — so a
+capture of it is the same picture every run. It is a NEW file rather than a lengthened existing one:
+the four the diff specs drive by name keep every byte they had (the two YAMLs, `health.ts` for its
+tokens, the rename). What moved with it is the two numbers the Overview's own summary states, `8
+files` and `+123`.
+
+`cd web && bun run preview -- --out /tmp/rev --diff-review` captures the offer and its cost in both
+themes, the document in both themes, ONE FILE's box cropped to itself in both themes, the heading
+STICKING while the code scrolls under it, the long diff folded with the count in its label, the
+leftovers cropped, a stale reading, a refused run and a phone's width. Two of those crops were got
+wrong first and are worth knowing about: a crop of a whole SECTION comes back mostly blank, because a
+section is taller than the viewport and it sits inside this page's own scroller — the file box is what
+can be read; and every crop of the code waits for as many `diffs-container` elements as there are
+shown patches, not for the first one, since Shiki resolves a grammar per language and the later files
+were still empty boxes with a screenful of reserved room under them.
 
 **THE MOCK DOES NOT ENFORCE THE WRITE TOKEN, AND THAT BLIND SPOT SHIPPED A REFUSED BUTTON.**
 `ws-client.ts` has two call paths — `request`, and `writeRequest`, which attaches the token this
@@ -2872,7 +2974,7 @@ added by either.
 
 A pipeline is drawn the way GitLab's own page draws it: columns of job cards with a curve from
 each job to the ones that wait for it. The Overview holds a compact one — a LOOK at the run,
-with the press that opens the page — and **the Pipelines page** (§ The four PAGES) holds the one
+with the press that opens the page — and **the Pipelines page** (§ The PAGES) holds the one
 a reader works in, drawn in the pane under the header that names the merge request and the
 sub-header that names its pages. So the page draws no header of its own: a third row saying
 either would be this app stating one thing twice.
@@ -3523,12 +3625,14 @@ user. Two independent mechanisms enforce that split:
   dragged in both themes, and a phone's width where the panel is not drawn:
   `bun run preview -- --out /tmp/sym --diff-symbols`, or `pressDiffToken` from the same file — which
   names the FILE it presses in, because the same name stands in several of them, and matches the
-  token EXACTLY, because `server` is a substring of `serverReady`. For the AI READING of a diff — the
-  offer and the cost it names in both themes, the reading it becomes in both themes, the files nothing
-  grouped cropped to themselves, a reading of an earlier commit, a refused run and a phone's width:
-  `bun run preview -- --out /tmp/rev --diff-review` (everything goes through the mock's own
-  `gitlab_mr_review*`, so no CLI runs and no model is reached — and that run RESETS the
-  `{kind:"gitlab_mr"}` hook at the end, because a stored reading outlives the page). For a COMMENT on a diff line — the
+  token EXACTLY, because `server` is a substring of `serverReady`. For the AI READING, which is the
+  fifth PAGE of a merge request — the offer and the cost it names in both themes, the document in both
+  themes, ONE FILE's box cropped to itself in both themes, the theme heading STICKING while the code
+  scrolls under it, the long diff folded with the count in its label, the files nothing grouped cropped
+  to themselves, a reading of an earlier commit, a refused run and a phone's width:
+  `bun run preview -- --out /tmp/rev --diff-review`, or `openReview` from the same file (everything
+  goes through the mock's own `gitlab_mr_review*`, so no CLI runs and no model is reached — and that
+  run RESETS the `{kind:"gitlab_mr"}` hook at the end, because a stored reading outlives the page). For a COMMENT on a diff line — the
   affordance in the gutter, the box on one line, the span a drag covers, the thread it lands as, a
   comment being rewritten and the fold a resolved thread takes:
   `bun run preview -- --out /tmp/dc --diff-comment`, or `diffGutterLine` / `dragDiffLines` from
