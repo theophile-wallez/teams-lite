@@ -3761,6 +3761,22 @@ if (import.meta.main) {
         await shot(`${out}-file-dark.png`, firstFile);
         await setTheme("light");
 
+        // A REGION of a file, which is what a theme really claims: the same file appears under two
+        // headings, each box holding only the hunks that theme is about and each carrying its own
+        // explanation. Both boxes are cropped, because the whole point is that they DIFFER — one
+        // picture of one of them would say nothing about whether the narrowing worked.
+        // Each is named by the REGION it draws rather than by its position, because the two boxes are
+        // in two different sections and `.nth()` over the document would depend on which theme the
+        // fixture happens to put first.
+        const region = (span: string) =>
+          `[data-testid="gitlab-review-file"][data-region="${span}"]`;
+        await page.waitForSelector(region("34-41"));
+        await shot(`${out}-region-light.png`, region("34-41"));
+        await shot(`${out}-region-2-light.png`, region("12-23"));
+        await setTheme("dark");
+        await shot(`${out}-region-dark.png`, region("34-41"));
+        await setTheme("light");
+
         // The heading STICKING, which is the one thing a still picture of the top of the page
         // cannot show: scrolled well past the start of a section, its name is still at the top.
         await page
@@ -3907,7 +3923,8 @@ if (import.meta.main) {
 
         console.log(
           `[preview] wrote ${out}-offer-{light,dark}.png, ${out}-{light,dark}.png, ` +
-            `${out}-file-{light,dark}.png, ${out}-sticky-light.png, ` +
+            `${out}-file-{light,dark}.png, ${out}-region-{light,dark}.png, ` +
+            `${out}-region-2-light.png, ${out}-sticky-light.png, ` +
             `${out}-names-{light,dark}.png, ${out}-card-light.png, ${out}-card-crop-light.png, ` +
             `${out}-card-dark.png, ${out}-folded-light.png, ` +
             `${out}-unplaced-light.png, ${out}-stale-light.png, ${out}-refused-light.png, ` +

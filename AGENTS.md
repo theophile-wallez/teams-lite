@@ -2689,10 +2689,13 @@ says nothing about what the branch DOES: a chart value, the template that reads 
 changed shape and a lockfile sit in one column with no relation stated. The **Themes** page asks the
 local agent to state the relation, and then draws the answer as a DOCUMENT — a sentence about the
 whole branch, a section per theme whose heading STICKS while its part is read, the reading's own
-prose as real markdown, and under that the real patches of the files it is about. A reviewer who has
+prose as real markdown, and under that the real patches of the changes it is about. A theme claims
+PARTS of files rather than files, so one file whose changes belong to two themes is drawn under both
+with an explanation and a narrowed patch each (§ A THEME CLAIMS PARTS OF FILES). A reviewer who has
 not opened the branch reads it top to bottom and knows what it does. `src/gitlab_review.rs` is the
 prompt, the parse and every bound; `web/src/lib/gitlab-review.ts` holds the pure decisions the page
-is built from and `web/src/components/gitlab-review-page.tsx` draws it.
+is built from, `web/src/lib/gitlab-patch.ts` cuts a patch into hunks and puts it back together
+holding some of them, and `web/src/components/gitlab-review-page.tsx` draws it.
 
 **IT IS A PAGE, AND THAT REVERSES WHAT SHIPPED FIRST — the reversal is recorded rather than tidied
 away, because the first argument was right when it was made.** The reading was a second VIEW of the
@@ -3054,6 +3057,13 @@ Fourteen rules hold it, and each is pinned by `gitlab_review::tests`,
 - **A tagged file with NO patch is STATED rather than skipped in silence.** The reader pointed at a
   binary file or a pure rename, so the answer has to be able to say it had nothing to look at instead
   of answering as though it had.
+- **A TAG IS A WHOLE FILE, even where the document draws that file in three boxes, and that is a
+  stated limit rather than an oversight.** Tagging `@src/server/health.ts` sends its whole patch; there
+  is no way to tag one REGION of it. A tagged THEME does carry the regions its own parts name (the
+  prompt spells `lines 96–140` beside each path, or the model would answer about code the reader was
+  not pointing at), so pointing at a theme is how a question is narrowed to part of a file today. What
+  a region tag would buy is a narrower question about a file two themes share; what it costs is a
+  second spelling of a range in the composer's own "@" grammar, which is why it is not here.
 - **FOUR BOUNDS, and each catches a different mistake.** The question is 2 000 characters
   (`MAX_QUESTION_CHARS` — it catches a whole file pasted into the box), the code one question carries
   is 64 KiB (`MAX_CHAT_PATCH_BYTES`, deliberately smaller than the reading's own 256 KiB: a follow-up
@@ -3130,24 +3140,90 @@ its half a megabyte.
 reading it has already paid for even on a read-only backend. `gitlab_mr_review_run` is the machine
 method, because only it starts a program.
 
-Eleven rules hold it, and each is pinned by a test in `gitlab_review::tests`,
+#### A THEME CLAIMS PARTS OF FILES, and a FILE IS NOT A UNIT OF MEANING
+
+One file very often holds changes belonging to two different themes: a handler that gained a draining
+state, and forty lines further down a rename somebody did on the way past. Forcing it under one
+heading is exactly the flattening the themes exist to undo — so a theme names a path plus an optional
+REGION of it, the same file appears under several headings with a sentence of its own each, and each
+box draws only the code its paragraph is about. `web/src/lib/gitlab-patch.ts` is the whole of the new
+machinery: a patch cut into hunks, and put back together holding some of them.
+
+**THE UNIT IS THE HUNK, and that is not a compromise.** git decided where a contiguous change begins
+and ends, from the real distance between the edits, so nothing here invents a boundary — and a patch
+narrowed to WHOLE hunks is still a patch, which is what lets the renderer, `patchTextLines` and every
+line walk read one with no special case at all. Slicing a hunk at an arbitrary line would leave an
+`@@` header whose counts lie, and `@pierre/diffs` and git would both read that as corrupt.
+
+**THE MODEL NAMES LINES; THE PAGE RESOLVES HUNKS.** `"lines": [96, 140]` is a pair of NEW-file
+numbers the model reads off the `@@` headers already in its prompt, `gitlab_review::ReviewRange`
+bounds the pair, and `hunksTouching` turns it into whole hunks — any hunk the range touches. **Nothing
+in Rust parses a patch**, deliberately: a hunk-header parser there would be a second spelling of the
+page's own and the two would disagree on the first header either got wrong, while the page needs its
+parser anyway, because a stored reading outlives the diff it was made from and the ranges have to be
+resolved again against whatever the branch holds now. `HUNK_HEADER` has ONE spelling on this side too
+— it moved out of `gitlab-diff-comment.ts`, which imports it.
+
+Six rules hold the split, and each is pinned by a test:
+
+- **A HUNK IS CLAIMED ONCE, and the two sides claim at different grains.** The first theme to claim a
+  hunk gets it, so no change is drawn under two headings — reviewed twice, counted twice, with no way
+  to tell which grouping the reading meant. Rust holds the COARSER half of that rule (the same
+  path-and-range pair twice) because it cannot know what a range covers; `reviewGroups` holds the fine
+  one. So a part surviving the parse is a part the model really stated, not one the page will
+  certainly draw.
+- **A RANGE THAT COVERS EVERY HUNK IS THE WHOLE FILE**, drawn with no region label, whether the
+  reading asked for it with a range or without one. It is the same code either way, and a label about
+  a region is noise when there is no other region.
+- **A RANGE NAMING NOTHING drops its part**, and the file falls to the leftovers whole. A model naming
+  lines 400–500 of a 100-line file invented them — the rule `from_answer` holds for a path, applied to
+  a place.
+- **A RANGE ON A FILE WITH NO PATCH IS IGNORED rather than fatal**, and the file is claimed where the
+  theme put it. There is no region of a binary file, so the range cannot mean anything — but the theme
+  did place the file, and honouring that is worth more than moving it to the leftovers over a field
+  that could not apply. A bad range costs the range, never the part.
+- **A RANGE THIS CANNOT READ COSTS THE RANGE AND NEVER THE READING**, which is why `RawFile.lines` is
+  a `serde_json::Value` and not an `Option<[u64; 2]>`. A typed field REFUSES the whole document when it
+  does not match, so one part writing `"lines": "96-140"` would cost the reader the entire reading —
+  for a field the page can do without. Both shapes a model really writes are read (`[96, 140]` and
+  `{"from": 96, "to": 140}`), which is tolerance at a trust boundary rather than two spellings of one
+  thing: the same reasoning as `extract_json` finding the object inside a fence the model was told not
+  to write.
+- **A BOX SAYS WHERE AND HOW MUCH** (`reviewPartLabel`: `lines 12–23 · 1 of 3 changes`), because each
+  answers what the other cannot — the lines are where to look in the file, and the count is how much
+  of the file is elsewhere. It stands in the STAT's place, since "+42 −8" is about the whole file and
+  would describe code the box is not showing. Two regions of one file are keyed APART
+  (`reviewPartKey`), or React would carry one box's fold over to the other.
+
+Eleven more rules hold the reading, and each is pinned by a test in `gitlab_review::tests`,
 `web/src/lib/gitlab-review.test.ts` or `web/e2e/gitlab.spec.ts`:
 
-- **NOTHING IS SILENTLY LEFT OUT.** A grouped view of a diff is a claim about the WHOLE diff, so
-  every changed file no theme claimed is a group of its own at the END — never a footnote and never
-  dropped. A reviewer who read the themes and believed they had seen the branch would otherwise be
-  wrong, with nothing on screen saying so. It is also the honest home for what the model got wrong: a
-  path it misspelled leaves its file unclaimed, which shows up there rather than vanishing. The spec
-  counts the rows against the diff's own file count.
+- **NOTHING IS SILENTLY LEFT OUT, AND THE LEFTOVERS ARE PER HUNK.** A grouped view of a diff is a
+  claim about the WHOLE diff, so everything no theme claimed is a group of its own at the END — never
+  a footnote and never dropped. Once a file can be split, the file-shaped version of that rule stopped
+  being enough: a reader who read every theme had still not seen the hunks of a file nothing claimed,
+  and nothing on screen said so. So a leftover is a REGION where a theme took part of its file, and
+  the section carries a second sentence saying exactly that (`UNPLACED_PARTS_NOTE`) — without it, a
+  reader meeting one path under two headings would read the page as having drawn it twice. It is also
+  the honest home for what the model got wrong: a path it misspelled, or a range it invented, leaves
+  its file unclaimed and it shows up there rather than vanishing.
 - **THE LEFTOVERS ARE COMPUTED AGAINST THE DIFF ON SCREEN**, not read off the stored list, so a file
   added by a push since the reading was made turns up in them instead of being invisible.
 - **A path the diff does not hold is DROPPED**, on both sides. A model naming a file the diff does not
   have is a model inventing one — the rule an @mention naming a person the thread does not hold
   already follows. The second check in TypeScript is not redundant: a stored reading outlives the diff
   it was made from, so a branch that moved leaves a reading naming files the page is not drawing.
-- **A file two themes claim goes to the FIRST, and a theme left with no files is dropped whole.** A
-  file drawn under two headings is a file reviewed twice and a coverage count that claims more files
-  than the diff holds; a heading over nothing reads as a section that failed to load.
+- **A theme left with no parts is dropped whole**, because a heading over nothing reads as a section
+  that failed to load.
+- **COVERAGE COUNTS FILES AND STATES PARTS.** `grouped` is DISTINCT paths, because a path now appears
+  in several groups and a count of entries would claim to account for more files than the diff holds —
+  which is what the E2E's own assertion had to be corrected to. The headline adds "in 19 parts" only
+  where a file was really split: a number that never varies is a number nobody reads. It takes the
+  GROUPS rather than the reading, which is both the shape `reviewFoldedPatches` already has and now a
+  correctness matter — the groups are a pass over every patch in the branch, and a version that made
+  its own would do that twice per render.
+- **THE PATCH BUDGETS ARE SPENT ON THE PART**, so a two-hunk region of a 900-line file is measured as
+  the region. That is what decides whether it opens shown and what the fold offers to show.
 - **A reading is of ONE COMMIT, and a stale one is KEPT rather than thrown away.** The `head_sha` it
   read travels with it, the page compares that with the commit it is drawing (`reviewIsStale`), and a
   reading of an earlier commit says so in a line above the groups — it is still the best account
@@ -3186,6 +3262,21 @@ is grouped could not show the one state the view must never hide). Its `{kind:"g
 `refuse_review` and `review: "stored" | "stale"`, and **a spec MUST clear it**: one mock process serves
 the whole run, and a stored reading outlives the page.
 
+**IT ANSWERS `range`, NOT the `lines` a MODEL writes**, because this mock stands in for the BACKEND:
+`gitlab_review::from_answer` is what turns one into the other, and a mock answering with the model's
+own spelling would let a page that never learned to read a range pass every test. And **one fixture
+file is deliberately SPLIT** (`MOCK_REVIEW_SPLIT_PATH`): `charts/user-facing/values.yaml` now holds
+THREE hunks, two themes claim one region each, and the third is left for the leftovers — the one state
+a fixture where everything is claimed cannot show. That file is left out of the mock's generic
+whole-file walk on purpose: claimed whole by either theme, its hunks would all go to the first and
+there would be no split to draw.
+
+**THE FIRST HUNK OF IT KEEPS EVERY BYTE, and the two new ones avoid two words.** The diff specs drive
+that file by name and by line — `podDisruptionBudget` is pressed in it and COUNTED across two files
+(`data-total="3"`), and a comment is filed against a line of it — so the new hunks are APPENDED and
+carry neither `podDisruptionBudget` nor `draining`, the only two tokens a spec counts. What moved with
+them is the Overview's own total, `+123` → `+127`.
+
 **THE DIFF FIXTURE GAINED ONE LONG PATCH, and that is what makes the fold reachable at all.** Its
 seven files were all short, so the document opened with every patch shown and no capture and no spec
 could see the state the budgets exist for — the shape § A COMPANION states as "a shape no capture can
@@ -3198,10 +3289,14 @@ tokens, the rename). What moved with it is the two numbers the Overview's own su
 files` and `+123`.
 
 `cd web && bun run preview -- --out /tmp/rev --diff-review` captures the offer and its cost in both
-themes, the document in both themes, ONE FILE's box cropped to itself in both themes, the heading
-STICKING while the code scrolls under it, the long diff folded with the count in its label, the
-leftovers cropped, a stale reading, a refused run and a phone's width. Two of those crops were got
-wrong first and are worth knowing about: a crop of a whole SECTION comes back mostly blank, because a
+themes, the document in both themes, ONE FILE's box cropped to itself in both themes, BOTH REGIONS of
+the split file cropped — both of them, because the whole point is that they DIFFER and one picture of
+one would say nothing about whether the narrowing worked — the heading STICKING while the code scrolls
+under it, the long diff folded with the count in its label, the leftovers cropped, a stale reading, a
+refused run and a phone's width. Each region is named by the SPAN it draws rather than by its position,
+because the two boxes are in two different sections and `.nth()` over the document would depend on
+which theme the fixture happens to put first. Two of those crops were got wrong first and are worth
+knowing about: a crop of a whole SECTION comes back mostly blank, because a
 section is taller than the viewport and it sits inside this page's own scroller — the file box is what
 can be read; and every crop of the code waits for as many `diffs-container` elements as there are
 shown patches, not for the first one, since Shiki resolves a grammar per language and the later files
@@ -3225,6 +3320,16 @@ pinned in Rust, the surface is pinned against the mock, and the diff reads it is
 user's own CLI, their own provider and their own press. The failure mode if the model answers
 something unexpected is a refusal reported at the button or a theme dropped for naming a file the diff
 does not hold, never a grouping that hides a changed file.
+
+**AND WHETHER A REAL MODEL SPLITS FILES WELL IS UNMEASURED, which is a different gap from the one
+above.** Every rule about a region is pinned — the parse, the hunk resolution, the claiming, the
+leftovers, and the six refusals — but what nothing here can pin is the QUALITY of the ranges a real CLI
+returns: whether it reads its own `@@` headers correctly, whether it splits the files worth splitting
+and leaves the rest whole. The safe direction is built in rather than hoped for: a range naming nothing
+drops its part and the file falls to the leftovers, a range covering everything is drawn as the whole
+file, and a range the parse cannot read costs only the range. So the worst a bad range does is put a
+change under "Not grouped", where the reader still meets it — never draw one theme's prose over
+another theme's code, and never hide a hunk.
 
 ### The two side columns are DRAGGED (and the code keeps its own minimum)
 
@@ -3974,9 +4079,10 @@ user. Two independent mechanisms enforce that split:
   names the FILE it presses in, because the same name stands in several of them, and matches the
   token EXACTLY, because `server` is a substring of `serverReady`. For the AI READING, which is the
   fifth PAGE of a merge request — the offer and the cost it names in both themes, the document in both
-  themes, ONE FILE's box cropped to itself in both themes, the theme heading STICKING while the code
-  scrolls under it, the long diff folded with the count in its label, the files nothing grouped cropped
-  to themselves, a reading of an earlier commit, a refused run, a phone's width — and the FOLLOW-UP
+  themes, ONE FILE's box cropped to itself in both themes, BOTH REGIONS of the file two themes split
+  between them (both, because the whole point is that they differ), the theme heading STICKING while the
+  code scrolls under it, the long diff folded with the count in its label, the changes nothing grouped
+  cropped to themselves, a reading of an earlier commit, a refused run, a phone's width — and the FOLLOW-UP
   conversation beside it: the "@" list offering a theme above the files in both themes, the chips that
   say what will travel, the answer it lands as in both themes, the whole page with the conversation
   beside it, a refused question, and that panel at a phone's width where it is BELOW the document —
@@ -8020,11 +8126,14 @@ user's. What changes is only what is asked.
   person on EITHER tracker is in the user's own Teams
   (`src/tracker_people.rs`, see § A tracker user who is also a colleague) — plus the approval
   those trackers got first, and its undo (`src/gitlab_approval.rs`, see § The trackers),
-  and an AI READING of a merge request's diff — drawn as a page of its own, with the
-  branch's real patches in it, and a FOLLOW-UP conversation beside it that carries exactly the theme
-  and the files the reader tagged — which is a PROMPT and a PARSE rather than a way to
-  reach a model: the CLI, the provider and every permission stay the local agent's, and both runs are
-  granted no tools at all (`src/gitlab_review.rs`, see § AN AI READING OF THE DIFF),
+  and an AI READING of a merge request's diff — drawn as a page of its own, grouped by what the branch
+  DOES rather than by file (one file whose changes belong to two themes is drawn under both, each box
+  holding the patch narrowed to its own hunks), with a FOLLOW-UP conversation beside it that carries
+  exactly the theme and the files the reader tagged — which is a PROMPT and a PARSE rather than a way to
+  reach a model: the CLI, the provider and every permission stay the local agent's, both runs are
+  granted no tools at all, and nothing in it parses a patch, because the page's own
+  `web/src/lib/gitlab-patch.ts` is the one thing in this app that does
+  (`src/gitlab_review.rs`, see § AN AI READING OF THE DIFF),
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
   § The local agent) and the user's own CUSTOM AGENTS that answer to a name they chose

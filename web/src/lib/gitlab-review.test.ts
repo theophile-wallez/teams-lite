@@ -26,6 +26,9 @@ import {
   reviewTagsToWire,
   reviewTagText,
   turnContext,
+  reviewPartKey,
+  reviewPartLabel,
+  UNPLACED_PARTS_NOTE,
   UNPLACED_TITLE,
   type GitLabReview,
   type GitLabReviewTurn,
@@ -57,6 +60,44 @@ function longFile(path: string, bodyLines: number): GitLabDiffFile {
 
 function diff(paths: string[]): GitLabDiff {
   return { files: paths.map(file), truncated: false, collapsed: 0, expanded: false };
+}
+
+/** A file of THREE hunks, covering new-file lines 1–5, 21–24 and 98–100 — so a test can name a
+ *  region of it and know exactly which hunks the answer should hold. It is the shape this app's own
+ *  backend writes: the git header first, then the hunks. */
+function splitFile(path = "src/server/health.ts"): GitLabDiffFile {
+  return {
+    ...file(path),
+    patch: [
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      "@@ -1,4 +1,5 @@",
+      " import { readyz } from \"./probe\";",
+      "+import { draining } from \"./drain\";",
+      " ",
+      " export const READY_PATH = \"/readyz\";",
+      "@@ -20,3 +21,4 @@ function ready() {",
+      "   return 200;",
+      "+  // the order matters",
+      " }",
+      "@@ -96,2 +98,3 @@ function health() {",
+      "   return 200;",
+      "+  if (draining) return 503;",
+      " }",
+      "",
+    ].join("\n"),
+  };
+}
+
+/** A diff of one three-hunk file, plus whatever else. */
+function splitDiff(extra: string[] = []): GitLabDiff {
+  return {
+    files: [splitFile(), ...extra.map(file)],
+    truncated: false,
+    collapsed: 0,
+    expanded: false,
+  };
 }
 
 function review(over: Partial<GitLabReview> = {}): GitLabReview {
@@ -151,18 +192,251 @@ describe("reviewGroups", () => {
     const drawn = groups.flatMap((group) => group.files.map((entry) => entry.file.path));
     expect(drawn).toEqual(["a.ts"]);
     expect(groups.map((group) => group.title)).toEqual(["First"]);
-    // And the coverage stays honest: one file grouped, out of one.
-    expect(reviewCoverage(twice, diff(["a.ts"]))).toEqual({ grouped: 1, total: 1 });
+    // And the coverage stays honest: one file grouped, out of one, in one part.
+    expect(reviewCoverage(groups, diff(["a.ts"]))).toEqual({ grouped: 1, total: 1, parts: 1 });
+  });
+});
+
+// A THEME CLAIMS PARTS OF FILES, which is what these hold. One file very often holds two unrelated
+// changes, and forcing it under one heading is the flattening the themes exist to undo — so the unit
+// a theme claims is the HUNK, and the rules below are all about what happens at that grain.
+describe("reviewGroups, split by region", () => {
+  const path = "src/server/health.ts";
+
+  it("draws ONE file under TWO themes, each showing only its own hunks", () => {
+    const groups = reviewGroups(
+      review({
+        themes: [
+          {
+            title: "Draining",
+            summary: "s",
+            files: [{ path, range: { from: 98, to: 100 }, note: "the 503" }],
+          },
+          {
+            title: "The probe path moved",
+            summary: "s",
+            files: [{ path, range: { from: 1, to: 5 }, note: "readyz" }],
+          },
+        ],
+      }),
+      splitDiff(),
+    );
+    expect(groups.map((group) => group.title)).toEqual(["Draining", "The probe path moved", UNPLACED_TITLE]);
+    const first = groups[0]!.files[0]!;
+    const second = groups[1]!.files[0]!;
+    // Each box is the SAME file and a different region of it, with its own note.
+    expect([first.file.path, second.file.path]).toEqual([path, path]);
+    expect([first.note, second.note]).toEqual(["the 503", "readyz"]);
+    expect([first.part!.from, first.part!.to]).toEqual([98, 100]);
+    expect([second.part!.from, second.part!.to]).toEqual([1, 5]);
+    // And each draws its OWN code and only that: the patch is narrowed to the hunks the theme
+    // claimed, so the reader is never shown a change the paragraph above is not about.
+    expect(first.part!.patch).toContain("if (draining) return 503;");
+    expect(first.part!.patch).not.toContain("READY_PATH");
+    expect(second.part!.patch).toContain("READY_PATH");
+    expect(second.part!.patch).not.toContain("if (draining) return 503;");
+    // The narrowed patch is a REAL patch: it keeps the header that names the file.
+    expect(first.part!.patch).toContain(`+++ b/${path}`);
+  });
+
+  it("puts the hunks NOTHING claimed in the leftovers, and says they are regions", () => {
+    // This is the completeness rule at its new grain. With whole files it was enough to list the
+    // files no theme named; once a file can be split, a reader who read every theme has still not
+    // seen the middle hunk of this one — and nothing on screen would have said so.
+    const groups = reviewGroups(
+      review({
+        themes: [{ title: "Draining", summary: "s", files: [{ path, range: { from: 98, to: 100 } }] }],
+      }),
+      splitDiff(),
+    );
+    const left = groups.at(-1)!;
+    expect(left.unplaced).toBe(true);
+    const rest = left.files[0]!;
+    // The two hunks the theme did not claim, as one region.
+    expect([rest.part!.from, rest.part!.to]).toEqual([1, 24]);
+    expect(rest.part!.hunks).toBe(2);
+    expect(rest.part!.ofHunks).toBe(3);
+    expect(rest.part!.patch).toContain("// the order matters");
+    expect(rest.part!.patch).not.toContain("if (draining) return 503;");
+    // And the section SAYS these are parts of files grouped above, or a reader meeting one path
+    // under two headings would read the page as having drawn it twice.
+    expect(left.summary).toContain(UNPLACED_PARTS_NOTE);
+  });
+
+  it("says nothing about regions in the leftovers when every one is a whole file", () => {
+    const groups = reviewGroups(review(), diff(["a.ts", "b.ts"]));
+    expect(groups.at(-1)!.summary).not.toContain(UNPLACED_PARTS_NOTE);
+  });
+
+  it("gives a HUNK to the FIRST theme that claims it, and drops a theme left with nothing", () => {
+    // Two themes over overlapping regions. The first takes both hunks its range touches; the second
+    // asks for one of them and gets nothing, so it is not drawn — the rule that keeps one change out
+    // of two headings, at the grain a part is claimed in.
+    const groups = reviewGroups(
+      review({
+        themes: [
+          { title: "First", summary: "s", files: [{ path, range: { from: 1, to: 24 } }] },
+          { title: "Second", summary: "s", files: [{ path, range: { from: 21, to: 24 } }] },
+        ],
+      }),
+      splitDiff(),
+    );
+    expect(groups.map((group) => group.title)).toEqual(["First", UNPLACED_TITLE]);
+    expect(groups[0]!.files[0]!.part!.hunks).toBe(2);
+    // The third hunk is what is left.
+    expect(groups[1]!.files[0]!.part!.from).toBe(98);
+  });
+
+  it("draws a range that covers EVERY hunk as the whole file, with no region label", () => {
+    // It is the same code either way, and a label about a region is noise when there is no other
+    // region — so this is decided on what was really claimed rather than on whether a range was
+    // asked for.
+    const groups = reviewGroups(
+      review({ themes: [{ title: "All", summary: "s", files: [{ path, range: { from: 1, to: 300 } }] }] }),
+      splitDiff(),
+    );
+    const entry = groups[0]!.files[0]!;
+    expect(entry.part).toBeNull();
+    expect(reviewPartLabel(entry)).toBeNull();
+    // Nothing is left over, so there is no leftovers section at all.
+    expect(groups).toHaveLength(1);
+  });
+
+  it("keeps a part with NO range as the whole file, which is what an older reading carries", () => {
+    // Every reading made before parts existed names files and no ranges. It has to fold into
+    // whole-file parts rather than becoming unreadable.
+    const groups = reviewGroups(
+      review({ themes: [{ title: "All", summary: "s", files: [{ path }] }] }),
+      splitDiff(),
+    );
+    expect(groups[0]!.files[0]!.part).toBeNull();
+    expect(groups).toHaveLength(1);
+  });
+
+  it("drops a part whose range names a region the file does not have", () => {
+    // A model naming lines 400–500 of a 100-line file invented them. The part claims nothing, so it
+    // is not drawn — and the file falls to the leftovers WHOLE, where the reader still meets it.
+    const groups = reviewGroups(
+      review({ themes: [{ title: "Nowhere", summary: "s", files: [{ path, range: { from: 400, to: 500 } }] }] }),
+      splitDiff(),
+    );
+    expect(groups.map((group) => group.title)).toEqual([UNPLACED_TITLE]);
+    expect(groups[0]!.files[0]!.part).toBeNull();
+  });
+
+  it("IGNORES a range named on a file with no patch, and keeps the file where it was placed", () => {
+    // There is no region of a binary file, so the range cannot mean anything — but the theme did
+    // place the file, and honouring that is worth more than moving it to the leftovers over a field
+    // that could not apply. A bad range costs the range, never the part.
+    const binary: GitLabDiffFile = { ...file("logo.png"), patch: undefined, binary: true };
+    const d: GitLabDiff = { files: [binary], truncated: false, collapsed: 0, expanded: false };
+    const groups = reviewGroups(
+      review({ themes: [{ title: "Art", summary: "s", files: [{ path: "logo.png", range: { from: 1, to: 2 } }] }] }),
+      d,
+    );
+    expect(groups.map((group) => group.title)).toEqual(["Art"]);
+    const entry = groups[0]!.files[0]!;
+    expect(entry.part).toBeNull();
+    expect(entry.patch).toBeNull();
+  });
+
+  it("claims a file with no patch WHOLE, once, however many themes name it", () => {
+    const binary: GitLabDiffFile = { ...file("logo.png"), patch: undefined, binary: true };
+    const d: GitLabDiff = { files: [binary], truncated: false, collapsed: 0, expanded: false };
+    const groups = reviewGroups(
+      review({
+        themes: [
+          { title: "First", summary: "s", files: [{ path: "logo.png" }] },
+          { title: "Second", summary: "s", files: [{ path: "logo.png" }] },
+        ],
+      }),
+      d,
+    );
+    expect(groups.map((group) => group.title)).toEqual(["First"]);
+  });
+
+  it("keys two regions of one file APART, so a fold pressed on one is not the other's", () => {
+    const groups = reviewGroups(
+      review({
+        themes: [
+          { title: "A", summary: "s", files: [{ path, range: { from: 1, to: 5 } }] },
+          { title: "B", summary: "s", files: [{ path, range: { from: 98, to: 100 } }] },
+        ],
+      }),
+      splitDiff(),
+    );
+    const keys = groups.flatMap((group) => group.files.map(reviewPartKey));
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("measures a region by its OWN lines, not by the whole file's", () => {
+    // Which decides whether it opens shown, and what the fold offers to show. A two-line region of a
+    // 900-line file is a two-line region.
+    const groups = reviewGroups(
+      review({ themes: [{ title: "A", summary: "s", files: [{ path, range: { from: 98, to: 100 } }] }] }),
+      splitDiff(),
+    );
+    const entry = groups[0]!.files[0]!;
+    expect(entry.patch!.lines).toBe(patchTextLineCount(entry.part!.patch));
+    expect(entry.patch!.lines).toBeLessThan(patchTextLineCount(entry.file.patch));
+  });
+
+  it("counts the FILES it grouped and the PARTS it grouped them in", () => {
+    const groups = reviewGroups(
+      review({
+        themes: [
+          { title: "A", summary: "s", files: [{ path, range: { from: 1, to: 5 } }] },
+          { title: "B", summary: "s", files: [{ path, range: { from: 21, to: 24 } }] },
+        ],
+      }),
+      splitDiff(["other.ts"]),
+    );
+    // One file, in two parts — a count of ENTRIES would claim two of the two files were grouped,
+    // when `other.ts` is untouched and sits in the leftovers.
+    expect(reviewCoverage(groups, splitDiff(["other.ts"]))).toEqual({
+      grouped: 1,
+      total: 2,
+      parts: 2,
+    });
+  });
+});
+
+describe("reviewPartLabel", () => {
+  const path = "src/server/health.ts";
+  const partOf = (from: number, to: number) =>
+    reviewGroups(
+      review({ themes: [{ title: "A", summary: "s", files: [{ path, range: { from, to } }] }] }),
+      splitDiff(),
+    )[0]!.files[0]!;
+
+  it("says WHERE in the file and HOW MUCH of it, because each answers what the other cannot", () => {
+    expect(reviewPartLabel(partOf(98, 100))).toBe("lines 98–100 · 1 of 3 changes");
+  });
+
+  it("never says 'lines 40–40'", () => {
+    const one = { ...partOf(1, 5), part: { patch: "x", from: 40, to: 40, hunks: 1, ofHunks: 2 } };
+    expect(reviewPartLabel(one)).toBe("line 40 · 1 of 2 changes");
+  });
+
+  it("says nothing for a box that IS the whole file", () => {
+    expect(reviewPartLabel(partOf(1, 300))).toBeNull();
   });
 });
 
 describe("reviewCoverage", () => {
   it("counts the files a THEME accounts for, over the diff's own total", () => {
-    expect(reviewCoverage(review(), diff(["a.ts", "b.ts"]))).toEqual({ grouped: 1, total: 2 });
+    const d = diff(["a.ts", "b.ts"]);
+    expect(reviewCoverage(reviewGroups(review(), d), d)).toEqual({
+      grouped: 1,
+      total: 2,
+      parts: 1,
+    });
   });
 
   it("counts nothing grouped with no reading, and still states the total", () => {
-    expect(reviewCoverage(null, diff(["a.ts", "b.ts"]))).toEqual({ grouped: 0, total: 2 });
+    const d = diff(["a.ts", "b.ts"]);
+    expect(reviewCoverage(reviewGroups(null, d), d)).toEqual({ grouped: 0, total: 2, parts: 0 });
   });
 });
 

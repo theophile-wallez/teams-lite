@@ -17,6 +17,8 @@ import {
   reviewGroups,
   reviewIsStale,
   reviewLimits,
+  reviewPartKey,
+  reviewPartLabel,
   reviewSectionId,
   type GitLabReview,
   type ReviewGroup,
@@ -443,7 +445,9 @@ function ReviewHeadline(props: {
   onRun: () => void;
 }) {
   const { review } = props;
-  const coverage = reviewCoverage(review, props.diff);
+  // Off the GROUPS the document is really drawing, not off the reading: the groups are a pass over
+  // every patch in the branch, and asking for them twice per render would double that.
+  const coverage = reviewCoverage(props.groups, props.diff);
   const limits = reviewLimits(review);
   const folded = reviewFoldedPatches(props.groups);
   const unmarked = reviewCodeUnsearchable(props.diff);
@@ -486,6 +490,11 @@ function ReviewHeadline(props: {
         {" · "}
         <span data-testid="gitlab-review-coverage">
           {coverage.grouped} of {coverage.total} files grouped
+          {/* IN HOW MANY PARTS, but only where a file was really split — a theme claims regions of
+              files, so "12 of 14 files grouped, in 19 parts" says the reading found more than one
+              thing in some of them. Where every part is a whole file the clause says nothing, and
+              a number that never varies is a number nobody reads. */}
+          {coverage.parts > coverage.grouped ? `, in ${coverage.parts} parts` : ""}
         </span>
         {/* WHY A NAME MIGHT NOT BE MARKED, said once and at document level — the only level where a
             missing chip can explain itself, since the chip that would have explained it is the thing
@@ -589,7 +598,9 @@ function ReviewSection(props: {
         )}
         {group.files.map((entry) => (
           <ReviewFile
-            key={entry.file.path}
+            // The PART's key, not the path: one file appears under several headings now, and a key
+            // React re-used for two of them would carry one box's fold over to the other.
+            key={reviewPartKey(entry)}
             entry={entry}
             project={props.project}
             theme={props.theme}
@@ -623,10 +634,18 @@ function ReviewFile(props: {
     [entry.note, props.project, code],
   );
   const notice = diffFileNotice(entry.file);
+  // WHICH region of the file this box is, when it is one of several. Drawn beside the name rather
+  // than instead of it: the file is still what the reader recognises, and the region is what says
+  // this is not all of it.
+  const region = reviewPartLabel(entry);
   return (
     <div
       data-testid="gitlab-review-file"
       data-path={entry.file.path}
+      // The region this box draws, so a test and a capture can tell two boxes of one file apart —
+      // and absent, rather than empty, for a box that IS the whole file: the two are different
+      // claims, which is the reading `data-patch` below already takes for its three states.
+      {...(entry.part ? { "data-region": `${entry.part.from}-${entry.part.to}` } : {})}
       // THREE states rather than a boolean, because "there is no code" and "the code is folded" are
       // different things and a reader acts differently on each. A two-valued `shown` conflated them,
       // and the first capture of the fold cropped to a BINARY file — which has no diff to unfold and
@@ -673,10 +692,22 @@ function ReviewFile(props: {
               strokeWidth={1.8}
             />
           </button>
-          {stat && (
-            <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-faint">
-              {stat}
+          {/* The REGION, where this box is part of a file rather than all of it. It stands in the
+              stat's place: a stat is about the whole file and would be wrong here — "+42 −8" over
+              two of five hunks describes code this box is not showing. */}
+          {region ? (
+            <span
+              data-testid="gitlab-review-region"
+              className="shrink-0 font-mono text-[10px] tabular-nums text-text-faint"
+            >
+              {region}
             </span>
+          ) : (
+            stat && (
+              <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-faint">
+                {stat}
+              </span>
+            )
           )}
           {/* Why there is no code under the bar, when there is none — a binary file, a pure rename,
               one GitLab collapsed. The feed's own header note says the same thing in the same words;
@@ -713,7 +744,14 @@ function ReviewFile(props: {
                 placeholder on the first and never blocks the PROSE — which is the half the page is
                 for. */}
             <Suspense fallback={<PatchLoading lines={patch.lines} />}>
-              <DiffFilePatch file={entry.file} theme={props.theme} />
+              {/* The PART's own patch when this box is a region, which is the file's patch narrowed
+                  to the hunks this theme claimed — a real patch, so the renderer needs no special
+                  case (see `gitlab-patch.ts`). */}
+              <DiffFilePatch
+                file={entry.file}
+                theme={props.theme}
+                {...(entry.part ? { patch: entry.part.patch } : {})}
+              />
             </Suspense>
           </div>
         )}

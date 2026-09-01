@@ -684,8 +684,29 @@ const noHeader = () => null;
 export function DiffFilePatch(props: {
   file: GitLabDiffFile;
   theme: ResolvedTheme;
+  /**
+   * The patch to draw INSTEAD of the file's own, when the document is drawing a REGION of it.
+   *
+   * A theme claims parts of files, so one file's code can appear under two headings with two
+   * explanations — and what each box draws is that file's patch narrowed to the hunks the theme
+   * claimed (`narrowPatch` in `lib/gitlab-patch.ts`). It is a whole patch, header and all, so
+   * nothing here needs a special case for it.
+   *
+   * What a narrowed patch DOES show that a one-hunk one does not is pierre's own "N unmodified
+   * lines" band, wherever the kept hunks are not adjacent. That band is INFORMATION and not a dead
+   * control: expanding needs their `loadDiffFiles`, which this app passes nowhere, and a patch is
+   * `isPartial`, so their `isExpandableDiff` is false and no press is offered. It says how far apart
+   * two regions are, which is exactly what a reader of a split file wants to know.
+   */
+  patch?: string;
 }) {
-  const fileDiff = useMemo(() => diffFeedMetadata(props.file), [props.file]);
+  // The override and the file's own go through ONE resolver, so a narrowed patch is parsed exactly
+  // as a whole one is and a file with no patch at all still draws the stated shape (see
+  // `diffFeedMetadata`).
+  const fileDiff = useMemo(
+    () => diffFeedMetadata(props.patch ? { ...props.file, patch: props.patch } : props.file),
+    [props.file, props.patch],
+  );
   const options = useMemo(
     () => ({
       diffStyle: "unified" as const,

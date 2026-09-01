@@ -5384,7 +5384,18 @@ function mockReviewAnswer(
 type MockReview = {
   head_sha: string;
   headline: string;
-  themes: { title: string; summary: string; files: { path: string; note?: string }[] }[];
+  /** The themes, each naming the PARTS it is about: a path, optionally a REGION of it, and whatever
+   *  the reading said about that part.
+   *
+   *  It is `range: {from, to}` and not the `lines: [from, to]` a MODEL writes, because this mock
+   *  stands in for the BACKEND: `gitlab_review::from_answer` is what turns one into the other, and a
+   *  mock that answered with the model's own spelling would let a page that never learned to read a
+   *  range pass every test. */
+  themes: {
+    title: string;
+    summary: string;
+    files: { path: string; range?: { from: number; to: number }; note?: string }[];
+  }[];
   unplaced: string[];
   provider: string;
   model?: string;
@@ -5402,13 +5413,27 @@ type MockReview = {
  * ungrouped, because "a file no theme claimed" is the one state the view must never hide — a
  * fixture where everything is grouped could not show it.
  */
+/** The fixture file a mock reading deliberately SPLITS between its two themes.
+ *
+ *  A theme claims parts of files, so a mock that only ever named whole files would let a page that
+ *  had lost the whole feature pass every test — the rule this mock already holds for markdown in a
+ *  summary. This file has three hunks (new lines 12–23, 34–41 and 65–66); the first two go to the
+ *  two themes and the THIRD is left for the leftovers, which is the one state a fixture where
+ *  everything is claimed cannot show. */
+const MOCK_REVIEW_SPLIT_PATH = "charts/user-facing/values.yaml";
+
 function mockReviewFor(mr: MockMergeRequest): MockReview {
   const files = mockDiffFiles.get(`${mr.project_path}!${mr.iid}`) ?? [];
   const paths = files.map((file) => file.path);
   // Two themes over the files that are not the last one, split down the middle — enough to show a
-  // grouping, and built from the real list so it survives a fixture change.
-  const grouped = paths.slice(0, Math.max(paths.length - 1, 1));
+  // grouping, and built from the real list so it survives a fixture change. The SPLIT file is left
+  // out of that walk and named by REGION in both themes below: claimed whole by either one, its
+  // hunks would all be taken by the first and there would be no split to draw.
+  const grouped = paths
+    .slice(0, Math.max(paths.length - 1, 1))
+    .filter((path) => path !== MOCK_REVIEW_SPLIT_PATH);
   const half = Math.max(Math.ceil(grouped.length / 2), 1);
+  const splits = paths.includes(MOCK_REVIEW_SPLIT_PATH);
   return {
     head_sha: mr.sha,
     // MARKDOWN, deliberately, in the headline, in both summaries and in the note. A model writes
@@ -5438,16 +5463,31 @@ function mockReviewFor(mr: MockMergeRequest): MockReview {
           // marked every word or only backticked ones would pass every test.
           "There is no `gracefulShutdown` hook yet, so terminationGracePeriodSeconds is the whole " +
           "of what gives a replica its time.",
-        files: grouped.slice(0, half).map((path, index) => ({
-          path,
-          ...(index === 0
-            ? {
-                note:
-                  "The two `503`s are deliberate and mean different things — the first is *draining*, " +
-                  "the second is *not ready yet*. Worth a comment in the code.",
-              }
-            : {}),
-        })),
+        files: [
+          ...grouped.slice(0, half).map((path, index) => ({
+            path,
+            ...(index === 0
+              ? {
+                  note:
+                    "The two `503`s are deliberate and mean different things — the first is *draining*, " +
+                    "the second is *not ready yet*. Worth a comment in the code.",
+                }
+              : {}),
+          })),
+          // The api service's own half of the chart, which is this theme's rather than the chart
+          // theme's below — the same file, a different region, its own explanation.
+          ...(splits
+            ? [
+                {
+                  path: MOCK_REVIEW_SPLIT_PATH,
+                  range: { from: 34, to: 41 },
+                  note:
+                    "`preStopSleepSeconds` is the api service's own half of the same wait — it sleeps " +
+                    "before the probe starts failing, so in-flight requests land somewhere.",
+                },
+              ]
+            : []),
+        ],
       },
       {
         title: "The chart asks Kubernetes for the room to do it",
@@ -5455,7 +5495,13 @@ function mockReviewFor(mr: MockMergeRequest): MockReview {
           "A `PodDisruptionBudget` and a longer `terminationGracePeriodSeconds`, so a node drain " +
           "takes one replica at a time and waits for it. The budget is read from the same values " +
           "the template renders, so the two move together.",
-        files: grouped.slice(half).map((path) => ({ path })),
+        files: [
+          // The WEB service's half of the chart — the first hunk, and only that one.
+          ...(splits
+            ? [{ path: MOCK_REVIEW_SPLIT_PATH, range: { from: 12, to: 23 } }]
+            : []),
+          ...grouped.slice(half).map((path) => ({ path })),
+        ],
       },
     ].filter((theme) => theme.files.length > 0),
     // What the READING left over. The view recomputes this against the diff on screen rather than
@@ -5875,11 +5921,22 @@ const mockDiffFiles = new Map<string, MockDiffFile[]>([
   [
     "acme/webapp!596",
     [
+      // THREE HUNKS, which is what makes a SPLIT file reachable at all. A theme claims parts of
+      // files (§ AN AI READING OF THE DIFF), so a fixture whose every file holds one hunk could
+      // draw no split, no partial leftovers and no region label — and a shape no capture can draw
+      // and no spec can find is one that ships broken. This is the real-world case too: a chart
+      // touched for one reason picks up two others on the way past.
+      //
+      // The FIRST hunk keeps every byte it had, because the diff specs drive this file by name and
+      // by line: `podDisruptionBudget` is pressed here and counted across two files, and a comment
+      // is filed against a line of it. The two new hunks are APPENDED and deliberately carry
+      // neither `podDisruptionBudget` nor `draining` — the two tokens a spec counts — so the
+      // occurrences panel's own numbers are untouched.
       {
         path: "charts/user-facing/values.yaml",
         change: "changed",
-        additions: 6,
-        deletions: 2,
+        additions: 10,
+        deletions: 4,
         patch:
           "diff --git a/charts/user-facing/values.yaml b/charts/user-facing/values.yaml\n" +
           "--- a/charts/user-facing/values.yaml\n" +
@@ -5899,7 +5956,26 @@ const mockDiffFiles = new Map<string, MockDiffFile[]>([
           "+      memory: 256Mi\n" +
           "+  terminationGracePeriodSeconds: 30\n" +
           " \n" +
-          " api:\n",
+          " api:\n" +
+          // The api service gets the same treatment, which is the SAME theme as the web service's
+          // half above — one change to two services.
+          "@@ -30,6 +34,8 @@ api:\n" +
+          "   image:\n" +
+          "     repository: registry.acme.dev/api\n" +
+          '     tag: "1.42.0"\n' +
+          "-  replicaCount: 2\n" +
+          "+  replicaCount: 3\n" +
+          "+  terminationGracePeriodSeconds: 45\n" +
+          "+  preStopSleepSeconds: 5\n" +
+          "   resources:\n" +
+          "     requests:\n" +
+          // And an image tag bump that belongs to NO theme, which is what puts a REGION of this
+          // file in the leftovers — the sharpest of the new rules, and one a fixture where every
+          // hunk is claimed could not show.
+          "@@ -58,2 +65,2 @@ redis:\n" +
+          "   image:\n" +
+          '-    tag: "7.2.4"\n' +
+          '+    tag: "7.2.5"\n',
       },
       {
         path: "charts/user-facing/templates/pdb.yaml",

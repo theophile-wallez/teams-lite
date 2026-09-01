@@ -29,11 +29,21 @@
 // but the view says it, and the reader can ask again.
 
 import type { GitLabDiff, GitLabDiffFile } from "./gitlab-diff";
+import { hunksTouching, narrowPatch, splitPatch, type SplitPatch } from "./gitlab-patch";
 
-/** One file inside a theme, and what the reading said about that file. Mirrors
- *  `gitlab_review::ReviewFile`. */
+/** A region of one file, in NEW-file line numbers, both ends inclusive. Mirrors
+ *  `gitlab_review::ReviewRange`. */
+export type GitLabReviewRange = { from: number; to: number };
+
+/** One PART of the branch inside a theme, and what the reading said about that part. Mirrors
+ *  `gitlab_review::ReviewFile`.
+ *
+ *  The range is optional and means "the whole file" when it is absent — which is what every reading
+ *  made before parts existed carries, so an older stored one folds into whole-file parts rather than
+ *  becoming unreadable. */
 export type GitLabReviewFile = {
   path: string;
+  range?: GitLabReviewRange;
   note?: string;
 };
 
@@ -41,6 +51,8 @@ export type GitLabReviewFile = {
 export type GitLabReviewTheme = {
   title: string;
   summary: string;
+  /** The parts this theme is about. The field keeps the name `files` on the wire so every stored
+   *  reading still parses; what it holds is a part. */
   files: GitLabReviewFile[];
 };
 
@@ -168,14 +180,63 @@ export function patchTextLineCount(patch: string | null | undefined): number {
   return lines;
 }
 
-/** One file of a group: the real changed file, whatever the reading said about it, and how much of
- *  its code the document opens with. */
+/** Which REGION of a file one entry is about, when it is about part of one.
+ *
+ *  It is resolved here rather than taken from the reading: the model names a range of NEW-file lines
+ *  and `hunksTouching` turns that into whole hunks, so what this carries is the region really drawn
+ *  rather than the one asked for. */
+export type ReviewPart = {
+  /** The patch narrowed to this part's hunks — a REAL patch, header and all, so the renderer and
+   *  every line walk need no special case for it (see `gitlab-patch.ts`). */
+  patch: string;
+  /** The NEW-file lines the kept hunks cover, which is what the box says and what a reader looks
+   *  for when they go to the file. */
+  from: number;
+  to: number;
+  /** How many hunks this part holds, and how many the file has — so the box can say "2 of 5
+   *  changes" rather than only a line span, which on its own says nothing about how much is left. */
+  hunks: number;
+  ofHunks: number;
+};
+
+/** One entry of a group: the real changed file, which part of it this is, whatever the reading said
+ *  about that part, and how much of its code the document opens with. */
 export type ReviewGroupFile = {
   file: GitLabDiffFile;
   note?: string;
+  /** `null` when the entry is the WHOLE file — which is every entry of a reading made before parts
+   *  existed, and every entry whose range turned out to cover all of the file's hunks. */
+  part: ReviewPart | null;
   /** `null` for a file that carries no patch at all. */
   patch: ReviewPatch | null;
 };
+
+/** One entry's key, for a React list.
+ *
+ *  A PATH is no longer unique: the whole point of a part is that one file appears under several
+ *  headings. So the key carries the region, and two parts of one file are two rows rather than one
+ *  row React re-uses for both — which is what would make a fold pressed on one apply to the other.
+ *
+ *  It rests on hunk spans being DISTINCT, which follows from the two facts above it: a patch's hunks
+ *  are in increasing order and a hunk is claimed once, so two disjoint sets of them cannot share both
+ *  a lowest `from` and a highest `to`. What would break it is a patch carrying the same `@@` header
+ *  twice — corrupt, and not something GitLab writes. The same span is what `data-region` states on the
+ *  element, so a test and a capture rest on it too. */
+export function reviewPartKey(entry: ReviewGroupFile): string {
+  return entry.part ? `${entry.file.path}#${entry.part.from}-${entry.part.to}` : entry.file.path;
+}
+
+/** What a part's box says it is, or `null` when the entry is the whole file.
+ *
+ *  Both facts, because each answers something the other cannot: the LINES are where to look in the
+ *  file, and the COUNT is how much of the file is elsewhere. A box saying only "lines 96–140" leaves
+ *  the reader wondering whether that is all of it. */
+export function reviewPartLabel(entry: ReviewGroupFile): string | null {
+  if (!entry.part) return null;
+  const { from, to, hunks, ofHunks } = entry.part;
+  const span = from === to ? `line ${from}` : `lines ${from}–${to}`;
+  return `${span} · ${hunks} of ${ofHunks} changes`;
+}
 
 /** One group as the view draws it: a theme, or the leftovers.
  *
@@ -196,7 +257,15 @@ export type ReviewGroup = {
 /** The prose the leftovers carry. It says what the group IS rather than apologising for it: these
  *  are changed files, they still need reading, and the grouping simply had nothing to say. */
 export const UNPLACED_SUMMARY =
-  "The reading did not place these files under any theme. They are part of the branch and still need reviewing.";
+  "The reading did not place these under any theme. They are part of the branch and still need reviewing.";
+
+/** The second sentence the leftovers carry when some of them are REGIONS rather than whole files.
+ *
+ *  Without it a reader meeting `src/server/health.ts` under both a theme and "Not grouped" would read
+ *  the page as having drawn one file twice. It says what really happened: part of that file is
+ *  grouped, and this is the rest. */
+export const UNPLACED_PARTS_NOTE =
+  "Some are regions of files whose other changes are grouped above — this is what is left of them.";
 
 export const UNPLACED_TITLE = "Not grouped";
 
@@ -223,16 +292,48 @@ export function reviewGroups(
   if (!review || !diff) return [];
   const byPath = new Map(diff.files.map((file) => [file.path, file]));
   const groups: ReviewGroup[] = [];
-  // The FIRST theme to name a file gets it. The Rust parse already holds a fresh answer to that
-  // rule, and this is the same answer for a payload from anywhere else — an older backend, a store
-  // row somebody edited. It is not belt-and-braces: a file drawn under two headings is a file
-  // reviewed twice, and it would make `reviewCoverage` claim to account for more files than the diff
-  // holds.
-  const claimed = new Set<string>();
+
+  // Each file's patch cut into hunks, once. The walk asks for the same file as many times as the
+  // reading names it, and `splitPatch` is a full pass over the text — which for a 900-line patch is
+  // not something to do per theme.
+  const splits = new Map<string, SplitPatch>();
+  const splitFor = (file: GitLabDiffFile): SplitPatch => {
+    let split = splits.get(file.path);
+    if (!split) {
+      split = splitPatch(file.patch);
+      splits.set(file.path, split);
+    }
+    return split;
+  };
+
+  // **A HUNK IS CLAIMED ONCE, and that is the rule this whole file rests on.** The FIRST theme to
+  // claim a hunk gets it, so no change is drawn under two headings — reviewed twice, counted twice,
+  // with no way to tell which grouping the reading meant. The Rust parse holds a COARSER version of
+  // the same rule (the same path-and-range pair twice), because deciding whether two RANGES overlap
+  // needs the patch and that module deliberately holds no patch parser. This is the fine answer, and
+  // it is also the only one that works for a payload from anywhere else — an older backend, a store
+  // row somebody edited.
+  //
+  // A file with NO hunks (a binary file, a pure rename, one GitLab collapsed) is atomic: it has one
+  // claimable unit, index 0, which is the file itself. That keeps the whole walk on one rule instead
+  // of a second path for the four states that carry no patch.
+  const claimed = new Map<string, Set<number>>();
+  const claimedIn = (path: string): Set<number> => {
+    let set = claimed.get(path);
+    if (!set) {
+      set = new Set<number>();
+      claimed.set(path, set);
+    }
+    return set;
+  };
+
   // How many patches the document has opened so far, across every group.
   let shown = 0;
-  const entryFor = (file: GitLabDiffFile, note?: string): ReviewGroupFile => {
-    const lines = patchTextLineCount(file.patch);
+  /** One entry, with both patch budgets spent on the code it really draws. */
+  const entryFor = (file: GitLabDiffFile, part: ReviewPart | null, note?: string): ReviewGroupFile => {
+    // The PART's own text when there is one, so a two-hunk region of a 900-line file is measured as
+    // the region — which is what decides whether it opens shown, and what the fold offers to show.
+    const lines = patchTextLineCount(part ? part.patch : file.patch);
     let patch: ReviewPatch | null = null;
     if (lines > 0) {
       // Both budgets, in the one place they can be spent together: short enough to read, AND
@@ -243,31 +344,89 @@ export function reviewGroups(
       patch = { lines, shown: fits && room };
       if (patch.shown) shown += 1;
     }
-    return { file, ...(note ? { note } : {}), patch };
+    return { file, ...(note ? { note } : {}), part, patch };
   };
+
+  /** The entry for a set of hunk indices, or `null` when the set is the whole file.
+   *
+   *  A part that covers EVERY hunk is drawn as the whole file rather than as "lines 1–200 · 5 of 5
+   *  changes", whether the reading asked for it with a range or without one: it is the same code, and
+   *  a label about a region is noise when there is no other region. */
+  const partOf = (file: GitLabDiffFile, take: number[]): ReviewPart | null => {
+    const split = splitFor(file);
+    if (split.hunks.length === 0) return null;
+    if (take.length === split.hunks.length) return null;
+    const wanted = new Set(take);
+    const kept = split.hunks.filter((hunk) => wanted.has(hunk.index));
+    const patch = narrowPatch(split, wanted);
+    if (!patch || kept.length === 0) return null;
+    return {
+      patch,
+      from: Math.min(...kept.map((hunk) => hunk.from)),
+      to: Math.max(...kept.map((hunk) => hunk.to)),
+      hunks: kept.length,
+      ofHunks: split.hunks.length,
+    };
+  };
+
   for (const theme of review.themes) {
-    const files = theme.files
-      .map((entry): ReviewGroupFile | null => {
-        const file = byPath.get(entry.path);
-        if (!file || claimed.has(entry.path)) return null;
-        claimed.add(entry.path);
-        return entryFor(file, entry.note);
-      })
-      .filter((entry): entry is ReviewGroupFile => entry !== null);
+    const files: ReviewGroupFile[] = [];
+    for (const entry of theme.files) {
+      const file = byPath.get(entry.path);
+      // A path the diff no longer holds is dropped here as well as in Rust, and that second check is
+      // not redundant: a stored reading outlives the diff it was made from, so a branch that moved
+      // can leave a reading naming a file the page is not drawing.
+      if (!file) continue;
+      const split = splitFor(file);
+      const units = split.hunks.length;
+      // Which units this entry ASKS for. A range is resolved against the hunks; no range asks for
+      // the whole file.
+      //
+      // A range on a file with NO hunks is IGNORED rather than fatal, and the file is claimed whole.
+      // There is no region of a binary file, so the range cannot mean anything — but the theme did
+      // place the file, and honouring that placement is worth more to the reader than moving it to
+      // the leftovers over a field that could not apply. It is the direction `range_from_value` takes
+      // in Rust for a range it cannot read: a bad range costs the range, never the part.
+      const wanted =
+        entry.range && units > 0
+          ? hunksTouching(split.hunks, entry.range.from, entry.range.to)
+          : new Set(units > 0 ? split.hunks.map((hunk) => hunk.index) : [0]);
+      const already = claimedIn(entry.path);
+      const take = [...wanted].filter((index) => !already.has(index)).sort((a, b) => a - b);
+      // Nothing left to claim: an earlier theme took these hunks, or the range named a region the
+      // file does not have. Either way this entry would be a heading over no code.
+      if (take.length === 0) continue;
+      for (const index of take) already.add(index);
+      files.push(entryFor(file, partOf(file, take), entry.note));
+    }
     if (files.length === 0) continue;
     groups.push({ title: theme.title, summary: theme.summary, files, unplaced: false });
   }
-  // The leftovers come from the DIFF rather than from the stored list, so a file added by a push
-  // since the reading was made turns up here instead of being invisible: a group of "everything no
-  // theme claimed" is only honest if it is computed against what is on screen now.
-  const leftovers = diff.files.filter((file) => !claimed.has(file.path));
+
+  // **THE LEFTOVERS ARE PER HUNK NOW, which is what keeps "nothing is silently left out" true once a
+  // file can be split.** They come from the DIFF rather than from the stored list, so a file added by
+  // a push since the reading was made turns up here instead of being invisible — and a file whose
+  // OTHER half a theme claimed turns up here as the half it did not.
+  const leftovers: ReviewGroupFile[] = [];
+  for (const file of diff.files) {
+    const already = claimed.get(file.path) ?? new Set<number>();
+    const split = splitFor(file);
+    if (split.hunks.length === 0) {
+      if (!already.has(0)) leftovers.push(entryFor(file, null));
+      continue;
+    }
+    const rest = split.hunks.map((hunk) => hunk.index).filter((index) => !already.has(index));
+    if (rest.length === 0) continue;
+    // The leftovers get the same budget rather than a rule of their own: the reading had nothing to
+    // say about them, so their code is the only thing on the page that speaks for them.
+    leftovers.push(entryFor(file, partOf(file, rest)));
+  }
   if (leftovers.length > 0) {
+    const partial = leftovers.some((entry) => entry.part !== null);
     groups.push({
       title: UNPLACED_TITLE,
-      summary: UNPLACED_SUMMARY,
-      // The leftovers get the same budget rather than a rule of their own: the reading had nothing
-      // to say about them, so their code is the only thing on the page that speaks for them.
-      files: leftovers.map((file) => entryFor(file)),
+      summary: partial ? `${UNPLACED_SUMMARY} ${UNPLACED_PARTS_NOTE}` : UNPLACED_SUMMARY,
+      files: leftovers,
       unplaced: true,
     });
   }
@@ -294,21 +453,36 @@ export function reviewFoldedPatches(
   return folded > 0 ? { folded, total } : null;
 }
 
-/** How many files a reading really accounts for, over how many the diff holds.
+/** How many files a reading really accounts for, over how many the diff holds — and in how many
+ *  PARTS it accounts for them.
  *
  *  Drawn at the top of the view, because it is the one number that says whether the grouping is a
- *  picture of the whole branch. */
+ *  picture of the whole branch.
+ *
+ *  It takes the GROUPS rather than the reading, which is the shape `reviewFoldedPatches` already has
+ *  and now a correctness matter as well as a tidiness one: computing the groups is a pass over every
+ *  patch in the branch, and a version of this that made its own would do that twice on every render
+ *  of the page.
+ *
+ *  `grouped` counts distinct FILES, because a path can now appear in several groups and a count of
+ *  entries would claim to account for more files than the diff holds. A file whose hunks are split
+ *  across a theme and the leftovers counts as grouped — the leftovers section says the rest out loud,
+ *  which is the honest place for it. */
 export function reviewCoverage(
-  review: GitLabReview | null | undefined,
+  groups: ReviewGroup[],
   diff: GitLabDiff | null | undefined,
-): { grouped: number; total: number } {
+): { grouped: number; total: number; parts: number } {
   const total = diff?.files.length ?? 0;
-  if (!review) return { grouped: 0, total };
-  const groups = reviewGroups(review, diff);
-  const grouped = groups
-    .filter((group) => !group.unplaced)
-    .reduce((count, group) => count + group.files.length, 0);
-  return { grouped, total };
+  const paths = new Set<string>();
+  let parts = 0;
+  for (const group of groups) {
+    if (group.unplaced) continue;
+    for (const entry of group.files) {
+      paths.add(entry.file.path);
+      parts += 1;
+    }
+  }
+  return { grouped: paths.size, total, parts };
 }
 
 /** Whether the page can offer a reading at all.

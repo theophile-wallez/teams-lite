@@ -21,6 +21,7 @@
 
 import type { GitLabDiffFile } from "./gitlab-diff";
 import type { GitLabDiscussion, GitLabDiscussionList, GitLabNote } from "./gitlab-mr";
+import { HUNK_HEADER } from "./gitlab-patch";
 
 /** Which side of a diff a line sits on. Mirrors `gitlab_mr_write::LineSide`, and closed for
  *  its reason: it decides which line numbers the position may state. */
@@ -106,7 +107,10 @@ export type DiffCommentTarget = {
 
 // ---- reading a patch --------------------------------------------------------
 
-const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+// `HUNK_HEADER` is imported at the top of this file, out of the module about patches: a copy of that
+// regex here would be a second answer to "where does a hunk begin", and its two readers — this walk,
+// and the splitter the AI reading narrows a patch with — would disagree on the first header either
+// got wrong, with nothing on screen looking wrong.
 
 /** One line of a patch with the CODE on it, which is what a textual search over a diff needs.
  *

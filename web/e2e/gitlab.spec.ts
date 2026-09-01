@@ -1040,7 +1040,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     // deciding whether to review needs; the code is one press away.
     const summary = page.locator('[data-testid="gitlab-changes-summary"]');
     await expect(summary).toContainText("8 files");
-    await expect(summary).toContainText("+123");
+    await expect(summary).toContainText("+127");
     await expect(page.locator('[data-testid="gitlab-changes-link"]')).toHaveAttribute(
       "href",
       /\/diffs$/,
@@ -1539,10 +1539,15 @@ test.describe.serial("the GitLab merge-request page", () => {
     // Every changed file is accounted for: the sections plus the one of what nothing claimed.
     const sections = page.locator('[data-testid="gitlab-review-section"]');
     await expect.poll(async () => await sections.count()).toBeGreaterThan(1);
-    const drawn = await page.locator('[data-testid="gitlab-review-file"]').count();
+    // DISTINCT PATHS rather than boxes, which is what this assertion has always meant and what it
+    // has to say now a theme claims parts of files: one file can be drawn in several boxes, so a
+    // count of boxes would exceed the branch's own file count and pass for the wrong reason.
+    const paths = await page
+      .locator('[data-testid="gitlab-review-file"]')
+      .evaluateAll((rows) => new Set(rows.map((row) => row.getAttribute("data-path"))).size);
     // Against the page's OWN count of the branch, which is the number a reader compares it with.
     const coverage = await page.locator('[data-testid="gitlab-review-coverage"]').innerText();
-    expect(drawn).toBe(Number(coverage.match(/of (\d+) files/)?.[1]));
+    expect(paths).toBe(Number(coverage.match(/of (\d+) files/)?.[1]));
 
     // And the files nothing grouped are a section of their OWN rather than a footnote: a reviewer
     // still has to read them, and a grouped view that left one out in silence would let them
@@ -1550,6 +1555,102 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(
       page.locator('[data-testid="gitlab-review-section"][data-unplaced="yes"]'),
     ).toBeVisible();
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("splits ONE file between two themes, each box holding only its own hunks", async ({
+    page,
+  }) => {
+    // The whole of what a part is for: one file holds changes belonging to different themes, so each
+    // region is drawn under the theme it belongs to with an explanation of its own. A file forced
+    // under one heading is the flattening the themes exist to undo.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const VALUES = "charts/user-facing/values.yaml";
+    const boxes = page.locator(`[data-testid="gitlab-review-file"][data-path="${VALUES}"]`);
+    // THREE boxes for one file: two themes claimed a region each, and the third region is what the
+    // leftovers hold.
+    await expect.poll(async () => await boxes.count()).toBe(3);
+
+    // Each names WHICH region it is, and the three are different regions of one file.
+    const regions = await boxes.evaluateAll((rows) =>
+      rows.map((row) => row.getAttribute("data-region")),
+    );
+    expect(new Set(regions).size).toBe(3);
+    expect(regions).toContain("12-23");
+    expect(regions).toContain("34-41");
+
+    // And they sit in DIFFERENT sections — a split that drew both boxes under one heading would have
+    // changed nothing at all.
+    const sectionOf = (span: string) =>
+      page
+        .locator('[data-testid="gitlab-review-section"]')
+        .filter({ has: page.locator(`[data-region="${span}"]`) });
+    await expect(sectionOf("12-23")).toHaveCount(1);
+    await expect(sectionOf("34-41")).toHaveCount(1);
+    const headings = await page
+      .locator('[data-testid="gitlab-review-section"]')
+      .filter({ has: page.locator(`[data-path="${VALUES}"]`) })
+      .locator('[data-testid="gitlab-review-heading"]')
+      .allInnerTexts();
+    expect(new Set(headings).size).toBe(3);
+
+    // The box says where in the file and how much of it, because each answers what the other cannot.
+    const web = page.locator(`[data-testid="gitlab-review-file"][data-region="12-23"]`);
+    await expect(web.locator('[data-testid="gitlab-review-region"]')).toHaveText(
+      "lines 12–23 · 1 of 3 changes",
+    );
+
+    // THE CODE IS NARROWED, which is the half a label cannot fake: the web service's box holds its
+    // own hunk and NOT the api service's, and the api box the other way round.
+    await expect(web.locator("diffs-container")).toBeVisible({ timeout: 20_000 });
+    const api = page.locator(`[data-testid="gitlab-review-file"][data-region="34-41"]`);
+    await expect(api.locator("diffs-container")).toBeVisible({ timeout: 20_000 });
+    await expect(web).toContainText("podDisruptionBudget");
+    await expect(web).not.toContainText("preStopSleepSeconds");
+    await expect(api).toContainText("preStopSleepSeconds");
+    await expect(api).not.toContainText("podDisruptionBudget");
+    // And each carries the reading's own words about THAT region rather than about the file.
+    await expect(api.locator('[data-testid="gitlab-review-note"]')).toContainText(
+      "preStopSleepSeconds",
+    );
+
+    // The headline counts the files and the PARTS, because a file drawn in three boxes is one file.
+    await expect(page.locator('[data-testid="gitlab-review-coverage"]')).toContainText("parts");
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("puts the hunks NOTHING claimed in the leftovers, and says they are regions", async ({
+    page,
+  }) => {
+    // The completeness rule at its new grain. With whole files it was enough to list the files no
+    // theme named; once a file can be split, a reader who read every theme has still not seen the
+    // hunks of it nothing claimed — and this is the section that says so.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const unplaced = page.locator('[data-testid="gitlab-review-section"][data-unplaced="yes"]');
+    await expect(unplaced).toBeVisible();
+    // It SAYS these are parts of files grouped above, or a reader meeting one path under two
+    // headings would read the page as having drawn it twice.
+    await expect(unplaced).toContainText("regions of files whose other changes are grouped above");
+    // And the region it holds is the one no theme took — the tag bump, not the drain changes.
+    const rest = unplaced.locator(
+      '[data-testid="gitlab-review-file"][data-path="charts/user-facing/values.yaml"]',
+    );
+    await expect(rest).toHaveAttribute("data-region", "65-66");
+    await expect(rest.locator("diffs-container")).toBeVisible({ timeout: 20_000 });
+    await expect(rest).toContainText("7.2.5");
+    await expect(rest).not.toContainText("podDisruptionBudget");
 
     await setMergeRequestControl(page, { clear: true });
   });
@@ -2565,7 +2666,16 @@ test.describe.serial("the GitLab merge-request page", () => {
     // stays under the line it is about, with the words still in it. It used to be thrown away,
     // which was right while the page drew one file at a time and would now cost a half-written
     // comment to a scroll.
+    //
+    // The DRAFT is what is asserted, not the element, and the round trip is what makes that
+    // honest: the feed VIRTUALIZES, so pressing a row far enough away unmounts the file this box is
+    // in — and the box goes with it however carefully the draft is kept. This test used to assert
+    // the element straight after the press and passed because that file happened to stay mounted;
+    // one fixture growing by two hunks was enough to unmount it, which is exactly the kind of
+    // accident an assertion should not rest on. What the rule really claims is that the words come
+    // BACK with the code, which is what `gitlabDiffCommentDraft` living in the store buys.
     await pickFile(page, "charts/user-facing/values.yaml");
+    await pickFile(page, HEALTH);
     await expect(composer).toHaveAttribute("data-lines", "Line 5");
     await expect(page.locator('[data-testid="gitlab-diff-comment-input"]')).toHaveValue(
       "Worth a note.",
