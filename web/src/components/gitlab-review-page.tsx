@@ -4,7 +4,6 @@ import {
   Alert02Icon,
   ArrowRight01Icon,
   ChevronLeftIcon,
-  Loading02Icon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import {
@@ -31,6 +30,7 @@ import { useAppState, useController } from "./controller-context";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
 import { ReviewChatPanel } from "./gitlab-review-chat";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { RichNodes } from "./rich-content";
 import { TrackerProjectProvider } from "./tracker-refs-context";
 
@@ -572,11 +572,11 @@ function RunButton(props: { busy: boolean; onRun: () => void; label: string }) {
         props.busy && "opacity-70",
       )}
     >
-      <HugeiconsIcon
-        icon={props.busy ? Loading02Icon : SparklesIcon}
-        className={cn("size-3.5", props.busy && "animate-spin")}
-        strokeWidth={1.8}
-      />
+      {props.busy ? (
+        <FadeArc className="size-3.5" />
+      ) : (
+        <HugeiconsIcon icon={SparklesIcon} className="size-3.5" strokeWidth={1.8} />
+      )}
       {/* A run is tens of seconds, so the button says it is going rather than looking pressed and
           idle — the reader has no other signal that anything is happening. */}
       {props.busy ? "Reading the changes…" : props.label}
@@ -634,7 +634,7 @@ function ReviewLoading(props: { label: string }) {
       className="flex h-full flex-1 items-center justify-center p-8"
     >
       <span className="flex items-center gap-2 text-[12px] text-text-faint">
-        <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
+        <FadeArc className="size-3.5" />
         {props.label}
       </span>
     </div>

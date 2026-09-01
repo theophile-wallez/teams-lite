@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Alert02Icon, Cancel01Icon, Loading02Icon, SentIcon } from "@hugeicons/core-free-icons";
+import { Alert02Icon, Cancel01Icon, SentIcon } from "@hugeicons/core-free-icons";
 import {
   matchReviewTags,
   MAX_REVIEW_TAG_FILES,
@@ -19,6 +19,7 @@ import { gitLabMarkdownOptions } from "~/lib/gitlab-upload";
 import { formatMessageTime } from "~/lib/message-time";
 import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
+import { FadeArc } from "./loading-ui/fade-arc";
 import { RichNodes } from "./rich-content";
 
 // ASKING A FOLLOW-UP about the reading — the conversation beside the document.
@@ -144,7 +145,7 @@ export function ReviewChatPanel(props: {
             data-testid="gitlab-review-chat-asking"
             className="mt-4 flex items-center gap-1.5 text-[12px] text-text-faint"
           >
-            <HugeiconsIcon icon={Loading02Icon} className="size-3.5 animate-spin" strokeWidth={1.6} />
+            <FadeArc className="size-3.5" />
             Reading it again for that…
           </p>
         )}
@@ -298,11 +299,11 @@ export function ReviewChatPanel(props: {
               (asking || !reviewQuestionCanBeAsked(props.review, question)) && "opacity-50",
             )}
           >
-            <HugeiconsIcon
-              icon={asking ? Loading02Icon : SentIcon}
-              className={cn("size-3.5", asking && "animate-spin")}
-              strokeWidth={1.8}
-            />
+            {asking ? (
+              <FadeArc className="size-3.5" />
+            ) : (
+              <HugeiconsIcon icon={SentIcon} className="size-3.5" strokeWidth={1.8} />
+            )}
             Ask
           </button>
           <span className="text-[11px] text-text-faint">Enter asks · Shift+Enter is a new line</span>
