@@ -1228,6 +1228,240 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-heading"]')).toBeVisible();
   });
 
+  test("opens the file that is ALREADY current, which on a phone is the only way out", async ({
+    page,
+  }) => {
+    // THE TRAP THIS CLOSES. `@pierre/trees` publishes one callback, `onSelectionChange`, and its
+    // controller returns early when the selection it is handed matches the one it holds — so a press
+    // on the row that is already current reports NOTHING. On a narrow screen that press is also the
+    // navigation from the files to the patch, so the reader was stuck: pressing the lit row did
+    // nothing, for ever. A diff of ONE file is the worst of it, because that file is always the
+    // current one and there is no other row to press instead.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+
+    const diffPage = page.locator('[data-testid="gitlab-diff-page"]');
+    await expect(diffPage).toHaveAttribute("data-column", "files");
+
+    // Press a file: this much always worked, because the selection really changed.
+    await pickFile(page, HEALTH);
+    await expect(diffPage).toHaveAttribute("data-column", "patch");
+
+    // Back to the list. That file is now the one the page is AT, so its row is the lit one.
+    await page.locator('[data-testid="gitlab-diff-back"]').click();
+    await expect(diffPage).toHaveAttribute("data-column", "files");
+
+    // Press it AGAIN. Nothing about the tree's selection changes, so the vendor reports nothing —
+    // and before the fix this press did nothing at all, leaving the reader on the file list with no
+    // way to the code. The assertion below timed out.
+    //
+    // It is asserted WITHOUT `pickFile`, which waits on the pane's own sentinel: what is being
+    // tested is that the press navigates, so the navigation has to be the thing asserted.
+    await page.locator(`[data-item-path="${HEALTH}"]`).first().click();
+    await expect(diffPage).toHaveAttribute("data-column", "patch");
+    await expect(page.locator('[data-testid="gitlab-diff-pane"]')).toHaveAttribute(
+      "data-path",
+      HEALTH,
+    );
+
+    // And a THIRD time, because a press must not be a one-off: whatever answers it has to keep
+    // answering.
+    await page.locator('[data-testid="gitlab-diff-back"]').click();
+    await expect(diffPage).toHaveAttribute("data-column", "files");
+    await page.locator(`[data-item-path="${HEALTH}"]`).first().click();
+    await expect(diffPage).toHaveAttribute("data-column", "patch");
+  });
+
+  // ---- a NAME pressed in the code, and the two columns being dragged ----------
+  //
+  // A reviewer meets an identifier and asks one thing about it — what else in this branch touches
+  // it? — and the panel on the right answers it (see lib/gitlab-diff-symbols.ts). The columns
+  // either side of the code are dragged, because a deep tree truncates every path at a fixed width
+  // and a reader who has picked their file wants the room back for the code.
+
+  /** One token of the code of one file, pressed the way a reader presses it.
+   *
+   *  `[data-char]` is `@pierre/diffs`' own element per token — it wraps them once a token handler
+   *  is passed — and Playwright's CSS engine pierces the open shadow root they live in. Scoped to
+   *  ONE file, because the same name stands in several, and EXACT, because `server` is a substring
+   *  of `serverReady` and a loose match would press the wrong token. */
+  async function pressToken(page: Page, path: string, token: string) {
+    await feedFile(page, path)
+      .locator("[data-char]")
+      .filter({ hasText: new RegExp(`^${token}$`) })
+      .first()
+      .click();
+  }
+
+  const symbolsPanel = (page: Page) => page.locator('[data-testid="gitlab-diff-symbols"]');
+
+  const VALUES = "charts/user-facing/values.yaml";
+  const PDB = "charts/user-facing/templates/pdb.yaml";
+
+  test("a press on a name lists every place it stands in the changes", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await waitForFeed(page);
+
+    // Nothing is open until the reader asks.
+    await expect(symbolsPanel(page)).toHaveCount(0);
+
+    // `podDisruptionBudget` is a key in the chart's values and is read in the template beside it,
+    // so the answer spans two files — which is the whole reason this is a column and not a tooltip.
+    await pickFile(page, VALUES);
+    await pressToken(page, VALUES, "podDisruptionBudget");
+    await expect(symbolsPanel(page)).toHaveAttribute("data-symbol", "podDisruptionBudget");
+    await expect(symbolsPanel(page)).toHaveAttribute("data-total", "3");
+    await expect(page.locator('[data-testid="gitlab-diff-symbols-summary"]')).toHaveText(
+      "3 occurrences in 2 files",
+    );
+
+    // Grouped by file, in the diff's own order, and every row emphasizes exactly the name.
+    const files = page.locator('[data-testid="gitlab-diff-symbols-file"]');
+    await expect(files).toHaveCount(2);
+    await expect(files.nth(0)).toHaveAttribute("data-path", VALUES);
+    await expect(files.nth(1)).toHaveAttribute("data-path", PDB);
+    const marks = page.locator('[data-testid="gitlab-diff-symbols-match"]');
+    await expect(marks).toHaveCount(3);
+    for (const mark of await marks.all()) await expect(mark).toHaveText("podDisruptionBudget");
+
+    // What the search could NOT see is stated: a file whose patch never travelled may hold the name
+    // and this list would never say so. Two of these seven carry none — the binary file and the one
+    // GitLab collapsed — and the RENAME is not one of them, because its patch IS its header.
+    await expect(page.locator('[data-testid="gitlab-diff-symbols-limits"]')).toContainText(
+      "2 files",
+    );
+  });
+
+  test("presses the same name to close it, and a brace opens nothing at all", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await waitForFeed(page);
+    await pickFile(page, HEALTH);
+
+    await pressToken(page, HEALTH, "draining");
+    await expect(symbolsPanel(page)).toHaveAttribute("data-symbol", "draining");
+    // The press is its own undo — the shape the comment gesture already has for its lit line.
+    await pressToken(page, HEALTH, "draining");
+    await expect(symbolsPanel(page)).toHaveCount(0);
+
+    // A token that is not a NAME does nothing rather than opening an empty panel: a side panel that
+    // appeared with nothing in it would read as a bug, where a press that changes nothing reads as a
+    // brace not being a name.
+    await pressToken(page, HEALTH, "\\{");
+    await expect(symbolsPanel(page)).toHaveCount(0);
+  });
+
+  test("a row of the panel is a PLACE: it goes to that file", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await waitForFeed(page);
+
+    await pickFile(page, VALUES);
+    await pressToken(page, VALUES, "podDisruptionBudget");
+
+    // The row for the OTHER file: pressing it makes that file the one on screen.
+    await page
+      .locator(`[data-testid="gitlab-diff-symbols-file"][data-path="${PDB}"]`)
+      .locator('[data-testid="gitlab-diff-symbols-occurrence"]')
+      .first()
+      .click();
+    await expect(page.locator('[data-testid="gitlab-diff-pane"]')).toHaveAttribute(
+      "data-path",
+      PDB,
+    );
+    // And the panel is still open: a reader walking a list of places presses the next one.
+    await expect(symbolsPanel(page)).toBeVisible();
+  });
+
+  test("draws no occurrences panel on a phone, where the page is one column at a time", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+    await pickFile(page, HEALTH);
+    await waitForFeed(page);
+
+    // The press still lands — it is the same code — but a third column here would be a page
+    // competing with the two this one already has.
+    await pressToken(page, HEALTH, "draining");
+    await expect(symbolsPanel(page)).toHaveCount(0);
+    // And no splitter either: each column fills the screen in turn, so there is nothing to divide.
+    await expect(page.locator('[data-testid="gitlab-diff-files-splitter"]')).toHaveCount(0);
+  });
+
+  test("drags the files column wider, and remembers how wide", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+
+    const files = page.locator('[data-testid="gitlab-diff-files"]');
+    const before = (await files.boundingBox())!;
+    const handle = page.locator('[data-testid="gitlab-diff-files-splitter"]');
+    const grip = (await handle.boundingBox())!;
+
+    // The STEPS matter: a jump straight from one point to the other fires no move between them, so
+    // the drag would report nothing at all.
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(grip.x + 120, grip.y + grip.height / 2, { steps: 10 });
+    await page.mouse.up();
+
+    const after = (await files.boundingBox())!;
+    expect(after.width).toBeGreaterThan(before.width + 100);
+
+    // It survives a reload, because it is the reader's own preference for this browser.
+    await page.reload();
+    await expect(page.locator('[data-testid="gitlab-diff-page"]')).toBeVisible();
+    await expect(page.locator('[data-testid="gitlab-diff-tree"]')).toBeVisible({ timeout: 25_000 });
+    const reloaded = (await files.boundingBox())!;
+    expect(Math.abs(reloaded.width - after.width)).toBeLessThan(2);
+
+    // Put it back where every other diff test expects it: one browser profile serves the whole run,
+    // so a column left 120 px wider is state they all inherit. The KEYBOARD is what does it, which
+    // is also the one assertion that this separator really is one.
+    await handle.focus();
+    for (let i = 0; i < 8; i += 1) await handle.press("ArrowLeft");
+    await expect
+      .poll(async () => Math.round((await files.boundingBox())!.width))
+      .toBeLessThan(Math.round(before.width) + 10);
+  });
+
+  test("never lets a drag squeeze the code below its own minimum", async ({ page }) => {
+    await page.setViewportSize({ width: 1100, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openDiffPage(page);
+
+    const handle = page.locator('[data-testid="gitlab-diff-files-splitter"]');
+    const grip = (await handle.boundingBox())!;
+    // Drag it as far right as the window goes. The patch is what this page is FOR, so the drag stops
+    // where the code would start being squeezed rather than leaving eight characters of it.
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(1090, grip.y + grip.height / 2, { steps: 12 });
+    await page.mouse.up();
+
+    const pane = (await page.locator('[data-testid="gitlab-diff-pane"]').boundingBox())!;
+    // `DIFF_CODE_MIN_WIDTH`, less a pixel for a fractional layout.
+    expect(pane.width).toBeGreaterThanOrEqual(359);
+
+    // Back to where it was, for the reason the test above gives.
+    await handle.focus();
+    for (let i = 0; i < 40; i += 1) await handle.press("ArrowLeft");
+  });
+
   test("offers the split layout where two columns of code fit, and remembers it", async ({
     page,
   }) => {

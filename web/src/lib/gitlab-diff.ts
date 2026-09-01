@@ -395,3 +395,107 @@ export function diffPageColumns(
   if (!narrow) return { files: true, patch: true, narrow };
   return { files: column === "files", patch: column === "patch", narrow };
 }
+
+// ---- how WIDE each column is ------------------------------------------------
+//
+// The files column shipped at a fixed `w-72`, and the reader has two reasons to disagree with it
+// that pull opposite ways: a deep tree (`src/main/java/com/acme/…`) truncates every path at that
+// width, and a reader who has picked their file wants the room back for the code. So both side
+// columns are dragged, and their widths are remembered per browser like the unified/split choice
+// (see `applyPersistedDiffColumnWidths` in lib/store.ts) — a per-screen decision with no upstream
+// to write it to.
+//
+// Every number below is a WIDTH IN PIXELS and every rule about them is here rather than in the
+// component, for the reason `diffPageColumns` is: the splitter, the column it sizes, the panel on
+// the other side and the persisted value are four readings of one answer.
+
+/** What the files column has always been: `w-72`, 18rem. It stays the default because it is the
+ *  width every capture and every reader of this page has seen. */
+export const FILES_COLUMN_DEFAULT_WIDTH = 288;
+
+/** The narrowest the files column goes. Below this a path is truncated to its extension and the
+ *  tree stops being a way of finding a file — and the stat decoration on the row (`+12 −3`) has
+ *  nowhere to sit. */
+export const FILES_COLUMN_MIN_WIDTH = 180;
+
+/** What the occurrences panel opens at, and the narrowest it goes.
+ *
+ *  It is wider than the tree by default because its rows hold a line of CODE rather than a path,
+ *  and narrower than the code column because it is a list of places rather than a place to read. */
+export const SYMBOLS_PANEL_DEFAULT_WIDTH = 340;
+export const SYMBOLS_PANEL_MIN_WIDTH = 240;
+
+/** The room the CODE keeps, whatever the reader drags.
+ *
+ *  This is the one number here that is not a preference: the patch is what the page is FOR, and a
+ *  reader who drags a splitter to the far side must not be able to leave themselves eight
+ *  characters of code — the same argument `SPLIT_MIN_WIDTH` makes for refusing the split layout on
+ *  a phone. So a drag is clamped against it, and with both side columns open it is what decides
+ *  which of them gives way (see {@link resolveDiffColumnWidths}). */
+export const DIFF_CODE_MIN_WIDTH = 360;
+
+/** Whether the reader may drag the columns at all.
+ *
+ *  Exactly when both columns are on screen: below `DIFF_COLUMNS_MIN_WIDTH` the page is one column
+ *  at a time and each fills the screen, so a splitter there would size nothing — and a control
+ *  that changes nothing reads as a bug, which is the rule that already hides the unified/split
+ *  toggle below `SPLIT_MIN_WIDTH`. It reads the same number `diffPageColumns` does, through it, so
+ *  the two can never disagree about whether there are two columns to divide. */
+export function diffColumnsAreResizable(width: number): boolean {
+  return !diffPageColumns(width, "files").narrow;
+}
+
+/** One column's own width, brought inside its bounds and the viewport's.
+ *
+ *  A stored width outlives the screen it was chosen on — a laptop undocked from a wide monitor
+ *  reads back 900 px for a column in a 1280 px window — so every width is clamped on the way OUT
+ *  of the store rather than only on the way in. `Math.round` because a fractional column width is
+ *  a fractional gap beside it at some device pixel ratios. */
+export function clampDiffColumnWidth(width: number, min: number, max: number): number {
+  if (!Number.isFinite(width)) return min;
+  return Math.round(Math.min(Math.max(width, min), Math.max(min, max)));
+}
+
+/**
+ * The width each side column really gets, for a viewport and the two the reader asked for.
+ *
+ * ONE function rather than a clamp per column, because the two are not independent: the code
+ * between them keeps {@link DIFF_CODE_MIN_WIDTH}, so on a narrow-ish desktop the pair cannot both
+ * have what was stored for them and something has to give.
+ *
+ * **The OCCURRENCES panel gives way first, and the files column second.** The panel is the
+ * transient one — it was opened by a press a moment ago and is closed by another — while the files
+ * column is the page's own furniture, at a width the reader set deliberately and expects to find
+ * again. Taking the room from the tree instead would move the whole page's shape every time a name
+ * was pressed, which is the jump this order exists to avoid. If shrinking the panel is not enough
+ * the tree gives way too, and only then does the code go below its minimum — which is a window too
+ * narrow to hold this layout at all, and is why `diffColumnsAreResizable` is false there.
+ */
+export function resolveDiffColumnWidths(input: {
+  viewport: number;
+  files: number;
+  symbols: number;
+  symbolsOpen: boolean;
+}): { files: number; symbols: number } {
+  // A viewport of 0 is the first paint, before anything is measured. Nothing is clamped against
+  // it — and the ceiling has to be lifted BEFORE the clamps rather than after them, or each column
+  // is clamped to `min(asked, 0)` and comes back at its own minimum, which is precisely the bug
+  // this guard exists to prevent.
+  const unmeasured = input.viewport <= 0;
+  const ceiling = unmeasured ? Number.POSITIVE_INFINITY : input.viewport;
+  const symbolsWanted = input.symbolsOpen
+    ? clampDiffColumnWidth(input.symbols, SYMBOLS_PANEL_MIN_WIDTH, ceiling)
+    : 0;
+  const filesWanted = clampDiffColumnWidth(input.files, FILES_COLUMN_MIN_WIDTH, ceiling);
+  if (unmeasured) return { files: filesWanted, symbols: symbolsWanted };
+  let symbols = symbolsWanted;
+  let files = filesWanted;
+  const overflow = () => files + symbols + DIFF_CODE_MIN_WIDTH - input.viewport;
+  if (overflow() > 0 && symbols > 0) {
+    symbols = Math.max(SYMBOLS_PANEL_MIN_WIDTH, symbols - overflow());
+  }
+  if (overflow() > 0) {
+    files = Math.max(FILES_COLUMN_MIN_WIDTH, files - overflow());
+  }
+  return { files, symbols };
+}

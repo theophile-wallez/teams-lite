@@ -93,6 +93,16 @@ export type DiffCommentTarget = {
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
+/** One line of a patch with the CODE on it, which is what a textual search over a diff needs.
+ *
+ *  It is a {@link PatchLine} and nothing but a {@link PatchLine} plus its text, so every rule
+ *  written against the numbers reads one of these unchanged — which is what lets
+ *  {@link patchLines} be this walk's own answer rather than a second walk (see there). */
+export type PatchTextLine = PatchLine & {
+  /** The line's own code, with the diff's leading `+`, `-` or space taken off. */
+  text: string;
+};
+
 /**
  * Every line of a patch that is drawn, with its place in each file.
  *
@@ -107,9 +117,15 @@ const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
  * an addition. So the walk starts at the first hunk — and after that a `--- x` really IS a
  * removed line whose content begins with two dashes, which is why the header is recognised by
  * position and never by its shape.
+ *
+ * **The TEXT comes off this same walk**, for the reason above stated once more: a search for an
+ * identifier has to report the line NUMBER it found it on, so a second walk that re-derived the
+ * text would be a second opinion about which line that is — and it would differ on the first
+ * patch with a removal in it, filing an occurrence against the wrong line. {@link patchLines}
+ * is this function with the text ignored by its return type.
  */
-export function patchLines(patch: string | null | undefined): PatchLine[] {
-  const lines: PatchLine[] = [];
+export function patchTextLines(patch: string | null | undefined): PatchTextLine[] {
+  const lines: PatchTextLine[] = [];
   if (!patch) return lines;
   let oldLine = 0;
   let newLine = 0;
@@ -133,10 +149,10 @@ export function patchLines(patch: string | null | undefined): PatchLine[] {
     if (raw.startsWith("\\")) continue;
     const mark = raw[0];
     if (mark === "-") {
-      lines.push({ old: oldLine, new: newLine, side: "old", row: lines.length });
+      lines.push({ old: oldLine, new: newLine, side: "old", row: lines.length, text: raw.slice(1) });
       oldLine += 1;
     } else if (mark === "+") {
-      lines.push({ old: oldLine, new: newLine, side: "new", row: lines.length });
+      lines.push({ old: oldLine, new: newLine, side: "new", row: lines.length, text: raw.slice(1) });
       newLine += 1;
     } else {
       // Everything else inside a hunk is a line that did not change. A space is the ordinary
@@ -145,12 +161,38 @@ export function patchLines(patch: string | null | undefined): PatchLine[] {
       // one, which is a comment quietly filed against the wrong line. A patch here covers one
       // file (the backend writes one per file), so there is no second `diff --git` to mistake
       // for code.
-      lines.push({ old: oldLine, new: newLine, side: "both", row: lines.length });
+      //
+      // Only a REAL leading space is taken off: a line somebody stripped it from is its own
+      // text already, and slicing there would eat the first character of the code.
+      lines.push({
+        old: oldLine,
+        new: newLine,
+        side: "both",
+        row: lines.length,
+        text: raw.startsWith(" ") ? raw.slice(1) : raw,
+      });
       oldLine += 1;
       newLine += 1;
     }
   }
   return lines;
+}
+
+/** Every line of a patch, by its place in each file — {@link patchTextLines} without the code.
+ *
+ *  It is the same walk rather than a copy of it: see there for why one walk is load-bearing.
+ *
+ *  The text is PROJECTED away rather than left on the objects, even though a `PatchTextLine`
+ *  satisfies every use of a `PatchLine`. What this function answers is a line's PLACE, and a
+ *  caller comparing one against a literal place — which is how the walk itself is pinned — would
+ *  otherwise be handed an object with a field it never asked for. */
+export function patchLines(patch: string | null | undefined): PatchLine[] {
+  return patchTextLines(patch).map(({ old, new: newLine, side, row }) => ({
+    old,
+    new: newLine,
+    side,
+    row,
+  }));
 }
 
 /** A patch's lines, reachable by the number a reader sees in either gutter.

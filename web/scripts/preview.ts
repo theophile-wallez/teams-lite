@@ -663,6 +663,29 @@ export async function scrollDiffFeed(page: Page, by: number): Promise<void> {
 }
 
 /**
+ * Press a NAME in the code of one file of the feed — the gesture that opens the occurrences panel.
+ *
+ * The token is `@pierre/diffs`' own element (it wraps every token once a token handler is passed,
+ * and each carries `data-char`, its start column), and Playwright's CSS engine pierces the open
+ * shadow root they live in. It is scoped to ONE file, because in a feed the same name stands in
+ * several — and pressing whichever happened to mount first would open the panel from a place the
+ * caller did not choose.
+ *
+ * `exact` matters: `podDisruptionBudget` is a substring of nothing here, but `server` is a
+ * substring of `serverReady`, and a loose match would press the wrong token.
+ */
+export async function pressDiffToken(page: Page, path: string, token: string): Promise<void> {
+  await diffFileItem(page, path)
+    .locator("[data-char]")
+    .filter({ hasText: new RegExp(`^${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) })
+    .first()
+    .click();
+  await page.waitForSelector(`[data-testid="gitlab-diff-symbols"][data-symbol="${token}"]`, {
+    timeout: APP_READY_TIMEOUT_MS,
+  });
+}
+
+/**
  * One FILE of the feed, as the renderer's own element.
  *
  * The element carries no path of its own, so it is found by the header slot this app renders
@@ -3564,6 +3587,80 @@ if (import.meta.main) {
             `${out}-{rename,binary,collapsed}-light.png, ` +
             `${out}-expand-light.png, ${out}-expanded-light.png and ` +
             `${out}-mobile-{files,patch}-light.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // A NAME pressed in the code: the occurrences panel it opens, and the two columns being dragged.
+  //
+  // Both are POINTER gestures, so both are driven here the way a reader makes them — a click on a
+  // token, and a real drag of the handle between two columns.
+  if (args.includes("--diff-symbols")) {
+    await withPreview(
+      async ({ page, shot, setTheme }) => {
+        await openGitLabTab(page);
+        await openMergeRequestAt(page, 0);
+        await openChanges(page);
+
+        // The panel, opened by pressing a name that stands in TWO of these files —
+        // `podDisruptionBudget` is a key in the chart's values and is read in the template beside
+        // it, which is what makes the list worth a column.
+        await pressDiffToken(page, "charts/user-facing/values.yaml", "podDisruptionBudget");
+        await page.waitForTimeout(400);
+        await shot(`${out}-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-dark.png`);
+        await setTheme("light");
+
+        // The panel ALONE, cropped: the rows are 11px code and the line numbers are 10px, so the
+        // page at 1200px says nothing about whether either can be read.
+        await shot(`${out}-panel-light.png`, '[data-testid="gitlab-diff-symbols"]');
+
+        // A press on a row is a press on a PLACE: the feed goes to that file, at that line.
+        await page
+          .locator('[data-testid="gitlab-diff-symbols-file"][data-path="charts/user-facing/templates/pdb.yaml"]')
+          .locator('[data-testid="gitlab-diff-symbols-occurrence"]')
+          .first()
+          .click();
+        await page.waitForTimeout(700);
+        await shot(`${out}-went-light.png`);
+
+        // A name that stands NOWHERE else, which is a real answer rather than an empty panel.
+        await pressDiffToken(page, "src/server/health.ts", "draining");
+        await page.waitForTimeout(400);
+        await shot(`${out}-alone-light.png`, '[data-testid="gitlab-diff-symbols"]');
+
+        // The two columns DRAGGED. The files column first: the handle is a one-pixel rule with a
+        // few pixels either side, so the drag is driven with the pointer in steps — a jump from one
+        // point to another fires no move between them.
+        const before = (await page.locator('[data-testid="gitlab-diff-files"]').boundingBox())!;
+        const handle = (await page.locator('[data-testid="gitlab-diff-files-splitter"]').boundingBox())!;
+        await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(handle.x + 150, handle.y + handle.height / 2, { steps: 12 });
+        await page.mouse.up();
+        await page.waitForTimeout(400);
+        const after = (await page.locator('[data-testid="gitlab-diff-files"]').boundingBox())!;
+        console.log(`[preview] files column: ${Math.round(before.width)}px -> ${Math.round(after.width)}px`);
+        await shot(`${out}-dragged-light.png`);
+        await setTheme("dark");
+        await shot(`${out}-dragged-dark.png`);
+        await setTheme("light");
+
+        // And a PHONE, where the panel is not drawn at all: the page is one column at a time, so a
+        // third one would be a page competing with the two it already has.
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(600);
+        await shot(`${out}-mobile-light.png`);
+        await page.setViewportSize(VIEWPORT);
+
+        console.log(
+          `[preview] wrote ${out}-{light,dark}.png, ${out}-panel-light.png, ` +
+            `${out}-went-light.png, ${out}-alone-light.png, ` +
+            `${out}-dragged-{light,dark}.png and ${out}-mobile-light.png`,
         );
       },
       { deviceScaleFactor: dpr },

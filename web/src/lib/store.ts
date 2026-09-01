@@ -156,6 +156,8 @@ import {
 } from "./call-failure";
 import {
   canExpandDiff,
+  FILES_COLUMN_DEFAULT_WIDTH,
+  SYMBOLS_PANEL_DEFAULT_WIDTH,
   type DiffDepth,
   type DiffLayout,
   type GitLabDiff,
@@ -167,7 +169,9 @@ import {
   type DiffCommentTarget,
   type DiffLineSelection,
   type PierreLineRange,
+  type PierreSide,
 } from "./gitlab-diff-comment";
+import { symbolIsSearchable, type DiffSymbolTarget } from "./gitlab-diff-symbols";
 import { jobLogIsLive } from "./gitlab-job-log";
 import {
   isNotMerged,
@@ -865,6 +869,22 @@ export type AppState = {
   /** Unified or split, the reader's own choice, persisted per browser. A narrow screen
    *  overrides it to unified without forgetting it (see `effectiveDiffLayout`). */
   gitlabDiffLayout: DiffLayout;
+  /** The NAME the reader pressed in the code, and where they pressed it — which is what the
+   *  occurrences panel searches for and what says which line to light.
+   *
+   *  Per merge request only in the sense that it is dropped when one is opened or left: it is a
+   *  question about the diff on screen, and carrying it to another branch would answer it about
+   *  files that have nothing to do with the press. */
+  gitlabDiffSymbol: DiffSymbolTarget | null;
+  /** How wide the two side columns of the diff page are, in pixels — the reader's own drag,
+   *  persisted per browser beside the layout above and for its reason: a per-screen decision with
+   *  no upstream to write it to.
+   *
+   *  They are stored as ASKED FOR and clamped on the way out (`resolveDiffColumnWidths`), never
+   *  clamped on the way in: a width chosen on a wide monitor has to survive being read back in a
+   *  small window and then found again when the monitor comes back. */
+  gitlabDiffFilesWidth: number;
+  gitlabDiffSymbolsWidth: number;
   /** The lines the diff renderer LIGHTS, in its own vocabulary — a press on a line number, or
    *  wherever a drag down them has reached.
    *
@@ -1000,6 +1020,12 @@ const CALENDAR_SETTINGS_KEY = "teams-lite:calendar-settings";
 // to write it to. What is deliberately NOT here is the expanded read — that is per merge
 // request, because its cost is (see `canExpandDiff`).
 const GITLAB_DIFF_LAYOUT_KEY = "teams-lite:gitlab-diff-layout";
+// How wide the diff page's two side columns are. Client-only for the same reason the layout is —
+// a per-screen decision with no upstream — and stored as the reader ASKED rather than as drawn, so
+// a width chosen on a wide monitor is found again when the monitor comes back (the clamp against
+// the window happens at draw time, in `resolveDiffColumnWidths`).
+const GITLAB_DIFF_FILES_WIDTH_KEY = "teams-lite:gitlab-diff-files-width";
+const GITLAB_DIFF_SYMBOLS_WIDTH_KEY = "teams-lite:gitlab-diff-symbols-width";
 
 /**
  * The calendar's display preferences — the three toggles the view menu offers.
@@ -1181,6 +1207,9 @@ function initialState(): AppState {
     gitlabDiffPath: null,
     gitlabDiffDepth: "listed",
     gitlabDiffLayout: "unified",
+    gitlabDiffSymbol: null,
+    gitlabDiffFilesWidth: FILES_COLUMN_DEFAULT_WIDTH,
+    gitlabDiffSymbolsWidth: SYMBOLS_PANEL_DEFAULT_WIDTH,
     gitlabDiffSelection: null,
     gitlabDiffComment: null,
     gitlabDiffCommentDraft: "",
@@ -1406,6 +1435,7 @@ export class TeamsController {
     this.applyPersistedVisibleCalendars();
     this.applyPersistedCalendarSettings();
     this.applyPersistedDiffLayout();
+    this.applyPersistedDiffColumnWidths();
     this.wireEvents();
     this.watchWakeups();
 
@@ -3973,6 +4003,9 @@ export class TeamsController {
       gitlabDiffError: null,
       gitlabDiffPath: this.gitlabDiffPathCache.get(id) ?? null,
       gitlabDiffDepth: diff?.expanded ? "raw" : "listed",
+      // A name pressed in one branch's code says nothing about another's, so the panel closes
+      // with the merge request rather than searching this diff for the last one's word.
+      gitlabDiffSymbol: null,
       // The pipeline is deliberately NOT cached across opens: a stale CI badge is the one
       // piece of this page that would be read as current when it is minutes old.
       gitlabPipeline: null,
@@ -4354,6 +4387,100 @@ export class TeamsController {
     }
   }
 
+  // ---- a name pressed in the code -------------------------------------------
+
+  /**
+   * The reader pressed a name in the diff: open the occurrences panel on it.
+   *
+   * The token comes from the renderer, so it is whatever Shiki made of a line — a brace, a string,
+   * a run of whitespace. `symbolIsSearchable` is what decides, and a press on something that is
+   * not a name does NOTHING rather than opening an empty panel: a side panel that appeared with
+   * nothing in it would read as a bug, where a press that changes nothing reads as a brace not
+   * being a name.
+   *
+   * Pressing the SAME name again closes the panel. That is the shape the comment gesture already
+   * has (pressing the lit line again closes the box), and it is what makes the press its own undo.
+   */
+  openGitLabDiffSymbol(name: string, path: string, lineNumber: number, side: PierreSide): void {
+    if (!symbolIsSearchable(name)) return;
+    const open = this.get().gitlabDiffSymbol;
+    if (open && open.name === name && open.path === path && open.lineNumber === lineNumber) {
+      this.closeGitLabDiffSymbol();
+      return;
+    }
+    this.set({ gitlabDiffSymbol: { name, path, lineNumber, side } });
+  }
+
+  /** Close the occurrences panel. */
+  closeGitLabDiffSymbol(): void {
+    if (!this.get().gitlabDiffSymbol) return;
+    this.set({ gitlabDiffSymbol: null });
+  }
+
+  /**
+   * Take the reader to one occurrence: that file becomes the one they are at, and the LIT line
+   * moves to the occurrence they went to.
+   *
+   * The panel does NOT close — a reader walking a list of six occurrences is going to press the next
+   * one — and the search does not run again, because it is keyed on the NAME and only the place has
+   * moved. Moving the highlight is what says where they landed: the code the feed scrolls to is a
+   * screenful of lines, and without it nothing in it says which one was the answer.
+   */
+  goToGitLabDiffOccurrence(path: string, lineNumber: number, side: PierreSide): void {
+    const open = this.get().gitlabDiffSymbol;
+    // Only ever while a name IS open: this is a press inside the panel that name opened.
+    if (!open) return;
+    this.setGitLabDiffFile(path);
+    this.set({ gitlabDiffSymbol: { name: open.name, path, lineNumber, side } });
+  }
+
+  // ---- how wide the two side columns are ------------------------------------
+
+  /** Remember how wide the reader dragged the files column. */
+  setGitLabDiffFilesWidth(width: number): void {
+    this.rememberDiffColumnWidth("gitlabDiffFilesWidth", GITLAB_DIFF_FILES_WIDTH_KEY, width);
+  }
+
+  /** Remember how wide they dragged the occurrences panel. */
+  setGitLabDiffSymbolsWidth(width: number): void {
+    this.rememberDiffColumnWidth("gitlabDiffSymbolsWidth", GITLAB_DIFF_SYMBOLS_WIDTH_KEY, width);
+  }
+
+  /** One spelling of "store a column width", because two would drift on the day one of them
+   *  stopped rounding or stopped refusing a width that is not a number. */
+  private rememberDiffColumnWidth(
+    field: "gitlabDiffFilesWidth" | "gitlabDiffSymbolsWidth",
+    key: string,
+    width: number,
+  ): void {
+    if (!Number.isFinite(width)) return;
+    const next = Math.round(width);
+    if (this.get()[field] === next) return;
+    this.set({ [field]: next } as Partial<AppState>);
+    try {
+      localStorage.setItem(key, String(next));
+    } catch {
+      /* ignore — a failed persist just doesn't survive reload */
+    }
+  }
+
+  /** Load the persisted column widths. Best-effort and SSR-safe like the layout above, and it
+   *  validates by SHAPE rather than by range: what is a sensible width depends on the window, and
+   *  that is `resolveDiffColumnWidths`' answer at draw time rather than this one's. A stored value
+   *  that is not a positive number at all leaves the default. */
+  private applyPersistedDiffColumnWidths(): void {
+    try {
+      const files = Number(localStorage.getItem(GITLAB_DIFF_FILES_WIDTH_KEY));
+      if (Number.isFinite(files) && files > 0) this.set({ gitlabDiffFilesWidth: Math.round(files) });
+      const symbols = Number(localStorage.getItem(GITLAB_DIFF_SYMBOLS_WIDTH_KEY));
+      if (Number.isFinite(symbols) && symbols > 0) {
+        this.set({ gitlabDiffSymbolsWidth: Math.round(symbols) });
+      }
+    } catch {
+      /* ignore — a column width is non-critical */
+    }
+  }
+
   private async loadMergeRequestApproval(key: MergeRequestKey, webUrl: string): Promise<void> {
     if (!webUrl) return;
     try {
@@ -4503,6 +4630,9 @@ export class TeamsController {
       gitlabDiffError: null,
       gitlabDiffPath: null,
       gitlabDiffDepth: "listed",
+      // A name pressed in one branch's code says nothing about another's — and the panel's own
+      // width is NOT reset here, because that is the persisted preference (see the field).
+      gitlabDiffSymbol: null,
       // A comment being written belongs to one line of one file, so opening another merge
       // request — or leaving this one — takes it away rather than carrying it over to a line
       // that means something else there.

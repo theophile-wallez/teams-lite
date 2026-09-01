@@ -16,6 +16,7 @@ import {
   type DiffLineAnnotation,
   type FileDiffMetadata,
   type SelectedLineRange,
+  type TokenEventBase,
 } from "@pierre/diffs";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -154,6 +155,15 @@ function FileHeaderNote(props: { file: GitLabDiffFile | undefined }) {
  *  numbers the comment is filed under. */
 type FeedGutterGetter = () => { lineNumber: number; side?: PierreSide } | undefined;
 
+/** A token as pierre's own press reports one.
+ *
+ *  The side is OPTIONAL for the same reason the gutter's line above has none: `onTokenClick` is one
+ *  callback over two modes, and a whole-FILE view's token sits on no side — so the handler has to
+ *  satisfy both overloads. This feed holds only diffs, so a token with no side cannot really arrive,
+ *  and one is skipped rather than guessed at: the side decides which of GitLab's two line numbers
+ *  the press was on. */
+type FeedToken = TokenEventBase & { side?: PierreSide };
+
 /** One card hanging under a line of a diff, addressed in the renderer's own vocabulary.
  *
  *  It is pierre's own `DiffLineAnnotation<T>` with this app's `T`: the side and the line say
@@ -167,14 +177,21 @@ export type DiffAnnotation = DiffLineAnnotation<DiffAnnotationCard>;
  *  has to satisfy both. */
 type FeedItemContext = { item: { id: string } };
 
-/** What the page can ASK the feed to do. One thing: show a file.
+/** What the page can ASK the feed to do: show a file, or show one LINE of one.
  *
  *  It is a handle rather than a prop, and that is deliberate. A "which file to scroll to" prop
  *  re-asks on every mount of the effect that reads it — a resize, a remount, any change of the
  *  object — and an ask the renderer cannot carry out at once is HELD until it can, which spends
  *  the reader's next wheel notch on it (measured, on this seam). A press is an event, so it is
- *  spelled as one. */
-export type DiffFeedHandle = { showFile: (path: string) => void };
+ *  spelled as one.
+ *
+ *  `showLine` is what an occurrences row presses. A file here runs to nine hundred lines, so
+ *  bringing the FILE up for a reader who asked for line 512 leaves them to find it themselves —
+ *  and the renderer publishes a line target of its own, so nothing about this is computed here. */
+export type DiffFeedHandle = {
+  showFile: (path: string) => void;
+  showLine: (path: string, lineNumber: number, side: PierreSide) => void;
+};
 
 type DiffFeedProps = {
   diff: GitLabDiff;
@@ -196,6 +213,9 @@ type DiffFeedProps = {
   renderAnnotation: (annotation: DiffAnnotation, path: string) => ReactNode;
   /** The file the reader is AT, whenever it changes — which is what the tree lights. */
   onActiveFile: (path: string) => void;
+  /** The reader pressed a NAME in the code. The token is whatever Shiki made of the line, so what
+   *  is worth searching for is the page's decision (`symbolIsSearchable`) and not this seam's. */
+  onTokenPress: (path: string, token: string, lineNumber: number, side: PierreSide) => void;
   /** Which file the feed OPENS at — the one the reader was last at on this merge request. It is
    *  read ONCE, when the items are first there: from then on where the feed sits is the reader's
    *  own business, and a press comes through {@link DiffFeedHandle}. */
@@ -246,6 +266,8 @@ export const DiffFeed = forwardRef<DiffFeedHandle, DiffFeedProps>(function DiffF
   onCommit.current = props.onSelectionEnd;
   const onActiveFile = useRef(props.onActiveFile);
   onActiveFile.current = props.onActiveFile;
+  const onTokenPress = useRef(props.onTokenPress);
+  onTokenPress.current = props.onTokenPress;
   const draw = useRef(props.renderAnnotation);
   draw.current = props.renderAnnotation;
 
@@ -303,7 +325,31 @@ export const DiffFeed = forwardRef<DiffFeedHandle, DiffFeedProps>(function DiffF
     asked.current = path;
     view.current?.scrollTo({ type: "item", id: path, align: "start", behavior: "instant" });
   }, []);
-  useImperativeHandle(ref, () => ({ showFile }), [showFile]);
+  // One line of one file, for an occurrences row.
+  //
+  // `start` rather than `center`, and that is a correctness rule rather than a preference.
+  // `activeDiffFeedFile` answers "which file is the reader at" with the last file that begins at or
+  // above the top of the viewport — so CENTRING a line near the beginning of a file leaves the
+  // PREVIOUS file filling the top, and the feed's own scroll then reports that one and overwrites
+  // the file the reader just asked for. Measured: pressing an occurrence in the second file left the
+  // pane still naming the first. Aligning to the start puts the asked-for line at the top, so its
+  // file began at or above the top and the tree, the pane and the code agree.
+  //
+  // It is also what a press on a file ROW already does, so a press in this page means one thing:
+  // what you asked for goes to the top. What it costs is the context above the line, which is one
+  // wheel notch away.
+  const showLine = useCallback((path: string, lineNumber: number, side: PierreSide) => {
+    asked.current = path;
+    view.current?.scrollTo({
+      type: "line",
+      id: path,
+      lineNumber,
+      side,
+      align: "start",
+      behavior: "instant",
+    });
+  }, []);
+  useImperativeHandle(ref, () => ({ showFile, showLine }), [showFile, showLine]);
 
   // Where the feed OPENS. Three things about it, and each was measured on this seam:
   //
@@ -381,6 +427,23 @@ export const DiffFeed = forwardRef<DiffFeedHandle, DiffFeedProps>(function DiffF
         onChange.current(context.item.id, range),
       onLineSelectionEnd: (range: SelectedLineRange | null, context: FeedItemContext) =>
         onCommit.current(context.item.id, range),
+      // A press on a NAME in the code, which is what opens the occurrences panel. Passing this
+      // handler at all is what turns pierre's token transformer on, so the tokens become elements
+      // a press can land on — and the gesture is entirely theirs: this app never asks which word is
+      // under a pointer.
+      //
+      // It does not compete with the comment gesture. That one starts only from the line-NUMBER
+      // gutter (see `enableLineSelection` above), so a press in the code is never the start of a
+      // selection and a drag down the numbers never lands on a token.
+      //
+      // The FILE travels, because in a feed a line number names a line in most of the files at
+      // once. A token with no side is a whole-FILE view's and cannot arrive here — this feed holds
+      // only diffs — and is skipped rather than guessed at, for the reason the gutter's own control
+      // skips one: the side decides which of GitLab's two numbers the line is.
+      onTokenClick: (token: FeedToken, _event: MouseEvent, context: FeedItemContext) => {
+        if (!token.side) return;
+        onTokenPress.current(context.item.id, token.tokenText, token.lineNumber, token.side);
+      },
       // The renderer has drawn a file: the feed can be put where it opens (see `openFeed`). It is
       // the one signal that says the layout is real rather than reserved.
       onPostRender: (_node: HTMLElement, _instance: unknown, phase: string) => {
@@ -584,7 +647,29 @@ function GutterCommentButton(props: {
  *  It fills the height its host gives it and scrolls itself — `h-full` rather than a fixed
  *  height, because on the diff page the host is a full-height column. The tree VIRTUALIZES its
  *  rows, so it measures its own box before drawing any: a box with only a `max-height`
- *  measures zero, which drew an empty column the width of a tree. */
+ *  measures zero, which drew an empty column the width of a tree.
+ *
+ *  **A PRESS and a CHANGE OF SELECTION are two different things, and this component needs both.**
+ *  `@pierre/trees` publishes exactly one callback — `onSelectionChange` — and its controller
+ *  returns early when the selection it is handed matches the one it holds
+ *  (`FileTreeController`: `if (!selectionChanged && !anchorChanged) return`). So a press on the row
+ *  that is ALREADY current reports nothing at all, and no heuristic over that callback can recover
+ *  it. That cost a reader the page: on a narrow screen the files and the patch are one column each
+ *  and a press is also the NAVIGATION between them, so a diff of ONE file — which is always the
+ *  current one — could not be opened at all. Pressing its row did nothing, for ever, with no way
+ *  forward. (It is the same dead press at every width; only on a phone is it a trap.)
+ *
+ *  So the press is read from the DOM, through the tree's OWN row contract: its rows are
+ *  `button[data-type="item"]` carrying `dataset.itemPath` and `dataset.itemType`, which is what its
+ *  own hit-testing reads (`render/FileTreeView.js`). The listener sits on a wrapper of this app's
+ *  and walks `composedPath()`, because the rows live in a shadow root and a `click` crosses it.
+ *  Three things make that safe to rest on. A press this cannot resolve falls through to the
+ *  selection-change path, which is exactly today's behaviour — so the failure mode of a vendor that
+ *  renames those attributes is the bug above rather than something worse. `web/e2e/gitlab.spec.ts`
+ *  presses the current row and holds the page to opening it, so a rename fails a test rather than
+ *  stranding a reader. And the contract was ALREADY load-bearing here before this: `pickDiffFile`
+ *  in `web/scripts/preview.ts` — which every diff capture and several specs drive the tree with —
+ *  selects a row as `[data-item-path="…"]`. */
 export function DiffFileTree(props: {
   diff: GitLabDiff;
   selected: string | null;
@@ -649,6 +734,11 @@ export function DiffFileTree(props: {
       if (selected.length !== 1) return;
       const path = selected[0]!;
       if (path === current.current) return;
+      // The press listener below already answered this one, in the same task. Without this the
+      // pick would be made twice for every press on a row that is not already current — once from
+      // the DOM and once from the selection it changed — which is one redundant instant scroll to
+      // the file the feed is already being sent to.
+      if (path === pressed.current) return;
       // A DIRECTORY row is a fold, not a file: picking one must not clear the diff under it.
       if (statsRef.current.has(path)) onPick.current(path);
     },
@@ -689,5 +779,39 @@ export function DiffFileTree(props: {
     model.scrollToPath(props.selected, { focus: false });
   }, [model, props.selected]);
 
-  return <FileTree model={model} data-testid="gitlab-diff-tree" className="h-full w-full" />;
+  // The last path a PRESS answered, cleared on the next task. It exists only so the selection this
+  // press is about to change does not answer the same press a second time (see `onSelectionChange`).
+  const pressed = useRef<string | null>(null);
+
+  // A press on a row, read from the tree's own row contract — see the note in the doc comment
+  // above for why this exists at all and why it is safe to rest on.
+  const onClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    for (const node of event.nativeEvent.composedPath()) {
+      if (!(node instanceof HTMLElement)) continue;
+      if (node.dataset.type !== "item") continue;
+      // A FOLDER row is a fold, not a file — the same rule the selection path holds.
+      if (node.dataset.itemType === "folder") return;
+      const path = node.dataset.itemPath;
+      // `statsRef` is the diff's own file list, so a row this app does not hold a file for is not
+      // one it can show: that is the one check that makes this contract-independent.
+      if (!path || !statsRef.current.has(path)) return;
+      pressed.current = path;
+      // Cleared on the next task rather than after a timeout: the selection change this press
+      // causes is dispatched synchronously or on a microtask, and anything later than that is a
+      // different press.
+      queueMicrotask(() => {
+        if (pressed.current === path) pressed.current = null;
+      });
+      onPick.current(path);
+      return;
+    }
+  }, []);
+
+  return (
+    // The wrapper is what the press listener needs, and it takes the size the column gives it so
+    // the tree below still measures a real box — a tree that measures zero draws no rows at all.
+    <div className="h-full w-full" onClick={onClick}>
+      <FileTree model={model} data-testid="gitlab-diff-tree" className="h-full w-full" />
+    </div>
+  );
 }

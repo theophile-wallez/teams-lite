@@ -10,16 +10,22 @@ import {
   Loading02Icon,
 } from "@hugeicons/core-free-icons";
 import {
+  DIFF_CODE_MIN_WIDTH,
+  diffColumnsAreResizable,
   diffPageColumns,
   diffSummary,
   diffTruncationNotice,
   effectiveDiffLayout,
   expandDiffHint,
+  FILES_COLUMN_MIN_WIDTH,
+  resolveDiffColumnWidths,
   selectDiffFile,
   SPLIT_MIN_WIDTH,
+  SYMBOLS_PANEL_MIN_WIDTH,
   type DiffColumn,
   type DiffLayout,
 } from "~/lib/gitlab-diff";
+import { symbolOccurrences, symbolSelection } from "~/lib/gitlab-diff-symbols";
 import {
   diffCommentAnchor,
   diffCommentableFiles,
@@ -28,11 +34,21 @@ import {
 import { mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import type { DiffAnnotation, DiffFeedHandle } from "./gitlab-diff-view";
 import { cn } from "~/lib/utils";
+import { ColumnSplitter } from "./column-splitter";
 import { useAppState, useController } from "./controller-context";
 import { DiffLineComposer, DiffLineThread } from "./gitlab-diff-comments";
+import { DiffSymbolsPanel } from "./gitlab-diff-symbols";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
 import { TrackerProjectProvider } from "./tracker-refs-context";
+
+/** The custom properties the two side columns take their width from.
+ *
+ *  They are declared on the row that holds both columns and written by the splitters during a drag,
+ *  which is what keeps a resize off React's path entirely (see `column-splitter.tsx`). The names are
+ *  shared between the host and the handle, so they are spelled once, here. */
+const FILES_WIDTH_VAR = "--diff-files-width";
+const SYMBOLS_WIDTH_VAR = "--diff-symbols-width";
 
 // The DIFF PAGE: the whole screen, the changed files down the left, and every one of them read
 // on the right as one FEED. It is its own route (`/mr/<id>/diff` — see
@@ -107,12 +123,30 @@ function useDiffState() {
      *  about. Two fields, because the box opens when the gesture ENDS (see the store). */
     selection: useAppState((s) => s.gitlabDiffSelection),
     comment: useAppState((s) => s.gitlabDiffComment),
+    /** The name the reader pressed in the code, and how wide they have dragged the two side
+     *  columns. */
+    symbol: useAppState((s) => s.gitlabDiffSymbol),
+    filesWidth: useAppState((s) => s.gitlabDiffFilesWidth),
+    symbolsWidth: useAppState((s) => s.gitlabDiffSymbolsWidth),
   };
 }
 
 export function GitLabDiffPage(props: { onBack: () => void }) {
-  const { detail, diff, loading, error, path, layout, theme, notes, selection, comment } =
-    useDiffState();
+  const {
+    detail,
+    diff,
+    loading,
+    error,
+    path,
+    layout,
+    theme,
+    notes,
+    selection,
+    comment,
+    symbol,
+    filesWidth,
+    symbolsWidth,
+  } = useDiffState();
   const controller = useController();
 
   const file = useMemo(() => selectDiffFile(diff, path), [diff, path]);
@@ -123,6 +157,30 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
   const columns = diffPageColumns(width, column);
   const effective = effectiveDiffLayout(layout, width);
   const expand = expandDiffHint(diff);
+
+  // What the reader pressed in the code, and where else it stands. `null` for no press and for a
+  // press on something that is not a name, so the panel is drawn exactly when it has an answer.
+  const search = useMemo(() => symbolOccurrences(diff, symbol?.name ?? null), [diff, symbol?.name]);
+  // The panel is only ever open beside the CODE, so it is not drawn while the reader is in the
+  // files column of a narrow screen — and never on a narrow screen at all, where it would be a
+  // third page competing with the two the page already has.
+  const symbolsOpen = !!search && !columns.narrow;
+  const resizable = diffColumnsAreResizable(width);
+  // Both side columns' widths at once, because they are not independent: the code between them
+  // keeps its own minimum, so on a narrow-ish desktop something has to give (see
+  // `resolveDiffColumnWidths`).
+  const widths = useMemo(
+    () =>
+      resolveDiffColumnWidths({
+        viewport: width,
+        files: filesWidth,
+        symbols: symbolsWidth,
+        symbolsOpen,
+      }),
+    [width, filesWidth, symbolsWidth, symbolsOpen],
+  );
+  // The element the two widths are declared on, and the one the splitters write to.
+  const columnHost = useRef<HTMLDivElement | null>(null);
 
   // What hangs under a line, per file: every thread already there, and the composer for the
   // comment being written. Per FILE because the feed holds them all, and one list per file
@@ -252,16 +310,30 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
             This merge request changes no files.
           </p>
         ) : (
-          <div className="flex min-h-0 flex-1">
+          <div
+            ref={columnHost}
+            className="flex min-h-0 flex-1"
+            // The two widths live here, on the row both columns are in, because that is the one
+            // element a splitter can write to and both columns can read from. React renders the
+            // resolved numbers; a drag overwrites them on the DOM and the store catches up at the
+            // end (see `column-splitter.tsx`).
+            style={
+              {
+                [FILES_WIDTH_VAR]: `${widths.files}px`,
+                [SYMBOLS_WIDTH_VAR]: `${widths.symbols}px`,
+              } as React.CSSProperties
+            }
+          >
             {/* THE FILES. Its own column, its own scroll, and the expand control at its foot
                 because what GitLab withheld is a fact about this list. */}
             {columns.files && (
               <div
                 data-testid="gitlab-diff-files"
-                className={cn(
-                  "flex min-h-0 flex-col",
-                  columns.narrow ? "flex-1" : "w-72 shrink-0 border-r border-border-subtle",
-                )}
+                className={cn("flex min-h-0 flex-col", columns.narrow ? "flex-1" : "shrink-0")}
+                // On a wide screen the column is as wide as the reader dragged it. It carries no
+                // border of its own: the splitter beside it IS the rule between the two, and a
+                // border there would be two lines saying one thing.
+                style={columns.narrow ? undefined : { width: `var(${FILES_WIDTH_VAR})` }}
               >
                 <div className="min-h-0 flex-1 overflow-hidden">
                   <Suspense fallback={<DiffLoading label="Loading the files…" />}>
@@ -311,6 +383,29 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
               </div>
             )}
 
+            {/* The rule between the files and the code, and the handle that moves it. Drawn only
+                where there really are two columns to divide — on a narrow screen each fills the
+                screen in turn, so a splitter there would size nothing. */}
+            {columns.files && columns.patch && resizable && (
+              <ColumnSplitter
+                host={columnHost}
+                variable={FILES_WIDTH_VAR}
+                width={widths.files}
+                min={FILES_COLUMN_MIN_WIDTH}
+                // The code keeps its own minimum, and the panel keeps whatever it is holding: the
+                // drag stops where the code would start being squeezed rather than pushing the
+                // panel closed under the reader.
+                max={Math.max(
+                  FILES_COLUMN_MIN_WIDTH,
+                  width - widths.symbols - DIFF_CODE_MIN_WIDTH,
+                )}
+                side="start"
+                onCommit={(next) => controller.setGitLabDiffFilesWidth(next)}
+                label="Resize the file list"
+                testId="gitlab-diff-files-splitter"
+              />
+            )}
+
             {/* THE FEED. Its own column and its own scroll, so the tree beside it never moves
                 while nine hundred lines are read. */}
             {/* The pane STATES which file the reader is AT — the one at the top of the feed, whose
@@ -332,7 +427,11 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
                       layout={effective}
                       theme={theme}
                       commentable={commentable}
-                      selection={selection}
+                      // The comment gesture's own lit lines, or — with none — the line the reader
+                      // pressed a NAME on. One prop, because `selectedLines` is one fact: the
+                      // composer's selection wins, since a reader writing a comment is doing the
+                      // more particular thing.
+                      selection={selection ?? symbolSelection(symbol)}
                       onSelectionChange={(path, range) =>
                         controller.setGitLabDiffSelection(path, range)
                       }
@@ -342,12 +441,58 @@ export function GitLabDiffPage(props: { onBack: () => void }) {
                       annotations={annotations}
                       renderAnnotation={renderDiffAnnotation}
                       onActiveFile={noteActiveFile}
+                      onTokenPress={(pressedPath, token, lineNumber, side) =>
+                        controller.openGitLabDiffSymbol(token, pressedPath, lineNumber, side)
+                      }
                       openAt={file?.path ?? null}
                       ref={feed}
                     />
                   </Suspense>
                 </div>
               </div>
+            )}
+
+            {/* THE OCCURRENCES PANEL, and the rule that sizes it. Its own column on the right, its
+                own scroll, and it is drawn exactly when a press has an answer to show. */}
+            {symbolsOpen && (
+              <>
+                <ColumnSplitter
+                  host={columnHost}
+                  variable={SYMBOLS_WIDTH_VAR}
+                  width={widths.symbols}
+                  min={SYMBOLS_PANEL_MIN_WIDTH}
+                  max={Math.max(
+                    SYMBOLS_PANEL_MIN_WIDTH,
+                    width - widths.files - DIFF_CODE_MIN_WIDTH,
+                  )}
+                  side="end"
+                  onCommit={(next) => controller.setGitLabDiffSymbolsWidth(next)}
+                  label="Resize the occurrences panel"
+                  testId="gitlab-diff-symbols-splitter"
+                />
+                <div
+                  className="flex min-h-0 shrink-0 flex-col"
+                  style={{ width: `var(${SYMBOLS_WIDTH_VAR})` }}
+                >
+                  <DiffSymbolsPanel
+                    search={search}
+                    currentPath={file?.path ?? null}
+                    onGo={(occurrence, occurrencePath) => {
+                      // The file becomes the one on screen, the LIT line moves to the occurrence,
+                      // and the feed goes to it — which is the whole point of a place: a file here
+                      // runs to nine hundred lines, so naming the file is not going there.
+                      const side = occurrence.side === "old" ? "deletions" : "additions";
+                      controller.goToGitLabDiffOccurrence(
+                        occurrencePath,
+                        occurrence.lineNumber,
+                        side,
+                      );
+                      feed.current?.showLine(occurrencePath, occurrence.lineNumber, side);
+                    }}
+                    onClose={() => controller.closeGitLabDiffSymbol()}
+                  />
+                </div>
+              </>
             )}
           </div>
         )}

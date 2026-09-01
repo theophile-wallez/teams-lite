@@ -14,6 +14,7 @@ import {
   patchLineAt,
   patchLineIndex,
   patchLines,
+  patchTextLines,
   threadResolution,
   threadResolveAction,
   type DiffRefs,
@@ -515,5 +516,59 @@ describe("what one card IS, in one string", () => {
     expect(diffAnnotationKey({ kind: "composer", target: one })).not.toBe(
       diffAnnotationKey({ kind: "composer", target: span }),
     );
+  });
+});
+
+describe("patchTextLines", () => {
+  it("hands over the code with the diff's own mark taken off", () => {
+    const lines = patchTextLines(PATCH);
+    // A context line, a removal and an addition: none of them keeps its leading ` `, `-` or `+`.
+    expect(lines[0]!.text).toBe("");
+    expect(lines[1]!.text).toBe("export function health(server: Server) {");
+    expect(lines[3]!.text).toBe("export function health(server: Server): number {");
+  });
+
+  it("is the SAME walk as patchLines, line for line", () => {
+    // Two walks would disagree on the first patch with a removal in it, which would file an
+    // occurrence against a line the reader is not looking at.
+    const places = patchLines(PATCH);
+    const texted = patchTextLines(PATCH);
+    expect(texted).toHaveLength(places.length);
+    for (const [index, place] of places.entries()) {
+      const { text: _text, ...rest } = texted[index]!;
+      expect(rest).toEqual(place);
+    }
+  });
+
+  it("says nothing about a line's place that patchLines does not", () => {
+    // `patchLines` projects the text away, so a caller comparing a line against a literal place
+    // is not handed a field it never asked for.
+    for (const line of patchLines(PATCH)) expect(line).not.toHaveProperty("text");
+  });
+
+  it("keeps the first character of a context line whose leading space was stripped", () => {
+    // GitLab sends a space on every unchanged line, but a patch that lost it is still counted
+    // (see the walk) — and slicing there unconditionally would eat the code's first character,
+    // which would put every occurrence's column one to the left.
+    const stripped = [
+      "diff --git a/a.ts b/a.ts",
+      "--- a/a.ts",
+      "+++ b/a.ts",
+      "@@ -1,2 +1,2 @@",
+      "const kept = 1;",
+      "+const added = 2;",
+      "",
+    ].join("\n");
+    const lines = patchTextLines(stripped);
+    expect(lines[0]).toEqual({ old: 1, new: 1, side: "both", row: 0, text: "const kept = 1;" });
+  });
+
+  it("carries no line for the header or for a no-newline note", () => {
+    const noNewline = PATCH + "\\ No newline at end of file\n";
+    expect(patchTextLines(noNewline)).toHaveLength(patchTextLines(PATCH).length);
+    for (const line of patchTextLines(PATCH)) {
+      expect(line.text.startsWith("-- ")).toBe(false);
+      expect(line.text.startsWith("++ ")).toBe(false);
+    }
   });
 });

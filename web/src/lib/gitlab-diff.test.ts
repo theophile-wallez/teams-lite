@@ -2,9 +2,17 @@ import { describe, expect, it } from "vitest";
 import {
   activeDiffFeedFile,
   canExpandDiff,
+  clampDiffColumnWidth,
+  DIFF_CODE_MIN_WIDTH,
   DIFF_FEED_TOLERANCE,
+  diffColumnsAreResizable,
   diffFeedVersions,
   DIFF_COLUMNS_MIN_WIDTH,
+  FILES_COLUMN_DEFAULT_WIDTH,
+  FILES_COLUMN_MIN_WIDTH,
+  resolveDiffColumnWidths,
+  SYMBOLS_PANEL_DEFAULT_WIDTH,
+  SYMBOLS_PANEL_MIN_WIDTH,
   diffFileNotice,
   diffFilePaths,
   diffFileState,
@@ -333,5 +341,135 @@ describe("the version each file's item carries", () => {
     expect(sameDiffFile(base, file({ generated: true }))).toBe(false);
     expect(sameDiffFile(base, file({ binary: true }))).toBe(false);
     expect(sameDiffFile(base, file({ collapsed: true }))).toBe(false);
+  });
+});
+
+// ---- how WIDE each column is ------------------------------------------------
+
+describe("diffColumnsAreResizable", () => {
+  it("is exactly whether both columns are on screen", () => {
+    // It reads `diffPageColumns`' own answer, so the two cannot disagree about whether there are
+    // two columns to divide.
+    expect(diffColumnsAreResizable(DIFF_COLUMNS_MIN_WIDTH)).toBe(true);
+    expect(diffColumnsAreResizable(DIFF_COLUMNS_MIN_WIDTH - 1)).toBe(false);
+  });
+
+  it("offers no splitter at the first paint, before anything is measured", () => {
+    expect(diffColumnsAreResizable(0)).toBe(false);
+  });
+});
+
+describe("clampDiffColumnWidth", () => {
+  it("brings a stored width inside its bounds", () => {
+    expect(clampDiffColumnWidth(1000, FILES_COLUMN_MIN_WIDTH, 500)).toBe(500);
+    expect(clampDiffColumnWidth(10, FILES_COLUMN_MIN_WIDTH, 500)).toBe(FILES_COLUMN_MIN_WIDTH);
+    expect(clampDiffColumnWidth(300, FILES_COLUMN_MIN_WIDTH, 500)).toBe(300);
+  });
+
+  it("rounds, because a fractional column is a fractional gap beside it", () => {
+    expect(clampDiffColumnWidth(300.4, FILES_COLUMN_MIN_WIDTH, 500)).toBe(300);
+  });
+
+  it("answers the minimum for a width that is not a number at all", () => {
+    // A localStorage value written by a build that stored something else, or by hand.
+    expect(clampDiffColumnWidth(Number.NaN, FILES_COLUMN_MIN_WIDTH, 500)).toBe(
+      FILES_COLUMN_MIN_WIDTH,
+    );
+  });
+
+  it("never answers below the minimum even when the maximum is under it", () => {
+    // A window narrower than one column's minimum: the minimum wins, and the layout is not
+    // offered at that width anyway.
+    expect(clampDiffColumnWidth(300, FILES_COLUMN_MIN_WIDTH, 50)).toBe(FILES_COLUMN_MIN_WIDTH);
+  });
+});
+
+describe("resolveDiffColumnWidths", () => {
+  it("gives both columns what was asked for when there is room", () => {
+    expect(
+      resolveDiffColumnWidths({
+        viewport: 1600,
+        files: FILES_COLUMN_DEFAULT_WIDTH,
+        symbols: SYMBOLS_PANEL_DEFAULT_WIDTH,
+        symbolsOpen: true,
+      }),
+    ).toEqual({ files: FILES_COLUMN_DEFAULT_WIDTH, symbols: SYMBOLS_PANEL_DEFAULT_WIDTH });
+  });
+
+  it("gives the occurrences panel no width at all while it is closed", () => {
+    const resolved = resolveDiffColumnWidths({
+      viewport: 1600,
+      files: FILES_COLUMN_DEFAULT_WIDTH,
+      symbols: SYMBOLS_PANEL_DEFAULT_WIDTH,
+      symbolsOpen: false,
+    });
+    expect(resolved.symbols).toBe(0);
+    expect(resolved.files).toBe(FILES_COLUMN_DEFAULT_WIDTH);
+  });
+
+  it("keeps the CODE's own minimum, and takes the room from the PANEL first", () => {
+    // The panel is the transient one — opened by a press a moment ago — while the tree is the
+    // page's own furniture at a width the reader set. Taking it from the tree would move the whole
+    // page's shape every time a name was pressed.
+    const viewport = FILES_COLUMN_DEFAULT_WIDTH + SYMBOLS_PANEL_DEFAULT_WIDTH + DIFF_CODE_MIN_WIDTH - 60;
+    const resolved = resolveDiffColumnWidths({
+      viewport,
+      files: FILES_COLUMN_DEFAULT_WIDTH,
+      symbols: SYMBOLS_PANEL_DEFAULT_WIDTH,
+      symbolsOpen: true,
+    });
+    expect(resolved.files).toBe(FILES_COLUMN_DEFAULT_WIDTH);
+    expect(resolved.symbols).toBe(SYMBOLS_PANEL_DEFAULT_WIDTH - 60);
+    expect(resolved.files + resolved.symbols + DIFF_CODE_MIN_WIDTH).toBe(viewport);
+  });
+
+  it("takes it from the TREE only once the panel is at its own minimum", () => {
+    const viewport = FILES_COLUMN_MIN_WIDTH + SYMBOLS_PANEL_MIN_WIDTH + DIFF_CODE_MIN_WIDTH + 20;
+    const resolved = resolveDiffColumnWidths({
+      viewport,
+      files: FILES_COLUMN_DEFAULT_WIDTH,
+      symbols: SYMBOLS_PANEL_DEFAULT_WIDTH,
+      symbolsOpen: true,
+    });
+    expect(resolved.symbols).toBe(SYMBOLS_PANEL_MIN_WIDTH);
+    expect(resolved.files).toBe(FILES_COLUMN_MIN_WIDTH + 20);
+  });
+
+  it("holds both at their minimum rather than below it, in a window too narrow for the layout", () => {
+    // Below this the code goes under its minimum — which is a window this layout is not offered
+    // at at all (`diffColumnsAreResizable`).
+    const resolved = resolveDiffColumnWidths({
+      viewport: 500,
+      files: FILES_COLUMN_DEFAULT_WIDTH,
+      symbols: SYMBOLS_PANEL_DEFAULT_WIDTH,
+      symbolsOpen: true,
+    });
+    expect(resolved.files).toBe(FILES_COLUMN_MIN_WIDTH);
+    expect(resolved.symbols).toBe(SYMBOLS_PANEL_MIN_WIDTH);
+  });
+
+  it("clamps a width stored on a WIDER screen than the one reading it back", () => {
+    // A laptop undocked from a monitor reads back a column wider than the whole window.
+    const resolved = resolveDiffColumnWidths({
+      viewport: 1280,
+      files: 900,
+      symbols: SYMBOLS_PANEL_DEFAULT_WIDTH,
+      symbolsOpen: false,
+    });
+    expect(resolved.files).toBeLessThanOrEqual(1280 - DIFF_CODE_MIN_WIDTH);
+  });
+
+  it("clamps nothing against a viewport nothing has measured", () => {
+    // Width 0 is the first paint. Clamping there would store the minimum for every column.
+    const resolved = resolveDiffColumnWidths({
+      viewport: 0,
+      files: FILES_COLUMN_DEFAULT_WIDTH,
+      symbols: SYMBOLS_PANEL_DEFAULT_WIDTH,
+      symbolsOpen: true,
+    });
+    expect(resolved).toEqual({
+      files: FILES_COLUMN_DEFAULT_WIDTH,
+      symbols: SYMBOLS_PANEL_DEFAULT_WIDTH,
+    });
   });
 });

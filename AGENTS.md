@@ -2586,6 +2586,168 @@ the people rows in both of their shapes and a blocked merge in both themes;
 run against a real GitLab project**: there is no sandbox project to aim one at, so doing that
 is the user's own click, in their own app.
 
+### A NAME pressed in the code (every place it stands, in a panel of its own)
+
+A reviewer meets an identifier in a diff and asks one thing about it — what else in this branch
+touches it? — and until this the only answers were a trip out to GitLab or a find-in-page over a
+VIRTUALIZED feed that has most of the diff unmounted. Pressing the name answers it: the line lights,
+and a third column lists every place that name stands across the changed files, grouped by file, each
+row a press away from the line it is on. `web/src/lib/gitlab-diff-symbols.ts` holds every pure
+decision, `web/src/components/gitlab-diff-symbols.tsx` draws the panel, and the seam onto the
+renderer is one option (`onTokenClick`) in `gitlab-diff-view.tsx`.
+
+**IT IS A TEXTUAL SEARCH, AND IT SAYS SO RATHER THAN PRETENDING OTHERWISE.** GitHub answers this
+from a symbol index a language server built, which knows that the `health` in one file is the
+`health` declared in another and that the `health` in a comment is prose. Nothing on this machine
+holds such an index for a diff read out of a tracker: the repository is not checked out here, and
+the patches are FRAGMENTS of files rather than files. So what this does is find the name as a WHOLE
+WORD and the panel is named for what it really is — the honest failure is a match in a comment (the
+capture shows one: `draining` in a docstring beside `draining` in the code), and the dishonest
+alternative, calling a grep "references", is what makes a reader trust a list they should be
+checking.
+
+**WHAT IS SEARCHED IS WHAT TRAVELLED**, which is the rule `diffTotals` already holds for its counts.
+Four of the five states a file arrives in carry no patch (§ The DIFF is a PAGE), and a file with no
+patch holds no line to search — so the panel COUNTS those files and says the search covered less
+than the branch did, and the reader can press Expand and ask again. Measured against the mock's own
+seven files: two carry no patch, and the RENAME is not one of them, because a rename's patch IS its
+header.
+
+Ten rules hold it, and each is pinned by `web/e2e/gitlab.spec.ts` or
+`web/src/lib/gitlab-diff-symbols.test.ts`:
+
+- **The GESTURE is pierre's own**, and that is why it is a press on a word at all: passing
+  `onTokenClick` is what turns their token transformer on, so each token becomes an element a press
+  can land on. Nothing here ever asks which word is under a pointer. It cannot compete with the
+  comment gesture either — that one starts only from the line-NUMBER gutter, so a press in the code
+  is never the start of a selection and a drag down the numbers never lands on a token.
+- **A token that is not a NAME does nothing at all** (`symbolIsSearchable`): a letter, `_` or `$` to
+  open and then letters, digits, `_` or `$`, between 2 and 120 characters. So `podDisruptionBudget`,
+  `READY_PATH`, `aws_s3_bucket` and `$svc` all search, while `{`, `=>`, `"a string"`, `1.42.0` and a
+  run of whitespace open nothing. A press that opened an EMPTY panel would read as a bug, where a
+  press that changes nothing reads as a brace not being a name. One character is refused because it
+  is not a search but a highlight of most of the file; a KEYWORD is deliberately NOT refused, because
+  a stop-list would have to be per language, would be wrong on the first language nobody listed, and
+  would refuse a reader who really did want every `return` the branch added.
+- **The boundary is the same character set the NAME is**, scanned by hand rather than with a pattern.
+  Two reasons, both correctness: a name is exactly the kind of value that arrives from outside the
+  module, so the version with no pattern in it cannot be got wrong by an escape; and `\b` is defined
+  over `[A-Za-z0-9_]`, which is not what an identifier here is made of — `$svc` searched with
+  `\b$svc\b` matches inside `x$svc` and misses nothing else, a boundary wrong in one direction only,
+  which is the hardest kind to notice.
+- **The TEXT and the LINE NUMBER come off ONE walk** (`patchTextLines`, in
+  `gitlab-diff-comment.ts`). A search has to report the line it found a name on, so a second walk
+  that re-derived the text would be a second opinion about which line that is — and it would differ
+  on the first patch with a removal in it, filing an occurrence against a line the reader is not
+  looking at. `patchLines` is that walk with the text projected away, so a caller comparing a line
+  against a literal PLACE is not handed a field it never asked for. Both of the walk's traps are
+  kept: the empty string after a patch's final newline is a terminator, and only a REAL leading space
+  is taken off a context line — slicing unconditionally would eat the first character of the code and
+  put every occurrence's column one to the left.
+- **A press on the same name CLOSES the panel**, which is the shape the comment gesture already has
+  for its lit line, and what makes the press its own undo.
+- **A row is a PLACE, and pressing it goes to the LINE** — not just the file, because a file here runs
+  to nine hundred lines. It scrolls to `align: "start"`, and that is a correctness rule rather than a
+  preference: `activeDiffFeedFile` answers "which file is the reader at" with the last file that
+  begins at or above the top of the viewport, so CENTRING a line near the beginning of a file leaves
+  the previous file filling the top and the feed's own scroll then overwrites the file the reader just
+  asked for. Measured — pressing an occurrence in the second file left the pane still naming the
+  first. It is also what a press on a file row already does, so a press on this page means one thing.
+- **The LIT line moves to the occurrence the reader went to**, and the search does not run again
+  because it is keyed on the NAME and only the place moved. The code the feed lands on is a screenful
+  of lines, and without it nothing in it says which one was the answer.
+- **The panel does NOT close on a jump**: a reader walking a list of six occurrences is going to
+  press the next one.
+- **The name is emphasized EXACTLY**, character for character, from the offsets the search returned.
+  That is what this panel has that the code beside it cannot — the app draws these lines itself. And
+  the DIRECTORY gives way while the file's own name never does: a path here runs to
+  `src/main/java/com/acme/service/UserService.java`, truncating at the end would drop the one part
+  that says which file this is, and truncating at the start (the `direction: rtl` trick) right-aligns
+  every short path against its count, which is what the first capture of this panel showed.
+- **It is not drawn on a phone at all.** Below `DIFF_COLUMNS_MIN_WIDTH` the page is one column at a
+  time, so a third column would be a page competing with the two it already has. The press still
+  lands — it is the same code — and answers nothing there.
+
+**THE IN-CODE HIGHLIGHT IS PER LINE, and that is a stated limit rather than an oversight.** What is
+lit is a controlled line SELECTION (`selectedLines`, the mechanism the comment gesture already uses),
+because there is no published way to tint one TOKEN of one line: the tokens live in a shadow root and
+CSS cannot select an element by its text. The vendor-internal route was measured and refused — pierre
+does emit `data-line` per row and `data-char` per token, so a rule per occurrence could be generated
+into `unsafeCSS` and re-injected on every press, and it would silently no-op wherever Shiki's token
+boundaries do not coincide with the identifier. A cosmetic win with an invisible failure mode is not
+worth three undocumented attributes. The PANEL is where a name is marked exactly.
+
+### The two side columns are DRAGGED (and the code keeps its own minimum)
+
+The files column shipped at a fixed `w-72`, and a reader has two reasons to disagree with it that
+pull opposite ways: a deep tree truncates every path at that width, and a reader who has picked their
+file wants the room back for the code. Both side columns are dragged now, and both widths are
+remembered per browser beside the unified/split choice — a per-screen decision with no upstream to
+write it to. Every number and every rule is in `gitlab-diff.ts` beside `diffPageColumns`, and
+`web/src/components/column-splitter.tsx` is the handle.
+
+- **The drag writes a CSS VARIABLE, not React state.** The column it sizes is one of two beside a
+  virtualized feed of highlighted code, so a `setState` per `pointermove` would re-render the page —
+  and the feed with it — sixty times a second. The row that holds both columns declares the width as
+  a custom property, the handle writes that property straight onto the DOM while the pointer is down,
+  and the STORE is written ONCE at the end; React then renders a number that is already on screen, so
+  nothing moves at the handover. The host element is PASSED rather than found, because sniffing for it
+  in the DOM would break the day the host moved the declaration.
+- **Five rails hold the gesture, and every one is a bug this app has already had** (§ A COMPANION,
+  whose vendored engine states each in full): the grabbing `pointerId` is remembered and every later
+  handler gated on it; only a PRIMARY press of button 0 starts a drag; `pointercancel` ends it as a
+  CANCEL and puts the column back, because a gesture the browser took away did not happen; a
+  `pointerup` whose button is not 0 is ignored, since right-clicking mid-drag fires one for the same
+  pointer; and a release that never arrives is ended by the next PRIMARY press anywhere, from a
+  capture-phase listener, NOT keyed on the pointer id because every touch gets a fresh one.
+- **The CODE keeps `DIFF_CODE_MIN_WIDTH`, and the OCCURRENCES panel is what gives way first.** The
+  two side widths are resolved together (`resolveDiffColumnWidths`) because they are not independent:
+  the panel is the transient one — opened by a press a moment ago and closed by another — while the
+  files column is the page's own furniture at a width the reader set deliberately and expects to find
+  again. Taking the room from the tree instead would move the whole page's shape every time a name
+  was pressed. Only once the panel is at its own minimum does the tree give way.
+- **A stored width is clamped on the way OUT, never on the way in.** A width chosen on a wide monitor
+  has to survive being read back in a small window and then be found again when the monitor comes
+  back — so the store keeps what the reader ASKED for and the clamp happens at draw time. A viewport
+  of 0 is the first paint and nothing is clamped against it: the ceiling has to be lifted BEFORE the
+  clamps rather than after them, or every column comes back at its own minimum, which is the bug that
+  guard exists to prevent and which it had on the first writing.
+- **It is drawn only where there are two columns to divide** (`diffColumnsAreResizable`, which reads
+  `diffPageColumns`' own answer so the two cannot disagree). Below that width each column fills the
+  screen in turn and a splitter would size nothing — the rule that already hides the unified/split
+  toggle below `SPLIT_MIN_WIDTH`.
+- **The target is deliberately NOT 44 px**, which is the floor every other control in this app
+  clears, and what is either side of it is the reason: the tree's own rows, and the diff's
+  line-NUMBER gutter — which is the target of the comment gesture this whole page rests on. A
+  thumb-sized box would steal presses from both, and it is not a control a thumb needs, because it is
+  drawn only at a width no phone has. What stands in for the touch target is the KEYBOARD: it is a
+  real `separator`, it takes focus, and the arrows move it (16 px, 64 px with Shift).
+
+**A file that is ALREADY current can be OPENED, which on a phone is the only way out.**
+`@pierre/trees` publishes exactly one callback — `onSelectionChange` — and its controller returns
+early when the selection it is handed matches the one it holds (`FileTreeController`:
+`if (!selectionChanged && !anchorChanged) return`), so a press on the row that is already current
+reports NOTHING and no heuristic over that callback can recover it. On a narrow screen that press is
+also the NAVIGATION from the files to the patch, so the reader was stuck: pressing the lit row did
+nothing, for ever. **A diff of ONE file is the worst of it**, because that file is always the current
+one and there is no other row to press instead — which is exactly how it was reported. So the press
+is read from the DOM, through the tree's OWN row contract (`button[data-type="item"]` carrying
+`dataset.itemPath` and `dataset.itemType`, which is what its own hit-testing reads), on a wrapper of
+this app's, walking `composedPath()` because the rows live in a shadow root. Three things make that
+safe to rest on: a press this cannot resolve falls through to the selection-change path, which is
+exactly the old behaviour, so a vendor that renames those attributes brings back the bug rather than
+something worse; the spec presses the same row twice and holds the page to opening it both times, so
+a rename fails a test rather than stranding a reader; and the contract was ALREADY load-bearing here
+before this, since `pickDiffFile` in `web/scripts/preview.ts` selects a row as `[data-item-path="…"]`.
+
+`cd web && bun run preview -- --out /tmp/sym --diff-symbols` captures the panel in both themes, the
+panel cropped to itself (the rows are 11 px code and the numbers 10 px, so the page at 1200 px says
+nothing about whether either can be read), the jump a row makes, a name that stands nowhere else, the
+files column dragged in both themes, and a phone's width where the panel is not drawn. **What is
+UNVERIFIED against the tenant is nothing new**: the diff reads are measured (§ The DIFF is a PAGE),
+and both features are drawn from what those reads already carry — no request, no field and no write is
+added by either.
+
 ### The pipeline is a GRAPH, and it is the Pipelines page (`/mr/<id>/pipelines`)
 
 A pipeline is drawn the way GitLab's own page draws it: columns of job cards with a curve from
@@ -3235,7 +3397,13 @@ user. Two independent mechanisms enforce that split:
   three files with no patch, the expand control and what it hands over, and both of its columns at
   a phone's width:
   `bun run preview -- --out /tmp/diff --diff`, or `openChanges` / `pickDiffFile` /
-  `scrollDiffFeed` / `diffFileItem` from the same file. For a COMMENT on a diff line — the
+  `scrollDiffFeed` / `diffFileItem` from the same file. For a NAME pressed in the code and the two
+  side columns being DRAGGED — the occurrences panel in both themes, the panel cropped to itself
+  (its rows are 11px code), the jump a row makes, a name that stands nowhere else, the files column
+  dragged in both themes, and a phone's width where the panel is not drawn:
+  `bun run preview -- --out /tmp/sym --diff-symbols`, or `pressDiffToken` from the same file — which
+  names the FILE it presses in, because the same name stands in several of them, and matches the
+  token EXACTLY, because `server` is a substring of `serverReady`. For a COMMENT on a diff line — the
   affordance in the gutter, the box on one line, the span a drag covers, the thread it lands as, a
   comment being rewritten and the fold a resolved thread takes:
   `bun run preview -- --out /tmp/dc --diff-comment`, or `diffGutterLine` / `dragDiffLines` from
