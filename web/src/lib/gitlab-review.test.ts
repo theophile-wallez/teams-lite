@@ -28,6 +28,8 @@ import {
   turnContext,
   reviewPartKey,
   reviewPartLabel,
+  reviewQuestionParts,
+  reviewTagLabel,
   UNPLACED_PARTS_NOTE,
   UNPLACED_TITLE,
   type GitLabReview,
@@ -752,6 +754,112 @@ describe("turnContext", () => {
     // theme that has gone — and "theme 4" is a line nobody can read.
     expect(turnContext(turn({ themes: [9], paths: ["a.ts"] }), review())).toBe("a.ts");
     expect(turnContext(turn({ themes: [0] }), null)).toBeNull();
+  });
+});
+
+describe("reviewTagLabel", () => {
+  it("shows a FILE's own name and extension, never its path", () => {
+    // Measured on the real instance: a path runs to 60 characters, and a chip carrying all of it says
+    // where the file lives four times over and what it is once.
+    const tag: ReviewTag = {
+      kind: "file",
+      path: "tooling/ci/components/blocks/kubernetes-agent.gitlab-ci.yaml",
+      label: "tooling/ci/components/blocks/kubernetes-agent.gitlab-ci.yaml",
+    };
+    expect(reviewTagLabel(tag)).toBe("kubernetes-agent.gitlab-ci.yaml");
+  });
+
+  it("leaves a file with no directory alone", () => {
+    expect(reviewTagLabel({ kind: "file", path: "bun.lock", label: "bun.lock" })).toBe("bun.lock");
+  });
+
+  it("shows a THEME's whole title, which is what a reader recognises it by", () => {
+    expect(reviewTagLabel({ kind: "theme", index: 0, label: "A replica is drained" })).toBe(
+      "A replica is drained",
+    );
+  });
+});
+
+describe("reviewQuestionParts", () => {
+  const tags: ReviewTag[] = [
+    { kind: "theme", index: 0, label: "A replica is drained" },
+    { kind: "file", path: "src/server/health.ts", label: "src/server/health.ts" },
+  ];
+
+  it("cuts a question into its words and its tags, in the order they are written", () => {
+    const parts = reviewQuestionParts("why does @src/server/health.ts answer 503?", tags);
+    expect(parts).toEqual([
+      { kind: "text", text: "why does " },
+      { kind: "tag", tag: tags[1] },
+      { kind: "text", text: " answer 503?" },
+    ]);
+  });
+
+  it("reads a THEME's bracket form, which is the one nobody would want raw", () => {
+    const parts = reviewQuestionParts("@[A replica is drained] why?", tags);
+    expect(parts[0]).toEqual({ kind: "tag", tag: tags[0] });
+    expect(parts[1]).toEqual({ kind: "text", text: " why?" });
+  });
+
+  it("leaves an '@' that names nothing as the words it is", () => {
+    // The rule an @mention naming a person the thread does not hold already follows.
+    expect(reviewQuestionParts("what about @rfc-2119 and @UTF-8?", tags)).toEqual([
+      { kind: "text", text: "what about @rfc-2119 and @UTF-8?" },
+    ]);
+  });
+
+  it("keeps a path holding an '@' whole", () => {
+    // `packages/@acme/ui/button.tsx` and Next.js's `app/@modal/page.tsx` are both real, and a walk that
+    // stopped at the second "@" read neither.
+    const scoped: ReviewTag[] = [
+      { kind: "file", path: "packages/@acme/ui/button.tsx", label: "packages/@acme/ui/button.tsx" },
+    ];
+    expect(reviewQuestionParts("look at @packages/@acme/ui/button.tsx please", scoped)).toEqual([
+      { kind: "text", text: "look at " },
+      { kind: "tag", tag: scoped[0] },
+      { kind: "text", text: " please" },
+    ]);
+  });
+
+  it("never returns an empty run of words", () => {
+    // An empty `{kind:"text"}` would be a `<span>` with nothing in it on every side of every chip.
+    const parts = reviewQuestionParts("@src/server/health.ts", tags);
+    expect(parts).toEqual([{ kind: "tag", tag: tags[1] }]);
+  });
+
+  it("is the ONE walk, and reviewTagsInText is it with the words thrown away", () => {
+    // Two scanners would drift, and the bubble would then draw a chip over a run the send did not count
+    // as a tag. Every question below is checked both ways round.
+    for (const text of [
+      "why does @src/server/health.ts answer 503?",
+      "@[A replica is drained] and @src/server/health.ts",
+      "@src/server/health.ts twice: @src/server/health.ts",
+      "nothing at all",
+      "@rfc-2119",
+    ]) {
+      const fromParts = reviewQuestionParts(text, tags)
+        .filter((part) => part.kind === "tag")
+        .map((part) => (part as { tag: ReviewTag }).tag);
+      // `reviewTagsInText` is that list with each tag ONCE, in the order they are written.
+      const seen = new Set<string>();
+      const expected = fromParts.filter((tag) => {
+        const key = reviewTagKey(tag);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      expect(reviewTagsInText(text, tags)).toEqual(expected);
+    }
+  });
+
+  it("puts a tag's WORDS back together exactly, so nothing is lost in the drawing", () => {
+    // What the bubble draws has to be the question — a walk that dropped a character would silently
+    // rewrite somebody's words.
+    const text = "why does @src/server/health.ts answer 503, @[A replica is drained]?";
+    const back = reviewQuestionParts(text, tags)
+      .map((part) => (part.kind === "text" ? part.text : reviewTagText(part.tag)))
+      .join("");
+    expect(back).toBe(text);
   });
 });
 

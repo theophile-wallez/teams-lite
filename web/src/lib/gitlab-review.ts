@@ -609,41 +609,107 @@ export function reviewTagText(tag: ReviewTag): string {
   return tag.kind === "file" ? `@${tag.path}` : `@[${tag.label}]`;
 }
 
-/**
- * The tags a question's own WORDS name, in the order they are written.
+/** What a CHIP shows for one tag — which is not what the question SPELLS it as.
  *
- * The one reader of a question's text, so what the composer offered and what really travels cannot
- * disagree — and a tag the reader deleted with the caret is simply gone, with nothing to clean up.
+ *  A theme shows its title. A FILE shows its own name and extension and not its path: measured on
+ *  this instance, a path runs to `tooling/ci/components/blocks/kubernetes-agent.gitlab-ci.yaml`, and
+ *  a chip carrying all of that is a chip the width of the composer — it says where the file lives
+ *  four times over and what it is once. The whole path stays in the chip's `title`, so it is one
+ *  hover away, and it stays in the WORDS, which is what travels (`reviewTagText`).
+ *
+ *  Two files with the same name are two chips reading alike, and that is deliberate: the alternative
+ *  is a chip whose length depends on what else the branch changed. What tells them apart is the
+ *  hover, and the line under a sent question, which names what really travelled in full. */
+export function reviewTagLabel(tag: ReviewTag): string {
+  if (tag.kind === "theme") return tag.label;
+  const cut = tag.path.lastIndexOf("/");
+  return cut < 0 ? tag.path : tag.path.slice(cut + 1);
+}
+
+/** One run of a question: words, or a tag drawn as a chip.
+ *
+ *  It is what both surfaces that draw a question are built from — the composer's own editor and the
+ *  bubble a sent question lands in — so a chip means the same thing before and after the press. */
+export type ReviewQuestionPart =
+  | { kind: "text"; text: string }
+  | { kind: "tag"; tag: ReviewTag };
+
+/**
+ * A question cut into its WORDS and its TAGS, in the order they are written.
+ *
+ * **This is the one walk over a question's text**, and {@link reviewTagsInText} is it with the words
+ * thrown away — the rule `patchTextLines` holds for its own walk and for its reason: what travels
+ * and what is DRAWN must be decided by one pass, or the bubble would draw a chip over a run the send
+ * did not count as a tag. The two really did have to be one function, because the drawing came second
+ * and a second scanner is exactly how they would drift.
  *
  * A run that matches no tag stays the words it is, which is the rule an @mention naming a person the
  * thread does not hold already follows: `@rfc-2119` in a question is a question about `@rfc-2119`.
  */
-export function reviewTagsInText(text: string, tags: ReviewTag[]): ReviewTag[] {
-  // Longest spelling first. It is a TIE-BREAK rather than the rule that keeps `@src/a.ts` out of
-  // `@src/a.tsx` — `endsATag` is what does that, and a mutation of this order fails no test today,
-  // because it only decides between two tags where one spelling IS the other plus a character
-  // `endsATag` allows (a path ending in `?`). Kept because it costs nothing and the alternative is a
-  // silent wrong answer the day such a pair exists.
-  const spellings = tags
+export function reviewQuestionParts(text: string, tags: ReviewTag[]): ReviewQuestionPart[] {
+  const parts: ReviewQuestionPart[] = [];
+  let plain = "";
+  const flush = () => {
+    if (plain) parts.push({ kind: "text", text: plain });
+    plain = "";
+  };
+  let at = 0;
+  const spellings = tagSpellings(tags);
+  while (at < text.length) {
+    const next = text.indexOf("@", at);
+    if (next < 0) break;
+    const found =
+      spellings.find(
+        (candidate) =>
+          text.startsWith(candidate.text, next) && endsATag(text, next + candidate.text.length),
+      ) ?? null;
+    if (!found) {
+      // Not a tag: the "@" and everything up to it are words. Advancing PAST the "@" is what stops
+      // the walk looping on it.
+      plain += text.slice(at, next + 1);
+      at = next + 1;
+      continue;
+    }
+    plain += text.slice(at, next);
+    flush();
+    parts.push({ kind: "tag", tag: found.tag });
+    at = next + found.text.length;
+  }
+  plain += text.slice(at);
+  flush();
+  return parts;
+}
+
+/** Every tag's own spelling, longest first.
+ *
+ *  It is a TIE-BREAK rather than the rule that keeps `@src/a.ts` out of `@src/a.tsx` — `endsATag` is
+ *  what does that, and a mutation of this order fails no test today, because it only decides between
+ *  two tags where one spelling IS the other plus a character `endsATag` allows (a path ending in
+ *  `?`). Kept because it costs nothing and the alternative is a silent wrong answer the day such a
+ *  pair exists. */
+function tagSpellings(tags: ReviewTag[]): { tag: ReviewTag; text: string }[] {
+  return tags
     .map((tag) => ({ tag, text: reviewTagText(tag) }))
     .sort((a, b) => b.text.length - a.text.length);
+}
+
+/**
+ * The tags a question's own WORDS name, in the order they are written, each once.
+ *
+ * The one thing that decides what TRAVELS, so what the composer offered and what leaves cannot
+ * disagree — and a tag the reader deleted with the caret is simply gone, with nothing to clean up.
+ * It is {@link reviewQuestionParts} with the words projected away, which is what keeps the drawing
+ * and the sending one answer.
+ */
+export function reviewTagsInText(text: string, tags: ReviewTag[]): ReviewTag[] {
   const picked: ReviewTag[] = [];
   const seen = new Set<string>();
-  for (let at = text.indexOf("@"); at >= 0; at = text.indexOf("@", at + 1)) {
-    // A tag is matched by its OWN SPELLING at this position rather than by a pattern over the words,
-    // which is what makes a path holding an `@` work: `packages/@acme/ui/button.tsx` and Next.js's
-    // `app/@modal/page.tsx` are both real, and a run that stopped at the second `@` read neither —
-    // the tag was offered by the list, written into the sentence, and then silently never travelled.
-    const found = spellings.find(
-      (candidate) => text.startsWith(candidate.text, at) && endsATag(text, at + candidate.text.length),
-    );
-    if (!found) continue;
-    // Past what matched, so a tag cannot be found inside the one before it.
-    at += found.text.length - 1;
-    const key = reviewTagKey(found.tag);
+  for (const part of reviewQuestionParts(text, tags)) {
+    if (part.kind !== "tag") continue;
+    const key = reviewTagKey(part.tag);
     if (seen.has(key)) continue;
     seen.add(key);
-    picked.push(found.tag);
+    picked.push(part.tag);
   }
   return picked;
 }

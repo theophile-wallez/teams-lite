@@ -1877,11 +1877,19 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(options.first()).toHaveAttribute("data-kind", "file");
     await options.first().click();
 
-    // THE TAG IS WORDS IN THE QUESTION, not a chip beside it: the pick replaces the "@…" that opened
-    // the list, in place, where the caret is — so the reader can edit or delete it like any other
-    // word and there is no second place the same fact lives.
-    await expect(field).toHaveValue("@src/server/health.ts ");
-    await expect(page.locator('[data-testid="gitlab-review-chat-tag"]')).toHaveCount(0);
+    // THE TAG IS WORDS IN THE QUESTION, DRAWN AS A CHIP IN PLACE — never a chip in a row beside the
+    // field, which is what this replaced. The pick puts it where the caret is, so the reader edits or
+    // deletes it with the caret like any other word, and there is no second place the same fact lives.
+    const chip = field.locator('[data-testid="review-tag-chip"]');
+    await expect(chip).toHaveCount(1);
+    // WHICH tag it is, in full: the chip carries the path that travels even though it SHOWS the name.
+    await expect(chip).toHaveAttribute("data-tag", "src/server/health.ts");
+    await expect(chip).toHaveAttribute("data-kind", "file");
+    // A FILE CHIP SHOWS ITS NAME AND NOT ITS PATH. Measured on the real instance a path runs to 60
+    // characters, which is a chip the width of the composer.
+    await expect(chip).toHaveText("health.ts");
+    // The path is one hover away rather than gone.
+    await expect(chip).toHaveAttribute("title", "src/server/health.ts");
 
     await field.type("— why is the draining check first?");
     await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
@@ -1896,7 +1904,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     const turn = page.locator('[data-testid="gitlab-review-turn"]').first();
     await expect(turn).toContainText("why is the draining check first?");
     await expect(turn).toHaveAttribute("data-answered", "no");
-    await expect(field).toHaveValue("");
+    await expect(field).toHaveText("");
     // And the backend still holds NOTHING, which is what says the bubble is this page's own.
     await expect(chat).toHaveAttribute("data-turns", "0");
 
@@ -1911,6 +1919,86 @@ test.describe.serial("the GitLab merge-request page", () => {
     const answer = turn.locator('[data-testid="gitlab-review-turn-answer"]');
     await expect(answer.locator("code").first()).toBeVisible();
     expect(await answer.innerText()).not.toContain("```");
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  /** The question's field as TEXT, exactly as the DOM holds it.
+   *
+   *  `innerText` would collapse the runs of whitespace this asserts on, and `toHaveText` normalises
+   *  them too — so a pick that added a SECOND space would pass. `textContent` is what really says
+   *  whether there is one. */
+  async function questionText(page: Page): Promise<string> {
+    return await page.evaluate(
+      () =>
+        document.querySelector('[data-testid="gitlab-review-chat-field"]')?.textContent ?? "",
+    );
+  }
+
+  test("draws a tagged THEME as a chip too, with its own title", async ({ page }) => {
+    // A theme's spelling is the bracket form (`@[A replica is drained…]`), which is the one thing in a
+    // question that a reader could not possibly want to read raw — and it is why a chip is worth
+    // having at all here rather than only for files.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const field = page.locator('[data-testid="gitlab-review-chat-field"]');
+    await field.click();
+    await field.type("@replica");
+    const option = page.locator('[data-testid="gitlab-review-chat-option"]').first();
+    await expect(option).toHaveAttribute("data-kind", "theme");
+    await option.click();
+
+    const chip = field.locator('[data-testid="review-tag-chip"]');
+    await expect(chip).toHaveAttribute("data-kind", "theme");
+    // The THEME's own title, and NOT the brackets its words carry.
+    await expect(chip).toHaveText("A replica is drained before it goes");
+    expect(await questionText(page)).not.toContain("@[");
+
+    // And the SAME chip once it is sent — one component, so a tag reads one way before and after the
+    // press (`review-tag-chip.tsx`).
+    await field.type("why?");
+    await page.locator('[data-testid="gitlab-review-chat-ask"]').click();
+    const sent = page
+      .locator('[data-testid="gitlab-review-turn-question"] [data-testid="review-tag-chip"]')
+      .first();
+    await expect(sent).toHaveAttribute("data-kind", "theme");
+    await expect(sent).toHaveText("A replica is drained before it goes");
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("the field GROWS with the question and stops at eight lines", async ({ page }) => {
+    // A box two lines tall hides most of a paragraph; one that grows for ever takes the conversation
+    // off the screen with it. So it grows to a ceiling and scrolls after that.
+    await setMergeRequestControl(page, { review: "stored" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    const field = page.locator('[data-testid="gitlab-review-chat-field"]');
+    await field.click();
+    const empty = (await field.boundingBox())!.height;
+
+    // Three lines of their own, so the growth is the CONTENT's rather than a wrap's.
+    await field.press("Shift+Enter");
+    await field.press("Shift+Enter");
+    const grown = (await field.boundingBox())!.height;
+    expect(grown).toBeGreaterThan(empty);
+
+    // Well past the ceiling. It stops growing and scrolls itself, so the composer never takes the
+    // panel — and the measurement is against the box's own scrollHeight, which is what says the rest
+    // of the question is reachable rather than lost.
+    for (let i = 0; i < 14; i += 1) await field.press("Shift+Enter");
+    const capped = (await field.boundingBox())!.height;
+    expect(capped).toBeLessThanOrEqual(8 * 20 + 2);
+    expect(capped).toBeGreaterThan(grown);
+    const scrolls = await field.evaluate((el) => el.scrollHeight > el.clientHeight + 1);
+    expect(scrolls).toBe(true);
 
     await setMergeRequestControl(page, { clear: true });
   });
@@ -1935,7 +2023,12 @@ test.describe.serial("the GitLab merge-request page", () => {
 
     // The tag landed in the middle, BOTH halves of the sentence survived, and there is ONE space
     // after it rather than two — the text already had one, and a pick must not add a second.
-    await expect(field).toHaveValue("why does @src/server/health.ts change the budget?");
+    //
+    // Read as TEXT rather than as a value, because the field is the app's own editor now and a chip is
+    // an atom in it: what the DOM carries is the chip's own LABEL between the two halves. What the
+    // question really travels as is proved at the other end of the press, by the context line below —
+    // which names the whole path the backend recorded.
+    expect(await questionText(page)).toBe("why does health.ts change the budget?");
 
     await setMergeRequestControl(page, { clear: true });
   });
@@ -1964,7 +2057,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(page.locator('[data-testid="gitlab-review-chat-error"]')).toContainText(
       "not on this machine's PATH",
     );
-    await expect(field).toHaveValue("why the 503?");
+    await expect(field).toHaveText("why the 503?");
     await expect(page.locator('[data-testid="gitlab-review-turn"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="gitlab-review-chat"]')).toHaveAttribute(
       "data-turns",

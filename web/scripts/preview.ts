@@ -3871,6 +3871,35 @@ if (import.meta.main) {
         await page.locator('[data-testid="gitlab-review-chat-option"]').first().click();
         await page.locator(field).type("— why is the draining check first?");
         await shot(`${out}-question-light.png`, '[data-testid="gitlab-review-chat"]');
+        // THE COMPOSER's own box, cropped to itself in both themes: the chip is 12px ink and the
+        // page at 1200px says nothing about whether it can be read.
+        const composerBox = '[data-testid="gitlab-review-chat"] .bg-card';
+        await shot(`${out}-chip-light.png`, composerBox);
+        await setTheme("dark");
+        await shot(`${out}-chip-dark.png`, composerBox);
+        await setTheme("light");
+
+        // A THEME as a chip, which is the tag a reader would least want to read raw: its words are
+        // the bracket form `@[A replica is drained before it goes]`.
+        await page.locator(field).press("Control+a");
+        await page.locator(field).press("Backspace");
+        await page.locator(field).type("@replica");
+        await page.locator('[data-testid="gitlab-review-chat-option"]').first().click();
+        await page.locator(field).type("and what happens on a rollback?");
+        await shot(`${out}-chip-theme-light.png`, composerBox);
+
+        // GROWN to its ceiling. A box two lines tall hides most of a paragraph; one that grows for
+        // ever takes the conversation with it, so it stops at eight lines and scrolls.
+        await page.locator(field).press("Control+a");
+        await page.locator(field).press("Backspace");
+        for (let line = 0; line < 12; line += 1) {
+          await page.locator(field).type(`line ${line + 1} of a long question`);
+          await page.locator(field).press("Shift+Enter");
+        }
+        await shot(`${out}-grown-light.png`, composerBox);
+        await page.locator(field).press("Control+a");
+        await page.locator(field).press("Backspace");
+        await page.locator(field).type("@src/server/health.ts — why is the draining check first?");
         // HELD, so the state the whole feature turns on has a duration to photograph: this mock
         // answers in one frame, and a real run is tens of seconds.
         await emit({ kind: "gitlab_mr", review: "stored", hold_ask: 2_000 });
@@ -3928,7 +3957,9 @@ if (import.meta.main) {
             `${out}-names-{light,dark}.png, ${out}-card-light.png, ${out}-card-crop-light.png, ` +
             `${out}-card-dark.png, ${out}-folded-light.png, ` +
             `${out}-unplaced-light.png, ${out}-stale-light.png, ${out}-refused-light.png, ` +
-            `${out}-tags-{light,dark}.png, ${out}-question-light.png, ${out}-asked-light.png, ` +
+            `${out}-tags-{light,dark}.png, ${out}-question-light.png, ` +
+            `${out}-chip-{light,dark}.png, ${out}-chip-theme-light.png, ${out}-grown-light.png, ` +
+            `${out}-asked-light.png, ` +
             `${out}-answer-{light,dark}.png, ${out}-with-chat-light.png, ` +
             `${out}-ask-refused-light.png and ${out}-mobile{,-chat}-light.png`,
         );

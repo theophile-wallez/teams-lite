@@ -2961,7 +2961,7 @@ two patches and nothing else; a question with NO tags carries the reading and no
 WORDS IN THE QUESTION — the reader sees what will travel in the sentence they wrote, and the rule below
 says why that is the shape rather than a chip row beside the field.
 
-Fourteen rules hold it, and each is pinned by `gitlab_review::tests`,
+Twenty-four rules hold it, and each is pinned by `gitlab_review::tests`,
 `web/src/lib/gitlab-review.test.ts`, `web/src/lib/ws-client.test.ts` or `web/e2e/gitlab.spec.ts`:
 
 - **A question needs a READING to be about.** The backend refuses one without it, so the panel is not
@@ -3006,11 +3006,15 @@ Fourteen rules hold it, and each is pinned by `gitlab_review::tests`,
   different lifetimes: a fresh reading REPLACES the reading and must not throw away the questions
   somebody asked — those were about this branch and are still worth reading. A spec presses "Read it
   again" and holds the turns to surviving.
-- **A TAG IS WORDS IN THE QUESTION, never a chip beside it** (`reviewTagText`, `reviewTagsInText`).
-  That is the shape every other "@" in this app takes — `@claude` is read back out of a message's own
-  words, and so is a tracker reference — and it is what a chip row above the field was replaced by:
-  the chips were a second place the same fact lived, they could not be edited with the caret, and they
-  pushed the box down. A FILE is written bare (`@src/server/health.ts`) and a THEME takes the BRACKET
+- **A TAG IS WORDS IN THE QUESTION, DRAWN AS A CHIP** (`reviewTagText`, `reviewQuestionParts`). The
+  WORDS are the truth — that is the shape every other "@" in this app takes, `@claude` is read back out
+  of a message's own words and so is a tracker reference — and the CHIP is how those characters are
+  drawn, in the field while the question is written and again in the bubble once it is sent, by ONE
+  component (`review-tag-chip.tsx`). It is `@claude`'s own arrangement exactly: a chip in the composer,
+  the bare prefix on the wire, read back for the thread. What it is NOT is a chip ROW BESIDE the field,
+  which is what the words replaced: those chips were a second place the same fact lived, they could not
+  be edited with the caret, and they pushed the box down. A FILE is written bare
+  (`@src/server/health.ts`) and a THEME takes the BRACKET
   form this app already uses for a name with spaces in it (`@[A replica is drained…]`), because a bare
   run would end at the first space and name nothing. **The punctuation a SENTENCE owns is trimmed
   back off** (`TAG_TRAILING_PUNCTUATION`): a reader really does write "and not
@@ -3021,6 +3025,38 @@ Fourteen rules hold it, and each is pinned by `gitlab_review::tests`,
   `app/@modal/page.tsx` are both real, and a run that stopped at the second `@` read neither — the tag
   was offered by the list, written into the sentence, and then silently never travelled. What follows a
   match must END it (`endsATag`), which is the half that keeps `@src/a.ts` out of `@src/a.tsx`.
+- **A FILE CHIP SHOWS ITS NAME AND EXTENSION, NEVER ITS PATH** (`reviewTagLabel`). Measured on this
+  instance a path runs to `tooling/ci/components/blocks/kubernetes-agent.gitlab-ci.yaml` — 60
+  characters, a chip the width of the composer, saying where the file lives four times over and what it
+  is once. The whole path is one hover away in the chip's `title`, it is what the WORDS carry and
+  therefore what travels, and the line under a sent question names it in full — which is the authority
+  on what the answer rests on. Two files of one name are two chips reading alike, deliberately: the
+  alternative is a chip whose length depends on what else the branch changed, and what tells them apart
+  is the hover, the context line, and the "@" list, which draws the whole path beside each row.
+- **THE FIELD IS THE APP'S OWN EDITOR, and that is what a chip costs.** A tag has to be drawn as
+  something whose width is not its text's, and no overlay over a `<textarea>` can do that — the mirror
+  would have to match the field character for character, which a shortened chip breaks by definition.
+  So it is TipTap with one atomic node (`review-tag-node.ts`, the shape `agent-tag-extension.ts`
+  already has), out of a LAZY chunk like the app's own composer's, with a placeholder of the same
+  height standing in so the box does not jump when it lands. **Nothing about the wire moved with it**:
+  `renderText` emits the tag's own spelling, so `editor.getText()` gives the string the textarea's
+  `value` gave, `reviewTagsInText` reads what travels out of the question's own words exactly as
+  before, and `src/gitlab_review.rs` is untouched. A question typed by hand with no chip in it still
+  works.
+- **THE FIELD GROWS WITH THE QUESTION, to eight lines.** A box two lines tall hides most of a
+  paragraph, and one that grows for ever takes the conversation off the screen with it — so it grows to
+  `MAX_LINES` and scrolls after that. `LINE_PX` (20) is a CONSTANT rather than a measurement and it is
+  the one the field's own class sets (`text-[13px] leading-5`): the ceiling has to be a number CSS can
+  hold before anything is rendered, or the box would draw at one height and be corrected a frame later
+  — the jump the description fold's own `everPressed` rule exists to avoid. Move one and move the
+  other.
+- **A FAILED PUBLISH REBUILDS THE CHIPS FROM THE WORDS** (`setText`, over `reviewQuestionParts`), so
+  nothing about a handed-back question is kept anywhere. And **the current words are read from a REF
+  rather than from the state**: `ask` closes over the render it was created in, so the state it can see
+  is the value from BEFORE the box was cleared — which made the hand-back decide against itself and
+  leave the reader with an empty box and a refusal. The textarea version read the current value through
+  `setQuestion`'s own updater form; that is not available once restoring also has to rebuild the chips,
+  because a side effect inside a state updater is one React may run twice. A spec catches it.
 - **THE QUERY IS WHAT STANDS BETWEEN THE "@" AND THE CARET**, never to the end of the text. Read to the
   end, the pick sliced from the end and DELETED every word after the caret, and the list matched
   against the whole tail — so a reader going back to add a tag mid-sentence lost the rest of their
@@ -4083,8 +4119,11 @@ user. Two independent mechanisms enforce that split:
   between them (both, because the whole point is that they differ), the theme heading STICKING while the
   code scrolls under it, the long diff folded with the count in its label, the changes nothing grouped
   cropped to themselves, a reading of an earlier commit, a refused run, a phone's width — and the FOLLOW-UP
-  conversation beside it: the "@" list offering a theme above the files in both themes, the chips that
-  say what will travel, the answer it lands as in both themes, the whole page with the conversation
+  conversation beside it: the "@" list offering a theme above the files in both themes — each file row
+  naming the whole path beside the name its chip will show — the CHIP a picked tag becomes, cropped to
+  the composer's own box in both themes, a THEME's chip, the box GROWN to its eight-line ceiling, the
+  answer it lands as in both themes (where the same chip is drawn on the accent fill), the whole page
+  with the conversation
   beside it, a refused question, and that panel at a phone's width where it is BELOW the document —
   and the NAMES in that prose (§ AND A NAME IN THAT PROSE IS THE CODE IT NAMES): the marked words
   cropped to one theme's own summary in both themes, the card a hover opens over the page it covers,

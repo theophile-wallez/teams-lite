@@ -1,15 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Alert02Icon, SentIcon } from "@hugeicons/core-free-icons";
 import {
   drawnReviewTurns,
-  matchReviewTags,
   reviewQuestionCanBeAsked,
+  reviewQuestionParts,
   reviewTagKey,
   reviewTagLimit,
   reviewTags,
   reviewTagsInText,
-  reviewTagText,
   turnContext,
   type DrawnReviewTurn,
   type GitLabReview,
@@ -25,6 +24,19 @@ import { cn } from "~/lib/utils";
 import { useAppState, useController } from "./controller-context";
 import { FadeArc } from "./loading-ui/fade-arc";
 import { RichNodes } from "./rich-content";
+import { ReviewTagChip } from "./review-tag-chip";
+import type { ReviewQuestionHandle } from "./review-question-editor";
+
+/** The question's own FIELD, out of a lazy chunk.
+ *
+ *  It is TipTap, which is the app's own editor and a chunk of its own — the main composer loads it
+ *  the same way and for the same reason (`composer.tsx`). Nothing on this page waits for it: the
+ *  document, the transcript and every answer render while it is on its way, and what stands in
+ *  meanwhile is a box of the same height (`QuestionFieldPlaceholder`), so the composer does not jump
+ *  when it arrives. */
+const ReviewQuestionEditor = lazy(() =>
+  import("./review-question-editor").then((m) => ({ default: m.ReviewQuestionEditor })),
+);
 
 // ASKING A FOLLOW-UP about the reading — the conversation beside the document.
 //
@@ -33,25 +45,40 @@ import { RichNodes } from "./rich-content";
 // some files, and the question travels with exactly those. `web/src/lib/gitlab-review.ts` holds every
 // pure decision and `src/gitlab_review.rs` the prompt, the bounds and the trust boundary.
 //
-// Nine rules hold it, and `web/e2e/gitlab.spec.ts` pins each:
+// Twelve rules hold it, and `web/e2e/gitlab.spec.ts` pins each:
 //
 //   - **It is the same RUN, narrowed.** The CLI, the provider, the model and "no tools at all" are
 //     the reading's own, so the cost is the same cost and the gate is the same gate — which is why
 //     what it costs is stated once, at the top of the page, rather than again here.
-//   - **A TAG IS WORDS IN THE QUESTION, never a chip beside it** (`reviewTagText`,
-//     `reviewTagsInText`). That is the shape every other "@" in this app takes — `@claude` is read
-//     back out of a message's own words, and so is a tracker reference — and it is what the chips
-//     above the field were replaced by: they were a second place the same fact lived, they could not
-//     be edited with the caret, and they pushed the box down. A file is written bare
-//     (`@src/server/health.ts`) and a THEME takes the bracket form this app already uses for a name
-//     with spaces in it (`@[A replica is drained…]`).
+//   - **A TAG IS WORDS IN THE QUESTION, DRAWN AS A CHIP** (`reviewTagText`, `reviewQuestionParts`).
+//     The words are the truth — `@src/server/health.ts`, `@[A replica is drained…]`, which is what
+//     travels and what `reviewTagsInText` reads — and the chip is how those characters are drawn, in
+//     the field and again in the bubble, by ONE component (`review-tag-chip.tsx`). That is the shape
+//     `@claude` already has: a chip in the composer, the bare prefix on the wire, read back for the
+//     thread. What it is NOT is a chip row BESIDE the field, which is what this replaced: those were
+//     a second place the same fact lived, they could not be edited with the caret, and they pushed
+//     the box down.
+//   - **A FILE CHIP SHOWS ITS NAME, NOT ITS PATH** (`reviewTagLabel`). Measured on this instance a
+//     path runs to `tooling/ci/components/blocks/kubernetes-agent.gitlab-ci.yaml`, and a chip
+//     carrying all of it is a chip the width of the composer. The whole path is in its `title`, and
+//     the line under a sent question names what really travelled in full.
 //   - **THE QUESTION IS DRAWN THE MOMENT IT LEAVES**, in its own bubble, with the words gone from the
 //     box (`gitlabReviewPending`). A run is tens of seconds, so a composer that swallows the words
 //     and shows nothing until the answer lands looks like one that lost them — the rule
 //     `chessPending` already holds for a move. The words are never in neither place.
-//   - **A publish that FAILED takes the bubble back and hands the words back**, beside the reason.
-//     The composer's contract read through the optimistic draw: a question that did not reach the
-//     model must end up where the reader can press again.
+//   - **A publish that FAILED takes the bubble back and hands the words back**, beside the reason,
+//     with the CHIPS rebuilt by re-reading those words (`setText`) — so nothing about a handed-back
+//     question is kept anywhere. The composer's contract read through the optimistic draw: a question
+//     that did not reach the model must end up where the reader can press again. **The current words
+//     are read from a REF** rather than from the state, because `ask` closes over the render it was
+//     created in and the state it can see is the value from BEFORE the box was cleared — which made
+//     the hand-back decide against itself and leave the reader an empty box beside a refusal.
+//   - **THE FIELD IS THE APP'S OWN EDITOR, out of a lazy chunk**, which is what a chip whose width is
+//     not its text's costs: no overlay over a `<textarea>` can shorten a run and keep the caret where
+//     the reader put it. Nothing about the wire moved with it — `ReviewTagNode.renderText` emits the
+//     tag's own spelling, so the question is the same string it always was.
+//   - **THE FIELD GROWS WITH THE QUESTION, to eight lines**, then scrolls itself. A box two lines tall
+//     hides most of a paragraph; one that grows for ever takes the conversation with it.
 //   - **THE COMPOSER IS ONE BOX**, and Send is inside it — the app's own composer's shape
 //     (`rounded-2xl bg-card`, a column with a control row at its foot), because two boxes for one
 //     act ask the reader which is the thing they are typing into.
@@ -76,28 +103,28 @@ export function ReviewChatPanel(props: {
   const controller = useController();
 
   const [question, setQuestion] = useState("");
-  // Where the "@" that opened the list starts, or `null` for a list that is not open. It is an
-  // OFFSET rather than a boolean because what is typed after it is the query.
-  const [trigger, setTrigger] = useState<number | null>(null);
-  // Where the CARET was when the trigger was measured. The query is what stands between the two, so
-  // this cannot be read off the text: with the query taken to the END instead, picking a tag deleted
-  // every word after the caret and the list matched against the whole tail — so a reader going back
-  // to add a tag mid-sentence lost the rest of their question.
-  const [caret, setCaret] = useState(0);
-  const [active, setActive] = useState(0);
-  const field = useRef<HTMLTextAreaElement | null>(null);
+  // The FIELD's own handle. The typeahead, the caret and the query all live inside it now, because
+  // every one of them is a fact about a document position and only the editor holds those — what the
+  // panel keeps is the question as WORDS, which is what it sends.
+  const field = useRef<ReviewQuestionHandle | null>(null);
   const end = useRef<HTMLDivElement | null>(null);
+  // The question as it stands RIGHT NOW, for `ask` to read AFTER its await.
+  //
+  // It is a ref rather than the state because `ask` closes over the render it was created in, so the
+  // state it can see is the value from BEFORE the box was cleared — which made the failure hand-back
+  // decide against itself and leave the reader with an empty box and a refusal. The textarea version
+  // read the current value through `setQuestion`'s own updater form; that is not available here,
+  // because restoring the words also has to rebuild the chips (`setText`) and a side effect inside a
+  // state updater is one React may run twice.
+  const asked = useRef("");
+  asked.current = question;
 
   const all = useMemo(() => reviewTags(props.review, props.diff), [props.review, props.diff]);
   // WHAT THE QUESTION NAMES, read out of its own words — so what the reader sees in the sentence and
-  // what travels are one fact rather than two.
+  // what travels are one fact rather than two. It is unchanged by the field becoming an editor: the
+  // chips serialize to exactly the words a textarea held (`ReviewTagNode.renderText`).
   const tags = useMemo(() => reviewTagsInText(question, all), [question, all]);
   const picked = useMemo(() => new Set(tags.map(reviewTagKey)), [tags]);
-  const query = trigger === null ? "" : question.slice(trigger + 1, caret);
-  const matches = useMemo(
-    () => (trigger === null ? [] : matchReviewTags(all, query, picked)),
-    [trigger, all, query, picked],
-  );
   const limit = reviewTagLimit(tags);
   const turns = useMemo(() => drawnReviewTurns(chat, pending), [chat, pending]);
 
@@ -108,46 +135,23 @@ export function ReviewChatPanel(props: {
     end.current?.scrollIntoView({ block: "end", behavior: "smooth" });
   }, [turns.length]);
 
-  const pick = (tag: ReviewTag) => {
-    if (trigger === null) return;
-    // The tag goes INTO the words, in place of the "@…" that opened the list, with a space after it
-    // so the sentence carries on. Nothing is kept beside the field.
-    const before = question.slice(0, trigger);
-    const after = question.slice(trigger + 1 + query.length);
-    // A space AFTER it, so the reader carries straight on typing — and NOT a second one when the text
-    // already has one there, which is what a pick in the middle of a sentence has in front of it. At
-    // the END of the text there is nothing following, so the space is wanted.
-    const spaced = after.startsWith(" ") ? "" : " ";
-    const inserted = `${reviewTagText(tag)}${spaced}`;
-    setQuestion(`${before}${inserted}${after}`);
-    setTrigger(null);
-    setActive(0);
-    // The caret goes after what was inserted, or the next thing typed lands before it — and the state
-    // follows, so the next "@" measures its query from the right place.
-    const next = before.length + inserted.length;
-    setCaret(next);
-    requestAnimationFrame(() => {
-      const el = field.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(next, next);
-    });
-  };
-
   const ask = async () => {
     if (!reviewQuestionCanBeAsked(props.review, question) || asking) return;
-    const asked = question;
+    const words = question;
     const sent = tags;
     // THE BOX IS CLEARED ON THE PRESS, because the words are drawn as a bubble in the same frame
     // (`gitlabReviewPending`). They are never in neither place.
     setQuestion("");
-    setTrigger(null);
-    const ok = await controller.askGitLabReview(asked, sent);
+    field.current?.clear();
+    const ok = await controller.askGitLabReview(words, sent);
     if (ok) return;
     // A publish that failed hands the words BACK, beside the reason — unless the reader has written
     // something new meanwhile, which is the rule `removeSentWords` holds for a draft that was
-    // rewritten while a send travelled: their words win over ours.
-    setQuestion((current) => (current === "" ? asked : current));
+    // rewritten while a send travelled: their words win over ours. The chips come back with them,
+    // rebuilt by re-reading the words (`setText`), so nothing about a handed-back question is kept.
+    if (asked.current !== "") return;
+    setQuestion(words);
+    field.current?.setText(words);
   };
 
   return (
@@ -173,7 +177,12 @@ export function ReviewChatPanel(props: {
           <ul className="flex flex-col gap-4">
             {turns.map((turn, index) => (
               <li key={`${turn.asked_ms}:${index}`}>
-                <ReviewTurn turn={turn} review={props.review} project={props.project} />
+                <ReviewTurn
+                  turn={turn}
+                  review={props.review}
+                  tags={all}
+                  project={props.project}
+                />
               </li>
             ))}
           </ul>
@@ -201,116 +210,19 @@ export function ReviewChatPanel(props: {
             field.current?.focus();
           }}
         >
-          {matches.length > 0 && (
-            // Over the box rather than under it, because the box is at the foot of a column: a list
-            // below would be off the bottom of the screen.
-            <ul
-              data-testid="gitlab-review-chat-list"
-              className="absolute bottom-full left-0 right-0 z-10 mb-1 max-h-64 overflow-y-auto rounded-lg bg-card p-1 shadow-card"
-            >
-              {matches.map((tag, index) => (
-                <li key={reviewTagKey(tag)}>
-                  <button
-                    type="button"
-                    data-testid="gitlab-review-chat-option"
-                    data-kind={tag.kind}
-                    data-active={index === active ? "yes" : "no"}
-                    // `mousemove` rather than `mouseenter`: this list opens right over the field the
-                    // reader just clicked, so a row appearing under a STATIONARY cursor would take
-                    // the active row away from the keyboard — the defect both composer typeaheads
-                    // were fixed for.
-                    onMouseMove={() => setActive(index)}
-                    onClick={() => pick(tag)}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px]",
-                      index === active ? "bg-accent" : "",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "shrink-0 rounded px-1 py-px text-[10px]",
-                        tag.kind === "theme"
-                          ? "bg-primary/10 text-primary"
-                          : "bg-element text-text-faint",
-                      )}
-                    >
-                      {tag.kind === "theme" ? "theme" : "file"}
-                    </span>
-                    <span
-                      className={cn(
-                        "min-w-0 truncate",
-                        tag.kind === "file" ? "font-mono text-text-dim" : "text-foreground",
-                      )}
-                    >
-                      {tag.label}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          <textarea
-            ref={field}
-            data-testid="gitlab-review-chat-field"
-            value={question}
-            rows={2}
-            placeholder="Ask about a theme or a file…"
-            onChange={(event) => {
-              const next = event.target.value;
-              setQuestion(next);
-              // The list is open while the caret is in a run of non-whitespace after an "@" that
-              // opens the text or follows whitespace — the rule the emoji and mention typeaheads
-              // hold, so `note@example` and an "@" in the middle of a word open nothing.
-              const where = event.target.selectionStart ?? next.length;
-              const at = next.lastIndexOf("@", Math.max(where - 1, 0));
-              const opens = at === 0 || (at > 0 && /\s/.test(next[at - 1]!));
-              const run = at >= 0 ? next.slice(at + 1, where) : "";
-              setTrigger(at >= 0 && opens && !/\s/.test(run) ? at : null);
-              setCaret(where);
-              setActive(0);
-            }}
-            onSelect={(event) => {
-              // A click or an arrow moves the caret with no change to the text. A list measured
-              // against the OLD position would then match the wrong run, so it closes: the reader
-              // types to open one again, which is what the "@" already means.
-              const where = (event.target as HTMLTextAreaElement).selectionStart ?? 0;
-              if (trigger !== null && where !== caret) setTrigger(null);
-              setCaret(where);
-            }}
-            onKeyDown={(event) => {
-              if (matches.length > 0) {
-                // While the list is open the next key belongs to it — the rule the emoji typeahead
-                // holds, including that ESCAPE is the way out and leaves the "@" as text.
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  setActive((index) => (index + 1) % matches.length);
-                  return;
-                }
-                if (event.key === "ArrowUp") {
-                  event.preventDefault();
-                  setActive((index) => (index - 1 + matches.length) % matches.length);
-                  return;
-                }
-                if (event.key === "Enter" || event.key === "Tab") {
-                  event.preventDefault();
-                  pick(matches[active] ?? matches[0]!);
-                  return;
-                }
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  setTrigger(null);
-                  return;
-                }
-              }
-              // Enter asks; Shift+Enter is a new line, which is how every multi-line box in this app
-              // behaves.
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void ask();
-              }
-            }}
-            className="w-full resize-none bg-transparent text-[13px] text-foreground outline-none placeholder:text-text-faint"
-          />
+          {/* THE FIELD, and the "@" list it opens — both the editor's, because a query is a fact
+              about the caret. What stands in while its chunk arrives is a box of the same height, so
+              the composer does not jump when it lands. */}
+          <Suspense fallback={<QuestionFieldPlaceholder />}>
+            <ReviewQuestionEditor
+              handle={field}
+              tags={all}
+              picked={picked}
+              placeholder="Ask about a theme or a file…"
+              onChangeText={setQuestion}
+              onSubmit={() => void ask()}
+            />
+          </Suspense>
           {/* The control row, at the box's own foot. Send is a round button at the right, which is
               where the app's own composer puts it. */}
           <div className="flex items-center justify-between gap-2">
@@ -366,6 +278,11 @@ export function ReviewChatPanel(props: {
 function ReviewTurn(props: {
   turn: DrawnReviewTurn;
   review: GitLabReview;
+  /** Everything a question could have been tagged with, so its own words can be read back into chips.
+   *  A tag the reading no longer holds — a fresh reading renamed its theme, a push removed its file —
+   *  stays the words it is, which is the rule an @mention naming a person the thread does not hold
+   *  already follows. */
+  tags: ReviewTag[];
   project: string | undefined;
 }) {
   const { turn } = props;
@@ -395,7 +312,12 @@ function ReviewTurn(props: {
           data-testid="gitlab-review-turn-question"
           className="max-w-[92%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-primary px-3 py-2 text-[13px] leading-relaxed text-primary-foreground"
         >
-          {turn.question}
+          {/* THE SAME CHIPS THE FIELD DREW, from the same walk over the same words — so what the
+              reader pointed at is legible in the message as well as in the box, and a question is not
+              a paragraph of raw paths. `onAccent`, because this bubble IS the accent fill: the tint
+              is a property of the surface rather than of the tag (§ A CHIP IS TINTED FOR THE SURFACE
+              IT LANDS ON). */}
+          <ReviewQuestionText question={turn.question} tags={props.tags} />
         </p>
         {context && (
           // WHAT IT WAS TOLD, from what the backend recorded: a tagged file the diff does not hold
@@ -429,5 +351,57 @@ function ReviewTurn(props: {
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * One question's words, with its tagged themes and files drawn as CHIPS.
+ *
+ * It is the read half of the composer's own node: the field turns a chip into words
+ * (`ReviewTagNode.renderText`) and this turns words back into chips, both over the one walk
+ * (`reviewQuestionParts`). So a question written by hand, one built by picking and one handed back
+ * after a failure all draw the same thing — and a tag the reading no longer holds stays the words it
+ * is rather than becoming a chip naming nothing.
+ *
+ * The runs keep their own newlines, because the bubble is `whitespace-pre-wrap`: a reader who pressed
+ * Shift+Enter meant a line to be there.
+ */
+function ReviewQuestionText(props: { question: string; tags: ReviewTag[] }) {
+  const parts = useMemo(
+    () => reviewQuestionParts(props.question, props.tags),
+    [props.question, props.tags],
+  );
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.kind === "text" ? (
+          <span key={index}>{part.text}</span>
+        ) : (
+          <ReviewTagChip key={index} tag={part.tag} onAccent />
+        ),
+      )}
+    </>
+  );
+}
+
+/**
+ * What stands in the composer while the field's own chunk is on its way.
+ *
+ * It reserves the height an EMPTY field has, so the box does not jump when the editor lands — the
+ * rule the app's own composer holds for exactly this swap (`COMPOSER_FIELD_CLASS`, shared between the
+ * placeholder and the editor so the two cannot disagree). It carries the placeholder's own words too,
+ * because a blank box for a moment reads as one that failed to load.
+ */
+function QuestionFieldPlaceholder() {
+  return (
+    <p
+      data-testid="gitlab-review-chat-field-placeholder"
+      aria-hidden
+      // Two lines at the field's own metrics — `text-[13px] leading-5`, which is where `LINE_PX`
+      // comes from.
+      className="min-h-10 text-[13px] leading-5 text-text-faint"
+    >
+      Ask about a theme or a file…
+    </p>
   );
 }
