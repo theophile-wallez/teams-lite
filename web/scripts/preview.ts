@@ -4147,9 +4147,33 @@ if (import.meta.main) {
   // `simulateMockAgentRun` in web/mock/server.ts), which is what makes this surface
   // reviewable without asking a real agent a real question in a real channel.
   if (args.includes("--agent-reply")) {
-    await withPreview(async ({ page, shot, setTheme }) => {
-      await openFirstConversation(page);
+    await withPreview(async ({ page, shot, setTheme, emit }) => {
+      const conversation = await openFirstConversation(page);
       await turnAgentOn(page);
+
+      // A REPLY THIS PAGE NEVER WATCHED BEING WRITTEN, and it is the commonest shape there
+      // is: the run belongs to another backend or another device, so no frame ever reaches
+      // this page and the bubble has only the message's own body to go on. It is drawn FIRST,
+      // before any real run, so the loader below cannot be mistaken for it.
+      //
+      // The body is `agent_policy::reply_html` mid-run — an answer, then the line that says it
+      // is still being written, which is the only thing that marks a reply at all. It carries a
+      // QUOTE too, because a real one does: the capture is what shows it is not drawn.
+      await emit({
+        conversation,
+        content: "",
+        is_self: true,
+        html:
+          `<blockquote itemscope itemtype="http://schema.skype.com/Reply" itemid="1785773946196">` +
+          `<strong>You</strong><p>which port does the backend listen on?</p></blockquote>` +
+          `<p><em>claude is writing…</em></p>`,
+      });
+      const pending = '[data-testid="message"]:has([data-testid="agent-stalled"])';
+      await page.locator(pending).last().waitFor({ state: "visible", timeout: 10_000 });
+      await shot(`${out}-pending-light.png`, pending);
+      await setTheme("dark");
+      await shot(`${out}-pending-dark.png`, pending);
+      await setTheme("light");
 
       await askAgent(page, "@claude which port does the backend listen on?");
       await shot(`${out}-thinking-light.png`);
@@ -4291,7 +4315,7 @@ if (import.meta.main) {
       await shot(`${out}-opencode-dark.png`);
       await shot(`${out}-opencode-coin-dark.png`, '[data-testid="agent-coin"][data-backend="opencode"]');
       console.log(
-        `[preview] wrote ${out}-{thinking,loading,working,stop,transcript,call,writing,done,row,opencode}-*.png`,
+        `[preview] wrote ${out}-{pending,thinking,loading,working,stop,transcript,call,writing,done,row,opencode}-*.png`,
       );
     });
     process.exit(0);

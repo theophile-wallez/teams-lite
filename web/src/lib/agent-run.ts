@@ -367,6 +367,60 @@ function plural(count: number): string {
 }
 
 /**
+ * The words a WAIT is drawn with, and how long each one stands.
+ *
+ * A run that has reported nothing yet has one line to fill, and "is thinking" for ten
+ * minutes reads as an app that has stopped rather than a model that is working. So the word
+ * turns over as the wait grows — the flavour a terminal spinner has, in this app's voice.
+ *
+ * THE FIRST WORD IS THE PLAIN ONE, deliberately: a reader meeting this line in its first
+ * seconds is owed the fact rather than the character, and every wait short enough to be
+ * ordinary shows nothing but "thinking". The rest are for a wait long enough to need them.
+ *
+ * None of them claims the agent DID anything — no "reading", no "running", no "searching".
+ * This is the state where nothing has been reported, so a word that named an action would be
+ * the glyph fallback's mistake in prose: overstating what the agent did.
+ */
+export const AGENT_WAITING_WORDS = [
+  "thinking",
+  "pondering",
+  "mulling it over",
+  "musing",
+  "noodling",
+  "percolating",
+  "brewing",
+  "simmering",
+  "ruminating",
+  "cogitating",
+  "puzzling",
+  "weighing it up",
+  "wondering",
+  "deliberating",
+  "reflecting",
+  "considering",
+] as const;
+
+/** How long one word stands before the next. Long enough to read twice without feeling
+ *  stuck, short enough that a minute of waiting is visibly not a frozen app. */
+export const AGENT_WAITING_ROTATE_MS = 4_000;
+
+/**
+ * What a waiting run says it is doing: who is working, and a word that turns over.
+ *
+ * `elapsedMs` is how long the wait has run — `0` (or a wait whose start this page cannot
+ * state) holds the first word, which is the plain one. It is keyed on the CLOCK and on
+ * nothing else, which is what keeps a capture of this line the same picture every run: at
+ * the moment a capture is taken the wait is inside its first bucket, so the word is
+ * `thinking` by construction rather than by luck. Two runs waiting side by side therefore
+ * show the same word, which is a thing nobody compares.
+ */
+export function agentWaitingLabel(name: string, elapsedMs: number): string {
+  const bucket = elapsedMs > 0 ? Math.floor(elapsedMs / AGENT_WAITING_ROTATE_MS) : 0;
+  const word = AGENT_WAITING_WORDS[bucket % AGENT_WAITING_WORDS.length] ?? AGENT_WAITING_WORDS[0];
+  return `${name} is ${word}`;
+}
+
+/**
  * The label for a phase, written for somebody watching a thread rather than a terminal.
  *
  * WHO is named is whoever the reader addressed: the custom agent when they wrote `@bebou`,

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_RUN_STALE_MS,
   AGENT_TRANSCRIPTS_KEPT,
+  AGENT_WAITING_ROTATE_MS,
+  AGENT_WAITING_WORDS,
+  agentWaitingLabel,
   agentPhaseLabel,
   agentRunIsLive,
   agentRunIsStale,
@@ -222,6 +225,48 @@ describe("a run's start", () => {
       opening({ run_id: "19:thread@thread.v2/1785773999999", at: 1_700_000_060_000 }),
     );
     expect(next[opening().conversation]!.started_at).toBe(1_700_000_060_000);
+  });
+});
+
+/**
+ * WHAT A WAIT SAYS IT IS DOING.
+ *
+ * The line is "<who> is <word>", and the word turns over as the wait grows so a long one does
+ * not read as a frozen app. Keyed on the clock alone, which is what makes it assertable at all.
+ */
+describe("agentWaitingLabel", () => {
+  it("opens with the PLAIN word, and a wait whose start is unknown never leaves it", () => {
+    // The first seconds of every run land here, and a reader meeting the line then is owed the
+    // fact rather than the flavour. `0` is also what a page that cannot date the run passes.
+    expect(agentWaitingLabel("Claude", 0)).toBe("Claude is thinking");
+    expect(agentWaitingLabel("Bebou", 0)).toBe("Bebou is thinking");
+    expect(agentWaitingLabel("Claude", AGENT_WAITING_ROTATE_MS - 1)).toBe("Claude is thinking");
+  });
+
+  it("turns the word over one bucket at a time, and wraps", () => {
+    const at = (bucket: number) =>
+      agentWaitingLabel("Claude", bucket * AGENT_WAITING_ROTATE_MS + 1);
+    expect(at(1)).not.toBe(at(0));
+    expect(at(1)).toBe(`Claude is ${AGENT_WAITING_WORDS[1]}`);
+    // A wait long enough to exhaust the list starts again rather than falling off it.
+    expect(at(AGENT_WAITING_WORDS.length)).toBe(at(0));
+    expect(at(AGENT_WAITING_WORDS.length + 3)).toBe(at(3));
+  });
+
+  it("names the AGENT, whatever it is called", () => {
+    // A custom agent's own label is what stands under its own signature, so the two agree.
+    expect(agentWaitingLabel("Natacha", 0)).toMatch(/^Natacha is /);
+  });
+
+  it("never claims the agent DID anything", () => {
+    // This is the state where NOTHING has been reported. A word naming an action would be the
+    // glyph fallback's mistake in prose: overstating what the agent did, which is the error
+    // every gate in this feature exists to prevent.
+    for (const word of AGENT_WAITING_WORDS) {
+      expect(word).not.toMatch(/read|writ|run|search|edit|fetch|grep|execut/i);
+    }
+    // And every one of them reads after "is", so the sentence is a sentence.
+    for (const word of AGENT_WAITING_WORDS) expect(word).toMatch(/^[a-z]+( it (over|up))?$/);
   });
 });
 

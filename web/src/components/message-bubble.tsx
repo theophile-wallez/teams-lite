@@ -1235,8 +1235,9 @@ function MessageBubbleImpl(props: {
               // from the content Teams last echoed back. The two agree — the backend
               // edits the message with the same text — but the stream is many frames
               // ahead of the edit, and it knows what the agent is doing between them.
+              //
+              // AND THE QUOTED REQUEST IS NOT DRAWN — see the note on the branch below.
               <>
-                {quotedBlock}
                 <AgentStream
                   run={props.agentRun}
                   onSettled={props.onAgentSettled ?? (() => undefined)}
@@ -1254,9 +1255,19 @@ function MessageBubbleImpl(props: {
               // message itself, including whether it stopped mid-answer. Plus the work
               // behind it, when this app is the one that watched it being done — the
               // message never carries that, so the panel is gone after a reload.
+              //
+              // THE QUOTED REQUEST IS NOT DRAWN ON AN AGENT'S REPLY. The body carries one —
+              // `agent_send` posts the answer as a native reply, which is what a colleague
+              // reading the thread in a stock client needs and what `agent_policy::answering`
+              // reads the request back out of — but in THIS app the request is the message
+              // directly above it, so the block stated the same words twice, a centimetre
+              // apart, on every answer. That is the "one fact twice" rule the per-bubble stamp
+              // and the padlock-per-row were both cut for. What it costs is stated rather than
+              // hidden: a reply read out of context (other messages landed while the run went)
+              // no longer says which message it answers, and the jump-to-request block goes
+              // with it. Nothing about the posted BODY changes — this is only how it is drawn.
               <>
                 {bodyBeforeQuote}
-                {quotedBlock}
                 {props.agentTranscript ? (
                   <AgentStoredTranscript
                     transcript={props.agentTranscript}

@@ -1358,10 +1358,54 @@ have written.
   something better than an animation to say it is going — the rows while the run works, the caret
   at the end of the answer once words arrive — and "the words are the progress indicator, and two
   competing animations is one too many" is the rule this surface already held. So the loader
-  stands exactly where the header had nothing to disclose and no control to be. It is
-  deliberately NOT drawn on a reply this app never watched (`AgentStoredStatus`): nothing is
-  arriving into that page, and a loader there would promise the next word at a pace it is not
-  being fed at.
+  stands exactly where the header had nothing to disclose and no control to be.
+
+**THE WAIT SAYS WHO IS WORKING, AND THE WORD TURNS OVER** (`agentWaitingLabel`). "Claude is
+thinking" held for ten minutes reads as an app that has stopped rather than a model that is
+working, so the line rotates through `AGENT_WAITING_WORDS` — the flavour a terminal spinner has,
+in this app's voice. Four rules, each pinned by `agent-run.test.ts`:
+
+- **The FIRST word is the plain one**, and it is what every ordinary wait shows: a reader meeting
+  this line in its first seconds is owed the fact rather than the character. The whimsy is for a
+  wait long enough to need it.
+- **It is keyed on the CLOCK and on nothing else**, which is also what keeps a capture of this
+  line the same picture every run: at the moment a capture is taken the wait is inside its first
+  bucket, so the word is `thinking` by construction rather than by luck. Two runs waiting side by
+  side therefore show the same word, which is a thing nobody compares.
+- **No word claims the agent DID anything** — no "reading", no "running", no "searching". This is
+  the state where nothing has been reported, so a word naming an action would be the glyph
+  fallback's mistake in prose. A test scans the list for exactly those verbs.
+- **The NAME is the SIGNATURE's, not `agentPhaseLabel`'s** (`useAgentRunName`): a custom agent's
+  own label where this machine holds the record, and this line stands directly under that
+  signature — two names for one agent a centimetre apart is what that resolution exists to avoid.
+- **A screen reader is given a STABLE sentence** (`ariaLabel`). The row is a live region, so a
+  rotating label would announce one sentence every few seconds for the whole wait — noise rather
+  than news, because the FACT does not change, only the word for it.
+
+**AND A PENDING REPLY IS THAT LOADER TOO, which REVERSES a rule this file used to hold.** It said
+the words on a reply nobody watched must never animate, because nothing is arriving into that page
+and a shimmer would promise the next word at a pace it is not being fed at — so it drew `still
+being written…` in italics. Two things settled it the other way, and the second is the one that
+matters. **That state is far commoner than the argument assumed: it is what EVERY page on the other
+install sees for a run this backend does not own**, since `agent_stream` is broadcast by the owning
+process alone (see § Running the released build BESIDE the staged one) — and an italic sentence
+over an empty body reads as a message that FAILED rather than one being written, which is how it
+was reported. And the claim the loader makes is not about pace: what it says is that this reply is
+unfinished, which the bubble's own edge is already saying, so the animation is the second half of
+one statement rather than a promise about the next word. What it deliberately does NOT carry is the
+elapsed time or the rotation: this page cannot date a run it never watched — only the placeholder,
+which for a reply nothing ever closed could be days old — so the word stands alone and never turns.
+
+**AN AGENT'S REPLY DRAWS NO QUOTE OF THE REQUEST.** The body carries one — `agent_send` posts the
+answer as a native reply, which is what a colleague reading the thread in a stock client needs and
+what `agent_policy::answering` reads the request back out of — but in THIS app the request is the
+message directly above it, so the block stated the same words twice, a centimetre apart, on every
+answer. That is the "one fact twice" rule the per-bubble stamp and the padlock-per-row were both
+cut for. The cost is stated rather than hidden: a reply read out of context (other messages landed
+while the run went) no longer says which message it answers, and the jump-to-request block goes
+with it. **Nothing about the posted BODY changes** — this is only how this app draws it, and
+`web/e2e/agent.spec.ts` asserts it on the mock's REAL run, whose echo really does open with a
+quote, so what is pinned is the drawing rather than a fixture that never had one.
 
 **THE PANEL'S OWN MECHANICS ARE UNCHANGED, which is the point of taking only the drawing.** The
 fold policy (open for the run, folded once when it ends, the reader's from then on, held per
@@ -9262,6 +9306,27 @@ RELOADED. Two rules follow, and each is pinned by a test in `src/bin/server.rs`:
   telling its own pages nothing. The store's row is shared; what a page has SEEN is not. A
   re-delivered frame costs nothing, because a client merges by id. Push and the agent
   answer stay behind the insert: those are per-machine actions, already claimed.
+
+**AN AGENT RUN IS NARRATED ONLY TO THE PAGES OF THE BACKEND THAT OWNS IT, and that is the one
+thing about this arrangement a reader really notices.** A trigger is CLAIMED by one process,
+which runs the CLI and broadcasts `agent_stream` on its own socket — so a page on the OTHER
+front gets the message (both backends ingest the same Teams frame, per the rule above) and not
+one frame of the run. It was diagnosed from the journal on 2026-09-02: five runs logged by
+`teams-lite-backend` (19420), **zero `[agent]` lines** in `teams-lite-app` (19422), and a
+reader on 19442 watching answers arrive with no loader, no reasoning, no tool rows and the
+bubble falling back to its own stored body. It is the same root as the `agent_stop` note above
+— the registry is per PROCESS — and it is stated here because the STREAM half is what anybody
+looking at the app will meet first.
+
+Nothing about it is broken, and nothing on this side can heal it cheaply: the narration is
+`agent::Progress` in the owning process's memory, and the transcript is deliberately NOT stored
+(the Teams message holds the answer and never the reasoning). Two things make it liveable rather
+than confusing, and both are the honest shape rather than a fix: a pending reply draws the
+LOADER under the agent's own name (§ AND A PENDING REPLY IS THAT LOADER TOO), so the other
+install says "this is being written" instead of looking like a message that failed; and the
+answer itself still arrives, because the backend EDITS the Teams message and both backends see
+that. **Narrating a run to both installs would mean publishing the transcript through the shared
+store** — a deliberate feature with a real cost, never a quiet addition.
 
 ## A broken sign-in costs the LIVE feed, never the history
 

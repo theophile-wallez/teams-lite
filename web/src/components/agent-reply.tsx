@@ -8,6 +8,7 @@ import {
   agentRunIsLive,
   agentRunStartedAt,
   agentToolGlyph,
+  agentWaitingLabel,
   agentTranscriptLabel,
   type AgentRun,
   type AgentStep,
@@ -466,6 +467,7 @@ function TranscriptPanel(props: {
 }) {
   const { run } = props;
   const reduce = useReducedMotion();
+  const waitingName = useAgentRunName(run);
   const live = !!run && agentRunIsLive(run);
   const has = props.steps.length > 0;
   const waiting = live && run?.phase !== "writing";
@@ -586,7 +588,11 @@ function TranscriptPanel(props: {
             this page cannot state draws no number at all). */}
         {!has && waiting ? (
           <LoadingState
-            label={label}
+            // A FUNCTION, so the wording turns over as the wait grows — the loader keeps the
+            // only clock here, so it is the only thing that can. The stable sentence beside
+            // it is what a screen reader is given, because the FACT does not change.
+            label={(elapsedMs) => agentWaitingLabel(waitingName, elapsedMs)}
+            ariaLabel={`${waitingName} is thinking`}
             sinceMs={run ? agentRunStartedAt(run) : undefined}
             // Their own box is `w-fit`; here it stands where the header does, sharing its
             // row with Stop, and it takes the header's own padding so the two states do not
@@ -666,6 +672,21 @@ function TranscriptPanel(props: {
       </AnimatePresence>
     </div>
   );
+}
+
+/**
+ * The name a WAIT is announced under: the custom agent's own label where this machine holds
+ * the record, then the address its frames carry, then the CLI's own name.
+ *
+ * It is the ladder `AgentSignature` uses rather than `agentPhaseLabel`'s, deliberately: this
+ * line stands directly under that signature, and two names for one agent a centimetre apart
+ * is the defect the signature's own label resolution exists to avoid. `agentPhaseLabel` keeps
+ * the ADDRESS because it is read off the run's frames alone, and a surface without the local
+ * record has nothing better.
+ */
+function useAgentRunName(run: AgentRun | null): string {
+  const label = usePersonaSignatureLabel(run?.persona);
+  return label ?? agentDisplayName(run?.backend ?? "claude");
 }
 
 /** Where the last thought sits, or `-1`. Only that one can still be growing. */
@@ -750,14 +771,25 @@ function AgentToolRow(props: {
  * it is exactly as informative as the thread is: an answer that was still being written
  * when the run died says so, and a failure says why.
  *
- * The WORDS here never animate. Nothing is arriving into this page, so a shimmer on the
- * line — or a caret at the end of the answer — would promise the next word at a pace this
- * app is not being fed at. What does say the answer is unfinished is the bubble's own edge
- * ({@link AgentBubbleShine}): a run somewhere else is still a run, and one moving hairline
- * around the whole message claims less than a line of text pretending to be live.
+ * **A PENDING REPLY IS THE LOADER, and that reverses a rule this file used to hold.** It said
+ * the words here must never animate, because nothing is arriving into this page and a shimmer
+ * would promise the next word at a pace it is not being fed at — so it drew the sentence
+ * "still being written…" in italics. Two things settled it the other way. The state is far
+ * commoner than that argument assumed: it is what EVERY page on the other install sees for a
+ * run this backend does not own (`agent_stream` is broadcast by the owning process alone), and
+ * an italic sentence with an empty body under it reads as a message that failed rather than one
+ * being written. And the claim the loader makes is not about pace: what it says is that this
+ * reply is unfinished, which the bubble's own edge is already saying — the animation is now
+ * the second half of one statement rather than a promise about the next word.
+ *
+ * What it deliberately does NOT carry is the elapsed time. This page did not watch the run, so
+ * it cannot say when the CLI started — only when the placeholder was posted, which for a reply
+ * nothing ever closed could be days ago. "A number nobody has yet draws NOTHING", so the word
+ * stands alone and never turns over: a rotating word here would claim a liveness this page has
+ * no frames for.
  */
 export function AgentStoredStatus(props: {
-  authorship: { pending: boolean; failure: string | null };
+  authorship: { pending: boolean; failure: string | null; backend: string; persona: string | null };
 }) {
   const { authorship } = props;
   if (authorship.failure) {
@@ -777,12 +809,21 @@ export function AgentStoredStatus(props: {
     );
   }
   if (!authorship.pending) return null;
+  return <AgentStoredWait authorship={authorship} />;
+}
+
+/** The loader a pending reply draws, in its own component so the name's own hook is not
+ *  called on the two paths above that return before it. */
+function AgentStoredWait(props: { authorship: { backend: string; persona: string | null } }) {
+  const label = usePersonaSignatureLabel(props.authorship.persona);
+  const name = label ?? agentDisplayName(props.authorship.backend);
   return (
-    <div
-      data-testid="agent-stalled"
-      className="mt-2 text-xs italic text-text-faint"
-    >
-      still being written…
+    <div data-testid="agent-stalled" className="mt-2">
+      <LoadingState
+        // No `sinceMs`, so no number and no rotation — see the note above.
+        label={agentWaitingLabel(name, 0)}
+        labelTestId="agent-stalled-label"
+      />
     </div>
   );
 }

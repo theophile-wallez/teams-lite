@@ -219,6 +219,14 @@ test.describe("The local agent's answer", () => {
     });
     await expect(bubble).toHaveAttribute("data-mine", "false");
 
+    // AND IT DRAWS NO QUOTE OF THE REQUEST. The body carries one — the answer is posted as a
+    // native reply, which is what a colleague in a stock client needs — but here the request is
+    // the message directly above, so the block stated the same words twice a centimetre apart.
+    // Asserted on the mock's real run, whose echo really does open with the quote, so this
+    // proves the DRAWING rather than a fixture that never had one.
+    await expect(bubble.locator('[data-testid="quote-sender"]')).toHaveCount(0);
+    await expect(bubble).not.toContainText("which port is it?");
+
     // The bubble's own edge catches the light while the run writes into it. It is inside
     // the bubble and takes its radius, so it is the message's own hairline rather than a
     // box around it — and its box is measured against the bubble's, because a shine that
@@ -538,9 +546,19 @@ test.describe("The local agent's answer", () => {
       })
       .last();
     await expect(bubble).toBeVisible();
-    // Nothing is streaming into this page, so the bubble says so in words…
+    // Nothing is streaming into this page, so the bubble says so ITSELF — the loader, naming
+    // the agent, with no elapsed time: this page did not watch the run, so it cannot say when
+    // the CLI started, and "a number nobody has yet draws NOTHING".
+    //
+    // This is the commonest state there is, not an edge case: it is what every page on the
+    // other install sees for a run this backend does not own, since `agent_stream` is broadcast
+    // by the owning process alone.
     await expect(page.locator('[data-testid="agent-stream"]')).toHaveCount(0);
-    await expect(page.locator('[data-testid="agent-stalled"]')).toBeVisible();
+    const stalled = page.locator('[data-testid="agent-stalled"]').last();
+    await expect(stalled).toBeVisible();
+    await expect(stalled).toContainText("Claude is thinking");
+    await expect(stalled.locator('[data-testid="loading-state"]')).toBeVisible();
+    await expect(stalled.locator('[data-testid="loading-state-elapsed"]')).toHaveCount(0);
     // …and the edge says it too, because a run this app cannot see is still a run. It is
     // the CLI's own colour, so the edge and the mark inside the bubble name one vendor.
     const shine = bubble.locator('[data-testid="agent-shine"]');

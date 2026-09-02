@@ -108,7 +108,7 @@ function LoaderGrid({
  * long as it is mounted, whether or not anybody can see it. That is the rule this app's
  * chess clock already holds for itself, and this app is left open for days on a phone.
  */
-function useElapsedSince(sinceMs: number | undefined): string | null {
+function useElapsedSince(sinceMs: number | undefined): { ms: number; text: string | null } {
   const [, tick] = useState(0);
   const running = typeof sinceMs === "number" && sinceMs > 0;
   useEffect(() => {
@@ -131,15 +131,23 @@ function useElapsedSince(sinceMs: number | undefined): string | null {
       document.removeEventListener("visibilitychange", start);
     };
   }, [running]);
-  if (!running) return null;
-  const total = Math.max(0, (Date.now() - sinceMs) / 1000);
-  if (total < 60) return `${total.toFixed(1)}s`;
-  return `${Math.floor(total / 60)}m ${(total % 60).toFixed(1)}s`;
+  if (!running) return { ms: 0, text: null };
+  const ms = Math.max(0, Date.now() - sinceMs);
+  const total = ms / 1000;
+  const text = total < 60 ? `${total.toFixed(1)}s` : `${Math.floor(total / 60)}m ${(total % 60).toFixed(1)}s`;
+  return { ms, text };
 }
 
 export default function LoadingState({
-  /** PATCH 3 — THE LABEL IS THE CALLER's. Theirs defaults to "Churning", which is a word
-   *  about ice cream and not about whatever the caller is really waiting on. */
+  /** PATCH 3 — THE LABEL IS THE CALLER's, and it may FOLLOW THE CLOCK. Theirs defaults to
+   *  "Churning", which is a word about ice cream and not about whatever the caller is really
+   *  waiting on.
+   *
+   *  A function is passed the elapsed milliseconds, which is what lets a label turn its own
+   *  wording over as a long wait grows (`agentWaitingLabel`). It has to be resolved HERE
+   *  rather than by the caller because the clock this hook keeps is the only one: a caller
+   *  ticking its own interval to re-render a string would be a second timer for one moment,
+   *  and this loader is mounted per conversation. */
   label,
   /** When the work started, in epoch ms — or `undefined` for work whose start is not known,
    *  which draws no time at all (PATCH 2). */
@@ -155,17 +163,25 @@ export default function LoadingState({
    *  own PATCH 6 removes from its header. The panel this is drawn in is `role="status"` for
    *  as long as a run is live, so it passes `false`; the vendor's behaviour is the default. */
   announce = true,
+  /** The STABLE sentence assistive tech is given for the label, where the visible one turns
+   *  over. Without it a live region re-announces every new wording — one sentence every few
+   *  seconds for as long as the wait lasts — which is noise rather than news: the FACT does
+   *  not change, only the word for it. Theirs has no such split, because its label is a
+   *  constant. */
+  ariaLabel,
   className,
 }: {
-  label: string;
+  label: string | ((elapsedMs: number) => string);
   sinceMs?: number;
   variant?: string;
   testId?: string;
   labelTestId?: string;
   announce?: boolean;
+  ariaLabel?: string;
   className?: string;
 }) {
   const elapsed = useElapsedSince(sinceMs);
+  const words = typeof label === "function" ? label(elapsed.ms) : label;
   const { delays, dur, round } = PATTERNS[variant] ?? DRIVE;
 
   return (
@@ -177,6 +193,7 @@ export default function LoadingState({
       <LoaderGrid delays={delays} dur={dur} round={round} />
       <span
         data-testid={labelTestId}
+        aria-label={ariaLabel}
         // `beautifului-shimmer`: see the note beside the same class in `thinking-state.tsx`.
         className="beautifului-shimmer min-w-0 truncate bg-clip-text text-[13px] font-medium text-transparent"
         style={{
@@ -186,14 +203,14 @@ export default function LoadingState({
           animation: "shimmer-text 1.4s linear infinite",
         }}
       >
-        {label}
+        {words}
       </span>
-      {elapsed ? (
+      {elapsed.text ? (
         <span
           data-testid="loading-state-elapsed"
           className="shrink-0 font-mono text-[12px] text-ink-3 tabular-nums"
         >
-          {elapsed}
+          {elapsed.text}
         </span>
       ) : null}
     </div>
