@@ -22,7 +22,7 @@
 // already holds, and it is what lets the row mapping be unit-tested for every stage without a
 // browser.
 
-import type { TaskRow, TaskState } from "../components/task-rows";
+import type { TaskRow, TaskRowStatus } from "../components/beautifului/task-rows";
 // The GitLab side's own byte formatter, reused rather than respelled: it already answers `null` for
 // "nothing to say", which is exactly the shape every value on these rows takes.
 import { formatBytes } from "./gitlab-job-log";
@@ -113,10 +113,7 @@ function stageIndex(stage: ReviewRunStage): number {
  *  A FAILURE marks the stage it stopped at and leaves everything before it finished, because how far
  *  the reading got is exactly what the reader needs in order to know what to do next: a diff that
  *  would not load is GitLab's problem, and a model that refused is the provider's. */
-function stateOf(
-  row: ReviewRunStage,
-  progress: ReviewRunProgress,
-): Exclude<TaskState, "failed"> | "failed" {
+function stateOf(row: ReviewRunStage, progress: ReviewRunProgress): TaskRowStatus {
   const at = stageIndex(progress.stage);
   const mine = stageIndex(row);
   if (progress.error) {
@@ -127,111 +124,114 @@ function stateOf(
   return mine === at ? "running" : "pending";
 }
 
-/** The three rows a reading is drawn as, from one frame.
+/** The three rows a reading is drawn as, from one frame — in the shape
+ *  `components/beautifului/task-rows.tsx` takes: a label, one `amount` at the right, a status, the
+ *  step number its ring shows, and the `details` behind its chevron.
  *
  *  THREE rather than one per stage, because the stages a reader can act on are not the stages the
  *  code has: the two GitLab reads are one thing to a person ("it is fetching the branch") and are
- *  worth telling apart only as sub-steps, while what the model does is the row somebody waits in
- *  front of. The `done` stage gets no row at all: the reading itself takes the screen the moment it
- *  lands, so a row saying "5 themes" beside a document that opens by saying so would state one fact
- *  twice — the rule this page already holds for its own headline.
+ *  worth telling apart only as details, while what the model does is the row somebody waits in front
+ *  of. The `done` stage gets no row at all: the reading itself takes the screen the moment it lands,
+ *  so a row saying "5 themes" beside a document that opens by saying so would state one fact twice —
+ *  the rule this page already holds for its own headline.
  *
- *  Every sub-step's value is a fact or nothing. A step whose number is not known yet draws no value
- *  rather than a zero, because "0 files" is a claim about the branch and a blank is not. */
+ *  THE RUNNING ROW OPENS ITSELF (`defaultOpen`), because the row a reader is waiting in front of is
+ *  the one whose detail they want; the others stay shut, which is what keeps three rows a summary
+ *  rather than a wall. A press wins from then on, which is the vendor's own rule.
+ *
+ *  Every value is a fact or an empty string. A `meta` nobody knows yet is blank rather than a zero
+ *  or a dash, because "0 files" is a claim about the branch and a blank is not. */
 export function reviewRunRows(progress: ReviewRunProgress): TaskRow[] {
-  const read = stateOf("diff", progress);
   const readStarted = stateOf("detail", progress);
+  const read = stateOf("diff", progress);
   const asking = stateOf("asking", progress);
   const writing = stateOf("writing", progress);
+  const files = progress.files ? fileCount(progress.files) : "";
+  const prompt = formatBytes(progress.promptBytes) ?? "";
+  // The prompt is not a stage of its own — it is built between the diff read and the ask, in no
+  // measurable time — so its row is finished exactly when the asking has begun. It is a ROW rather
+  // than a detail because of WHAT it says: how much of the branch left this machine, which is the one
+  // fact the offer above warned the reader about and the only place it is ever answered.
+  const promptState: TaskRowStatus = asking === "pending" ? "pending" : "done";
+  const readState = rowState([readStarted, read]);
+  const agentState = rowState([asking, writing]);
   return [
     {
-      id: "read",
-      title: "Read the branch",
-      // The count is the headline fact about a diff and it is the LAST of the two reads to answer,
-      // so this stays blank while the branch is still coming down rather than claiming a total.
-      value: progress.files ? fileCount(progress.files) : null,
-      // The row is finished once BOTH its steps are, which is what the diff read reaching `done`
-      // means — and it fails if either does.
-      state: rowState([readStarted, read]),
-      steps: [
-        {
-          id: "detail",
-          label: "The merge request",
-          // The commit, shortened the way every other surface here shortens one. It is the fact that
-          // makes a reading checkable later: the document says which commit it read, and this is
-          // where that value comes from.
-          value: progress.headSha ? progress.headSha.slice(0, 8) : null,
-          state: readStarted,
-        },
-        {
-          id: "diff",
-          label: "Its changes",
-          value: progress.files ? fileCount(progress.files) : null,
-          state: read,
-        },
+      key: "read",
+      label: "Read the branch",
+      // The count is the headline fact about a diff and the LAST of the two reads to answer, so this
+      // stays blank while the branch is still coming down rather than claiming a total.
+      amount: files,
+      status: readState,
+      step: 1,
+      defaultOpen: readState === "running",
+      details: [
+        // The commit, shortened the way every other surface here shortens one. It is what makes a
+        // reading checkable against the branch later.
+        { label: "The merge request", meta: progress.headSha ? progress.headSha.slice(0, 8) : "" },
+        { label: "Its changes", meta: files },
       ],
     },
     {
-      id: "prompt",
-      title: "Put the diff in the prompt",
-      value: formatBytes(progress.promptBytes),
-      // It is not a stage of its own: the prompt is built between the diff read and the ask, in no
-      // measurable time, so this row is finished exactly when the asking has begun. It is a ROW
-      // rather than a step because of WHAT it says — how much of the branch left this machine, which
-      // is the one fact the offer above warned the reader about and the only place it is answered.
-      state: asking === "pending" ? "pending" : "done",
-      steps: [
-        {
-          id: "prompt-bytes",
-          label: "Patch sent",
-          value: formatBytes(progress.promptBytes),
-          state: asking === "pending" ? "pending" : "done",
-        },
-        // Only when the budget really cut something. A row reading "0 files without their patch" on
-        // every run is a line that never varies, which is a line nobody reads.
+      key: "prompt",
+      label: "Put the diff in the prompt",
+      amount: prompt,
+      status: promptState,
+      step: 2,
+      defaultOpen: false,
+      details: [
+        { label: "Patch sent", meta: prompt },
+        // Only when the budget really cut something. A line reading "0 files went without their
+        // patch" on every run is a line that never varies, which is a line nobody reads.
         ...(progress.truncated || progress.filesUnseen
           ? [
               {
-                id: "prompt-cut",
                 label:
                   progress.filesUnseen === 1
                     ? "1 file went without its patch"
                     : `${progress.filesUnseen} files went without their patch`,
-                value: "cut",
-                state: "done" as const,
+                meta: "cut",
               },
             ]
           : []),
       ],
     },
     {
-      id: "agent",
+      key: "agent",
       // The CLI doing the reading, named — because it is what the reader chose in Settings and what
       // they would go and change if this row is the one that fails.
-      title: progress.backend ? `${progress.backend} reads it` : "The agent reads it",
-      value: progress.model || null,
-      state: rowState([asking, writing]),
-      steps: [
-        {
-          id: "thinking",
-          label: "Thinking",
-          state: asking,
-        },
-        {
-          id: "writing",
-          label: "Writing the reading",
-          // The answer so far. The one number on this page that moves while the model works, and it
-          // is what really arrived — never a fraction of an answer whose length nothing knows.
-          value: formatBytes(progress.answerBytes),
-          state: writing,
-        },
+      label: progress.backend ? `${progress.backend} reads it` : "The agent reads it",
+      amount: progress.model,
+      status: agentState,
+      step: 3,
+      defaultOpen: agentState === "running" || agentState === "failed",
+      details: [
+        // The phase, in a word. The model is either still working things out or writing the answer,
+        // and which of the two it is is the whole of what a reader learns by opening this row.
+        { label: "Thinking", meta: phaseMeta(asking) },
+        // The answer so far. The one number on this page that moves while the model works, and it is
+        // what really arrived — never a fraction of an answer whose length nothing knows.
+        { label: "Writing the reading", meta: formatBytes(progress.answerBytes) ?? phaseMeta(writing) },
       ],
     },
   ];
 }
 
+/** What a detail says when its own fact is a STATE rather than a number.
+ *
+ *  A word rather than a mark, because this sits in the vendor's `meta` slot — a monospace column at
+ *  the right of a detail line — and an empty one there reads as a value that failed to arrive. A
+ *  step still to come says nothing at all, which is the honest answer for something that has not
+ *  happened. */
+function phaseMeta(state: TaskRowStatus): string {
+  if (state === "done") return "done";
+  if (state === "running") return "now";
+  if (state === "failed") return "stopped";
+  return "";
+}
+
 /** A row is as far along as its LEAST advanced step, and failed if any of them failed. */
-function rowState(steps: TaskState[]): TaskState {
+function rowState(steps: TaskRowStatus[]): TaskRowStatus {
   if (steps.includes("failed")) return "failed";
   if (steps.every((state) => state === "done")) return "done";
   if (steps.some((state) => state !== "pending")) return "running";

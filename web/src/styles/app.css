@@ -128,6 +128,96 @@
    * the element itself, so the value has to be inlined into the utility rather than
    * resolved here. */
   --animate-shine: shine var(--duration) infinite linear;
+
+  /* beautifului.dev's TASK ROWS (components/beautifului/task-rows.tsx) — their own
+   * token NAMES, mapped onto this app's. The vendor file draws with `bg-surface`,
+   * `text-ink-2`, `bg-green-tint`, `rounded-card` and reads `var(--line)` /
+   * `var(--ink-3)` straight out of an SVG stroke, so those names have to resolve —
+   * and mapping them here rather than installing their `foundation.json` is what
+   * keeps ONE palette in this app: theirs is a second one, which is the mistake
+   * § Project shape bans for icon sets in another vocabulary. It is the seam
+   * `@pierre/diffs` already has, where the vendor keeps its own vocabulary and this
+   * app decides what the colours are — so these rows follow the appearance setting
+   * with nothing in the component knowing about it.
+   *
+   * The two tints are `/12`, which is what this app's own success and failure pills
+   * already use (`PipelineStatusBadge`), so a "Completed" pill here and a "passed"
+   * badge on the pipeline page are the same green at the same strength. */
+  --color-surface: var(--card);
+  --color-inset: var(--accent);
+  --color-ink: var(--foreground);
+  --color-ink-2: var(--text-dim);
+  --color-ink-3: var(--text-faint);
+  --color-line: var(--border-subtle);
+  --color-green: var(--success);
+  --color-green-tint: color-mix(in oklab, var(--success) 12%, transparent);
+  --color-red: var(--destructive);
+  --color-red-tint: color-mix(in oklab, var(--destructive) 12%, transparent);
+  --radius-card: var(--radius);
+}
+
+/* The same two, as PLAIN properties: the spinner ring strokes its circles with
+ * `var(--line)` and `var(--ink-3)` rather than through a utility, so the bare names
+ * have to exist as well as the `--color-*` ones above. */
+:root {
+  --line: var(--border-subtle);
+  --ink-3: var(--text-faint);
+}
+
+/* The four the TASK ROWS above animate with, from the same registry item. `spin` is
+ * the ring, `pop-in` a badge landing, `fade-in` the failed pill, and `fade-up` both
+ * the row entering and each detail line under an opened one. */
+/* A READER WHO ASKED FOR LESS MOTION GETS NONE OF IT, and it has to be said here
+ * rather than in the component: the vendor writes every one of these as an INLINE
+ * `style={{ animation: … }}`, which no prop can switch off, so the stylesheet is the
+ * only place that can. The rows still say everything they said — the ring keeps its
+ * accent arc against a pending row's plain circle, the badges keep their colour, and
+ * the expansion still opens; what goes is the sweep, the pop, the fade and the slide.
+ * That is the rule `.agent-shine` holds one surface over, applied to somebody else's
+ * file. */
+@media (prefers-reduced-motion: reduce) {
+  [data-testid="task-row"],
+  [data-testid="task-row"] * {
+    animation: none !important;
+    transition-duration: 0ms !important;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes shine {

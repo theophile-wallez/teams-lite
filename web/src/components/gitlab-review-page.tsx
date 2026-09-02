@@ -31,7 +31,7 @@ import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
 import { gitlabPageUrl, mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import { markReviewCode, reviewCodeUnsearchable } from "~/lib/gitlab-review-code";
 import { reviewRunRows, type ReviewRunProgress } from "~/lib/review-progress";
-import { TaskRows } from "./task-rows";
+import TaskRows from "./beautifului/task-rows";
 import { ReviewCodeProvider, useCodeVocabulary } from "./review-code-context";
 import { gitLabMarkdownOptions } from "~/lib/gitlab-upload";
 import { formatMessageTime } from "~/lib/message-time";
@@ -458,12 +458,20 @@ function ReviewRunProgressRows(props: { progress: ReviewRunProgress }) {
     // A rule above them, because they are a different KIND of thing from the offer they appear under:
     // above is what a press would do, below is what it is doing. `self-stretch` so the line crosses
     // the card rather than ending at the widest row — the card's own items are `items-start`.
-    <div className="flex w-full flex-col gap-2 self-stretch border-t border-border-subtle pt-3">
-      <TaskRows
-        rows={rows}
-        label="What the reading is doing"
-        data-testid="gitlab-review-progress"
-      />
+    //
+    // `aria-live="polite"` sits on the wrapper rather than in the vendor's file: a reader who is not
+    // looking is told when a step finishes, and never interrupted mid-sentence to hear it. Polite is
+    // the only honest setting for a run that lasts minutes.
+    <div
+      aria-live="polite"
+      aria-label="What the reading is doing"
+      className="flex w-full flex-col self-stretch border-t border-border-subtle pt-3"
+    >
+      {/* CAPSULES, which is the vendor's own default: each row a rounded card of its own. The LIST
+          variant is one bordered box with flush rows, and it is the wrong one here — this sits inside
+          a card already, and a card inside a card is two nested surfaces for one thing (the argument
+          `TabsList surface={false}` makes on the page strip above). */}
+      <TaskRows rows={rows} testId="gitlab-review-progress" />
     </div>
   );
 }

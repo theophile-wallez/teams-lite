@@ -2798,15 +2798,73 @@ steps: `src/gitlab_review.rs` holds the stage vocabulary, `ReviewRunReport` / `r
 src/bin/server.rs emit it, `web/src/lib/review-progress.ts` is the one pure decision the surface is
 built from, and `web/src/components/task-rows.tsx` draws it.
 
-**THE COMPONENT IS AFTER beautifului.dev's "Task Rows"** (§ 06 — *Live agent task status: running,
-failed, completed*), which publishes **no source at all**: the shape is theirs — a numbered row with a
-value at its right and its own sub-steps carrying a value apiece, the number traded for a terminal mark
-once the row is over — and every line of it is this app's own. Two things about that are deliberate.
-It **decides nothing**: every state and value arrives as a prop, which is the split `chess-board.tsx`
-holds against `use-chess-game.ts` and what lets the mapping be unit-tested for every stage with no
-browser. And there is **ONE presentation, not two**: the reference offers a Capsules/List switch, which
-is how a gallery lets somebody choose — an app that drew both would ask the reader to pick a look for a
-thing they are only waiting on. The list is the one taken, because the surface is a DOCUMENT page.
+**THE COMPONENT IS beautifului.dev's OWN "Task Rows"** (§ 06 — *Live agent task status: running,
+failed, completed*, MIT), fetched from their registry rather than reimplemented from the picture:
+
+    npx shadcn add https://www.beautifului.dev/r/task-rows.json
+
+which publishes `components/primitives/TaskRows.tsx`. `web/src/components/beautifului/task-rows.tsx`
+IS that file — the capsules, the 24px spinner ring, the round green/red badges, the Completed/Failed
+pill, the chevron, the `grid-template-rows: 0fr → 1fr` disclosure and every number and curve in it are
+theirs. The pristine copy sits beside it as `task-rows.vendor.txt`, so re-fetching the registry item
+and diffing the two shows exactly what this app changed. **It was written from the description first
+and that was wrong**: the page's rendered markdown carries no source, so the first version was a flat
+numbered list of this app's own — and it did not look like the reference at all, which is what the
+reader reported.
+
+**The CLI is deliberately not run.** `shadcn add` refuses without a `components.json` and offers to
+create one; this repo has hand-written primitives in `web/src/components/ui` and its own token system,
+so letting the CLI scaffold a config and a palette would be invasive. What is vendored is the exact
+bytes that command would have written.
+
+**FOUR MARKED PATCHES, and the rule is `web/src/vendor/desksprite.ts`'s**: keep the drawing, mark every
+divergence, never let a demo drive real data.
+
+- **PATCH 1 — a REAL `failed`, and a REAL `pending`.** Theirs is `"done" | "running" | "sequence"`,
+  where `sequence` is the canned animation PATCH 2 removes — so a real failure had no way in at all,
+  and a step that has not STARTED had none either (their pending look is the inactive ring, which only
+  the demo ever reached). Both are what this surface is for. They are drawn exactly as their own three
+  were.
+- **PATCH 2 — the scripted demo is GONE**: `TICKS`, `useTick`, the `row2` state it drove and the
+  `TASK_ROWS` sample data. It flipped row 2 to Failed 3.9 s after mount and resolved it at 5.3 s, which
+  is right for a gallery and a lie on a surface reporting a real run — and a timer that can draw
+  "Failed" over work that is going fine is not something to leave one prop away.
+- **PATCH 3 — `open` comes from the ROW** (`defaultOpen`). Theirs opened `row.key === "index" && tick
+  === 2`, the demo's own second row at the moment its script said so, so a caller with real rows could
+  open none of them. The RUNNING row opens itself here, because the row a reader waits in front of is
+  the one whose detail they want; a press wins from then on, which is the vendor's own `manualOpen`
+  rule unchanged.
+- **PATCH 4 — the DOM states which row is in which state** (`data-testid` / `data-state`). Theirs
+  carry `aria-expanded` and nothing else, so neither a spec nor a capture could read a row's state
+  without inferring it from a colour — the sentinel discipline `data-conversation-id` and `data-path`
+  already hold on this page's neighbours.
+
+**THEIR TOKEN NAMES RESOLVE TO THIS APP'S COLOURS, and their `foundation.json` is deliberately NOT
+installed.** The file draws with `bg-surface`, `text-ink-2`, `bg-green-tint`, `rounded-card` and reads
+`var(--line)` / `var(--ink-3)` straight out of an SVG stroke, so those names have to exist —
+`web/src/styles/app.css` maps each onto this app's own (`--card`, `--text-dim`, `--success` at the
+`/12` strength `PipelineStatusBadge` already uses, …) plus the four keyframes the file animates with
+(`spin`, `pop-in`, `fade-in`, `fade-up`). Installing their palette would be a SECOND design system,
+which is the mistake § Project shape bans for icon sets in another vocabulary; mapping the names is the
+seam `@pierre/diffs` already has, where the vendor keeps its vocabulary and this app decides what the
+colours are. So the rows follow the appearance setting with nothing in the component knowing about it.
+
+**A READER WHO ASKED FOR LESS MOTION GETS NONE, and that had to be said in the stylesheet.** The
+vendor writes every animation as an inline `style={{ animation: … }}`, which no prop can switch off, so
+app.css carries one `prefers-reduced-motion` rule over `[data-testid="task-row"]`. The rows still say
+everything they said — the ring keeps its accent arc against a pending row's plain circle, the badges
+keep their colour, the disclosure still opens — and what goes is the sweep, the pop, the fade and the
+slide.
+
+**CAPSULES is the variant drawn, which is the vendor's own default.** Their `List` is one bordered box
+with flush rows, and it is the wrong one here: this sits inside a card already, and a card inside a
+card is two nested surfaces for one thing — the argument `TabsList surface={false}` makes on the page
+strip above.
+
+**The MAPPING decides nothing about the drawing.** `reviewRunRows` returns the vendor's own shape —
+`{ key, label, amount, status, step, details: [{ label, meta }] }` — so every state and value arrives
+as a prop and can be unit-tested for every stage with no browser. That is the split `chess-board.tsx`
+holds against `use-chess-game.ts`.
 
 **EVERY VALUE IS MEASURED, AND THERE IS NO PERCENTAGE ANYWHERE.** No bar, no fraction, no estimated
 time — and the vocabulary has no room for one, so a later caller cannot quietly invent one. Nothing on
@@ -2838,20 +2896,22 @@ Eleven rules hold it, and each is pinned by a test:
   store stamps the error on the kept frame where the backend supplied none; the frame's own reason wins
   where it has one, since only the backend knows which read or phase gave way.
 - **THREE ROWS, and `done` gets none.** The stages a reader acts on are not the stages the code has:
-  the two GitLab reads are one thing to a person and are worth telling apart only as sub-steps. The
-  reading's own row is left out because the document takes the screen the moment it lands — a row
-  reading "5 themes" above a headline that opens by saying so would state one fact twice.
-- **THE PROMPT IS A ROW rather than a step, on what it SAYS.** How much of the branch left this machine
-  is the one fact the offer above it warned the reader about, and this is the only place it is ever
-  answered. It is not a stage — the prompt is built in no measurable time — so the row is finished
+  the two GitLab reads are one thing to a person and are worth telling apart only as the DETAILS behind
+  a chevron. The reading's own row is left out because the document takes the screen the moment it
+  lands — a row reading "5 themes" above a headline that opens by saying so would state one fact twice.
+- **THE PROMPT IS A ROW rather than a detail, on what it SAYS.** How much of the branch left this
+  machine is the one fact the offer above it warned the reader about, and this is the only place it is
+  ever answered. It is not a stage — the prompt is built in no measurable time — so the row is finished
   exactly when the asking has begun.
 - **A number nobody has yet draws NOTHING.** "0 files" is a claim about the branch and a blank is not,
-  so a value absent from the frame is absent from the row. The rows still say what they are GOING to
-  do, so the first paint is three sentences rather than three blank lines.
+  so a value absent from the frame is an empty `amount` or `meta`. The rows still say what they are
+  GOING to do, so the first paint is three sentences rather than three blank lines — and a detail whose
+  own fact is a STATE rather than a number says it in a word (`done`, `now`, `stopped`), because an
+  empty cell in the vendor's monospace meta column reads as a value that failed to arrive.
 - **THE CUT IS STATED ONLY WHEN THERE WAS ONE.** A step reading "0 files went without their patch" on
   every run is a line that never varies, which is a line nobody reads.
 - **A row's state may only ever ADVANCE**, which a test walks every stage to prove: a reader watching a
-  step un-finish itself reads the page as broken. A stage this build does not know is REFUSED rather
+  row un-finish itself reads the page as broken. A stage this build does not know is REFUSED rather
   than defaulted, for the same reason — read as `detail`, a nearly-finished run would appear to start
   again.
 - **THE PRESS DRAWS ROWS IN ITS OWN TASK** (`reviewRunStarting`). The first real frame is a round trip

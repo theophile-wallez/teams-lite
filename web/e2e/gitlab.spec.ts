@@ -1820,25 +1820,42 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(rows).toBeVisible();
 
     const row = (id: string) => rows.locator(`[data-testid="task-row"][data-task-id="${id}"]`);
-    const step = (id: string) => rows.locator(`[data-testid="task-step"][data-task-id="${id}"]`);
 
-    // The two GitLab reads FINISHED, the agent RUNNING, and the answer not yet arriving. Everything
-    // before the current stage is done, which is what lets one frame say everything.
+    // The two GitLab reads FINISHED, the agent RUNNING. Everything before the current stage is done,
+    // which is what lets one frame say everything.
     await expect(row("agent")).toHaveAttribute("data-state", "running", { timeout: 20_000 });
     await expect(row("read")).toHaveAttribute("data-state", "done");
-    await expect(step("detail")).toHaveAttribute("data-state", "done");
-    await expect(step("diff")).toHaveAttribute("data-state", "done");
-    await expect(step("thinking")).toHaveAttribute("data-state", "running");
-    await expect(step("writing")).toHaveAttribute("data-state", "pending");
+    await expect(row("prompt")).toHaveAttribute("data-state", "done");
+    // A finished row wears the pill, which is the vendor's own terminal mark.
+    await expect(row("read")).toContainText("Completed");
 
-    // The values are MEASURED facts, not a proportion of anything: the commit that was read, the
-    // count of files, how much patch really left this machine, and which CLI is reading it.
-    await expect(step("diff")).toContainText("8 files");
+    // The values are MEASURED facts, not a proportion of anything: the count of files, which CLI is
+    // reading, under which model, and how much patch really left this machine.
+    await expect(row("read")).toContainText("8 files");
     await expect(row("agent")).toContainText("claude reads it");
     await expect(row("agent")).toContainText("sonnet");
     await expect(row("prompt")).toContainText("KB");
     // Nothing anywhere in the rows states a percentage — there is no total to take one against.
     await expect(rows).not.toContainText("%");
+
+    // THE RUNNING ROW OPENS ITSELF, because the row a reader waits in front of is the one whose
+    // detail they want — and the details are what say which of the two phases the model is in.
+    await expect(row("agent").locator("button")).toHaveAttribute("aria-expanded", "true");
+    await expect(row("prompt").locator("button")).toHaveAttribute("aria-expanded", "false");
+    const agentDetail = row("agent").locator('[data-testid="task-step"]');
+    await expect(agentDetail.first()).toContainText("Thinking");
+    // A shut row's details are in the DOM and collapsed to nothing, which is the vendor's own
+    // `grid-template-rows: 0fr → 1fr` grammar — so what is measured is that grid's own box rather
+    // than the detail inside it, which keeps its natural height and is clipped.
+    const shutHeight = async () =>
+      (await row("prompt").locator("button").evaluate((button) => {
+        const grid = button.nextElementSibling as HTMLElement | null;
+        return grid ? grid.getBoundingClientRect().height : -1;
+      })) ?? -1;
+    expect(await shutHeight()).toBe(0);
+    // A press opens it, which is the reader's own control over the vendor's own disclosure.
+    await row("prompt").locator("button").click();
+    await expect.poll(shutHeight).toBeGreaterThan(0);
 
     // The reading lands, and the rows go with it: the document says everything they did and more, so
     // a finished list above it would be scaffolding left standing.
@@ -1854,9 +1871,9 @@ test.describe.serial("the GitLab merge-request page", () => {
     await page.locator('[data-testid="gitlab-review-run"]').click();
     await expect(rows).toBeVisible();
     await expect(row("agent")).toHaveAttribute("data-state", "running", { timeout: 20_000 });
-    await expect(step("writing")).toHaveAttribute("data-state", "running");
-    // The answer's own byte count is the one number here that MOVES while a reader waits.
-    await expect(step("writing")).toContainText("KB");
+    // The answer's own byte count is the one number here that MOVES while a reader waits, and it is
+    // in the detail behind the running row's own chevron — which opens itself.
+    await expect(row("agent").locator('[data-testid="task-step"]').last()).toContainText("KB");
     // And they are taken back when the fresh reading lands, with the document still on screen.
     await expect(rows).toHaveCount(0, { timeout: 30_000 });
     await expect(reviewDoc(page)).toHaveAttribute("data-has-review", "yes");
@@ -1884,10 +1901,9 @@ test.describe.serial("the GitLab merge-request page", () => {
     // one thing the reader needs: that GitLab was fine and the model was not.
     await expect(row("read")).toHaveAttribute("data-state", "done");
     await expect(row("prompt")).toHaveAttribute("data-state", "done");
-    // And the answer is NOT drawn as having failed too: it never started arriving.
-    await expect(
-      rows.locator('[data-testid="task-step"][data-task-id="writing"]'),
-    ).toHaveAttribute("data-state", "pending");
+    // The failed row wears the vendor's own red pill, and says which phase stopped.
+    await expect(row("agent")).toContainText("Failed");
+    await expect(row("agent").locator('[data-testid="task-step"]').first()).toContainText("stopped");
     // The rows are KEPT beside the sentence rather than cleared, so both halves are on screen.
     await expect(page.locator('[data-testid="gitlab-review-error"]')).toBeVisible();
 

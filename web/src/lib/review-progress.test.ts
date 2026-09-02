@@ -8,7 +8,7 @@ import {
   type ReviewRunProgress,
   type ReviewRunStage,
 } from "./review-progress";
-import type { TaskRow } from "../components/task-rows";
+import type { TaskRow } from "../components/beautifului/task-rows";
 
 /** A frame at a stage, with whatever the run would really know by then. */
 function frame(stage: ReviewRunStage, over: Partial<ReviewRunProgress> = {}): ReviewRunProgress {
@@ -26,15 +26,16 @@ function frame(stage: ReviewRunStage, over: Partial<ReviewRunProgress> = {}): Re
   return { ...reviewRunStarting("acme/webapp", 42), stage, ...known, ...over };
 }
 
-const rowOf = (rows: TaskRow[], id: string): TaskRow => {
-  const row = rows.find((candidate) => candidate.id === id);
-  if (!row) throw new Error(`no row ${id}`);
+const rowOf = (rows: TaskRow[], key: string): TaskRow => {
+  const row = rows.find((candidate) => candidate.key === key);
+  if (!row) throw new Error(`no row ${key}`);
   return row;
 };
-const stepState = (rows: TaskRow[], rowId: string, stepId: string): string => {
-  const step = rowOf(rows, rowId).steps.find((candidate) => candidate.id === stepId);
-  if (!step) throw new Error(`no step ${stepId}`);
-  return step.state;
+/** A detail's own `meta`, by the label it is drawn under. */
+const metaOf = (rows: TaskRow[], key: string, label: string): string => {
+  const detail = rowOf(rows, key).details.find((candidate) => candidate.label === label);
+  if (!detail) throw new Error(`no detail ${label}`);
+  return detail.meta;
 };
 
 describe("the frames off the wire", () => {
@@ -102,22 +103,22 @@ describe("the rows a run is watched through", () => {
    *  reading "5 themes" above a headline that opens by saying so would state one fact twice. */
   it("draws three rows and no row for the reading itself", () => {
     const rows = reviewRunRows(frame("asking"));
-    expect(rows.map((row) => row.id)).toEqual(["read", "prompt", "agent"]);
+    expect(rows.map((row) => row.key)).toEqual(["read", "prompt", "agent"]);
   });
 
   it("marks everything before the current stage finished, the current one running, the rest to come", () => {
     const rows = reviewRunRows(frame("asking"));
-    expect(stepState(rows, "read", "detail")).toBe("done");
-    expect(stepState(rows, "read", "diff")).toBe("done");
-    expect(rowOf(rows, "read").state).toBe("done");
-    expect(stepState(rows, "agent", "thinking")).toBe("running");
-    expect(stepState(rows, "agent", "writing")).toBe("pending");
-    expect(rowOf(rows, "agent").state).toBe("running");
+    expect(rowOf(rows, "read").status).toBe("done");
+    expect(rowOf(rows, "prompt").status).toBe("done");
+    expect(rowOf(rows, "agent").status).toBe("running");
+    // The two phases, in the detail behind the running row's own chevron.
+    expect(metaOf(rows, "agent", "Thinking")).toBe("now");
+    expect(metaOf(rows, "agent", "Writing the reading")).toBe("");
   });
 
   it("walks forward through every stage without a row ever going back", () => {
     const seen: string[][] = REVIEW_RUN_STAGES.map((stage) =>
-      reviewRunRows(frame(stage)).map((row) => row.state),
+      reviewRunRows(frame(stage)).map((row) => row.status),
     );
     // A row's state may only ever advance as the run does. `pending` → `running` → `done`, never the
     // other way: a reader watching a step un-finish itself would read the page as broken.
@@ -133,50 +134,49 @@ describe("the rows a run is watched through", () => {
 
   it("has every row finished by the time the reading exists", () => {
     const rows = reviewRunRows(frame("done"));
-    expect(rows.every((row) => row.state === "done")).toBe(true);
+    expect(rows.every((row) => row.status === "done")).toBe(true);
   });
 
   /** A number nobody has yet draws NOTHING. "0 files" is a claim about the branch; a blank is not. */
   it("states no value for a fact the run has not learnt", () => {
     const rows = reviewRunRows(frame("detail"));
-    expect(rowOf(rows, "read").value).toBeNull();
-    expect(stepState(rows, "read", "detail")).toBe("running");
-    expect(rowOf(rows, "read").steps.find((s) => s.id === "detail")?.value).toBeNull();
-    expect(rowOf(rows, "prompt").value).toBeNull();
-    expect(rowOf(rows, "agent").steps.find((s) => s.id === "writing")?.value).toBeNull();
+    expect(rowOf(rows, "read").status).toBe("running");
+    expect(rowOf(rows, "read").amount).toBe("");
+    expect(metaOf(rows, "read", "The merge request")).toBe("");
+    expect(rowOf(rows, "prompt").amount).toBe("");
+    expect(metaOf(rows, "agent", "Writing the reading")).toBe("");
   });
 
   it("states the facts it has learnt, in the words a reader reads", () => {
     const rows = reviewRunRows(frame("writing"));
-    expect(rowOf(rows, "read").value).toBe("8 files");
+    expect(rowOf(rows, "read").amount).toBe("8 files");
     // The commit, shortened — which is what makes a reading checkable against the branch later.
-    expect(rowOf(rows, "read").steps.find((s) => s.id === "detail")?.value).toBe("a1b2c3d4");
-    expect(rowOf(rows, "prompt").value).toBe("18 KB");
+    expect(metaOf(rows, "read", "The merge request")).toBe("a1b2c3d4");
+    expect(rowOf(rows, "prompt").amount).toBe("18 KB");
     // The CLI and the model are named, because they are what the reader would go and change if this
     // is the row that fails.
-    expect(rowOf(rows, "agent").title).toBe("claude reads it");
-    expect(rowOf(rows, "agent").value).toBe("sonnet");
-    expect(rowOf(rows, "agent").steps.find((s) => s.id === "writing")?.value).toBe("4.7 KB");
+    expect(rowOf(rows, "agent").label).toBe("claude reads it");
+    expect(rowOf(rows, "agent").amount).toBe("sonnet");
+    expect(metaOf(rows, "agent", "Writing the reading")).toBe("4.7 KB");
   });
 
   it("says one file rather than 1 files", () => {
-    expect(rowOf(reviewRunRows(frame("writing", { files: 1 })), "read").value).toBe("1 file");
+    expect(rowOf(reviewRunRows(frame("writing", { files: 1 })), "read").amount).toBe("1 file");
   });
 
   /** The cut is stated only when there really was one: a line reading "0 files went without their
    *  patch" on every run is a line that never varies, which is a line nobody reads. */
   it("says nothing about a cut diff unless the diff was cut", () => {
     const whole = rowOf(reviewRunRows(frame("asking")), "prompt");
-    expect(whole.steps.map((step) => step.id)).toEqual(["prompt-bytes"]);
-    const cut = rowOf(
-      reviewRunRows(frame("asking", { truncated: true, filesUnseen: 3 })),
-      "prompt",
-    );
-    expect(cut.steps.map((step) => step.id)).toEqual(["prompt-bytes", "prompt-cut"]);
-    expect(cut.steps[1]?.label).toBe("3 files went without their patch");
+    expect(whole.details.map((detail) => detail.label)).toEqual(["Patch sent"]);
+    const cut = rowOf(reviewRunRows(frame("asking", { truncated: true, filesUnseen: 3 })), "prompt");
+    expect(cut.details.map((detail) => detail.label)).toEqual([
+      "Patch sent",
+      "3 files went without their patch",
+    ]);
     expect(
-      rowOf(reviewRunRows(frame("asking", { truncated: true, filesUnseen: 1 })), "prompt").steps[1]
-        ?.label,
+      rowOf(reviewRunRows(frame("asking", { truncated: true, filesUnseen: 1 })), "prompt")
+        .details[1]?.label,
     ).toBe("1 file went without its patch");
   });
 
@@ -184,22 +184,21 @@ describe("the rows a run is watched through", () => {
    *  half that tells the reader whose problem it is. */
   it("fails at the stage the run stopped at, and keeps what got done", () => {
     const rows = reviewRunRows(frame("asking", { error: "claude is not on this machine's PATH" }));
-    expect(rowOf(rows, "read").state).toBe("done");
-    expect(rowOf(rows, "agent").state).toBe("failed");
-    expect(stepState(rows, "agent", "thinking")).toBe("failed");
-    // NOT failed as well: the answer never started arriving, and marking it so would say two things
-    // went wrong.
-    expect(stepState(rows, "agent", "writing")).toBe("pending");
+    expect(rowOf(rows, "read").status).toBe("done");
+    expect(rowOf(rows, "agent").status).toBe("failed");
+    expect(metaOf(rows, "agent", "Thinking")).toBe("stopped");
+    // The answer never started arriving, so it says nothing rather than claiming a second failure.
+    expect(metaOf(rows, "agent", "Writing the reading")).toBe("");
+    // A failed row OPENS itself: the reason is why the reader is looking.
+    expect(rowOf(rows, "agent").defaultOpen).toBe(true);
   });
 
   it("blames the diff read when that is where it stopped", () => {
     const rows = reviewRunRows(frame("diff", { error: "GitLab could not be reached" }));
-    expect(stepState(rows, "read", "detail")).toBe("done");
-    expect(stepState(rows, "read", "diff")).toBe("failed");
-    expect(rowOf(rows, "read").state).toBe("failed");
+    expect(rowOf(rows, "read").status).toBe("failed");
     // Nothing after it is drawn as having happened.
-    expect(rowOf(rows, "agent").state).toBe("pending");
-    expect(rowOf(rows, "prompt").state).toBe("pending");
+    expect(rowOf(rows, "agent").status).toBe("pending");
+    expect(rowOf(rows, "prompt").status).toBe("pending");
   });
 
   /** The press draws rows in its own task, and this is the frame it draws them from: the first stage
@@ -209,12 +208,11 @@ describe("the rows a run is watched through", () => {
     expect(start.stage).toBe("detail");
     expect(start.error).toBeNull();
     const rows = reviewRunRows(start);
-    expect(rows.map((row) => row.state)).toEqual(["running", "pending", "pending"]);
-    // Not one value anywhere, because not one fact is known yet.
-    const values = rows.flatMap((row) => [row.value, ...row.steps.map((step) => step.value)]);
-    expect(values.every((value) => !value)).toBe(true);
+    expect(rows.map((row) => row.status)).toEqual(["running", "pending", "pending"]);
+    // Not one amount anywhere, because not one fact is known yet.
+    expect(rows.every((row) => row.amount === "")).toBe(true);
     // And the row still says what it is going to do, so the reader is not shown three blank lines.
-    expect(rows.map((row) => row.title)).toEqual([
+    expect(rows.map((row) => row.label)).toEqual([
       "Read the branch",
       "Put the diff in the prompt",
       "The agent reads it",
@@ -228,8 +226,11 @@ describe("the rows a run is watched through", () => {
     for (const stage of REVIEW_RUN_STAGES) {
       const rows = reviewRunRows(frame(stage));
       const text = rows
-        .flatMap((row) => [row.title, row.value, ...row.steps.flatMap((s) => [s.label, s.value])])
-        .filter((value): value is string => typeof value === "string")
+        .flatMap((row) => [
+          row.label,
+          row.amount,
+          ...row.details.flatMap((detail) => [detail.label, detail.meta]),
+        ])
         .join(" ");
       expect(text).not.toMatch(/%/);
       expect(text).not.toMatch(/\bof \d/);
