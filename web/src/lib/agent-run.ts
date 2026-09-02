@@ -71,15 +71,33 @@ export type AgentStreamFrame = {
   at: number;
 };
 
-/** A run as the store holds it: the latest frame, and nothing else. A run IS its
- *  latest state — see the module note on why frames are whole. */
-export type AgentRun = AgentStreamFrame;
+/**
+ * A run as the store holds it: the latest frame, plus the one thing no frame carries.
+ *
+ * A run IS its latest state — see the module note on why frames are whole — so everything
+ * here but `started_at` is the newest frame verbatim.
+ */
+export type AgentRun = AgentStreamFrame & {
+  /**
+   * When the run began, in epoch ms, or `0` for a run whose beginning this page cannot
+   * state (see {@link withAgentFrame}).
+   *
+   * It is what the loader counts from while a run has nothing to show yet, and it is
+   * deliberately NOT on the wire: it is established once, here, from the first frame's own
+   * clock, and carried forward — so it survives the remount the virtualized history forces
+   * on the bubble every time the row scrolls away and back.
+   */
+  started_at: number;
+};
 
 import { agentDisplayName } from "./agent-message";
+import type { ToolChipGlyph } from "~/components/beautifului/tool-chips";
 
 /** The phases in which a run is still going. A finished or failed run stops being an
- *  overlay: what the thread holds is then the answer. */
-export function agentRunIsLive(run: AgentRun | null | undefined): boolean {
+ *  overlay: what the thread holds is then the answer.
+ *
+ *  Takes the phase alone, so a raw frame answers as well as a stored run does. */
+export function agentRunIsLive(run: { phase: AgentPhase } | null | undefined): boolean {
   return !!run && run.phase !== "done" && run.phase !== "error";
 }
 
@@ -112,7 +130,7 @@ export function agentRunIsStale(run: AgentRun, nowMs: number): boolean {
  * frame from an older backend (or a mock that grew a typo) degrades to "no run"
  * instead of a bubble rendering `undefined`.
  */
-export function parseAgentFrame(raw: unknown): AgentRun | null {
+export function parseAgentFrame(raw: unknown): AgentStreamFrame | null {
   if (!raw || typeof raw !== "object") return null;
   const f = raw as Record<string, unknown>;
   const conversation = typeof f.conversation === "string" ? f.conversation : "";
@@ -186,18 +204,45 @@ function parseActivity(raw: unknown): AgentActivity | null {
  */
 export function withAgentFrame(
   runs: Record<string, AgentRun>,
-  frame: AgentRun,
+  frame: AgentStreamFrame,
 ): Record<string, AgentRun> {
   const current = runs[frame.conversation];
   // A late frame from a run the user has already superseded is not news.
   if (current && current.run_id !== frame.run_id && current.at > frame.at) return runs;
   if (current && current.run_id === frame.run_id && sameRun(current, frame)) return runs;
-  return { ...runs, [frame.conversation]: frame };
+  // The run's own start, established ONCE and then carried: a later frame must not restate
+  // it, or the loader's clock would reset on every beat.
+  const started_at =
+    current && current.run_id === frame.run_id ? current.started_at : runBeganAt(frame);
+  return { ...runs, [frame.conversation]: { ...frame, started_at } };
+}
+
+/**
+ * When a run began, from the FIRST frame of it this page saw — or `0`, which means this page
+ * cannot say.
+ *
+ * The first frame of a run carries nothing: no answer, no transcript, no call. So a first
+ * frame that already carries WORK is not the beginning of anything — it is a run that was
+ * already going when this page arrived, which is the ordinary case for a page that connected
+ * mid-run (a live run repeats its latest frame every `AGENT_STREAM_KEEPALIVE`, so a reload
+ * lands on one within fifteen seconds). Counting from that frame would put a number on
+ * screen that understates the wait by however long the run had been going, and this app's own
+ * rule for that is not to put a number on screen at all.
+ *
+ * It is deliberately not read off the ids either. A Teams message id IS its arrival time in
+ * epoch ms, so both `message_id` and the trigger inside `run_id` really would date the run on
+ * the tenant — and neither is one on the mock, where an id is `<conversation>#<seq>`. A
+ * surface no capture can draw and no spec can find is one that ships broken.
+ */
+function runBeganAt(frame: AgentStreamFrame): number {
+  if (frame.at <= 0) return 0; // a backend too old to stamp its frames
+  const empty = !frame.text && frame.steps.length === 0 && frame.tools_used === 0;
+  return empty ? frame.at : 0;
 }
 
 /** Whether two frames of the same run say the same thing (`at` aside — a frame that
  *  only moved the clock is not a change anybody can see). */
-function sameRun(a: AgentRun, b: AgentRun): boolean {
+function sameRun(a: AgentStreamFrame, b: AgentStreamFrame): boolean {
   return (
     a.phase === b.phase &&
     a.text === b.text &&
@@ -265,7 +310,7 @@ export type AgentTranscript = {
 
 /** The transcript of a run worth keeping, or null when the run worked nothing out — a CLI
  *  that reports no reasoning, answering with no tool call, has nothing to disclose. */
-export function agentTranscriptOf(run: AgentRun): AgentTranscript | null {
+export function agentTranscriptOf(run: AgentStreamFrame): AgentTranscript | null {
   if (!run.steps.length || !run.message_id) return null;
   return {
     message_id: run.message_id,
@@ -334,6 +379,54 @@ function plural(count: number): string {
  * thinking" over a message the reader sent to Bebou reads as the wrong agent having picked it
  * up.
  */
+/**
+ * The moment the loader counts from, or `undefined` for a run whose start this page cannot
+ * state (see {@link withAgentFrame}).
+ *
+ * One place, so the loader is never handed a `0` to render as "0.0s" — a zero is a claim
+ * about the wait and a blank is not, which is the rule the reading's own progress rows hold
+ * ("a number nobody has yet draws NOTHING").
+ */
+export function agentRunStartedAt(run: AgentRun): number | undefined {
+  return run.started_at > 0 ? run.started_at : undefined;
+}
+
+/**
+ * Which of beautifului's four glyphs a tool call is drawn with (see `ToolChipRow`).
+ *
+ * The row already NAMES the call, so the glyph is a hint about its KIND — and a hint is
+ * exactly the thing that must not overstate. Three rules:
+ *
+ * - **Only an exact name is classified.** Both CLIs spell their own tools
+ *   (`Read`/`read`, `Edit`/`edit`), so the match folds case and nothing else. No verb is
+ *   guessed at inside an MCP tool's name: that would be this app inferring what somebody
+ *   else's server does from how they named it.
+ * - **Anything else is a READ, and that is the narrow answer rather than the neutral one.**
+ *   An unrecognised call really is a read in every configuration but one: the allowlist is
+ *   `Read`, `Glob`, `Grep` out of the box (`agent::DEFAULT_TOOLS`), and every tool in every
+ *   named grant reads — `every_granted_tool_reads` pins exactly that. `run` would be the
+ *   tempting fallback and it is the wrong one, because it claims a command executed, and
+ *   overstating what the agent did is the error this whole feature's gates exist to prevent.
+ * - **The cost is stated rather than hidden:** under `agent_set_unrestricted` the user's own
+ *   config can reach a tool that writes, and a tool this app does not know is drawn as a
+ *   read. It costs a glyph, never a row: the name beside it is the CLI's own.
+ *
+ * `think` is theirs and nothing maps to it: it is the sparkle, which is what the transcript's
+ * own HEADER wears (`ThinkingHeader`), and reasoning is not a tool call.
+ */
+export function agentToolGlyph(tool: string): ToolChipGlyph {
+  const name = tool.trim().toLowerCase();
+  if (WRITE_TOOLS.has(name)) return "write";
+  if (RUN_TOOLS.has(name)) return "run";
+  return "read";
+}
+
+/** The tools that leave something behind. */
+const WRITE_TOOLS = new Set(["write", "edit", "multiedit", "notebookedit", "todowrite"]);
+
+/** The tools that start a program. */
+const RUN_TOOLS = new Set(["bash", "bashoutput", "killshell", "killbash", "task"]);
+
 export function agentPhaseLabel(run: AgentRun): string {
   const name = run.persona ?? agentDisplayName(run.backend);
   switch (run.phase) {

@@ -393,6 +393,67 @@ test.describe("The local agent's answer", () => {
     await expect(transcript).toHaveAttribute("data-open", "true");
   });
 
+  // THE ONE STATE ON THIS SURFACE THAT IS PURELY A WAIT.
+  //
+  // Before the CLI has said anything there is no transcript, no answer and nothing to fold —
+  // so this is where the LOADER is drawn (beautifului's own, § The local agent), and it is the
+  // only place: every other state has something better than an animation to say it is going,
+  // and two competing animations is one too many.
+  //
+  // The half that needs a browser is the SWAP. The elapsed time itself is pinned in
+  // `agent-run.test.ts`, where a run's start can be stated exactly.
+  test("waits with a loader, and hands the room to the transcript the moment there is one", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    // Its own thread, named, for the reason the transcript test above gives: this counts what
+    // is on screen, so a thread another spec has been answered in would match twice.
+    await openConversationNamed(page, "Chess Club");
+    await optIn(page);
+    await fillComposer(page, "@claude which port does the backend listen on?");
+    await page.keyboard.press("Enter");
+
+    // The mock reports nothing for two beats, which is the window a real CLI takes to think.
+    const loader = page.locator('[data-testid="loading-state"]');
+    await expect(loader).toBeVisible({ timeout: 20_000 });
+    // It says WHAT is being waited for and HOW LONG for — the second is what a run bounded by
+    // silence rather than by a clock owes a reader, and it is a real number off the run's own
+    // start rather than a proportion of a total nothing here knows.
+    await expect(loader).toContainText("is thinking");
+    const elapsed = loader.locator('[data-testid="loading-state-elapsed"]');
+    await expect(elapsed).toBeVisible();
+    await expect(elapsed).toHaveText(/^\d+(\.\d)?s$|^\d+m \d+(\.\d)?s$/);
+    // And it MOVES, because a frozen clock on a wait is worse than no clock.
+    const first = await elapsed.textContent();
+    await expect.poll(async () => await elapsed.textContent()).not.toBe(first);
+    // There is no fold to offer while there is nothing behind it, so no control is drawn.
+    await expect(page.locator('[data-testid="agent-transcript-toggle"]')).toHaveCount(0);
+
+    // A READER WHO ASKED FOR LESS MOTION STILL GETS THE WORDS, and this is the one state where
+    // getting it wrong makes them INVISIBLE: the label is painted out of a sweeping gradient
+    // (`background-clip: text` over transparent ink), so stopping the animation alone leaves a
+    // bright stripe frozen across it and stopping the gradient alone leaves nothing at all.
+    // `.beautifului-shimmer` in app.css has to put the ink back, and only a browser can say it
+    // did — the declaration is inline in a vendored file, which no prop can reach.
+    const label = loader.locator('[data-testid="agent-phase"]');
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(label).toHaveCSS("background-image", "none");
+    await expect(label).not.toHaveCSS("color", "rgba(0, 0, 0, 0)");
+    await expect(label).toContainText("is thinking");
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    // And with motion allowed it is the gradient again, sweeping.
+    await expect(label).not.toHaveCSS("background-image", "none");
+
+    // THE TRANSCRIPT ARRIVES AND THE LOADER GOES. The rows are the progress from here on, and
+    // the header keeps the shimmer for as long as the run is still working — one thing moving,
+    // not two.
+    await expect(page.locator('[data-testid="agent-thinking"]').first()).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect(loader).toHaveCount(0);
+    await expect(page.locator('[data-testid="agent-transcript-toggle"]')).toBeVisible();
+  });
+
   // THE SIDEBAR NAMES THE AGENT, not the account the reply went out under.
   //
   // The row used to read "You: …ship it — claude, via teams-lite": the account, because the
@@ -464,9 +525,18 @@ test.describe("The local agent's answer", () => {
       html: "<p>The backend listens on 19420</p><p><em>claude is writing…</em></p>",
     });
 
-    const bubble = page.locator('[data-testid="message"]', {
-      has: page.locator('[data-testid="agent-signature"]'),
-    });
+    // `.last()`, because the reply this test is about is the one it just INJECTED — and this
+    // thread is index 0, which the sidebar test above already had the agent answer in. Whether
+    // that older reply is on screen is not a fact about either test: the history is
+    // virtualized, so it is MOUNTED or not according to how tall the rows above happen to be,
+    // and this assertion used to pass on the accident that it was not. The newest row is the
+    // injected one by construction (`emitLive` appends), which is the neighbouring tests'
+    // "THE one agent reply of the history" made deterministic rather than lucky.
+    const bubble = page
+      .locator('[data-testid="message"]', {
+        has: page.locator('[data-testid="agent-signature"]'),
+      })
+      .last();
     await expect(bubble).toBeVisible();
     // Nothing is streaming into this page, so the bubble says so in words…
     await expect(page.locator('[data-testid="agent-stream"]')).toHaveCount(0);

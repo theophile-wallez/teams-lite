@@ -1,11 +1,17 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-/* shadcn's shared utility layer, for one utility: `shimmer` (see the agent's status
- * line in components/agent-reply.tsx). It brings the `data-*` variants and the
- * scroll-fade utilities along with it — no cost, since Tailwind v4 only emits the ones
- * a class actually uses — and it adds no design tokens: every `@theme` block in that
- * file holds keyframes and nothing else, so none of this app's colours, radii or
- * shadows can be shadowed by it. */
+/* shadcn's shared utility layer. It brings the `data-*` variants, the scroll-fade
+ * utilities and `shimmer` — no cost, since Tailwind v4 only emits the ones a class
+ * actually uses — and it adds no design tokens: every `@theme` block in that file holds
+ * keyframes and nothing else, so none of this app's colours, radii or shadows can be
+ * shadowed by it.
+ *
+ * `shimmer` was the one utility this was imported FOR, on the agent's own status line, and
+ * that line is now beautifului's (`ThinkingHeader`, which paints its own words out of a
+ * gradient and sweeps it — see § AND THE TRANSCRIPT IS DRAWN BY …). So nothing in this app
+ * uses `shimmer` today. Whether the import can go with it is UNMEASURED and deliberately
+ * left alone: it is a whole utility layer, the removal would be felt across every surface
+ * rather than on this one, and nothing here has checked what else resolves through it. */
 @import "shadcn/tailwind.css";
 /* Self-hosted Inter (variable). Bundled by Vite — no external CDN fetch,
  * which keeps the app local-first and offline-safe. */
@@ -129,9 +135,12 @@
    * resolved here. */
   --animate-shine: shine var(--duration) infinite linear;
 
-  /* beautifului.dev's TASK ROWS (components/beautifului/task-rows.tsx) — their own
-   * token NAMES, mapped onto this app's. The vendor file draws with `bg-surface`,
-   * `text-ink-2`, `bg-green-tint`, `rounded-card` and reads `var(--line)` /
+  /* beautifului.dev's FOUR vendored items — TASK ROWS (the reading's own progress, in
+   * components/beautifului/task-rows.tsx), and the three the agent's transcript is drawn
+   * with: TOOL CHIPS, THINKING and LOADING STATE (tool-chips.tsx, thinking-state.tsx,
+   * loading-state.tsx) — their own
+   * token NAMES, mapped onto this app's. The vendor files draw with `bg-surface`,
+   * `text-ink-2`, `bg-green-tint`, `rounded-card` and read `var(--line)` /
    * `var(--ink-3)` straight out of an SVG stroke, so those names have to resolve —
    * and mapping them here rather than installing their `foundation.json` is what
    * keeps ONE palette in this app: theirs is a second one, which is the mistake
@@ -148,19 +157,55 @@
   --color-ink: var(--foreground);
   --color-ink-2: var(--text-dim);
   --color-ink-3: var(--text-faint);
-  --color-line: var(--border-subtle);
+  /* THE HAIRLINE IS A TINT AND NOT A COLOUR, and that is the one mapping decision here that
+   * a token lookup gets WRONG. Every `--*` this app publishes for a line or an inset fill is
+   * chosen against the PAGE (`--background`); the agent's transcript is drawn inside a
+   * BUBBLE, which is a raised surface — so `--border-subtle` (#242424) is DARKER than
+   * `--bubble-incoming` (#262626) in the dark theme and a rail mapped to it is a line nobody
+   * can see, while `--element` and `--bubble-incoming` are the SAME #262626 and a chip mapped
+   * to it has no fill at all. Measured on the captures: both were invisible.
+   *
+   * Their own foundation defines both as a STEP off `--surface` (light: surface oklch(1),
+   * field 0.961, line 0.946), so a relative tint is what the names really mean — and it is
+   * this app's own technique for a fill on a surface it does not know, which the row this
+   * replaces already used (`bg-black/5 dark:bg-white/10`, `border-black/15
+   * dark:border-white/20`) and which the mention and reaction chips use. One expression,
+   * every surface: the page, a card, a bubble. */
+  --color-line: color-mix(in oklab, var(--foreground) 12%, transparent);
   --color-green: var(--success);
   --color-green-tint: color-mix(in oklab, var(--success) 12%, transparent);
   --color-red: var(--destructive);
   --color-red-tint: color-mix(in oklab, var(--destructive) 12%, transparent);
   --radius-card: var(--radius);
+
+  /* The five the AGENT'S TRANSCRIPT adds. Each is this app's own value under their name,
+   * and two of the mappings are decisions rather than lookups:
+   *
+   *  - `--field` is their inset fill — the slab a tool call's target sits in — and it is a
+   *    TINT for the reason `--color-line` above spells out: `--element` is this app's inset
+   *    fill against the page, and against a bubble it is the same colour.
+   *  - they publish TWO hover fills, `--hover` and `--hover-2`; this app publishes ONE
+   *    (`--accent`, "neutral hover fill"), and one is the right answer — a second step
+   *    nothing else in this app has would be a palette decision made by a vendor.
+   *  - the two radii are their 8px and 6px, taken through this app's OWN scale rather than
+   *    restated as pixels, so a change to `--radius` carries them.
+   *  - `--shadow-hairline` is their formula verbatim over this app's border colour. */
+  --color-field: color-mix(in oklab, var(--foreground) 5%, transparent);
+  --color-hover-2: var(--accent);
+  --radius-control: var(--radius-md);
+  --radius-chip: var(--radius-sm);
+  --shadow-hairline: 0 0 0 1px var(--line);
 }
 
-/* The same two, as PLAIN properties: the spinner ring strokes its circles with
- * `var(--line)` and `var(--ink-3)` rather than through a utility, so the bare names
- * have to exist as well as the `--color-*` ones above. */
+/* The same four, as PLAIN properties: the spinner ring strokes its circles with
+ * `var(--line)` and `var(--ink-3)` rather than through a utility, the sparkle in the
+ * transcript's header FILLS itself from `var(--ink-2)` / `var(--ink-3)`, and both
+ * shimmering labels build their gradient out of `var(--ink-3)` and `var(--ink)` — so the
+ * bare names have to exist as well as the `--color-*` ones above. */
 :root {
-  --line: var(--border-subtle);
+  --line: color-mix(in oklab, var(--foreground) 12%, transparent);
+  --ink: var(--foreground);
+  --ink-2: var(--text-dim);
   --ink-3: var(--text-faint);
 }
 
@@ -180,6 +225,38 @@
   [data-testid="task-row"] * {
     animation: none !important;
     transition-duration: 0ms !important;
+  }
+}
+
+/* The same rule for the three the AGENT'S TRANSCRIPT is drawn with, and for the same
+ * mechanical reason: every one of these animations is an INLINE `style={{ animation: … }}`
+ * in somebody else's file, which no prop can switch off.
+ *
+ * WHAT IS LEFT SAYS EVERYTHING IT SAID, which is what makes this a stop rather than a
+ * removal: the pixel grid keeps its dim cells (`pixel-on` rests at 0.15 either way), the
+ * shimmering label keeps its gradient — and that one needs a second declaration, because a
+ * shimmer held still is a label with a bright stripe frozen across it, so the ink goes back
+ * to being ink. The rail keeps its height, the chevron its angle, the reasoning its place.
+ *
+ * The ELAPSED time is deliberately untouched: it is a number, not a movement, and a reader
+ * who asked for less motion still asked how long they have been waiting. That is the split
+ * the vendor's own header note draws ("the timer still ticks"). */
+@media (prefers-reduced-motion: reduce) {
+  [data-testid="loading-state"],
+  [data-testid="loading-state"] *,
+  [data-testid="agent-transcript"],
+  [data-testid="agent-transcript"] * {
+    animation: none !important;
+    transition-duration: 0ms !important;
+  }
+
+  /* A CLASS rather than a match on the inline `style` attribute: the sweep is what those
+   * two labels paint their own ink with, so stopping it alone leaves a bright stripe frozen
+   * across the words. `.beautifului-shimmer` is the app's own hook on somebody else's
+   * element — the shape `.agent-shine` already has — and it is spelled in both files. */
+  .beautifului-shimmer {
+    background-image: none !important;
+    color: var(--ink-2) !important;
   }
 }
 
@@ -217,6 +294,34 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+/* And the two more the AGENT'S TRANSCRIPT animates with, from the same `foundation.css` and
+ * copied out of it verbatim: `shimmer-text` is the sweep both the transcript's header and
+ * the loader's label paint their own ink with, and `pixel-on` is one cell of the loader's
+ * 3×3 grid lighting as the wavefront reaches it. Neither is installed as part of their
+ * palette — see the note above the token mapping. */
+@keyframes shimmer-text {
+  from {
+    background-position: 150% center;
+  }
+  to {
+    background-position: -50% center;
+  }
+}
+
+@keyframes pixel-on {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  18%,
+  42% {
+    opacity: 1;
+  }
+  62% {
+    opacity: 0.15;
   }
 }
 

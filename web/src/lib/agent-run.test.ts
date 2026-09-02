@@ -5,6 +5,8 @@ import {
   agentPhaseLabel,
   agentRunIsLive,
   agentRunIsStale,
+  agentRunStartedAt,
+  agentToolGlyph,
   agentTranscriptLabel,
   agentTranscriptOf,
   keepAgentTranscript,
@@ -157,6 +159,129 @@ describe("withAgentFrame", () => {
   });
 });
 
+/**
+ * THE RUN'S OWN START — what the loader counts from while a run has nothing to show yet.
+ *
+ * It is not on the wire: it is established once from the FIRST frame this page saw, and
+ * carried. Which makes the two halves worth pinning separately — that a later frame cannot
+ * restate it, and that a first frame which already carries work is refused rather than
+ * counted from.
+ */
+describe("a run's start", () => {
+  /** A frame as a run really OPENS: nothing written, nothing reasoned, nothing called. */
+  const opening = (over: Record<string, unknown> = {}) =>
+    parseAgentFrame(frame({ phase: "thinking", text: "", steps: [], tools_used: 0, ...over }))!;
+
+  it("is the first frame's own clock", () => {
+    const runs = withAgentFrame({}, opening({ at: 1_700_000_000_000 }));
+    const run = runs[opening().conversation]!;
+    expect(run.started_at).toBe(1_700_000_000_000);
+    expect(agentRunStartedAt(run)).toBe(1_700_000_000_000);
+  });
+
+  it("is CARRIED by every later frame, so the loader's clock never restarts", () => {
+    let runs = withAgentFrame({}, opening({ at: 1_700_000_000_000 }));
+    // The run works, then writes. Every frame moves `at`; none of them may move the start,
+    // or the elapsed time would reset to zero on each beat under the reader.
+    runs = withAgentFrame(runs, {
+      ...opening({ at: 1_700_000_004_000 }),
+      steps: [{ kind: "tool", tool: "Grep", target: "DEFAULT_PORT", done: false }],
+    });
+    runs = withAgentFrame(runs, opening({ at: 1_700_000_009_000, text: "19420", phase: "writing" }));
+    expect(runs[opening().conversation]!.started_at).toBe(1_700_000_000_000);
+  });
+
+  it("is REFUSED for a run that was already going when this page arrived", () => {
+    // A live run repeats its latest frame every `AGENT_STREAM_KEEPALIVE`, so a page that
+    // reloads mid-run lands on one of those within fifteen seconds. Counting from it would
+    // put a number on screen that understates the wait by however long the run had been
+    // going, so no number is put on screen at all.
+    for (const already of [
+      { text: "the port is 19420" },
+      { steps: [{ kind: "thought", text: "the port is a constant" }] },
+      { tools_used: 3 },
+    ]) {
+      const run = withAgentFrame({}, opening({ at: 1_700_000_000_000, ...already }))[
+        opening().conversation
+      ]!;
+      expect(run.started_at).toBe(0);
+      expect(agentRunStartedAt(run)).toBeUndefined();
+    }
+  });
+
+  it("is refused for a backend too old to stamp its frames", () => {
+    const run = withAgentFrame({}, opening({ at: 0 }))[opening().conversation]!;
+    expect(run.started_at).toBe(0);
+    expect(agentRunStartedAt(run)).toBeUndefined();
+  });
+
+  it("starts again for the NEXT run in the same thread", () => {
+    const runs = withAgentFrame({}, opening({ at: 1_700_000_000_000 }));
+    const next = withAgentFrame(
+      runs,
+      opening({ run_id: "19:thread@thread.v2/1785773999999", at: 1_700_000_060_000 }),
+    );
+    expect(next[opening().conversation]!.started_at).toBe(1_700_000_060_000);
+  });
+});
+
+/**
+ * WHICH GLYPH A TOOL CALL IS DRAWN WITH.
+ *
+ * The glyph is a claim about what a call DID, beside a name the row already spells in full —
+ * so what is pinned here is mostly the FALLBACK, and that it is the narrow answer rather
+ * than the neutral-sounding one.
+ */
+describe("agentToolGlyph", () => {
+  it("knows the tools that leave something behind", () => {
+    for (const tool of ["Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite"]) {
+      expect(agentToolGlyph(tool)).toBe("write");
+    }
+  });
+
+  it("knows the tools that start a program", () => {
+    for (const tool of ["Bash", "BashOutput", "KillShell", "Task"]) {
+      expect(agentToolGlyph(tool)).toBe("run");
+    }
+  });
+
+  it("folds case, because the two CLIs spell their own tools", () => {
+    // Claude Code writes `Read`, opencode writes `read`.
+    expect(agentToolGlyph("read")).toBe("read");
+    expect(agentToolGlyph("edit")).toBe("write");
+    expect(agentToolGlyph("bash")).toBe("run");
+    expect(agentToolGlyph("  Bash  ")).toBe("run");
+  });
+
+  it("reads anything it does not know, which is the NARROW answer and not the neutral one", () => {
+    // `Read`, `Glob`, `Grep` is the allowlist out of the box, and every tool in every named
+    // grant reads (`every_granted_tool_reads` in src/agent.rs pins that) — so an
+    // unrecognised call really is a read in every configuration but the one the user widened
+    // themselves. `run` is the tempting fallback and the wrong one: it claims a command
+    // executed, and overstating what the agent did is the error every gate here exists to
+    // prevent.
+    for (const tool of [
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "mcp__grafana__query_prometheus",
+      "somethingNobodyListed",
+      "",
+    ]) {
+      expect(agentToolGlyph(tool)).toBe("read");
+    }
+  });
+
+  it("never answers `think`, which is the header's own mark", () => {
+    // The sparkle says the model is reasoning, and reasoning is not a tool call — so nothing
+    // maps to it, however a tool is named.
+    for (const tool of ["Think", "think", "Thinking", "sequentialthinking"]) {
+      expect(agentToolGlyph(tool)).not.toBe("think");
+    }
+  });
+});
+
 describe("withoutAgentRun", () => {
   const run = parseAgentFrame(frame())!;
 
@@ -172,7 +297,11 @@ describe("withoutAgentRun", () => {
 });
 
 describe("a run's life", () => {
-  const run = (over: Partial<AgentRun>): AgentRun => ({ ...parseAgentFrame(frame())!, ...over });
+  const run = (over: Partial<AgentRun>): AgentRun => ({
+    ...parseAgentFrame(frame())!,
+    started_at: 0,
+    ...over,
+  });
 
   it("is live until it is done or failed", () => {
     expect(agentRunIsLive(run({ phase: "thinking" }))).toBe(true);
@@ -193,7 +322,11 @@ describe("a run's life", () => {
 });
 
 describe("agentPhaseLabel", () => {
-  const run = (over: Partial<AgentRun>): AgentRun => ({ ...parseAgentFrame(frame())!, ...over });
+  const run = (over: Partial<AgentRun>): AgentRun => ({
+    ...parseAgentFrame(frame())!,
+    started_at: 0,
+    ...over,
+  });
 
   it("names the tool and its target while a tool runs", () => {
     expect(

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Alert02Icon, ArrowRight01Icon, CheckIcon, StopIcon } from "@hugeicons/core-free-icons";
+import { Alert02Icon, StopIcon } from "@hugeicons/core-free-icons";
 import { agentMarkdownToHtml } from "~/lib/agent-markdown";
 import {
   agentPhaseLabel,
   agentRunIsLive,
+  agentRunStartedAt,
+  agentToolGlyph,
   agentTranscriptLabel,
   type AgentRun,
   type AgentStep,
@@ -17,8 +19,10 @@ import { cn } from "~/lib/utils";
 import { AgentCoin, agentShineColor } from "./agent-logo";
 import { useAppState } from "./controller-context";
 import { RichContent } from "./rich-content";
-import { FadeArc } from "./loading-ui/fade-arc";
 import { ShineBorder } from "./magicui/shine-border";
+import LoadingState from "./beautifului/loading-state";
+import { ThinkingHeader, ThinkingReasoning, ThinkingTrace } from "./beautifului/thinking-state";
+import { ToolChipRow } from "./beautifului/tool-chips";
 
 /**
  * The agent's reply, as this app draws it.
@@ -102,8 +106,12 @@ const TRANSCRIPT_PIN_SLACK = 24;
  * The curve the transcript opens and closes on: a strong ease-out.
  *
  * It moves fast first and settles, which is what makes a fold feel answered rather than
- * played back — the built-in curves are too weak to read as either. The same curve
- * carries the chevron, so the arrow and the rows are one movement and not two.
+ * played back — the built-in curves are too weak to read as either.
+ *
+ * It is also beautifului's own, which is what makes the panel one movement rather than two now
+ * that the header, the rail and both kinds of row are theirs: every animation in those three
+ * files is `cubic-bezier(0.23,1,0.32,1)`, this pair of numbers exactly. The chevron used to be
+ * carried from here for that reason; it is their own now, and it agrees.
  */
 const TRANSCRIPT_EASE = [0.23, 1, 0.32, 1] as const;
 
@@ -393,9 +401,14 @@ export function AgentStoredTranscript(props: {
  * - **It outlives the run.** The same rows are drawn from the kept transcript once the
  *   overlay is gone (see {@link AgentStoredTranscript}), so a reply keeps its disclosure
  *   for as long as the page is open.
- * - **The reasoning is data, not prose.** It is what the model said to itself, so it is
- *   set small, dim and italic, and no Markdown is applied to it — a heading the model
- *   happened to type is not a heading in this app's voice.
+ * - **The reasoning is data, not prose.** It is what the model said to itself, so no Markdown
+ *   is applied to it — a heading the model happened to type is not a heading in this app's
+ *   voice — and it is set smaller and dimmer than the answer, in beautifului's own `Reasoning`
+ *   row, hanging off their guide rail (see {@link AgentThought}).
+ *
+ * The header, the rail and both kinds of row are beautifului.dev's; the five rules above are
+ * this app's, and `thinking-state.tsx`'s own `PATCH 5` records where their collapse was refused
+ * in favour of them.
  */
 /**
  * Stop the run being written into this bubble.
@@ -499,8 +512,11 @@ function TranscriptPanel(props: {
   //   - folded by the reader while the answer arrives, or after the run: what the fold
   //     HOLDS, which is what a reader clicks it for. The caret at the end of the answer
   //     already says it is being written, so the header does not spend its line on that.
+  //   - live with NOTHING to disclose: the same, because `props.folded` falls back to the
+  //     word "Reasoning" for a run that has reported none, which is a label about work that
+  //     did not happen. What the run is DOING is the true thing to say there.
   const label =
-    run && live && (open || waiting)
+    run && live && (open || waiting || !has)
       ? open && run.phase === "working"
         ? `${agentDisplayName(run.backend)} is working`
         : agentPhaseLabel(run)
@@ -557,56 +573,42 @@ function TranscriptPanel(props: {
         aria-live={live ? "polite" : undefined}
         className="flex min-w-0 items-center gap-2"
       >
-        <button
-          type="button"
-          data-testid="agent-transcript-toggle"
-          // A header with nothing behind it is not a control: a run whose CLI reports no
-          // reasoning and has called nothing has only this line to show.
-          disabled={!has}
-          aria-expanded={has ? open : undefined}
-          onClick={() => props.onChoose(!open)}
-          className={cn(
-            "flex min-w-0 flex-1 items-center gap-1 rounded text-left",
-            has && "hover:text-text",
-          )}
-        >
-          {has ? (
-            <motion.span
-              className="flex shrink-0 items-center text-text-faint"
-              animate={{ rotate: open ? 90 : 0 }}
-              initial={false}
-              transition={
-                reduce
-                  ? { duration: 0 }
-                  : {
-                      duration: open ? TRANSCRIPT_OPEN_SECONDS : TRANSCRIPT_CLOSE_SECONDS,
-                      ease: TRANSCRIPT_EASE,
-                    }
-              }
-            >
-              <HugeiconsIcon
-                icon={ArrowRight01Icon}
-                className="size-3.5"
-                strokeWidth={1.8}
-                aria-hidden
-              />
-            </motion.span>
-          ) : null}
-          <span
-            data-testid="agent-phase"
-            // shadcn's `shimmer` (ui.shadcn.com/docs/utils/shimmer): it paints the text
-            // out of `currentColor` and sweeps a brighter copy of it across, so the colour
-            // class stays — it is what the highlight is derived from — and the dark theme
-            // needs nothing said about it. `prefers-reduced-motion` is handled by the
-            // utility itself, which is why only `waiting` gates it here.
-            className={cn(
-              "min-w-0 truncate text-text-dim",
-              waiting && "shimmer shimmer-duration-2100",
-            )}
-          >
-            {label}
-          </span>
-        </button>
+        {/* A RUN WITH NOTHING TO SHOW YET IS THE ONE PLACE THIS SURFACE IS PURELY A WAIT,
+            and it is the only place the LOADER is drawn. Every other state has something
+            better than an animation to say it is going: the transcript's rows while the run
+            works, and the caret at the end of the answer once words arrive — "the words are
+            the progress indicator, and two competing animations is one too many". So the
+            loader stands exactly where there is neither, which is also where the header had
+            nothing to disclose and no control to be.
+
+            It is beautifului's own LOADING STATE: the pixel grid, the shimmering label, and
+            how long the reader has been waiting (see `agentRunStartedAt` — a run whose start
+            this page cannot state draws no number at all). */}
+        {!has && waiting ? (
+          <LoadingState
+            label={label}
+            sinceMs={run ? agentRunStartedAt(run) : undefined}
+            // Their own box is `w-fit`; here it stands where the header does, sharing its
+            // row with Stop, and it takes the header's own padding so the two states do not
+            // shift the line they are drawn on.
+            className="flex-1 px-1.5 py-1"
+            labelTestId="agent-phase"
+            // The row above is already this run's live region, and two nested ones announce
+            // the same line twice.
+            announce={false}
+          />
+        ) : (
+          <ThinkingHeader
+            label={label}
+            working={!!waiting}
+            expanded={open}
+            disabled={!has}
+            onToggle={() => props.onChoose(!open)}
+            className="min-w-0 flex-1"
+            testId="agent-transcript-toggle"
+            labelTestId="agent-phase"
+          />
+        )}
         {props.onStop ? <AgentStopButton onStop={props.onStop} /> : null}
       </div>
 
@@ -631,32 +633,33 @@ function TranscriptPanel(props: {
                   el.scrollHeight - el.scrollTop - el.clientHeight <= TRANSCRIPT_PIN_SLACK;
               }}
               style={{ maxHeight: TRANSCRIPT_MAX_HEIGHT }}
-              // A rail rather than a box: the transcript is an aside to the answer under
-              // it, and a second card inside a bubble reads as a second message. It hangs
-              // under the chevron, so the fold and what it holds line up.
-              className="ml-[7px] mt-1 flex min-w-0 flex-col gap-1 overflow-y-auto overscroll-contain border-l border-black/15 pl-2.5 dark:border-white/20"
+              className="flex min-w-0 flex-col overflow-y-auto overscroll-contain"
             >
-              {/* Keyed by position, because that is what a step IS: the transcript only
-                  ever grows at its end. The one exception is its own cap dropping the
-                  oldest rows (`MAX_TOOL_CALLS`), which shifts the rest — a re-mount, and
-                  the only thing it costs is a fade on rows already read. */}
-              {props.steps.map((step, index) =>
-                step.kind === "thought" ? (
-                  <AgentThought
-                    key={index}
-                    text={step.text}
-                    live={live && index === growing}
-                    onGrow={follow}
-                  />
-                ) : (
-                  <AgentToolRow
-                    key={index}
-                    step={step}
-                    reduce={!!reduce}
-                    entering={index >= ridden.current}
-                  />
-                ),
-              )}
+              {/* A RAIL rather than a box, and it is beautifului's own: the transcript is an
+                  aside to the answer under it, and a second card inside a bubble reads as a
+                  second message. Their offsets put the line under the centre of the header's
+                  own sparkle with nothing said here, which is why this adds no margin of its
+                  own — and it grows with the trace, so it really ends at the newest row
+                  rather than running the height of the box. */}
+              <ThinkingTrace>
+                {/* Keyed by position, because that is what a step IS: the transcript only
+                    ever grows at its end. The one exception is its own cap dropping the
+                    oldest rows (`MAX_TOOL_CALLS`), which shifts the rest — a re-mount, and
+                    the only thing it costs is a fade on rows already read. */}
+                {props.steps.map((step, index) =>
+                  step.kind === "thought" ? (
+                    <AgentThought
+                      key={index}
+                      text={step.text}
+                      live={live && index === growing}
+                      entering={index >= ridden.current}
+                      onGrow={follow}
+                    />
+                  ) : (
+                    <AgentToolRow key={index} step={step} entering={index >= ridden.current} />
+                  ),
+                )}
+              </ThinkingTrace>
             </div>
           </motion.div>
         ) : null}
@@ -674,14 +677,26 @@ function lastThoughtIndex(steps: AgentStep[]): number {
 }
 
 /**
- * One stretch of the model's reasoning, revealed at the pace the answer is.
+ * One stretch of the model's reasoning, revealed at the pace the answer is — drawn as
+ * beautifului's own `Reasoning` row (see `ThinkingReasoning`).
  *
  * The same easing as the answer ({@link useSmoothReveal}), because it is the same act: a
  * text arriving in bursts of uneven size, read by somebody watching it appear. `onGrow`
  * is how the panel above follows it — the reveal ticks in here, so this is the only place
  * that knows a line was added.
+ *
+ * **The reasoning is still DATA and not prose**, which was the load-bearing half of drawing
+ * it small, dim and italic: no Markdown is applied to it, because a heading the model
+ * happened to type is not a heading in this app's voice. What the vendor's row says it with
+ * instead of the italic is the guide rail beside it, the dimmer ink and the smaller measure —
+ * so that half moved rather than going.
  */
-function AgentThought(props: { text: string; live: boolean; onGrow: () => void }) {
+function AgentThought(props: {
+  text: string;
+  live: boolean;
+  entering: boolean;
+  onGrow: () => void;
+}) {
   const { onGrow } = props;
   const { revealed } = useSmoothReveal(props.text, props.live);
   useEffect(() => {
@@ -689,59 +704,40 @@ function AgentThought(props: { text: string; live: boolean; onGrow: () => void }
   }, [revealed, onGrow]);
   if (!revealed.trim()) return null;
   return (
-    <p
-      data-testid="agent-thinking"
-      className="min-w-0 whitespace-pre-wrap break-words text-[11px] italic leading-relaxed text-text-faint"
-    >
+    <ThinkingReasoning testId="agent-thinking" entering={props.entering}>
       {revealed}
-    </p>
+    </ThinkingReasoning>
   );
 }
 
 /**
- * One tool call: what it was, what it was pointed at, and whether it is still running.
+ * One tool call: what it was, what it was pointed at, and whether it is still running —
+ * drawn as beautifului's own TOOL CHIP row (see `ToolChipRow`).
  *
- * A finished call keeps its row — the whole point of a transcript — and says so with a
- * tick, while the one in flight spins. The two states are what tells a reader whether the
- * wait they are in is this call's fault.
+ * A finished call keeps its row — the whole point of a transcript — and it keeps its own
+ * GLYPH to say what the call was, while the one in flight turns instead. The two states are
+ * what tells a reader whether the wait they are in is this call's fault.
+ *
+ * Which glyph is `agentToolGlyph`'s, and it is deliberately pure and unit-tested: it is a
+ * claim about what a call DID, so it is made in one place with its fallback argued.
  *
  * `entering` is false for a row the panel opened WITH: it is then already where it belongs
  * and the panel's own collapse is the animation (see {@link TranscriptPanel}).
  */
 function AgentToolRow(props: {
   step: Extract<AgentStep, { kind: "tool" }>;
-  reduce: boolean;
   entering: boolean;
 }) {
   const { step } = props;
   return (
-    <motion.span
-      data-testid="agent-activity"
-      data-done={step.done}
-      // `false`: straight to where it belongs, with no animation of its own.
-      initial={!props.entering ? false : props.reduce ? { opacity: 0 } : { opacity: 0, y: -3 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={props.entering ? { duration: 0.18, ease: TRANSCRIPT_EASE } : { duration: 0 }}
-      // `max-w-full` is load-bearing next to `self-start`: a flex item aligned to the
-      // start is sized by its content, so a chip naming a long path would grow straight
-      // through the bubble's edge instead of ellipsising inside it.
-      className="flex min-w-0 max-w-full items-center gap-1.5 self-start rounded-md bg-black/5 px-1.5 py-0.5 text-[11px] text-text-dim dark:bg-white/10"
-    >
-      {step.done ? (
-        <HugeiconsIcon
-          icon={CheckIcon}
-          className="size-3 shrink-0"
-          strokeWidth={1.8}
-          aria-hidden
-        />
-      ) : (
-        <FadeArc className="size-3 shrink-0" aria-hidden />
-      )}
-      <span className="font-medium">{step.tool}</span>
-      {step.target ? (
-        <span className="min-w-0 truncate font-mono opacity-80">{step.target}</span>
-      ) : null}
-    </motion.span>
+    <ToolChipRow
+      testId="agent-activity"
+      glyph={agentToolGlyph(step.tool)}
+      label={step.tool}
+      chip={step.target}
+      running={!step.done}
+      entering={props.entering}
+    />
   );
 }
 

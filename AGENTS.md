@@ -1327,10 +1327,156 @@ that surface together:
   the whole answer — and the last frame is the last chance to state the transcript, so a
   `done` that dropped it would blank the panel a beat before the app lets the run go.
 
+#### AND THE TRANSCRIPT IS DRAWN BY beautifului.dev's OWN THREE COMPONENTS
+
+The three things this surface shows are a TOOL CALL, the model THINKING, and a WAIT — and each
+is drawn by the registry item made for it, fetched rather than reimplemented from a picture:
+
+    npx shadcn add https://www.beautifului.dev/r/tool-chips.json
+    npx shadcn add https://www.beautifului.dev/r/thinking-state.json
+    npx shadcn add https://www.beautifului.dev/r/loading-state.json
+
+`web/src/components/beautifului/{tool-chips,thinking-state,loading-state}.tsx` ARE those files,
+and the pristine copy of each sits beside it as `*.vendor.txt` — so re-fetching the registry item
+and diffing the two shows exactly what this app changed. It is the rule `task-rows.tsx` already
+holds one surface over, and `web/src/vendor/desksprite.ts` before it: **keep the drawing, mark
+every divergence as a numbered patch, and never let a demo drive real data.** The CLI is
+deliberately not run, for `task-rows`' own reason: `shadcn add` refuses without a
+`components.json` and offers to create one, and letting it scaffold a config and a palette over
+this repo's hand-written primitives is invasive. What is vendored is the exact bytes it would
+have written.
+
+**WHERE EACH ONE IS DRAWN, and the split is argued rather than convenient:**
+
+- **A TOOL CALL is `ToolChipRow`** — the 16px glyph slot, the label at 12.5px medium, and the
+  target in a hairlined `bg-field` chip at 11.5px. It replaced a grey pill with a tick.
+- **THE REASONING is `ThinkingReasoning`**, inside `ThinkingTrace`'s measured guide rail, under
+  `ThinkingHeader` — the sparkle, the shimmering label and the chevron. Their `Reasoning` row is
+  prose that wraps, which is what a stretch of reasoning is.
+- **THE WAIT is `LoadingState`, and ONLY where there is nothing else at all**: before the CLI has
+  said anything there is no transcript, no answer and nothing to fold. Every other state has
+  something better than an animation to say it is going — the rows while the run works, the caret
+  at the end of the answer once words arrive — and "the words are the progress indicator, and two
+  competing animations is one too many" is the rule this surface already held. So the loader
+  stands exactly where the header had nothing to disclose and no control to be. It is
+  deliberately NOT drawn on a reply this app never watched (`AgentStoredStatus`): nothing is
+  arriving into that page, and a loader there would promise the next word at a pace it is not
+  being fed at.
+
+**THE PANEL'S OWN MECHANICS ARE UNCHANGED, which is the point of taking only the drawing.** The
+fold policy (open for the run, folded once when it ends, the reader's from then on, held per
+message), the ceiling it scrolls itself inside, the follow-the-newest-line rule, `TRANSCRIPT_EASE`
+and its close-shorter-than-the-open collapse, and the Stop button are all this app's and stay
+this app's — `PATCH 5` in `thinking-state.tsx` says so where their single `grid 0fr → 1fr`
+transition was refused, because it moves the height and the opacity at one speed in both
+directions and both of those rules are argued where they are spelled. Every `data-testid` the
+old rows published is kept (`agent-activity`, `data-done`, `agent-thinking`, `agent-phase`,
+`agent-transcript-toggle`), so what every existing assertion and every capture MEANS survived
+the change.
+
+**THE PATCHES, and each says what it prevents.** Fifteen in all, and three classes recur — a
+scripted demo removed (all three shipped one: a 700 ms row reveal, a trace that flips to
+"Thought for 4 seconds" whatever is happening, a clock counting from mount), a state the vendor's
+row had no way to express (a tool call that is still RUNNING, a header with nothing behind it),
+and a value that has to come from the CALLER rather than from the demo's own tick. Two are worth
+knowing without opening the files:
+
+- **`tool-chips.tsx` LOST its file-diff chips and their hover portal**, and `createPortal` /
+  `react-dom` with them. An `AgentStep` of kind `tool` carries `{tool, target, done}` and nothing
+  else, so those chips would need data the backend does not send — and inventing it is what this
+  app refuses to do everywhere. Their `detail` lines went the same way, which takes the row's own
+  expansion with them: a control that changes nothing reads as a bug. If the wire ever grows a
+  diff per call, drawing it is a deliberate feature with a recon behind it.
+- **`loading-state.tsx` LOST its `Surfer` variant**, with the `<video>`, the Vercel Blob URL it
+  played from and its fallback card. Either half settles it: it fetches a meme from somebody
+  else's host, and displaying this app makes no network request to a third party — the read
+  receipt § Mail strips out of every message body, in another costume — and an autoplaying video
+  inside a virtualized chat history is a media element decoding frames behind whatever the reader
+  scrolled to.
+
+**THE RUN'S OWN START IS A FIELD ON THE RUN, and the loader's clock is the reason.** Their
+elapsed time counts from MOUNT, which is the same thing in a gallery and not here: this panel is
+unmounted whenever its row scrolls away and mounted again when it comes back, so a run's elapsed
+time would reset to zero under the reader twice a scroll. `AgentRun.started_at` is established
+ONCE by `withAgentFrame` from the first frame's own clock and carried by every frame after it.
+Three rules hold it, and `agent-run.test.ts` pins each:
+
+- **It is not on the wire**, so no backend change was needed and an older one is not misread.
+- **A first frame that already carries WORK is REFUSED** — `started_at` stays 0, `agentRunStartedAt`
+  answers `undefined`, and the loader draws no number at all. The first frame of a run carries
+  nothing — no answer, no transcript, no call — so one that does is a run that was already going
+  when this page arrived, which is the ordinary case for a page that reloaded mid-run: a live run
+  repeats its latest frame every `AGENT_STREAM_KEEPALIVE`, so a reload lands on one within fifteen
+  seconds. Counting from it would understate the wait by however long the run had been going, and
+  this app's rule for that is not to put a number on screen — "a number nobody has yet draws
+  NOTHING", which the reading's own progress rows already hold.
+- **It is NOT read off the ids, though it could be.** A Teams message id IS its arrival time in
+  epoch ms, so both `message_id` and the trigger inside `run_id` really would date a run on the
+  tenant — and neither is one on the MOCK, where an id is `<conversation>#<seq>`. A surface no
+  capture can draw and no spec can find is one that ships broken.
+
+**WHICH GLYPH A CALL WEARS IS A CLAIM, so it is made in one pure place** (`agentToolGlyph`, and
+the glyph is the FINISHED state — it says what the call was, where a generic tick would only say
+that it ended; the running one turns instead, and it is the app's own `FadeArc` rather than
+beautifului's sibling spinner, because this app has one loader and one turn). Only an exact
+name is classified, case folded, and **anything else is a READ — the narrow answer rather than the
+neutral-sounding one.** An unrecognised call really is a read in every configuration but one: the
+allowlist is `Read`, `Glob`, `Grep` out of the box (`agent::DEFAULT_TOOLS`) and every tool in
+every named grant reads, which `every_granted_tool_reads` pins. `run` is the tempting fallback
+and the wrong one, because it claims a command executed — and overstating what the agent did is
+the error every gate in this feature exists to prevent. The cost is stated: under
+`agent_set_unrestricted` the user's own config can reach a tool that writes, and one this app
+does not know is drawn as a read. It costs a glyph, never a row — the name beside it is the CLI's
+own.
+
+**THE ONE MAPPING DECISION A TOKEN LOOKUP GOT WRONG WAS THE HAIRLINE, and the captures measured
+it.** Every `--*` this app publishes for a line or an inset fill is chosen against the PAGE, and
+this transcript is drawn inside a BUBBLE — a raised surface. So `--border-subtle` (#242424) is
+DARKER than `--bubble-incoming` (#262626) in the dark theme and a rail mapped to it is a line
+nobody can see, while `--element` and `--bubble-incoming` are the SAME #262626 and a chip mapped
+to it has no fill at all. Both were invisible in the first capture. Their own foundation defines
+both as a STEP off `--surface` (light: surface `oklch(1)`, field `0.961`, line `0.946`), so
+`--color-line` and `--color-field` are relative TINTS off `--foreground` — which is also this
+app's own technique for a fill on a surface it does not know, and exactly what the row this
+replaced already used (`bg-black/5 dark:bg-white/10`, `border-black/15 dark:border-white/20`).
+One expression, every surface. It reaches `task-rows` on the review page too, whose spinner track
+and detail rail were nearly invisible for the same reason and now read.
+
+**A READER WHO ASKED FOR LESS MOTION GETS NONE OF IT**, and it has to be said in app.css for
+`task-rows`' own mechanical reason: every one of these animations is an inline
+`style={{ animation: … }}` no prop can switch off. What is left says everything it said — the
+pixel grid keeps its dim cells, the rail its height, the chevron its angle — and the shimmering
+label needs a second declaration, because the sweep is what paints those words at all: stopped,
+it is a bright stripe frozen across them, so `.beautifului-shimmer` puts the ink back. The
+ELAPSED time is deliberately untouched: it is a number, not a movement, and the vendor's own
+header note draws the same line ("the timer still ticks").
+
+**What the vendor's drawing COST, said rather than left to be found.** The reasoning is no longer
+small, dim and ITALIC: their `Reasoning` row is 12.5px in the dimmer ink, and what says "this is
+data rather than this app's voice" is now the guide rail beside it and the measure. The
+load-bearing half of that rule is untouched — no Markdown is applied to it, because a heading the
+model happened to type is not a heading in this app's voice. And the folded row of a KEPT
+transcript is some 12px taller on every agent reply, which is the sparkle and the 13px label.
+That second cost is what broke `agent.spec.ts`'s own "lights the edge of a reply it never watched"
+— it asserted on THE one agent-signed bubble of a history that can hold two, and passed on master
+only because the older one happened to be unmounted. It reads the newest row now, which is the
+injected one by construction: the neighbouring tests' rule made deterministic rather than lucky.
+
+`web/e2e/agent.spec.ts` pins the loader, its moving clock, that no fold is offered while there is
+nothing behind one, and that the loader GOES the moment the transcript has a row; the two pure
+rules are `agent-run.test.ts`'s. **What is UNVERIFIED is what the whole feature's is:** no real
+CLI has driven these three, because that needs the user's own agent and their own question — the
+frames are the run's own and the drawing is pinned against the mock.
+
 `web/mock/server.ts` reproduces that flow (`simulateMockAgentRun`) with no CLI and no
 tenant, which is what makes the surface reviewable — `cd web && bun run preview --
 --out /tmp/reply --agent-reply` walks one run through every phase (`--agent` captures the
-menu instead), and `web/e2e/agent.spec.ts` pins it.
+menu instead), and `web/e2e/agent.spec.ts` pins it. **Pass `--dpr 3` for the three vendored
+drawings**: the LOADER cropped to itself in both themes (a 4px grid beside 13px type and a 12px
+number), the whole TRANSCRIPT in both themes — which is where all three meet, and where every
+one of them is a hairline or a 4px mark whose contrast is decided per theme — and ONE TOOL ROW
+on its own in both, since a 1200px page says nothing about whether an 11.5px mono chip inside a
+1px ring can be read.
 
 Five rules hold it together. Each one is load-bearing, and each is pinned by a test:
 
@@ -4361,7 +4507,12 @@ user. Two independent mechanisms enforce that split:
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For a message's actions as a PHONE draws them —
   opened by a real HOLD, at the touch floor, in both themes, and the bubble left with no "…"
-  once the menu closes: `bun run preview -- --out /tmp/ma --message-actions`. For "Answer with <agent>" on a message:
+  once the menu closes: `bun run preview -- --out /tmp/ma --message-actions`. For the LOCAL
+  AGENT answering — every phase of one run, the LOADER a run with nothing to show yet draws
+  cropped to itself in both themes, the TRANSCRIPT in both themes and ONE TOOL ROW cropped in
+  both (see § AND THE TRANSCRIPT IS DRAWN BY beautifului.dev's OWN THREE COMPONENTS, and pass
+  `--dpr 3`: the whole feature is a 4px grid, a hairline rail and 11.5px mono):
+  `bun run preview -- --out /tmp/reply --agent-reply`. For "Answer with <agent>" on a message:
   `bun run preview -- --out /tmp/ask --answer-with`. For SENDING LATER — the send pill, the
   menu of moments in both themes, a moment that has passed being refused, the banner a queued
   message earns, the custom-time dialog in both themes, the list of what is waiting in both

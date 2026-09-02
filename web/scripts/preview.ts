@@ -4153,6 +4153,20 @@ if (import.meta.main) {
 
       await askAgent(page, "@claude which port does the backend listen on?");
       await shot(`${out}-thinking-light.png`);
+      // THE LOADER, cropped to itself and in both themes. It is the one state on this
+      // surface that is purely a wait — no transcript yet, no words yet — and it is the only
+      // place beautifului's LOADING STATE is drawn: the pixel grid, the shimmering label and
+      // how long the reader has been waiting. Cropped because the whole thing is a 4px grid
+      // beside 13px type and a 12px number, which a 1200px page says nothing about.
+      const loader = '[data-testid="loading-state"]';
+      if (await page.locator(loader).count()) {
+        await shot(`${out}-loading-light.png`, loader);
+        await setTheme("dark");
+        await shot(`${out}-loading-dark.png`, loader);
+        await setTheme("light");
+      } else {
+        console.log("[preview] the run had already reported work — no loader to capture");
+      }
       // Best-effort: a tool call is a phase of the run, and a capture that arrives after
       // it must not take the whole preview down with it. `MOCK_AGENT_STEP_MS` is what
       // widens the window (the mock reads it — see web/mock/server.ts).
@@ -4190,6 +4204,22 @@ if (import.meta.main) {
         .waitFor({ state: "visible", timeout: 15_000 })
         .catch(() => console.log("[preview] one call only — capturing the transcript as it is"));
       await shot(`${out}-transcript-light.png`, '[data-testid="agent-transcript"]');
+      // BOTH THEMES, because the transcript is where all three vendored drawings meet — the
+      // header's sparkle and shimmer, the guide rail, a reasoning row and a tool row (one
+      // finished, wearing the glyph for its own kind, one turning) — and every one of them is
+      // a hairline or a 4px mark whose contrast is decided per theme.
+      await setTheme("dark");
+      await shot(`${out}-transcript-dark.png`, '[data-testid="agent-transcript"]');
+      await setTheme("light");
+      // ONE TOOL ROW on its own, in both themes: a 13px glyph, a 12.5px label and an 11.5px
+      // mono chip inside a 1px ring, which is the detail the page-sized shot cannot show.
+      const call = '[data-testid="agent-activity"]';
+      if (await page.locator(call).count()) {
+        await shot(`${out}-call-light.png`, call);
+        await setTheme("dark");
+        await shot(`${out}-call-dark.png`, call);
+        await setTheme("light");
+      }
       await scrollToNewest(page);
       // Both themes while the run is WAITING, because that is the state the shimmer
       // stands in for — and shadcn's utility derives its highlight from the text's own
@@ -4261,7 +4291,7 @@ if (import.meta.main) {
       await shot(`${out}-opencode-dark.png`);
       await shot(`${out}-opencode-coin-dark.png`, '[data-testid="agent-coin"][data-backend="opencode"]');
       console.log(
-        `[preview] wrote ${out}-{thinking,working,stop,transcript,writing,done,row,opencode}-*.png`,
+        `[preview] wrote ${out}-{thinking,loading,working,stop,transcript,call,writing,done,row,opencode}-*.png`,
       );
     });
     process.exit(0);
