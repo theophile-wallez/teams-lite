@@ -8757,6 +8757,23 @@ which is the part worth for ever and a few KB. `update::tests::the_release_workf
 the tag, the notes' machine-readable line, the history the changelog needs and the fact that
 pruning selects `build-` releases and never `latest`.
 
+**AND THE ROLLING RELEASE IS PROVED READABLE BEFORE THE BUILD IS CALLED SHIPPED, because `gh
+release create` exiting 0 does not say that it is.** Measured on run 33686205734 (2026-09-02):
+the step printed the release's URL, attached the right asset at the right commit — and left the
+release a **DRAFT**, whose asset URL was `…/releases/download/untagged-8466ea76ec15…/`. Both
+`--cleanup-tag` and the create that follows it write `refs/tags/latest`, so a create landing
+before the delete has propagated has no tag to hang on and GitHub keeps the release unpublished;
+the git tag then existed and the release did not. A draft is absent from
+`GET /releases/tags/latest` whether or not the caller is authenticated — which is exactly the
+request `update::check` makes and the URL install.sh downloads from — so **every install
+answered "Could not reach GitHub — 404 Not Found" while the workflow was green**, and the only
+place this app ever said so was the button the user pressed. Two lines close it, and
+`the_release_workflow_…` pins both: `gh release edit latest --draft=false` (idempotent on a
+release that is already published, so it costs a request in the ordinary case and repairs the
+race in the rare one), and then the app's OWN question, retried a few times against propagation
+— under `set -e` a 404 fails the job. **A release nobody can read must fail the build rather
+than pass it.**
+
 **The changelog is written ONCE, in Rust** (`src/changelog.rs`), and read by two surfaces:
 CI renders its markdown into every release body through `examples/changelog.rs`, and the
 backend publishes the same structure to the app. A grouper in the workflow beside one in the

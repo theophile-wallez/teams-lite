@@ -1430,6 +1430,24 @@ mod tests {
             "the changelog base must be proved an ancestor of this build, or the range names \
              commits this build does not hold"
         );
+
+        // AND THE ROLLING RELEASE MUST BE PROVED READABLE, which is the one thing `gh release
+        // create` exiting 0 does not say. Measured on run 33686205734: it printed the release's
+        // URL, attached the right asset at the right commit, and left the release a DRAFT —
+        // absent from the tag endpoint [`check`] asks and from the URL install.sh downloads, so
+        // every install answered "Could not reach GitHub — 404 Not Found" while the workflow was
+        // green. Both halves are pinned: publishing it, and then asking the app's own question.
+        assert!(
+            workflow.contains("gh release edit latest --draft=false"),
+            "the rolling release must be published explicitly: `gh release create` can leave a \
+             draft when its own `--cleanup-tag` has not propagated, and a draft is invisible to \
+             every installed build"
+        );
+        assert!(
+            workflow.contains("releases/tags/latest"),
+            "the workflow must ASK the endpoint this module reads before it calls a build \
+             shipped — a release nobody can read must fail the job rather than pass it"
+        );
         assert!(
             workflow.contains("refs/tags/build-*"),
             "the newest immutable build release is the second candidate for the base: it is \

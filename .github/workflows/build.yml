@@ -211,6 +211,39 @@ jobs:
             --target "${GITHUB_SHA}" \
             --latest=false
 
+          # AND THEN PROVE IT IS READABLE, because a release that is not is invisible to every
+          # installed build and this step reported success while shipping one.
+          #
+          # Measured on run 33686205734 (2026-09-02): `gh release create` printed the release's
+          # URL, exited 0, attached the right asset at the right commit — and left the release a
+          # DRAFT, whose download URL was `…/releases/download/untagged-8466ea76ec15…/`. The
+          # `--cleanup-tag` above and the create below both write `refs/tags/latest`, so a create
+          # that lands before the delete has propagated has no tag to hang on and GitHub keeps
+          # it unpublished. The git tag then existed and the release did not.
+          #
+          # A draft is absent from `GET /releases/tags/latest`, authenticated or not — which is
+          # exactly the request `update::check` makes and the URL `install.sh` downloads from. So
+          # the app said "Could not reach GitHub — 404 Not Found" and every install stopped being
+          # able to update, while this workflow was green.
+          #
+          # `--draft=false` is idempotent on a release that is already published, so this costs a
+          # request in the ordinary case and repairs the race in the rare one. The check after it
+          # is the app's OWN question rather than a restatement of it: under `set -e` a 404 fails
+          # the job, so a release nobody can read can never again be reported as a build that
+          # shipped. It retries, because publishing propagates in a second or two and a spurious
+          # red build teaches its reader to ignore this step.
+          gh release edit latest --draft=false
+          for attempt in 1 2 3 4 5; do
+            if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/latest" --jq '.tag_name' >/dev/null 2>&1; then
+              echo "latest is published and readable"
+              exit 0
+            fi
+            echo "latest not readable yet (attempt ${attempt})"
+            sleep 3
+          done
+          echo "::error::the rolling \`latest\` release is not readable — every install's update check would 404"
+          exit 1
+
       - name: Keep the binary on the newest builds only
         env:
           GH_TOKEN: ${{ github.token }}
