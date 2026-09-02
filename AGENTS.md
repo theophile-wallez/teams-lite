@@ -2786,6 +2786,120 @@ needs two columns of code, and here the code sits inside a column of prose set a
 so split would be two columns of eight characters, which is the reason `effectiveDiffLayout` refuses
 it on a phone. The toggle stays on the Diffs page, where it changes something.
 
+#### AND THE RUN SAYS WHAT IT IS DOING (task rows, from the backend's own frames)
+
+A reading is tens of seconds at best and bounded at 35 minutes (`AGENT_REQUEST_TIMEOUT_MS`), and the
+whole of what the press used to answer with was one word on the button: **Reading the changes…**. So
+the three things that really happen — a merge request GitLab would not answer for, half a megabyte of
+diff coming down, and a model thinking — were one undifferentiated wait, and they are seconds, seconds
+and minutes with different next moves. A reader who cannot see which one they are in has no way to
+know whether waiting is the right thing to do. The run now reports itself as a numbered stack of
+steps: `src/gitlab_review.rs` holds the stage vocabulary, `ReviewRunReport` / `review_run_stream` in
+src/bin/server.rs emit it, `web/src/lib/review-progress.ts` is the one pure decision the surface is
+built from, and `web/src/components/task-rows.tsx` draws it.
+
+**THE COMPONENT IS AFTER beautifului.dev's "Task Rows"** (§ 06 — *Live agent task status: running,
+failed, completed*), which publishes **no source at all**: the shape is theirs — a numbered row with a
+value at its right and its own sub-steps carrying a value apiece, the number traded for a terminal mark
+once the row is over — and every line of it is this app's own. Two things about that are deliberate.
+It **decides nothing**: every state and value arrives as a prop, which is the split `chess-board.tsx`
+holds against `use-chess-game.ts` and what lets the mapping be unit-tested for every stage with no
+browser. And there is **ONE presentation, not two**: the reference offers a Capsules/List switch, which
+is how a gallery lets somebody choose — an app that drew both would ask the reader to pick a look for a
+thing they are only waiting on. The list is the one taken, because the surface is a DOCUMENT page.
+
+**EVERY VALUE IS MEASURED, AND THERE IS NO PERCENTAGE ANYWHERE.** No bar, no fraction, no estimated
+time — and the vocabulary has no room for one, so a later caller cannot quietly invent one. Nothing on
+either side of the socket knows how long a model will think: a run's own bound is SILENCE rather than a
+clock (§ The local agent). What is drawn instead is what really happened — the commit that was read, the
+file count, how much patch went into the prompt, how much of it went without one, which CLI under which
+model, and how much answer has come back. A proportion here would be the one part of this page a reader
+could catch lying, and `review-progress.test.ts` scans every stage's own words for `%` to keep it out.
+
+**FIVE STAGES, AND THE ORDER IS WHAT LETS ONE FRAME SAY EVERYTHING** (`gitlab_review::RunStage`:
+`detail` -> `diff` -> `asking` -> `writing` -> `done`). The page draws every stage before the current
+one as finished, the current one as running and the rest as pending — so a frame carries the WHOLE state
+rather than a delta, and folding one is an assignment. That is what makes a frame lost under load, or a
+second page connecting mid-run, cost a moment of staleness instead of a half-drawn row. `asking` and
+`writing` are the CLI's own two phases off the progress channel the run already had and **deliberately
+dropped**: that channel's comment used to say nothing watched it, and `review_run_stream` is the twin of
+`agent_stream_local`, on the same keepalive and the same rate floor.
+
+Eleven rules hold it, and each is pinned by a test:
+
+- **A FAILURE names the stage it stopped AT, never a stage of its own.** The rows before it stay
+  finished, which is the half that says whose problem it is: a diff that would not load is GitLab's and
+  a model that refused is the provider's. The sentence beside the button says WHAT went wrong and the
+  rows say HOW FAR it got, so the two sit together — which is why the error moved above the cost
+  paragraph in the offer card rather than staying at its foot.
+- **THE OUTCOME SETTLES THE ROWS, because the frames cannot always.** A run whose answer never came
+  back — the socket dropped, the request hit its own ceiling — leaves the last frame saying a stage is
+  running, and a row that spins after the press has failed is the one thing this must never draw. The
+  store stamps the error on the kept frame where the backend supplied none; the frame's own reason wins
+  where it has one, since only the backend knows which read or phase gave way.
+- **THREE ROWS, and `done` gets none.** The stages a reader acts on are not the stages the code has:
+  the two GitLab reads are one thing to a person and are worth telling apart only as sub-steps. The
+  reading's own row is left out because the document takes the screen the moment it lands — a row
+  reading "5 themes" above a headline that opens by saying so would state one fact twice.
+- **THE PROMPT IS A ROW rather than a step, on what it SAYS.** How much of the branch left this machine
+  is the one fact the offer above it warned the reader about, and this is the only place it is ever
+  answered. It is not a stage — the prompt is built in no measurable time — so the row is finished
+  exactly when the asking has begun.
+- **A number nobody has yet draws NOTHING.** "0 files" is a claim about the branch and a blank is not,
+  so a value absent from the frame is absent from the row. The rows still say what they are GOING to
+  do, so the first paint is three sentences rather than three blank lines.
+- **THE CUT IS STATED ONLY WHEN THERE WAS ONE.** A step reading "0 files went without their patch" on
+  every run is a line that never varies, which is a line nobody reads.
+- **A row's state may only ever ADVANCE**, which a test walks every stage to prove: a reader watching a
+  step un-finish itself reads the page as broken. A stage this build does not know is REFUSED rather
+  than defaulted, for the same reason — read as `detail`, a nearly-finished run would appear to start
+  again.
+- **THE PRESS DRAWS ROWS IN ITS OWN TASK** (`reviewRunStarting`). The first real frame is a round trip
+  away and a press answered by nothing reads as one that missed. It claims nothing: the first stage
+  running, every value absent, which is exactly true.
+- **WHICH RUN a frame belongs to is checked** (`run_id`), because two pages can ask about one merge
+  request and an older run's `done` would take the rows down under a newer one still going. A frame
+  with NO run id — a backend older than the field — is accepted, since the older behaviour is one run
+  at a time and refusing it would draw nothing at all.
+- **A RE-READ is watched too, and it is the press this page's own reader makes most.** A reading that
+  has gone stale is asked for again from the HEADLINE, where the document is on screen and the offer's
+  copy of these rows is not drawn at all — so the rows are drawn in both places, from one mapping.
+  That is also the only place "the rows go when the reading lands" can really be tested: with the offer
+  unmounting anyway, the assertion would otherwise pass for the wrong reason, which is exactly how it
+  first shipped and what a mutation caught.
+- **A RUN THAT FAILED KEEPS ITS ROWS; one that SUCCEEDED loses them.** The document says everything
+  they did and more, so a finished list above it is scaffolding left standing — while a failed one is
+  half of the answer. They go when the reader presses again, or leaves the merge request.
+
+**THE READ IS UNGATED AND NOTHING NEW IS.** No RPC was added: the frames are
+`gitlab_mr_review_progress` on the event bus the backend already broadcasts on — named beside
+`gitlab_mr_review_answer`, which is the FOLLOW-UP's own stream, and carrying `project_path` for the
+reason that one does — `gitlab_mr_review_run` is the same `MACHINE_METHODS` entry it was, and nothing
+here publishes anything about the user that the reading did not already. It is deliberately not
+`agent_stream` for the reason the answer's own frames are not: this run posts no Teams message, so
+every field of one would be empty.
+
+**The FOLLOW-UP conversation is deliberately untouched.** It already draws the question optimistically
+in its own bubble the moment it leaves (§ AND THE READER CAN ASK ABOUT IT), so the wait there is
+already answered; adding rows to it would be a second report of one act.
+
+`web/mock/server.ts` walks a reading through the same five stages and mirrors the two things a page can
+get wrong rather than only the happy path — the frames carry the whole state, and a refusal is reported
+AT `asking`, which is where a real one comes from since it is the CLI that says no. Its
+`{kind:"gitlab_mr", hold_review:"<stage>"}` hook **holds** a run at a stage and **a spec MUST clear
+it**: one mock process serves the whole run, and a held reading would make every later one wait. The
+hold is what makes the surface reachable at all — a real run is minutes and this mock answers in one
+frame, so `asking` and `writing` have no duration here, which is the gap `hold_ask` already fills for a
+question. `cd web && bun run preview -- --out /tmp/rev --diff-review --dpr 3` captures the rows at each
+stage, cropped to themselves (the numbers are 9px and the values 11px, so a 1200px page says nothing
+about whether either can be read), the writing state in both themes, and a run that stopped.
+
+**What is UNVERIFIED against the tenant is the same thing the reading's own is:** no real agent has
+driven these rows, because that needs the user's own CLI and their own press. The stages are the ones
+the run's own code passes through and the two phases are the CLI's own, pinned in Rust and against the
+mock. The failure mode if a phase arrives that this does not recognise is the model reported as still
+thinking — the narrower claim — never a row drawn as finished before it is.
+
 #### AND A NAME IN THAT PROSE IS THE CODE IT NAMES (hovered for its lines, pressed to go to them)
 
 The reading writes about the branch, and the things it writes about are in the diff one page over:
@@ -4157,7 +4271,9 @@ user. Two independent mechanisms enforce that split:
   themes, ONE FILE's box cropped to itself in both themes, BOTH REGIONS of the file two themes split
   between them (both, because the whole point is that they differ), the theme heading STICKING while the
   code scrolls under it, the long diff folded with the count in its label, the changes nothing grouped
-  cropped to themselves, a reading of an earlier commit, a refused run, a phone's width — and the FOLLOW-UP
+  cropped to themselves, a reading of an earlier commit, a refused run, a phone's width — WHAT THE RUN
+  IS DOING at each of its stages, cropped to the rows themselves (the numbers are 9px), the writing
+  state in both themes and a run that STOPPED, with the reads still finished behind it — and the FOLLOW-UP
   conversation beside it: the "@" list offering a theme above the files in both themes — each file row
   naming the whole path beside the name its chip will show — the CHIP a picked tag becomes, cropped to
   the composer's own box in both themes, a THEME's chip, the box GROWN to its eight-line ceiling, the
@@ -8210,8 +8326,9 @@ user's. What changes is only what is asked.
   exactly the theme and the files the reader tagged — which is a PROMPT and a PARSE rather than a way to
   reach a model: the CLI, the provider and every permission stay the local agent's, both runs are
   granted no tools at all, and nothing in it parses a patch, because the page's own
-  `web/src/lib/gitlab-patch.ts` is the one thing in this app that does
-  (`src/gitlab_review.rs`, see § AN AI READING OF THE DIFF),
+  `web/src/lib/gitlab-patch.ts` is the one thing in this app that does — and the reading REPORTS ITSELF
+  as it runs, stage by stage, over the progress channel `agent::run` already had
+  (`src/gitlab_review.rs`, see § AN AI READING OF THE DIFF and § AND THE RUN SAYS WHAT IT IS DOING),
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
   § The local agent) and the user's own CUSTOM AGENTS that answer to a name they chose

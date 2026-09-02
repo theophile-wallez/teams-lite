@@ -762,6 +762,11 @@ export async function setMergeRequestControl(
      *  in its own bubble with the box already empty and no answer yet — has no duration against a mock
      *  that answers in one frame, so this is the only way a spec or a capture can see it at all. */
     hold_ask?: number;
+    /** HOLD an AI reading AT this stage (`detail` | `diff` | `asking` | `writing`), so the state the
+     *  progress rows are drawn from can be asserted at all. Two of those stages are minutes of a real
+     *  run and one frame of this mock's, so without it there is no moment to catch — the same gap
+     *  `hold_ask` fills, for the run rather than for a question. */
+    hold_review?: "detail" | "diff" | "asking" | "writing";
     /** Put a CONVERSATION about the reading in place without asking anything, so a spec and a
      *  capture can reach a transcript without paying for a turn per picture. It needs a reading, so
      *  it implies one. */

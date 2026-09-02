@@ -31,6 +31,7 @@
 //          | mail_folders_changed | mail_list_updated | mail_list_error
 //          | calendars_changed | calendar_view_updated | calendar_view_error
 //          | gitlab_list_updated | gitlab_mr_updated | gitlab_read_error
+//          | gitlab_mr_review_progress | gitlab_mr_review_answer
 //          | agent_personas_changed
 //          | agent_stream | person_override_changed | settings_changed
 //
@@ -8770,7 +8771,168 @@ fn review_agent(
     Ok((backend, providers.model(backend.name), workspace))
 }
 
+/// One `gitlab_mr_review_progress` frame: where a reading has got to, for the page that is waiting.
+///
+/// The WHOLE state travels every time (see [`gitlab_review::RunProgress`]), so the page folds one
+/// frame and needs nothing it was told before — which is what makes a frame lost under load, or a
+/// second page connecting mid-run, cost a moment of staleness rather than a half-drawn row.
+///
+/// `stage` is passed rather than read off the progress because the terminal states are not stages of
+/// a run at all: `done` is the reading existing, and `error` is where it stopped.
+fn review_progress_frame(
+    project_path: &str,
+    iid: u64,
+    run_id: &str,
+    stage: &str,
+    progress: &gitlab_review::RunProgress,
+    error: Option<&str>,
+) -> Value {
+    json!({
+        // WHICH run, so a page ignores a frame from a run other than the one it is watching. Two
+        // pages can ask about one merge request, and an older run's `done` would otherwise tear the
+        // rows down under a newer one that is still going.
+        "run_id": run_id,
+        "project_path": project_path,
+        "iid": iid,
+        "stage": stage,
+        "head_sha": progress.head_sha,
+        "files": progress.files,
+        "prompt_bytes": progress.prompt_bytes,
+        "truncated": progress.truncated,
+        "files_unseen": progress.files_unseen,
+        "backend": progress.backend,
+        "model": progress.model,
+        "answer_bytes": progress.answer_bytes,
+        "themes": progress.themes,
+        "error": error,
+    })
+}
+
+/// What a run says about itself while it runs.
+///
+/// It accumulates rather than reporting one fact at a time, because every frame carries the whole
+/// state — so the facts have to live somewhere for the length of the run, and that somewhere is the
+/// one place that also knows how to emit them.
+struct ReviewRunReport<'a> {
+    ctx: &'a Ctx,
+    project_path: String,
+    iid: u64,
+    run_id: String,
+    /// Where the run has got to — kept so a FAILURE can say which read or phase it stopped at,
+    /// which is the whole difference between "GitLab would not answer" and "the model refused".
+    at: gitlab_review::RunStage,
+    progress: gitlab_review::RunProgress,
+}
+
+impl<'a> ReviewRunReport<'a> {
+    fn new(ctx: &'a Ctx, project_path: &str, iid: u64, started_ms: i64) -> Self {
+        Self {
+            ctx,
+            project_path: project_path.to_string(),
+            iid,
+            run_id: format!("{project_path}!{iid}/{started_ms}"),
+            at: gitlab_review::RunStage::Detail,
+            progress: gitlab_review::RunProgress::default(),
+        }
+    }
+
+    /// Say the run has reached a stage. Every frame after this one carries the facts it has learnt.
+    fn reached(&mut self, stage: gitlab_review::RunStage) {
+        self.at = stage;
+        self.ctx.emit(
+            "gitlab_mr_review_progress",
+            review_progress_frame(
+                &self.project_path,
+                self.iid,
+                &self.run_id,
+                stage.as_str(),
+                &self.progress,
+                None,
+            ),
+        );
+    }
+
+    /// Say the run stopped, and where. The reason is the backend's or the CLI's own words, which is
+    /// what the page draws beside the button that was pressed.
+    fn failed(&self, error: &anyhow::Error) {
+        self.ctx.emit(
+            "gitlab_mr_review_progress",
+            review_progress_frame(
+                &self.project_path,
+                self.iid,
+                &self.run_id,
+                // The stage it stopped AT, not "error" as a stage of its own: the page draws the
+                // rows up to that point as finished and marks that one failed, so the reader can see
+                // how far the reading got.
+                self.at.as_str(),
+                &self.progress,
+                Some(&format!("{error:#}")),
+            ),
+        );
+    }
+}
+
+/// Report the ANSWER arriving, for as long as it arrives.
+///
+/// The twin of [`agent_stream_local`] and deliberately the same discipline — a keepalive so a quiet
+/// run repeats itself rather than looking dead, and a floor on the rate so a burst of output
+/// collapses into one frame. It reports the CLI's own two phases: `Thinking` is the model working
+/// before anything has been said, `Writing` is the answer coming back, and the byte count is what
+/// really arrived rather than a guess at how much is still to come.
+async fn review_run_stream(
+    ctx: &Ctx,
+    project_path: &str,
+    iid: u64,
+    run_id: &str,
+    known: &gitlab_review::RunProgress,
+    progress: &mut tokio::sync::watch::Receiver<agent::Progress>,
+) {
+    loop {
+        let waited = tokio::time::timeout(AGENT_STREAM_KEEPALIVE, progress.changed()).await;
+        // A closed channel is the run ending — the caller says how it ended, so nothing is reported
+        // from here. A timeout is a run that is merely quiet, and the frame below repeats itself.
+        if matches!(waited, Ok(Err(_))) {
+            return;
+        }
+        let current = progress.borrow_and_update().clone();
+        // The facts from `asking` plus the one number that moves. The reading is granted no tools,
+        // so there is no tool call to name here and `Phase::Working` cannot happen — a phase this
+        // does not recognise is reported as the model still thinking, which is the narrower claim.
+        let mut frame = known.clone();
+        frame.answer_bytes = current.text.len();
+        let stage = match current.phase {
+            agent::Phase::Writing => gitlab_review::RunStage::Writing,
+            _ => gitlab_review::RunStage::Asking,
+        };
+        ctx.emit(
+            "gitlab_mr_review_progress",
+            review_progress_frame(project_path, iid, run_id, stage.as_str(), &frame, None),
+        );
+        tokio::time::sleep(AGENT_STREAM_INTERVAL).await;
+    }
+}
+
 async fn gitlab_review_run(ctx: &Ctx, project_path: String, iid: u64) -> Result<Value> {
+    // A run says what it is doing as it does it, and says where it stopped when it does not finish.
+    // The reads below are seconds and the agent is minutes, so one word for all of it left the
+    // reader unable to tell a merge request that would not load from a model that was thinking.
+    let mut report = ReviewRunReport::new(ctx, &project_path, iid, now_ms());
+    let outcome = gitlab_review_run_reported(ctx, &project_path, iid, &mut report).await;
+    match &outcome {
+        Ok(_) => {}
+        Err(e) => report.failed(e),
+    }
+    outcome
+}
+
+async fn gitlab_review_run_reported(
+    ctx: &Ctx,
+    project_path: &str,
+    iid: u64,
+    report: &mut ReviewRunReport<'_>,
+) -> Result<Value> {
+    let project_path = project_path.to_string();
+    report.reached(gitlab_review::RunStage::Detail);
     // The two reads the page already holds. `refresh: false`, because the reader asked for a reading
     // of what they are LOOKING at.
     let detail = gitlab_cached(
@@ -8789,6 +8951,10 @@ async fn gitlab_review_run(ctx: &Ctx, project_path: String, iid: u64) -> Result<
         .unwrap_or_default()
         .to_string();
     let title = detail.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
+    // The commit is known now, and the DIFF is the read that follows — the big one (523 KB measured
+    // on the real instance), so it is the stage a reader is most likely to be sitting in front of.
+    report.progress.head_sha = head_sha.clone();
+    report.reached(gitlab_review::RunStage::Diff);
     let diff_json = gitlab_cached(
         ctx,
         gitlab_mr::cache_key(&project_path, iid, gitlab_mr::DiffDepth::Listed.cache_kind()),
@@ -8835,11 +9001,36 @@ async fn gitlab_review_run(ctx: &Ctx, project_path: String, iid: u64) -> Result<
         input.prompt.len(),
         if input.truncated { " (cut)" } else { "" },
     );
-    // The progress sender is required by `agent::run` and nothing here watches it: this is one
-    // question with one answer, so there is no bubble to stream into and no phase to draw. The
-    // receiver is held only so the channel is not closed under the run.
-    let (progress, _watch) = tokio::sync::watch::channel(agent::Progress::default());
-    let outcome = agent::run(&request, &progress).await?;
+    // Everything about the ask is known now: how much of the branch really travelled, how much of it
+    // went without its patch, and which CLI under which model is about to read it. This is also the
+    // stage the reader waits in, so it is the one that has facts worth reading while they do.
+    report.progress.files = input.paths.len();
+    report.progress.prompt_bytes = input.prompt.len();
+    report.progress.truncated = input.truncated;
+    report.progress.files_unseen = input.files_unseen;
+    report.progress.backend = backend.name.to_string();
+    report.progress.model = model.clone().unwrap_or_default();
+    report.reached(gitlab_review::RunStage::Asking);
+
+    // The answer is reported as it arrives, which is the whole reason this channel now has a reader.
+    // The state the frames carry is the state as of `asking` — the facts above cannot change while
+    // the model works — plus the one number that does.
+    let known = report.progress.clone();
+    let (progress, mut watch) = tokio::sync::watch::channel(agent::Progress::default());
+    let run = async {
+        let outcome = agent::run(&request, &progress).await;
+        // The sender goes with the run, which is what ends the reporter below: a channel still open
+        // would leave it repeating the last frame on its keepalive for ever.
+        drop(progress);
+        outcome
+    };
+    let stream = review_run_stream(ctx, &project_path, iid, &report.run_id, &known, &mut watch);
+    let (outcome, ()) = tokio::join!(run, stream);
+    // The answer is in, so a failure from here on belongs to the answer rather than to the asking:
+    // an agent that refused and an answer nobody could parse are both "the model's own reply went
+    // wrong", and reporting either against `asking` would say the reading never got a reply at all.
+    report.at = gitlab_review::RunStage::Writing;
+    let outcome = outcome?;
     let review = gitlab_review::from_answer(
         &outcome.text,
         &input,
@@ -8848,6 +9039,8 @@ async fn gitlab_review_run(ctx: &Ctx, project_path: String, iid: u64) -> Result<
         model.as_deref(),
         now_ms(),
     )?;
+    report.progress.answer_bytes = outcome.text.len();
+    report.progress.themes = review.themes.len();
     {
         let store = ctx.store()?;
         store.set_setting(
@@ -8855,6 +9048,9 @@ async fn gitlab_review_run(ctx: &Ctx, project_path: String, iid: u64) -> Result<
             &serde_json::to_string(&review)?,
         )?;
     }
+    // The reading exists. The page swaps to the document on the answer below, so this frame is what
+    // lets a SECOND page — one that watched the run without asking for it — stop waiting.
+    report.reached(gitlab_review::RunStage::Done);
     Ok(json!({ "review": review }))
 }
 
@@ -13282,6 +13478,121 @@ mod tests {
         assert!(
             resolver.contains("channel_layouts"),
             "the answer is cached per process — the page asks on every open of every channel"
+        );
+    }
+
+    /// A frame carries the WHOLE state, never a delta.
+    ///
+    /// That is what makes the page's fold an assignment, and it is what lets a client that connected
+    /// mid-run — or missed a frame under load — draw exactly what one that saw them all draws. A
+    /// field left out here is a value the page can only get by remembering, which is the design this
+    /// deliberately does not have.
+    #[test]
+    fn a_progress_frame_carries_every_fact_the_run_has_learnt() {
+        let progress = gitlab_review::RunProgress {
+            head_sha: "a1b2c3d4e5f6".into(),
+            files: 8,
+            prompt_bytes: 18_400,
+            truncated: true,
+            files_unseen: 3,
+            backend: "claude".into(),
+            model: "sonnet".into(),
+            answer_bytes: 4_800,
+            themes: 5,
+        };
+        let frame = review_progress_frame(
+            "acme/webapp",
+            42,
+            "acme/webapp!42/1756060012345",
+            gitlab_review::RunStage::Writing.as_str(),
+            &progress,
+            None,
+        );
+        assert_eq!(frame["run_id"], "acme/webapp!42/1756060012345");
+        assert_eq!(frame["project_path"], "acme/webapp");
+        assert_eq!(frame["iid"], 42);
+        assert_eq!(frame["stage"], "writing");
+        assert_eq!(frame["head_sha"], "a1b2c3d4e5f6");
+        assert_eq!(frame["files"], 8);
+        assert_eq!(frame["prompt_bytes"], 18_400);
+        assert_eq!(frame["truncated"], true);
+        assert_eq!(frame["files_unseen"], 3);
+        assert_eq!(frame["backend"], "claude");
+        assert_eq!(frame["model"], "sonnet");
+        assert_eq!(frame["answer_bytes"], 4_800);
+        assert_eq!(frame["themes"], 5);
+        assert!(frame["error"].is_null());
+
+        // A FAILURE names the stage it stopped at rather than a stage of its own, so the page draws
+        // everything before it as finished — which is the half that says whose problem it is.
+        let failed = review_progress_frame(
+            "acme/webapp",
+            42,
+            "run",
+            gitlab_review::RunStage::Asking.as_str(),
+            &progress,
+            Some("claude is not on this machine's PATH"),
+        );
+        assert_eq!(failed["stage"], "asking");
+        assert_eq!(failed["error"], "claude is not on this machine's PATH");
+        // The facts it had already learnt survive the failure: how far it got is what the reader acts
+        // on, so a failed frame that dropped them would leave the rows blank.
+        assert_eq!(failed["files"], 8);
+    }
+
+    /// The run really reports every stage, and a run that fails really says so.
+    ///
+    /// A source scan because the alternative is a live agent and a live GitLab: the emissions are
+    /// spread down one long function, and a stage dropped from it is a row that never finishes with
+    /// nothing anywhere to report it. The window is bounded at BOTH ends on markers the body cannot
+    /// contain — this function's own header, and the doc comment of the one that follows it — and the
+    /// length is checked, because a slice that silently ran to the end of the file would be satisfied
+    /// by this test's own assertion strings.
+    #[test]
+    fn an_ai_reading_reports_every_stage_it_passes_through() {
+        let source = include_str!("server.rs");
+        let opened = source
+            .split("async fn gitlab_review_run_reported(")
+            .nth(1)
+            .expect("gitlab_review_run_reported must exist");
+        let body = opened
+            .split("/// A FOLLOW-UP question about a reading")
+            .next()
+            .expect("gitlab_review_ask's own doc comment must follow it");
+        assert!(
+            body.len() < opened.len(),
+            "the window must really END at the next function: run to the end of the file it would \
+             be satisfied by the assertions below, which name every stage as a string"
+        );
+        for stage in ["Detail", "Diff", "Asking", "Done"] {
+            assert!(
+                body.contains(&format!("reached(gitlab_review::RunStage::{stage})")),
+                "the run must report reaching {stage} — a stage nothing emits is a row that never \
+                 finishes, and the page has no other way to learn it happened"
+            );
+        }
+        assert!(
+            body.contains("let stream = review_run_stream("),
+            "the ANSWER arriving is the one thing that moves while a reader waits, so the progress \
+             channel must have a reader — it was deliberately dropped before this feature existed"
+        );
+
+        // The wrapper is what turns a `?` into a report. Without it every early return — a diff
+        // GitLab refused, a provider switched off, an answer nobody could parse — would leave the
+        // rows spinning with the reason only in the RPC's own rejection.
+        let wrapper = source
+            .split("async fn gitlab_review_run(ctx: &Ctx")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn ").next())
+            .expect("gitlab_review_run must exist");
+        assert!(
+            wrapper.contains("Err(e) => report.failed(e),"),
+            "a run that stopped must say so, and where: the rows are how the reader learns whether \
+             it was GitLab or the model that gave way"
+        );
+        assert!(
+            wrapper.contains("gitlab_review_run_reported("),
+            "the wrapper must be the one that reports, so no early return can skip it"
         );
     }
 

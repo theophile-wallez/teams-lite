@@ -688,6 +688,122 @@ pub fn setting_key(project_path: &str, iid: u64) -> String {
     format!("gitlab_review:{project_path}!{iid}")
 }
 
+// ---- what the run is doing, while it does it ---------------------------------
+
+/// Where a reading has got to, as a run passes through it.
+///
+/// A run is tens of seconds to minutes and used to say one word for all of it ("Reading the
+/// changes…"), so the reader could not tell a merge request that would not load from a model that
+/// was thinking — which are minutes apart and have different next moves. These are the stages the
+/// run really has, in the order it really takes them, and nothing here is a step invented to fill
+/// the wait: each one is a read that can fail on its own or a phase the CLI reports.
+///
+/// It is an ORDER, which is what lets one frame say everything: the page draws every stage before
+/// the current one as finished, the current one as running and the rest as pending, so a lost frame
+/// costs a moment of staleness rather than a row stuck half-drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RunStage {
+    /// Reading the merge request itself — which is where its head commit comes from.
+    Detail,
+    /// Reading its diff, which is the big read and the one the whole reading rests on.
+    Diff,
+    /// The prompt is built and the model is thinking. Nothing is arriving yet.
+    Asking,
+    /// The answer is coming back.
+    Writing,
+    /// Parsed and stored.
+    Done,
+}
+
+impl RunStage {
+    /// The wire spelling, which is also what the page keys its rows off.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunStage::Detail => "detail",
+            RunStage::Diff => "diff",
+            RunStage::Asking => "asking",
+            RunStage::Writing => "writing",
+            RunStage::Done => "done",
+        }
+    }
+}
+
+/// Everything known about a run so far — the WHOLE state, in every frame.
+///
+/// Deliberately not a delta. A frame carries each fact it has learnt, so the page folds one frame
+/// and needs no memory of the ones before it: a client that connected mid-run, or missed a frame
+/// under load, draws the same rows as one that saw them all. It is the discipline
+/// `agent_stream_local` already follows when it repeats itself on a keepalive.
+///
+/// Every field is MEASURED rather than estimated. There is no percentage and no expected duration,
+/// because nothing here knows how long a model will think — a bar that guessed would be the one
+/// part of this surface a reader could catch lying.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunProgress {
+    /// The head commit, once the detail read has answered.
+    pub head_sha: String,
+    /// How many files the diff holds, once it has been read.
+    pub files: usize,
+    /// How much patch really went into the prompt.
+    pub prompt_bytes: usize,
+    /// Whether the budget cut any of it, and how many files went without their patch.
+    pub truncated: bool,
+    pub files_unseen: u64,
+    /// Which CLI is reading, and under which model.
+    pub backend: String,
+    pub model: String,
+    /// How much answer has arrived. The one number that moves while the model works, and it is the
+    /// CLI's own output rather than a guess at how far through it is.
+    pub answer_bytes: usize,
+    /// How many themes the reading came out with, once it is parsed.
+    pub themes: usize,
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+
+    /// The order IS the feature: the page draws "before the current stage" as finished, so a stage
+    /// out of sequence would report a read as done that has not happened.
+    #[test]
+    fn the_stages_run_in_the_order_a_reading_takes_them() {
+        let mut stages = vec![
+            RunStage::Writing,
+            RunStage::Detail,
+            RunStage::Done,
+            RunStage::Asking,
+            RunStage::Diff,
+        ];
+        stages.sort();
+        assert_eq!(
+            stages,
+            vec![
+                RunStage::Detail,
+                RunStage::Diff,
+                RunStage::Asking,
+                RunStage::Writing,
+                RunStage::Done,
+            ],
+        );
+    }
+
+    /// The page keys its rows off these words, so a rename here is a surface that draws nothing.
+    /// `review-progress.ts` holds the same five and its own test pins them.
+    #[test]
+    fn every_stage_has_its_own_wire_spelling() {
+        let spellings = [
+            RunStage::Detail.as_str(),
+            RunStage::Diff.as_str(),
+            RunStage::Asking.as_str(),
+            RunStage::Writing.as_str(),
+            RunStage::Done.as_str(),
+        ];
+        assert_eq!(spellings, ["detail", "diff", "asking", "writing", "done"]);
+        let unique: std::collections::BTreeSet<_> = spellings.iter().collect();
+        assert_eq!(unique.len(), spellings.len(), "two stages cannot share one spelling");
+    }
+}
+
 // ---- the model's own answer, before anything is checked ----------------------
 
 #[derive(Debug, Deserialize)]

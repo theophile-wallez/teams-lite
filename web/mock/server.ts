@@ -5333,6 +5333,22 @@ let mockGitLabAskHoldMs = 0;
  *  (`AGENT_STREAM_INTERVAL`) rather than a count, because it has a real CLI's output to follow; what
  *  this mirrors is the SHAPE — text that grows — and not the cadence. */
 const MOCK_ANSWER_STREAM_PIECES = 6;
+/**
+ * The stage this mock HOLDS an AI reading at, and how long each stage takes here.
+ *
+ * The same gap `mockGitLabAskHoldMs` fills, for the stages a reading passes through: the real run is
+ * two network reads and then a model thinking for tens of seconds, and this mock does all of it in one
+ * frame — so `asking` and `writing`, the two stages a reader spends nearly all of their wait in, have
+ * no duration at all here. No capture could photograph them and no spec could assert one without the
+ * hold, and a spec that arms it MUST clear it: one mock process serves the whole run, and a held
+ * reading would make every later one wait.
+ *
+ * `mockGitLabReviewStepMs` is the ordinary pace — small, so it is a walk rather than a wait, and
+ * non-zero so the stages really are separate frames a spec can watch advance.
+ */
+let mockGitLabReviewHoldAt: string | null = null;
+let mockGitLabReviewStepMs = 60;
+
 /** The readings this machine has "made", keyed the way the backend keys its own stored one:
  *  `<project>!<iid>`, ONE per merge request, with the head sha inside the payload. */
 const mockReviews = new Map<string, MockReview>();
@@ -5522,6 +5538,89 @@ function mockReviewFor(mr: MockMergeRequest): MockReview {
     files_unseen: 0,
   };
 }
+
+/**
+ * Walk one AI reading through the stages it really has, broadcasting a frame at each.
+ *
+ * The mirror of `ReviewRunReport` / `review_run_stream` in src/bin/server.rs, and it mirrors the two
+ * things a page can get wrong rather than only the happy path: the frames carry the WHOLE state each
+ * time (so a page that merged deltas would pass here and fail against the backend), and a REFUSAL is
+ * reported at the stage it stopped at rather than as a stage of its own — which is what lets the rows
+ * say how far the reading got.
+ *
+ * It stops at `mockGitLabReviewHoldAt` for as long as the hold says, which is the only way a capture
+ * or a spec reaches `asking` and `writing`: those are minutes of a real run and one frame of this one.
+ */
+async function mockReviewRun(
+  projectPath: string,
+  iid: number,
+  mr: MockMergeRequest,
+  review: MockReview,
+  refusal: string | null,
+): Promise<void> {
+  const files = mockDiffFiles.get(`${projectPath}!${iid}`) ?? [];
+  const runId = `${projectPath}!${iid}/${Date.now()}`;
+  // The state accumulates exactly as the backend's does: each stage learns a fact and every frame
+  // after it carries that fact.
+  const state: Record<string, unknown> = {
+    run_id: runId,
+    project_path: projectPath,
+    iid,
+    head_sha: "",
+    files: 0,
+    prompt_bytes: 0,
+    truncated: false,
+    files_unseen: 0,
+    backend: "",
+    model: "",
+    answer_bytes: 0,
+    themes: 0,
+    error: null,
+  };
+  const frame = (stage: string): void => {
+    broadcast("gitlab_mr_review_progress", { ...state, stage });
+  };
+  // A refusal happens AT a stage. The mock refuses at `asking` — the stage a real refusal comes from,
+  // since it is the CLI that says no — so the rows show both reads finished and the agent failed.
+  const failAt = refusal ? "asking" : null;
+  const step = async (stage: string): Promise<boolean> => {
+    if (failAt === stage) {
+      state.error = refusal;
+      frame(stage);
+      return false;
+    }
+    frame(stage);
+    if (mockGitLabReviewHoldAt === stage) {
+      await new Promise((resolve) => setTimeout(resolve, MOCK_REVIEW_HOLD_MS));
+    } else if (mockGitLabReviewStepMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, mockGitLabReviewStepMs));
+    }
+    return true;
+  };
+
+  if (!(await step("detail"))) return;
+  state.head_sha = mr.sha;
+  if (!(await step("diff"))) return;
+  state.files = files.length;
+  // A stand-in for how much patch really travelled — the sum of what the fixture holds, so it is a
+  // number taken from the diff rather than one invented for the picture.
+  state.prompt_bytes = files.reduce((total, file) => total + (file.patch?.length ?? 0), 400);
+  state.backend = review.provider;
+  state.model = review.model;
+  if (!(await step("asking"))) return;
+  // The answer arriving. TWO frames rather than one, because the byte count is the only thing on this
+  // surface that moves, and a single frame would let a page that drew it once pass a test about it.
+  state.answer_bytes = 1_200;
+  if (!(await step("writing"))) return;
+  state.answer_bytes = 4_800;
+  if (!(await step("writing"))) return;
+  state.themes = review.themes.length;
+  frame("done");
+}
+
+/** How long a HELD stage of a mock reading waits. Long enough for a capture to be taken and a spec to
+ *  assert against it, and bounded so a hook nobody cleared cannot hang a whole run for ever. */
+const MOCK_REVIEW_HOLD_MS = 4_000;
 
 /** When set, an UPLOAD read fails with this sentence. Its own switch for the reason the diff's
  *  is: a picture this app cannot fetch must cost that picture and nothing else — the words
@@ -9552,8 +9651,14 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const iid = requireNumber(params, "iid");
       const mr = mockMergeRequestFor(projectPath, iid);
       if (!mr) throw new Error("GitLab has no merge request there, or the token cannot see it");
-      if (mockGitLabReviewRefusal) throw new Error(mockGitLabReviewRefusal);
       const review = mockReviewFor(mr);
+      // The run REPORTS ITSELF, the way the backend does (`ReviewRunReport` in src/bin/server.rs):
+      // the stages it really passes through, in order, each frame carrying the whole state. A mock
+      // that answered the reading in silence would let a page drawing nothing pass every test — and
+      // this surface exists precisely because the wait is long, which is the one thing a mock that
+      // answers instantly cannot show on its own (hence the hold).
+      await mockReviewRun(projectPath, iid, mr, review, mockGitLabReviewRefusal);
+      if (mockGitLabReviewRefusal) throw new Error(mockGitLabReviewRefusal);
       mockReviews.set(`${projectPath}!${iid}`, review);
       return { review };
     }
@@ -12627,6 +12732,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         mockReviewChats.clear();
         mockGitLabAskRefusal = null;
         mockGitLabAskHoldMs = 0;
+        mockGitLabReviewHoldAt = null;
         // Every job log goes back too: the running one's length grows on each read, so a spec
         // that wants to watch a live log has to start from a known number of lines.
         resetMockJobLogs();
@@ -12648,6 +12754,10 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         typeof body.refuse_review === "string" ? body.refuse_review : null;
       mockGitLabAskRefusal = typeof body.refuse_ask === "string" ? body.refuse_ask : null;
       mockGitLabAskHoldMs = typeof body.hold_ask === "number" ? body.hold_ask : 0;
+      // WHERE a reading pauses, so the two stages that are minutes of a real run and one frame of
+      // this one can be photographed and asserted against.
+      mockGitLabReviewHoldAt =
+        typeof body.hold_review === "string" ? body.hold_review : null;
       // A reading the machine has ALREADY made, so a spec can reach the stored path without
       // pressing anything — and `stale: true` makes it a reading of another commit.
       if (body.review === "stored" || body.review === "stale") {
@@ -12698,6 +12808,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           refuse_review: mockGitLabReviewRefusal,
           refuse_ask: mockGitLabAskRefusal,
           hold_ask: mockGitLabAskHoldMs,
+          hold_review: mockGitLabReviewHoldAt,
           reviews: mockReviews.size,
           chats: mockReviewChats.size,
         },

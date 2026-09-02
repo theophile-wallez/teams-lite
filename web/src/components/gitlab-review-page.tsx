@@ -30,6 +30,8 @@ import type { PierreSide } from "~/lib/gitlab-diff-comment";
 import { parseGitLabMarkdown } from "~/lib/gitlab-markdown";
 import { gitlabPageUrl, mergeRequestPagePanel } from "~/lib/gitlab-mr-pages";
 import { markReviewCode, reviewCodeUnsearchable } from "~/lib/gitlab-review-code";
+import { reviewRunRows, type ReviewRunProgress } from "~/lib/review-progress";
+import { TaskRows } from "./task-rows";
 import { ReviewCodeProvider, useCodeVocabulary } from "./review-code-context";
 import { gitLabMarkdownOptions } from "~/lib/gitlab-upload";
 import { formatMessageTime } from "~/lib/message-time";
@@ -137,6 +139,7 @@ export function GitLabReviewPage(props: {
   const review = useAppState((s) => s.gitlabReview);
   const busy = useAppState((s) => s.gitlabReviewBusy);
   const error = useAppState((s) => s.gitlabReviewError);
+  const progress = useAppState((s) => s.gitlabReviewProgress);
   const askedChatWidth = useAppState((s) => s.gitlabReviewChatWidth);
   const controller = useController();
 
@@ -264,6 +267,7 @@ export function GitLabReviewPage(props: {
                 headSha={detail?.diff_refs?.head_sha ?? null}
                 busy={busy}
                 error={error}
+                progress={progress}
                 onRun={() => void controller.runGitLabReview()}
                 onOpenFile={props.onOpenFile}
               />
@@ -332,6 +336,7 @@ function ReviewDocument(props: {
   headSha: string | null;
   busy: boolean;
   error: string | null;
+  progress: ReviewRunProgress | null;
   onRun: () => void;
   onOpenFile: (path: string) => void;
 }) {
@@ -357,6 +362,7 @@ function ReviewDocument(props: {
             <ReviewOffer
               busy={props.busy}
               error={props.error}
+              progress={props.progress}
               onRun={props.onRun}
               files={diff.files.length}
             />
@@ -371,6 +377,7 @@ function ReviewDocument(props: {
               stale={stale}
               busy={props.busy}
               error={props.error}
+              progress={props.progress}
               onRun={props.onRun}
             />
             {groups.map((group, index) => (
@@ -398,6 +405,7 @@ function ReviewDocument(props: {
 function ReviewOffer(props: {
   busy: boolean;
   error: string | null;
+  progress: ReviewRunProgress | null;
   onRun: () => void;
   files: number;
 }) {
@@ -417,8 +425,17 @@ function ReviewOffer(props: {
         {props.files === 1 ? "file" : "files"} are all accounted for.
       </p>
       <RunButton busy={props.busy} onRun={props.onRun} label="Read the changes" />
+      {/* WHAT THE RUN IS DOING, directly under the press that started it — the composer's own rule
+          that an action reports itself where it was asked for. A run is tens of seconds at best and
+          bounded at 35 minutes, and the button alone said one word for all of it. */}
+      {props.progress && <ReviewRunProgressRows progress={props.progress} />}
+      {/* The failure sits with the ROWS rather than at the foot of the card, because the two are one
+          answer: the sentence says what went wrong and the rows say how far the reading got, and a
+          paragraph of small print between them would separate the halves. */}
+      {props.error && <ReviewError error={props.error} />}
       {/* It runs the CLI the reader chose in Settings › AI providers, and the diff travels in the
-          prompt — so this says where their code goes, in as many words. */}
+          prompt — so this says where their code goes, in as many words. Last in the card, which is
+          where small print belongs once there is a report above it. */}
       <p
         data-testid="gitlab-review-cost"
         className="text-[11px] leading-relaxed text-text-faint"
@@ -427,7 +444,26 @@ function ReviewOffer(props: {
         the prompt, so this branch's code reaches that provider — exactly as it does when you write
         to an agent in a chat. It is granted no access to your files.
       </p>
-      {props.error && <ReviewError error={props.error} />}
+    </div>
+  );
+}
+
+/** The rows a run is watched through.
+ *
+ *  The mapping is `reviewRunRows`' — pure, and tested for every stage without a browser — and the
+ *  drawing is `TaskRows`'. Nothing about what a stage MEANS lives here. */
+function ReviewRunProgressRows(props: { progress: ReviewRunProgress }) {
+  const rows = useMemo(() => reviewRunRows(props.progress), [props.progress]);
+  return (
+    // A rule above them, because they are a different KIND of thing from the offer they appear under:
+    // above is what a press would do, below is what it is doing. `self-stretch` so the line crosses
+    // the card rather than ending at the widest row — the card's own items are `items-start`.
+    <div className="flex w-full flex-col gap-2 self-stretch border-t border-border-subtle pt-3">
+      <TaskRows
+        rows={rows}
+        label="What the reading is doing"
+        data-testid="gitlab-review-progress"
+      />
     </div>
   );
 }
@@ -442,6 +478,7 @@ function ReviewHeadline(props: {
   stale: boolean;
   busy: boolean;
   error: string | null;
+  progress: ReviewRunProgress | null;
   onRun: () => void;
 }) {
   const { review } = props;
@@ -542,6 +579,11 @@ function ReviewHeadline(props: {
         </p>
       )}
       <RunButton busy={props.busy} onRun={props.onRun} label="Read it again" />
+      {/* And the rows on a RE-READ too, which is the press this page's own reader makes most: a
+          reading that has gone stale is asked for again from here, and the document behind it means
+          the offer's copy of these rows is not drawn at all. Same mapping, same component — the
+          feedback belongs to the run rather than to whichever control started it. */}
+      {props.progress && <ReviewRunProgressRows progress={props.progress} />}
       {props.error && <ReviewError error={props.error} />}
     </header>
   );

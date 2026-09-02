@@ -185,6 +185,12 @@ import {
   type PendingReviewQuestion,
   type ReviewTag,
 } from "./gitlab-review";
+import {
+  parseReviewProgress,
+  reviewProgressIsOurs,
+  reviewRunStarting,
+  type ReviewRunProgress,
+} from "./review-progress";
 import { jobLogIsLive } from "./gitlab-job-log";
 import {
   isNotMerged,
@@ -908,6 +914,14 @@ export type AppState = {
   /** Why a reading did not happen, in the CLI's or the backend's own words, reported where the press
    *  was made — the contract every outward-ish action in this app holds. */
   gitlabReviewError: string | null;
+  /** What the run in flight is DOING, from the backend's own `gitlab_mr_review_progress` frames, or null
+   *  when no run is being watched.
+   *
+   *  It is the WHOLE state each time rather than a merge of frames (see `ReviewRunProgress`), so this
+   *  is an assignment and a page that connected mid-run draws what every other page draws. It is set
+   *  optimistically the moment the press is made, because the first real frame is a round trip away
+   *  and a press answered by nothing reads as one that missed. */
+  gitlabReviewProgress: ReviewRunProgress | null;
   /** The FOLLOW-UP questions asked about that reading, oldest first. Its own field rather than one
    *  on the reading, for the reason it is its own store row: a fresh reading replaces the reading and
    *  must not throw away the questions somebody asked. */
@@ -1278,6 +1292,7 @@ function initialState(): AppState {
     gitlabReview: null,
     gitlabReviewBusy: false,
     gitlabReviewError: null,
+    gitlabReviewProgress: null,
     gitlabReviewChat: EMPTY_REVIEW_CHAT,
     gitlabReviewAsking: false,
     gitlabReviewAskError: null,
@@ -2071,6 +2086,20 @@ export class TeamsController {
       } else if (d.kind === "stale") {
         void this.reloadMergeRequest();
       }
+    });
+
+    // WHAT AN AI READING IS DOING, while it does it. One frame carries the whole state, so folding
+    // one is an assignment — see `ReviewRunProgress`, which is why nothing here merges.
+    on("gitlab_mr_review_progress", (raw) => {
+      const frame = parseReviewProgress(raw);
+      if (!frame) return;
+      // The merge request on screen, and the run this page is watching. A frame about another merge
+      // request is another page's business, and a frame from another RUN of this one would take these
+      // rows down under a run that is still going.
+      const key = { projectPath: frame.projectPath, iid: frame.iid };
+      if (!sameMergeRequest(key, this.get().openMergeRequest)) return;
+      if (!reviewProgressIsOurs(frame, this.get().gitlabReviewProgress)) return;
+      this.set({ gitlabReviewProgress: frame });
     });
 
     // A background refresh was refused. Reported only when there is nothing on screen:
@@ -4111,6 +4140,9 @@ export class TeamsController {
       gitlabReview: null,
       gitlabReviewBusy: false,
       gitlabReviewError: null,
+      // A run belongs to the merge request it was asked about, so leaving one takes its rows with it
+      // — the rule the reading itself and a half-written diff comment both follow.
+      gitlabReviewProgress: null,
       gitlabReviewChat: EMPTY_REVIEW_CHAT,
       gitlabReviewAsking: false,
       gitlabReviewAskError: null,
@@ -4592,18 +4624,45 @@ export class TeamsController {
   async runGitLabReview(): Promise<void> {
     const key = this.get().openMergeRequest;
     if (!key || this.get().gitlabReviewBusy) return;
-    this.set({ gitlabReviewBusy: true, gitlabReviewError: null });
+    // The rows are drawn in the same task as the press. A run's first real frame is a round trip
+    // away, and this one is a run that has started and knows nothing yet — which is exactly true, and
+    // the alternative is a press answered by nothing for as long as the socket takes.
+    this.set({
+      gitlabReviewBusy: true,
+      gitlabReviewError: null,
+      gitlabReviewProgress: reviewRunStarting(key.projectPath, key.iid),
+    });
     try {
       const { review } = await this.backend.gitlabRunMergeRequestReview(key);
       if (sameMergeRequest(this.get().openMergeRequest, key)) {
         // The reading is shown the moment it lands, and the view switches to it: the reader pressed
         // a control that says "read this diff", so being left on the file feed would be a press
         // whose answer is somewhere they have to go and find.
-        this.set({ gitlabReview: review });
+        //
+        // The rows go WITH it. They are what stood in for the reading while it was being made, and
+        // the document says everything they did and more — a finished list of steps above it would be
+        // scaffolding left up after the building was finished.
+        this.set({ gitlabReview: review, gitlabReviewProgress: null });
       }
     } catch (e) {
       if (sameMergeRequest(this.get().openMergeRequest, key)) {
-        this.set({ gitlabReviewError: errText(e) });
+        const error = errText(e);
+        // The rows are KEPT on a failure, deliberately: the sentence beside the button says what went
+        // wrong and the rows say how far the reading got, which is the half that decides what to do
+        // about it — a diff that would not load is GitLab's problem and a model that refused is the
+        // provider's. They go when the reader presses again, or leaves.
+        //
+        // And the OUTCOME settles them, which is not something the frames can always do: a run whose
+        // answer never came back — the socket dropped, the request hit its own ceiling — leaves the
+        // last frame saying a stage is running, and a row that spins after the press has failed is the
+        // one thing this surface must never draw. The frame's own reason wins where it has one, since
+        // the backend knows which read or phase gave way.
+        const progress = this.get().gitlabReviewProgress;
+        this.set({
+          gitlabReviewError: error,
+          gitlabReviewProgress:
+            progress && !progress.error ? { ...progress, error } : progress,
+        });
       }
     } finally {
       if (sameMergeRequest(this.get().openMergeRequest, key)) {
@@ -4930,6 +4989,9 @@ export class TeamsController {
       gitlabReview: null,
       gitlabReviewBusy: false,
       gitlabReviewError: null,
+      // A run belongs to the merge request it was asked about, so leaving one takes its rows with it
+      // — the rule the reading itself and a half-written diff comment both follow.
+      gitlabReviewProgress: null,
       gitlabReviewChat: EMPTY_REVIEW_CHAT,
       gitlabReviewAsking: false,
       gitlabReviewAskError: null,

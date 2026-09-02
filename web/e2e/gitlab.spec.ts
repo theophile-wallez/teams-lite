@@ -1800,6 +1800,100 @@ test.describe.serial("the GitLab merge-request page", () => {
     await setMergeRequestControl(page, { clear: true });
   });
 
+  test("says what the run is doing, stage by stage, and takes the rows back with the reading", async ({
+    page,
+  }) => {
+    // HELD at the stage the reader spends most of their wait in. A real run is tens of seconds and
+    // this mock answers in one frame, so without the hold there is no moment to assert against —
+    // the gap `hold_ask` already fills for a follow-up question.
+    await setMergeRequestControl(page, { hold_review: "asking" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    // Nothing is drawn before the press: the rows are a report of a run, not a description of one.
+    const rows = page.locator('[data-testid="gitlab-review-progress"]');
+    await expect(rows).toHaveCount(0);
+
+    await page.locator('[data-testid="gitlab-review-run"]').click();
+    await expect(rows).toBeVisible();
+
+    const row = (id: string) => rows.locator(`[data-testid="task-row"][data-task-id="${id}"]`);
+    const step = (id: string) => rows.locator(`[data-testid="task-step"][data-task-id="${id}"]`);
+
+    // The two GitLab reads FINISHED, the agent RUNNING, and the answer not yet arriving. Everything
+    // before the current stage is done, which is what lets one frame say everything.
+    await expect(row("agent")).toHaveAttribute("data-state", "running", { timeout: 20_000 });
+    await expect(row("read")).toHaveAttribute("data-state", "done");
+    await expect(step("detail")).toHaveAttribute("data-state", "done");
+    await expect(step("diff")).toHaveAttribute("data-state", "done");
+    await expect(step("thinking")).toHaveAttribute("data-state", "running");
+    await expect(step("writing")).toHaveAttribute("data-state", "pending");
+
+    // The values are MEASURED facts, not a proportion of anything: the commit that was read, the
+    // count of files, how much patch really left this machine, and which CLI is reading it.
+    await expect(step("diff")).toContainText("8 files");
+    await expect(row("agent")).toContainText("claude reads it");
+    await expect(row("agent")).toContainText("sonnet");
+    await expect(row("prompt")).toContainText("KB");
+    // Nothing anywhere in the rows states a percentage — there is no total to take one against.
+    await expect(rows).not.toContainText("%");
+
+    // The reading lands, and the rows go with it: the document says everything they did and more, so
+    // a finished list above it would be scaffolding left standing.
+    await expect(reviewDoc(page)).toHaveAttribute("data-has-review", "yes", { timeout: 30_000 });
+    await expect(rows).toHaveCount(0);
+
+    // A RE-READ is watched too, and it is the press this page's own reader makes most — a reading
+    // that has gone stale is asked for again from the headline. It is also the only place the rule
+    // above can really be tested: with a document on screen the offer is not drawn at all, so the
+    // rows going when the reading lands is a claim about the STATE rather than about a card that
+    // unmounted anyway.
+    await setMergeRequestControl(page, { hold_review: "writing" });
+    await page.locator('[data-testid="gitlab-review-run"]').click();
+    await expect(rows).toBeVisible();
+    await expect(row("agent")).toHaveAttribute("data-state", "running", { timeout: 20_000 });
+    await expect(step("writing")).toHaveAttribute("data-state", "running");
+    // The answer's own byte count is the one number here that MOVES while a reader waits.
+    await expect(step("writing")).toContainText("KB");
+    // And they are taken back when the fresh reading lands, with the document still on screen.
+    await expect(rows).toHaveCount(0, { timeout: 30_000 });
+    await expect(reviewDoc(page)).toHaveAttribute("data-has-review", "yes");
+
+    // One mock process serves the whole run, and a held reading would make every later one wait.
+    await setMergeRequestControl(page, { clear: true });
+  });
+
+  test("a run that stopped says WHERE it stopped, and keeps what got done", async ({ page }) => {
+    // The rows and the sentence are one answer: the sentence says what went wrong, the rows say how
+    // far the reading got — which is the half that decides whose problem it is.
+    await setMergeRequestControl(page, {
+      refuse_review: "claude is not on this machine's PATH",
+    });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openGitLab(page);
+    await openMergeRequest(page, 596);
+    await openThemes(page);
+
+    await page.locator('[data-testid="gitlab-review-run"]').click();
+    const rows = page.locator('[data-testid="gitlab-review-progress"]');
+    const row = (id: string) => rows.locator(`[data-testid="task-row"][data-task-id="${id}"]`);
+    await expect(row("agent")).toHaveAttribute("data-state", "failed", { timeout: 20_000 });
+    // The reads really happened, so they stay finished. Marking the whole list failed would hide the
+    // one thing the reader needs: that GitLab was fine and the model was not.
+    await expect(row("read")).toHaveAttribute("data-state", "done");
+    await expect(row("prompt")).toHaveAttribute("data-state", "done");
+    // And the answer is NOT drawn as having failed too: it never started arriving.
+    await expect(
+      rows.locator('[data-testid="task-step"][data-task-id="writing"]'),
+    ).toHaveAttribute("data-state", "pending");
+    // The rows are KEPT beside the sentence rather than cleared, so both halves are on screen.
+    await expect(page.locator('[data-testid="gitlab-review-error"]')).toBeVisible();
+
+    await setMergeRequestControl(page, { clear: true });
+  });
+
   test("a refused run is reported beside the button, and nothing is drawn as a reading", async ({
     page,
   }) => {

@@ -3717,6 +3717,59 @@ if (import.meta.main) {
         await shot(`${out}-offer-dark.png`);
         await setTheme("light");
 
+        // WHAT THE RUN IS DOING, at the two stages a reader spends nearly all of their wait in.
+        //
+        // HELD at each, because this mock answers a reading in one frame and a real run is tens of
+        // seconds: `asking` and `writing` have no duration here at all, so without the hold there is
+        // no moment to photograph — the gap `hold_ask` already fills for a follow-up question.
+        for (const [stage, name] of [
+          ["diff", "reading"],
+          ["asking", "asking"],
+          ["writing", "writing"],
+        ] as const) {
+          await emit({ kind: "gitlab_mr", hold_review: stage });
+          await reopenThemes(page);
+          await page.locator('[data-testid="gitlab-review-run"]').click();
+          // The row for that stage really RUNNING — which is the state the hold exists to hold, and
+          // waiting on the row rather than on a timeout is what makes the capture the same picture
+          // every run.
+          await page.waitForSelector(
+            `[data-testid="gitlab-review-progress"] [data-task-id="${
+              stage === "diff" ? "read" : "agent"
+            }"][data-state="running"]`,
+            { timeout: 20_000 },
+          );
+          await page.waitForTimeout(250);
+          await shot(`${out}-progress-${name}-light.png`);
+          if (stage === "writing") {
+            await setTheme("dark");
+            await shot(`${out}-progress-${name}-dark.png`);
+            await setTheme("light");
+          }
+          // The rows CROPPED to themselves: the numbers are 9px and the values 11px, so the page at
+          // 1200px says nothing about whether either can be read.
+          await shot(
+            `${out}-progress-${name}-crop.png`,
+            '[data-testid="gitlab-review-progress"]',
+          );
+        }
+        // A run that STOPPED, and where. The rows before it stay finished, which is the half that
+        // says whose problem it is — GitLab's, or the provider's.
+        await emit({
+          kind: "gitlab_mr",
+          refuse_review: "claude is not on this machine's PATH, so it cannot read this diff",
+        });
+        await reopenThemes(page);
+        await page.locator('[data-testid="gitlab-review-run"]').click();
+        await page.waitForSelector('[data-testid="gitlab-review-error"]');
+        await shot(`${out}-progress-failed-light.png`);
+        await shot(
+          `${out}-progress-failed-crop.png`,
+          '[data-testid="gitlab-review-progress"]',
+        );
+        await emit({ kind: "gitlab_mr", clear: true });
+        await reopenThemes(page);
+
         // The RUN, and the document it lands as: the headline, the sticky theme headings, the prose
         // and the code under it.
         await page.locator('[data-testid="gitlab-review-run"]').click();
