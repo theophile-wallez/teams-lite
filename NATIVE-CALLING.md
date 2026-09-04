@@ -599,6 +599,35 @@ a meeting does (§ 10.3a), and this side is already answering it ready to RECEIV
   invite carries as a BARE field rather than inside a `links` object — which is why
   `collect_links` never picks it up, and why `JoinedConversation.controller` (parsed for a join
   and used nowhere) is the nearest prior art.
+- **A SCREEN SHARE INTO A MEETING IS STILL REFUSED, and 2026-09-04 narrowed it to one step.**
+  A join by link into a real meeting with a colleague in it, audio working both ways, and the
+  share pressed:
+
+      the meeting never granted the sharing session — answer links=[]
+      offered media: modalities=["audio","ScreenSharer"] sending=["screen"]
+        sections=audio mid=0 accepted | x-data mid=4 REJECTED
+                 | video mid=1 label=applicationsharing-video accepted
+      a media answer arrived: audio accepted | x-data REJECTED | video REJECTED
+      gave the sharing session up: told_service=false
+
+  So the fault is UPSTREAM of the section, which § 10.4 already suspected and this measures:
+  the `addModality` POST for the content-sharing session answered with **no links at all** and
+  no `addModalitySuccess` frame ever arrived, so the presenter role was never granted — and a
+  section from an endpoint that is not the presenter is rejected exactly as it was in August.
+  Chasing the SDP would have been chasing the wrong half.
+
+  Why the meeting granted nothing is the open question. § 10.4 records the role CHANGING HANDS
+  on this tenant (measured, with a colleague's own share stopping), so a takeover is not
+  refused in principle — what differs here is unknown, and the candidates are the meeting's own
+  policy, the organiser-vs-attendee role, and a `contentSharing` blob the service no longer
+  accepts. Do not guess: this answer names nothing, so the next step is a request that makes it
+  name something.
+
+  One defect on the way out WAS fixed: the reservation is written before the POST so the
+  granting frame has somewhere to land, and a refusal used to leave it on the call — after
+  which the guard refused every later press with `this call already holds a sharing session`,
+  so the reader could not try again for the rest of the call and was blamed for a session they
+  did not have.
 - **VIDEO on a one-to-one is untried in both directions.** The acceptance names
   `controlVideoStreaming` and `mediaRenegotiation` and the outgoing call answered a
   renegotiation with `ScreenViewer`, so the doors exist and nothing has gone through them.

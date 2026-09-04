@@ -6254,6 +6254,34 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // service has registered the presenter is a section it rejects.
             let granted = ctx.await_sharing_session(&call_id).await;
             if !granted {
+                // A SESSION THAT WAS NEVER GRANTED IS NOT A SESSION, so the reservation above
+                // is given back. Without this it stayed on the call for ever and the guard at
+                // the top of this arm refused every later attempt with `this call already
+                // holds a sharing session` — measured 2026-09-04 in a real meeting: the first
+                // press failed because the meeting granted nothing, and the reader could then
+                // never try again for the rest of the call, with a message that blamed a
+                // session they did not have.
+                //
+                // Nothing is posted to give it back, because there is nothing to post TO: the
+                // answer named no links at all, so there is no `leave`. That is the same
+                // reading `call_stop_sharing` already takes for a session the service named no
+                // way out of — drop it locally rather than keep it for ever.
+                //
+                // A grant that merely arrived LATE is harmless: its own frame puts the session
+                // back, and this only clears what this attempt reserved.
+                {
+                    let mut plane = ctx.calling.lock().unwrap();
+                    if let Some(call) = plane
+                        .call
+                        .as_mut()
+                        .filter(|c| c.id == call_id)
+                        .filter(|c| {
+                            c.sharing.as_ref().is_some_and(|s| s.correlation_id == correlation_id)
+                        })
+                    {
+                        call.sharing = None;
+                    }
+                }
                 eprintln!(
                     "[calling] the meeting never granted the sharing session — answer links={:?}",
                     calling::Links::collect(&response).names()
@@ -14880,6 +14908,25 @@ mod tests {
         assert!(
             start.contains("await_sharing_session"),
             "the section must not be offered before the meeting has granted the session"
+        );
+        // A GRANT THAT NEVER CAME GIVES THE RESERVATION BACK. The reservation is written before
+        // the POST so the granting frame has somewhere to land, so a refusal that left it there
+        // made the guard at the top of this arm refuse every LATER press with `this call
+        // already holds a sharing session` — measured 2026-09-04 in a real meeting, where the
+        // reader could not try again for the rest of the call and was blamed for a session they
+        // did not have.
+        let ungranted = start
+            .split("if !granted {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n            }").next())
+            .expect("the ungranted branch");
+        assert!(
+            ungranted.contains("call.sharing = None"),
+            "an ungranted session must be forgotten, or no later share can be attempted:\n{ungranted}"
+        );
+        assert!(
+            !ungranted.contains("post_call_signal"),
+            "there is nothing to post a give-back to — the answer named no links at all:\n{ungranted}"
         );
         // And the session's links never join the call's: merged in, this frame's `leave`
         // would overwrite the one a hangup posts to, so giving a share up would end the call.
