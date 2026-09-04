@@ -6183,11 +6183,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // follows carries whatever is on the user's screen.
         "call_start_sharing" => {
             let call_id = param_str(params, "call_id")?;
-            let (local, callbacks, url, correlation_id, displacing) = {
-                let plane = ctx.calling.lock().unwrap();
+            let (local, callbacks, url, correlation_id, displacing, replacing) = {
+                let mut plane = ctx.calling.lock().unwrap();
                 let call = plane
                     .call
-                    .as_ref()
+                    .as_mut()
                     .filter(|c| c.id == call_id && !c.ended())
                     .context("call_start_sharing: no such call")?;
                 if call.phase != CallPhase::Connected {
@@ -6196,9 +6196,18 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                          added to a live conversation"
                     );
                 }
-                if call.sharing.is_some() {
-                    anyhow::bail!("call_start_sharing: this call already holds a sharing session");
-                }
+                // A session THIS ENDPOINT already holds is REPLACED, never refused. Pressing
+                // Share is one gesture with one meaning — "show them my screen now" — and real
+                // Teams answers it that way whoever is presenting, including you. This used to
+                // `bail!` about a session the call still held: an error about the app's own
+                // bookkeeping, shown in place of the action somebody asked for, with nothing they
+                // could do about it. Every path that leaves a stale session behind — a share the
+                // service rejected, an end frame that arrived late, a give-back whose POST failed
+                // — turned Share into a dead button for the rest of the call.
+                //
+                // Nothing here refuses on somebody ELSE's session either: that is the takeover
+                // below, which the service performs and which is the feature.
+                let replacing = call.sharing.take();
                 // A share TAKES the role off whoever holds it, and that is the feature rather
                 // than an accident. Measured 2026-08-06 against a colleague's real share: the
                 // service granted the role — `role = "presenter"` in our own roster entry — and
@@ -6224,8 +6233,23 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     url,
                     uuid::Uuid::new_v4().to_string(),
                     displacing,
+                    replacing,
                 )
             };
+            // Give the old one back before asking for a new one, so the service is not left
+            // holding two sessions for one endpoint. Best-effort by design: it is told only
+            // where the session named a way out (this tenant's answer names none — § 10.8), and
+            // a failure is one journal line rather than the reader's problem. The session is
+            // already gone from the call either way, so nothing here can block the new share.
+            if let Some(old) = replacing {
+                eprintln!("[calling] replacing the sharing session this endpoint already held");
+                if let Some(url) = &old.leave {
+                    let payload = calling::content_sharing_leave_payload(&local, &callbacks);
+                    if let Err(e) = ctx.post_call_signal(url, &payload).await {
+                        eprintln!("[calling] the old sharing session would not close: {e:#}");
+                    }
+                }
+            }
             if displacing {
                 // One line, and no name in it: a colleague's name is theirs, and what this
                 // record is for is that a share of theirs stopped because of a press here.
@@ -14952,6 +14976,20 @@ mod tests {
             start.contains("await_sharing_session"),
             "the section must not be offered before the meeting has granted the session"
         );
+        // PRESSING SHARE NEVER REFUSES OVER A SESSION. Not the reader's own — that one is
+        // replaced — and not a colleague's, which the service displaces and which is the
+        // feature. `this call already holds a sharing session` was an error about the app's own
+        // bookkeeping shown in place of the action somebody asked for, and every path that left
+        // a stale session behind turned Share into a dead button for the rest of the call.
+        assert!(
+            !start.contains("already holds a sharing session"),
+            "Share must replace a held session, never refuse over one:\n{start}"
+        );
+        assert!(
+            start.contains("call.sharing.take()"),
+            "the held session must be taken so the new one can replace it:\n{start}"
+        );
+
         // A GRANT THAT NEVER CAME GIVES THE RESERVATION BACK. The reservation is written before
         // the POST so the granting frame has somewhere to land, so a refusal that left it there
         // made the guard at the top of this arm refuse every LATER press with `this call
