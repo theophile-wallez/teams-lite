@@ -453,23 +453,32 @@ describe("toMsSdp: the SSRC range", () => {
     expect(out.filter((l) => l.startsWith("a=x-ssrc-range:")).length).toBe(1);
   });
 
-  it("gives every section its own range", () => {
+  it("gives every section its own range, over the PRIMARY ssrc alone", () => {
+    // Real SSRCs, because that is the whole point: a browser picks them at random, so the span
+    // of a media SSRC and its `rtx` companion is meaningless. Measured 2026-09-04, min-to-max
+    // produced `a=x-ssrc-range:341013634-993826282` — a claim on 652 million SSRCs — and every
+    // video section this app offered was answered with a zeroed port, a camera as much as a
+    // screen. The service's own ranges are `1000-1000` and `2403-2502`.
     const sdp = [
       "v=0",
       "t=0 0",
       "m=audio 9 UDP/TLS/RTP/SAVPF 111",
       "a=mid:0",
-      "a=ssrc:111 cname:a",
+      "a=ssrc:1532221031 cname:a",
       "m=video 9 UDP/TLS/RTP/SAVPF 107",
       "a=mid:1",
-      "a=ssrc:222 cname:b",
-      "a=ssrc:333 cname:b",
+      "a=ssrc-group:FID 993826282 341013634",
+      "a=ssrc:993826282 cname:b",
+      "a=ssrc:341013634 cname:b",
       "",
     ].join("\r\n");
     const out = lines(toMsSdp(sdp));
-    expect(out).toContain("a=x-ssrc-range:111-111");
-    // Two SSRCs on one section — a simulcast or an rtx stream — span a range.
-    expect(out).toContain("a=x-ssrc-range:222-333");
+    // Audio carries one SSRC, so this is byte-for-byte what it always was — and it is the shape
+    // the service has accepted on every run.
+    expect(out).toContain("a=x-ssrc-range:1532221031-1532221031");
+    // The video section states its MEDIA ssrc, not the span across the rtx one.
+    expect(out).toContain("a=x-ssrc-range:993826282-993826282");
+    expect(out.join("\n")).not.toContain("341013634-993826282");
   });
 
   it("says nothing for a section that declares no SSRC", () => {

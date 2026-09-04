@@ -447,13 +447,27 @@ export function toMsSdp(sdp: string, labels?: Map<string, string>): string {
     if (label && !section.hasLabel) out.push(`a=label:${label}`);
     // The SSRCs the section carries, stated the service's own way. `a=ssrc:` stays exactly
     // where the browser wrote it — the client ADDS this line rather than replacing them.
+    //
+    // It is the PRIMARY SSRC ALONE, and never the span of every SSRC in the section. A range
+    // is a CONTIGUOUS claim: the service's own are `1000-1000` and `2403-2502` (measured), a
+    // hundred wide at most. A browser picks its SSRCs at random, so a video section — which
+    // carries a media SSRC and an `rtx` one for retransmission — spanned 652 MILLION when this
+    // took min-to-max: `a=x-ssrc-range:341013634-993826282`, measured 2026-09-04.
+    //
+    // That is not a description of two SSRCs, and it is the one thing that differed between a
+    // section the service ACCEPTS and one it rejects. Audio carries a single SSRC, so its span
+    // was already `N-N` and it was accepted on every run; every video section this app has ever
+    // offered — a camera as well as a screen, so this was never about sharing — came back with
+    // a zeroed port. Taking the primary alone leaves audio byte-for-byte what it was and makes
+    // video the same shape audio already proves.
+    //
+    // `ssrcs[0]` is the primary: a browser writes `a=ssrc-group:FID <media> <rtx>` and then the
+    // `a=ssrc:` lines in that order, which our own captured offer does. If that ever has to be
+    // exact rather than conventional, the FID group is the authority to read.
     if (section.ssrcs.length > 0 && !section.hasSsrcRange) {
-      const low = Math.min(...section.ssrcs);
-      const high = Math.max(...section.ssrcs);
-      out.push(`a=x-ssrc-range:${low}-${high}`);
+      const primary = section.ssrcs[0];
+      out.push(`a=x-ssrc-range:${primary}-${primary}`);
     }
-    section = null;
-    return;
     section = null;
   };
 

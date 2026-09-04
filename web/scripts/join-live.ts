@@ -267,7 +267,7 @@ export type JoinLiveSession = {
    * to the meeting: `--auto-select-desktop-capture-source` picks that blank surface and
    * `--use-fake-ui-for-media-stream` accepts it with no picker.
    */
-  share: (holdMs?: number) => Promise<{ pressed: boolean; sending: string[] }>;
+  send: (what: "screen" | "camera", holdMs?: number) => Promise<{ pressed: boolean; sending: string[] }>;
   /** OUR OWN offer, section by section — see {@link readLocalOffer}. */
   localOffer: () => Promise<string[]>;
   /** Every description this side APPLIED, whole. For reading a refusal that names no line:
@@ -491,7 +491,7 @@ export async function withJoinLive<T>(
       },
       mediaStats: () => readMediaStats(page as Page),
       signals: () => readSignals(page as Page),
-      share: (holdMs = SHARE_HOLD_MS) => shareTheScreen(page as Page, holdMs),
+      send: (what, holdMs = SHARE_HOLD_MS) => sendSomething(page as Page, what, holdMs),
       localOffer: () => readLocalOffer(page as Page),
       rawDescriptions: () =>
         (page as Page).evaluate("window.__tlOffers || []") as Promise<
@@ -1098,16 +1098,27 @@ const SHARE_HOLD_MS = 12_000;
  * (AGENTS.md § Video in a meeting), so it is stated rather than guarded — the run is theirs,
  * in their own meeting, and they take the share straight back from Teams.
  */
-async function shareTheScreen(
+/**
+ * Press one of the stage's two SENDING controls and report what the service did with it.
+ *
+ * It takes the control rather than assuming Share, because the CAMERA is the sharper
+ * experiment of the two: a camera asks for no content-sharing session (§ 10.4 — only the one
+ * screen is a session), so pressing it says whether a rejected section is about SHARING or
+ * about this app's renegotiation in general. One helper, so the two are driven identically
+ * and the only difference in the measurement is the thing under test.
+ */
+async function sendSomething(
   page: Page,
+  what: "screen" | "camera",
   holdMs: number,
 ): Promise<{ pressed: boolean; sending: string[] }> {
-  const share = page.locator('[data-testid="call-share"]').first();
+  const testId = what === "screen" ? "call-share" : "call-camera";
+  const share = page.locator(`[data-testid="${testId}"]`).first();
   if ((await share.count()) === 0) {
-    console.log("  no Share control on the stage — the call is not carrying media yet");
+    console.log(`  no ${what} control on the stage — the call is not carrying media yet`);
     return { pressed: false, sending: [] };
   }
-  console.log("  pressing Share…");
+  console.log(`  pressing ${what}…`);
   await share.click();
   await page.waitForTimeout(holdMs);
   const sending = await readSending(page);
@@ -1179,9 +1190,15 @@ if (import.meta.main) {
   const from = argv.includes("--from-chat") ? "chat" : "calendar";
   const holdAt = argv.indexOf("--hold");
   const hold = holdAt >= 0 ? Number(argv[holdAt + 1]) : DEFAULT_HOLD_SECONDS;
-  // Whether to SHARE the screen once the meeting is up. It is a step this run takes, never a
-  // target it aims at: the meeting is the same constant either way.
+  // WHAT to send once the meeting is up, if anything. Steps this run takes, never targets it
+  // aims at: the meeting is the same constant either way.
+  //
+  // `--camera` is the sharper of the two to run first. A camera asks for no content-sharing
+  // session (§ 10.4 — only the one screen is a session), so if its section is rejected too then
+  // the fault is in this app's renegotiation rather than in sharing, and the whole
+  // presenter-role question is beside the point.
   const share = argv.includes("--share");
+  const camera = argv.includes("--camera");
 
   await withJoinLive(
     async (session) => {
@@ -1193,7 +1210,10 @@ if (import.meta.main) {
         // The SCREEN, if this run asked for one: pressed here rather than after the hold,
         // because what is under test is the pair — the session, then the section — and both
         // answers arrive within seconds.
-        if (share) await session.share();
+        // One at a time, camera first: two new sections in one renegotiation would make the
+        // answer say nothing about which of them the service disliked.
+        if (camera) await session.send("camera");
+        if (share) await session.send("screen");
         await wait(["ended"], hold * 1_000);
       }
       // What the MEDIA did, which is the half the bar cannot show. Bytes SENT prove our
