@@ -5301,6 +5301,24 @@ call does — this side never handles RTP, and the page never learns a Teams URL
     of `send-failure.ts`): the RPC name the backend opens every refusal with is dropped, the
     socket's `not connected` becomes what it costs the call, and a failure that carried no
     words at all — the service answers `400` with an empty body — still says something.
+  - **AN INSECURE ORIGIN IS BLAMED ON THE ADDRESS, never on the user's permissions**, which is
+    § Push notifications' own rule on the other capability the same missing context takes away.
+    No browser publishes `navigator.mediaDevices` outside a secure context, so on a page reached
+    over plain `http://` at a hostname or a private address — a tailnet name with the TLS front
+    skipped, `http://100.x.y.z:19440` over NetBird or Tailscale — every open of a microphone, a
+    camera or a screen throws a `TypeError` about `undefined`, and this app answered *"Allow it
+    for this site, then try again"*: permissions that were never the cause and could never be
+    the fix. It reached a real reader on Brave. `insecureOrigin` in `call-media.ts` is read at
+    the two device-open CATCHES and travels on the error (`MicrophoneUnavailableError.insecure`,
+    `CaptureUnavailableError.insecure`), so the open's own failure is what decides and the flag
+    only picks which sentence explains it — the order `pushBlocker` states in full, and an absent
+    `isSecureContext` therefore reads as SECURE. Three things follow, and each is pinned by a
+    test in `call-failure.test.ts`: the sentence names https as the ONLY iPhone fix and the
+    browser flag as a DESKTOP one, because WebKit publishes no such allowance and sending an
+    iPhone reader hunting a switch that does not exist is the same defect one platform over; the
+    exact flag is NOT restated, since `pushBlockerRemedy` already spells it in Settings and a
+    notice leaves on its own; and it is TOLD rather than detected, because one true sentence
+    beats a second platform sniff.
   - **A call that rang NOTHING says whose devices were not there.** Measured against the
     tenant: calling somebody with no client signed in is accepted, answered with an SDP, and
     then ended two seconds later — and the only frame that names the CAUSE is

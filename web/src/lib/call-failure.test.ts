@@ -5,7 +5,7 @@ import {
   captureRefusedMessage,
   renegotiationRefusedMessage,
 } from "./call-failure";
-import { MicrophoneUnavailableError, type SendKind } from "./call-media";
+import { CaptureUnavailableError, MicrophoneUnavailableError, type SendKind } from "./call-media";
 
 // What the user is told when a call, a join or a capture did not happen. The rule is the
 // one ./send-failure.test.ts pins for the other outward action: every sentence says what
@@ -32,6 +32,34 @@ describe("callFailureMessage", () => {
     const message = callFailureMessage(new MicrophoneUnavailableError(new Error("NotAllowedError")));
     expect(message).toMatch(/microphone/i);
     expect(message).toMatch(/Allow it for this site/);
+  });
+
+  it("blames the ADDRESS rather than a permission when the origin is insecure", () => {
+    // Measured on Brave over NetBird, at http://100.x.y.z:19440: there is no
+    // `navigator.mediaDevices` outside a secure context, so the open fails with a TypeError
+    // and the app said "Allow it for this site" — permissions that were never the cause and
+    // could never be the fix. Both halves are asserted, because the sentence has to name the
+    // one thing the reader can change AND stop naming the one they cannot.
+    const message = callFailureMessage(
+      new MicrophoneUnavailableError(new Error("mediaDevices is undefined"), true),
+    );
+    expect(message).toMatch(/http:\/\//);
+    expect(message).toMatch(/https/);
+    expect(message).not.toMatch(/Allow it for this site/);
+
+    // The camera and the screen lose the same capability at the same address, and each
+    // names its own — "open a camera" and "capture a screen" are not one sentence.
+    expect(
+      callFailureMessage(new CaptureUnavailableError("camera", new Error("undefined"), true)),
+    ).toMatch(/camera/);
+    expect(
+      callFailureMessage(new CaptureUnavailableError("screen", new Error("undefined"), true)),
+    ).toMatch(/screen/);
+
+    // And a real refusal on a secure page is untouched: the flag is the whole difference.
+    expect(
+      callFailureMessage(new CaptureUnavailableError("camera", new Error("NotAllowedError"))),
+    ).not.toMatch(/http:\/\//);
   });
 
   it("turns the socket's own words into what they cost the call", () => {

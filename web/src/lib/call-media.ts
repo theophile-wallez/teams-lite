@@ -226,11 +226,38 @@ export type CallMediaOptions = {
   onConnectionStateChange?: (state: RTCPeerConnectionState) => void;
 };
 
+/**
+ * Whether an open that just failed failed because the ORIGIN is not a secure context.
+ *
+ * No browser publishes `navigator.mediaDevices` outside one, so on a page reached over
+ * plain `http://` at a hostname or a private address — a tailnet name with the TLS front
+ * skipped, `http://100.x.y.z:19440` over NetBird or Tailscale — every open throws a
+ * `TypeError` about `undefined`, which this app reported as a refused permission. That is
+ * false, it blames the one thing the reader cannot change, and it hides a one-step fix: it
+ * is exactly the defect `pushBlocker` records for notifications (see ./push.ts), on the
+ * other capability the same missing context takes away.
+ *
+ * It is asked only from a CATCH, so the open's own failure is what really decides and this
+ * only picks which sentence explains it — the order `pushBlocker` states in full. An absent
+ * `isSecureContext` therefore reads as secure.
+ */
+function insecureOrigin(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    (window as { isSecureContext?: boolean }).isSecureContext === false
+  );
+}
+
 /** Thrown when the user refused the microphone, or the machine has none. It is a
  *  separate type because it is the one failure the UI must explain rather than report:
  *  a call without a microphone is not a bug. */
 export class MicrophoneUnavailableError extends Error {
-  constructor(cause: unknown) {
+  constructor(
+    cause: unknown,
+    /** The origin is not a secure context, so no microphone was ever reachable from this
+     *  address — a different sentence from a refusal (see lib/call-failure.ts). */
+    readonly insecure = false,
+  ) {
     super("teams-lite could not open the microphone.");
     this.name = "MicrophoneUnavailableError";
     this.cause = cause;
@@ -247,6 +274,8 @@ export class CaptureUnavailableError extends Error {
   constructor(
     readonly kind: SendKind,
     cause: unknown,
+    /** As {@link MicrophoneUnavailableError.insecure}: the address, not a refusal. */
+    readonly insecure = false,
   ) {
     super(
       kind === "camera"
@@ -356,7 +385,7 @@ async function openMicrophone(): Promise<MediaStream> {
       video: false,
     });
   } catch (error) {
-    throw new MicrophoneUnavailableError(error);
+    throw new MicrophoneUnavailableError(error, insecureOrigin());
   }
 }
 
@@ -556,7 +585,7 @@ async function openCapture(kind: SendKind): Promise<MediaStream> {
       audio: false,
     });
   } catch (error) {
-    throw new CaptureUnavailableError(kind, error);
+    throw new CaptureUnavailableError(kind, error, insecureOrigin());
   }
 }
 

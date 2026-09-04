@@ -9,13 +9,25 @@
 //
 // Pure, so every sentence is unit-tested with no backend and no browser.
 
-import { MicrophoneUnavailableError, type SendKind } from "./call-media";
+import { CaptureUnavailableError, MicrophoneUnavailableError, type SendKind } from "./call-media";
 
 /** One short sentence for a call, a join, or a capture that did not happen.
  *
  *  The fallback keeps the raw words rather than replacing them with something vague: an
  *  unrecognised failure is exactly the one the user has to be able to report. */
 export function callFailureMessage(error: unknown): string {
+  // THE ADDRESS, not a refusal, and the order matters for the reason `pushBlocker`'s does:
+  // both arrive as one failed open, and only this flag tells them apart. On a page reached
+  // over plain http:// there is no `navigator.mediaDevices` at all, so "Allow it for this
+  // site" sent the reader into permissions that were never the cause and could never be the
+  // fix — measured on Brave over NetBird. See ./push.ts, whose Settings remedy carries the
+  // flag's own name; a notice has room for the two fixes and not for a paragraph.
+  if (error instanceof MicrophoneUnavailableError && error.insecure) {
+    return insecureOriginMessage("open a microphone");
+  }
+  if (error instanceof CaptureUnavailableError && error.insecure) {
+    return insecureOriginMessage(error.kind === "camera" ? "open a camera" : "capture a screen");
+  }
   // The one failure that is not a bug, and the common one: the browser asks once, the user
   // says no, and every later call fails the same way until they change it in the site
   // settings. So it gets its own sentence rather than a `NotAllowedError` shown verbatim.
@@ -52,6 +64,27 @@ export function callFailureMessage(error: unknown): string {
   // the user pressed a button and something did not happen. It covers a call, a join and a
   // capture, so it names none of them.
   return withoutMethodName(raw) || "That did not happen, and nothing said why.";
+}
+
+/** What an insecure origin costs, and the two things that really mend it.
+ *
+ *  Both are named because this app is reached three ways and they do not overlap: an https
+ *  front, loopback on the machine itself, and a private address on a VPN or an overlay
+ *  network, where no certificate is possible and the browser's own per-origin allowance is
+ *  the only thing that works. The flag's exact name is one paragraph away in Settings, where
+ *  `pushBlockerRemedy` already spells it — this is a notice that leaves on its own.
+ *
+ *  WebKit publishes no such allowance, so the flag is named as a DESKTOP fix and https as the
+ *  iPhone's only one. Sending an iPhone reader hunting a switch that does not exist is the
+ *  same defect as blaming their permissions, one platform over — and `pushBlockerRemedy` says
+ *  it in as many words for the other capability the same missing context takes away. It is
+ *  told rather than detected: one true sentence beats a second platform sniff. */
+function insecureOriginMessage(what: string): string {
+  return (
+    `This page is on plain http://, where no browser lets it ${what}. ` +
+    "Reach teams-lite over https — on an iPhone that is the only way; a desktop browser can " +
+    "allow this one address in its flags instead."
+  );
 }
 
 /**
