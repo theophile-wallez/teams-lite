@@ -623,12 +623,34 @@ a meeting does (§ 10.3a), and this side is already answering it ready to RECEIV
   section from an endpoint that is not the presenter is rejected exactly as it was in August.
   Chasing the SDP would have been chasing the wrong half.
 
-  Why the meeting granted nothing is the open question. § 10.4 records the role CHANGING HANDS
-  on this tenant (measured, with a colleague's own share stopping), so a takeover is not
-  refused in principle — what differs here is unknown, and the candidates are the meeting's own
-  policy, the organiser-vs-attendee role, and a `contentSharing` blob the service no longer
-  accepts. Do not guess: this answer names nothing, so the next step is a request that makes it
-  name something.
+  **AND THE PRESENTER ROLE IS NOT WHAT IT IS MISSING — measured later the same day, with the
+  request body and every frame logged, over six live runs into that meeting.** This corrects
+  what § 10.4 assumed and what two rounds of work were spent on:
+
+  - **No grant frame arrives, on EITHER callback.** Zero frames on `addModalitySuccess` and
+    zero on `contentSharingUpdate` across a whole run, with both links published in the very
+    POST that asks. `await_sharing_session` therefore always times out here.
+  - **The session EXISTS anyway.** On leaving, the service reported it ending with
+    `"phrase": "Content sharing session ended as present left the session."` — which names this
+    endpoint as the presenter that held it. A session that never began does not end because its
+    presenter left. So the `addModality` POST creates the session on this tenant, and what the
+    `{}` answer really costs is only the explicit way to give it back.
+  - **So the rejected section is not a permissions problem.** The role was held for the whole
+    call and `applicationsharing-video` was still answered with a zeroed port. Whatever is
+    wrong is in the SECTION or in a step between the session and the offer — not in who is
+    allowed to present, and not in the eight seconds of waiting that preceded it.
+
+  What that leaves as the next step is a DIFFERENT investigation from the one this file
+  previously pointed at: compare this app's `applicationsharing-video` section against a real
+  client's captured one, field by field, rather than asking again for a role that is already
+  held. Two facts to start from — the service also rejects the `x-data`/`data` section beside
+  it, and its own renegotiation offers `applicationsharing-video` at `RTP/AVP` where this app
+  offers `UDP/TLS/RTP/SAVPF`.
+
+  Three things WERE fixed on the way to that, each a real defect: a join published no
+  `addModalitySuccess` link at all (so a grant could not have been delivered even by a tenant
+  that sends one), an ungranted session was left on the call and locked out every later press,
+  and the session's own `contentSharingEnd` was not handled.
 
   One defect on the way out WAS fixed: the reservation is written before the POST so the
   granting frame has somewhere to land, and a refusal used to leave it on the call — after

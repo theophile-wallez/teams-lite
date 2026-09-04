@@ -6282,8 +6282,21 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         call.sharing = None;
                     }
                 }
+                // NOT "never granted" — that read the silence as a refusal and it is false.
+                // Measured 2026-09-04 with the request and every frame logged: no grant frame
+                // arrives on EITHER callback (`addModalitySuccess`, `contentSharingUpdate`),
+                // and the session exists all the same — on leaving, the service reported it
+                // ending with `Content sharing session ended as present left the session`,
+                // which names this endpoint as the presenter that held it. So the POST itself
+                // creates the session on this tenant, and what is missing is only the way to
+                // give it back explicitly (the answer is `{}`, so there is no `leave`).
+                //
+                // This matters more than the wording: it means the presenter role is NOT what
+                // the rejected `applicationsharing-video` section is missing, which is where
+                // § 10.4 pointed and where two rounds of work went.
                 eprintln!(
-                    "[calling] the meeting never granted the sharing session — answer links={:?}",
+                    "[calling] no grant frame for the sharing session — the POST creates it on \
+                     this tenant, but it named no way to give it back (answer links={:?})",
                     calling::Links::collect(&response).names()
                 );
             }
