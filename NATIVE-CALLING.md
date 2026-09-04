@@ -8,11 +8,19 @@ directions, with a colleague, voices heard each way — taking one is § 8a and 
 `participants.to`, it has no sanctioned target, so the first one is the user's own click to
 people who agreed beforehand (§ 7).
 
-Two things are open and each is written up where it belongs. Hanging up an INCOMING call may
-not tell the caller (§ 8a). And SENDING a screen is still refused: the sharing SESSION is
-created and this endpoint really holds the presenter role — measured 2026-09-04, and it is the
-opposite of what was believed for a month — so what the rejected `applicationsharing-video`
-section is missing is in the SECTION rather than in a permission (§ 10.8).
+Two things are open and each is written up where it belongs.
+
+Hanging up an INCOMING call may not tell the caller (§ 8a).
+
+SENDING a camera or a screen is no longer REFUSED, and is not yet SEEN. Two beliefs about it
+were disproved on 2026-09-04 and both had stood for a month: it is not about the presenter role
+(the session is created and this endpoint holds it), and it is not about sharing at all — a
+CAMERA was refused identically, and a camera asks for no session. What it really was is the
+DOOR: the acceptance names `startOutgoingNegotiation` beside `mediaRenegotiation` and only the
+second had ever been posted to. On the first, with the two fields the service names, the POST is
+accepted and the capture is retained. What is still missing is that no `mediaAnswer` comes back
+for that offer and nobody has yet watched a camera arrive — every run that got this far was
+alone in the meeting (§ 10.8).
 
 `src/calling.rs` signals, `web/src/lib/call-media.ts` carries the audio,
 `web/src/lib/ms-sdp.ts` is the one place an SDP is rewritten, and the whole flow is driven
@@ -674,19 +682,45 @@ Each was measured, not reasoned about:
   is the code for it and is deliberately called from nowhere — do not "fix" that by wiring it up
   without reading the note at its call site first.
 
-#### What to try NEXT, in order
+#### THE DOOR WAS WRONG — `startOutgoingNegotiation`, and it took two named refusals
 
-1. **`startOutgoingNegotiation`.** The acceptance names it beside `mediaRenegotiation`, and this
-   app has only ever posted to the second. The names suggest the first is for offering media of
-   one's own rather than answering a negotiation the service began. Cheapest untried thing.
-2. **The four rewrites § 2.5 lists as unimplemented**, now that a refusal really is repeatable:
-   the simulcast envelope, the `red` payload, a per-section fingerprint, and `a=rtcp` on an
-   offer. § 2.5's rule was that a rewrite earns its place when a refusal names one — this
-   refusal names nothing, so the rule has to bend, and the way to bend it honestly is one
-   variable per run against this same meeting.
-3. **The `x-data`/`data` section**, which the service rejects beside the video on every run. It
-   is not ours — it arrives in the service's offer and we answer it — but a renegotiation
-   carrying a section the service dislikes may be refused whole.
+The acceptance names TWO doors and this app had only ever used one. `mediaRenegotiation` answers
+or updates a negotiation the SERVICE began; `startOutgoingNegotiation` starts one this endpoint
+wants. Posting to the second took two rounds, each naming its own field — the loop that cracked
+`attach` in § 8a:
+
+```
+400 {"errors":{"StartOutgoingNegotiation":["The StartOutgoingNegotiation field is required."]}}
+400 {"errors":{"StartOutgoingNegotiation.Links.MediaRenegotiation":["The MediaRenegotiation field is required."]}}
+```
+
+With the envelope and that one extra link, **the POST is accepted and the capture is RETAINED**:
+the backend reports `sending: camera`, which it had never once done, and no answer zeroes the
+section. `start_outgoing_negotiation_payload` shares its inner statement with the other door so
+the two cannot drift, and the extra link is added to the outgoing one ALONE — a body carrying a
+field the other door does not know is how this plane earns a `400` that names nothing.
+
+#### What is still missing, and what to try next
+
+Nobody has SEEN a camera. Every run that got this far was alone in the meeting (`received 0B`),
+so there was no one to see it — that is the first thing to fix, and it needs a person rather
+than a change.
+
+Two facts from the frames of the accepted run, both unexplained:
+
+- **No `mediaAnswer` comes back for our offer.** `frames by path` held
+  `{"/call/acceptance/":1,"/call/mediaRenegotiation/":2,"/call/mediaAcknowledgement/":2}` and no
+  `mediaAnswer` and no `rejection` at all. The service accepted the POST and then said nothing
+  about the section.
+- **Its own renegotiations still carry audio only** — `audio port=3480 label:main-audio` and
+  nothing else — where a meeting that had accepted a video channel would be expected to describe
+  one.
+
+So the next questions, in order: whether a second participant changes either of those; then the
+four rewrites § 2.5 lists as unimplemented (the simulcast envelope, the `red` payload, a
+per-section fingerprint, `a=rtcp` on an offer), one variable per run against this same meeting;
+and the `x-data`/`data` section the service rejects beside the video, which is not ours — it
+arrives in the service's offer and we answer it.
 
   Three things WERE fixed on the way to that, each a real defect: a join published no
   `addModalitySuccess` link at all (so a grant could not have been delivered even by a tenant
