@@ -57,15 +57,20 @@ import {
 } from "./join-live";
 
 /**
- * The one conversation this script may ever ring: the user's own one-to-one, authorized out
- * loud for exactly this test.
+ * The one conversation this script may ever ring: the user's own one-to-one with the ONE
+ * colleague who agreed to it out loud, for exactly this test.
  *
  * A call has no sandbox — every other thread in this account belongs to a colleague who
  * agreed to nothing — so this constant is the whole safety of the file. Never parameterise
  * it, and never widen it to "the open conversation".
+ *
+ * It is Clément BOSLE's thread, re-pinned 2026-09-04: the colleague sitting beside the user
+ * for the session that finally rings a one-to-one (§ 8, "A ONE-TO-ONE call has never been
+ * rung"). Moving it is not a code change to make on a hunch — it takes a person saying yes,
+ * and the name in this comment is how the next reader knows who that was.
  */
 export const AUTHORIZED_CALL_CONVERSATION =
-  "19:2367c029-149d-4ebd-a96c-1fe12bfc24cf_d98f6938-47be-4db9-a509-9676cbe3020d@unq.gbl.spaces";
+  "19:2367c029-149d-4ebd-a96c-1fe12bfc24cf_5f5e928f-4aa0-4efa-a680-e3c9abb77439@unq.gbl.spaces";
 
 const APP_READY_TIMEOUT_MS = 60_000;
 const CALL_BUTTON_TIMEOUT_MS = 30_000;

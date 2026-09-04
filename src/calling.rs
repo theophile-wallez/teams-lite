@@ -315,6 +315,12 @@ impl Links {
     /// The first of `names` this frame carried. Several spellings are tried per
     /// action because the service names the same action differently depending on
     /// which frame carries it (`accept` on one, `acceptance` on another).
+    ///
+    /// Nothing here has to check that the value is postable: `collect_links` admits only a
+    /// URL into the table in the first place, so a shorthand like this tenant's own
+    /// `mediaAnswer: "cc://ma"` is absent by the time any accessor asks. That filter stays
+    /// in ONE place — a second copy here would be a second answer to "what can be POSTed
+    /// to", and the two would drift.
     pub fn get(&self, names: &[&str]) -> Option<&str> {
         names.iter().find_map(|n| self.0.get(*n).map(String::as_str))
     }
@@ -330,8 +336,17 @@ impl Links {
     }
 
     /// Accept an incoming call (we take the call; media is negotiated separately).
+    ///
+    /// `attach` is the third spelling and it is the one that MATTERS on this tenant. A real
+    /// one-to-one invite, measured 2026-09-04, carried `attach`, `progress`, `reject` and
+    /// **no `accept` at all** — and its `to.endpointId` was all zeroes, so the invite is
+    /// addressed to the USER rather than to one device and is FORKED to every endpoint they
+    /// are signed in on. The link's own path says so (`/cc/v1/forked/…/attach`): an endpoint
+    /// that wants the call attaches itself to that leg, which is what taking the call IS
+    /// here. Without this the accept fell through to `mediaAnswer`, which the same invite
+    /// gives as the shorthand `cc://ma`, so an incoming call could not be answered at all.
     pub fn accept(&self) -> Option<&str> {
-        self.get(&["accept", "acceptance"])
+        self.get(&["accept", "acceptance", "attach"])
     }
 
     /// Refuse an incoming call.
@@ -2255,6 +2270,41 @@ mod tests {
         let links = Links::collect(&json!({ "links": { "hangup": true, "accept": "https://x/a" } }));
         assert_eq!(links.hangup(), None);
         assert_eq!(links.accept(), Some("https://x/a"));
+    }
+
+    /// The link table of a REAL one-to-one invite, measured on this tenant 2026-09-04.
+    ///
+    /// Three things about it decided the accept path, and each is asserted here rather than
+    /// described in a comment somewhere: there is no `accept` and no `acceptance`, the way
+    /// in is `attach` (the path says `/forked/`, because the invite is addressed to the user
+    /// and forked to every endpoint), and `mediaAnswer` is the shorthand `cc://ma`, which is
+    /// not something this app can POST to.
+    ///
+    /// Before this, `accept()` found nothing, the accept fell through to that shorthand, and
+    /// answering an incoming call failed on the URL scheme with a message about neither the
+    /// call nor the link. A regression puts an unanswerable ring back.
+    #[test]
+    fn a_forked_one_to_one_invite_is_accepted_by_attaching_to_it() {
+        let base = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-frce-02-prod-aks\
+                    .cc.skype.com/cc/v1/forked/08dea4a3-a935-4684-a03f-d129c76b695a/27/i1/1351";
+        let links = Links::collect(&json!({
+            "callNotification": { "links": {
+                "attach": format!("{base}/attach?i=10-128-136-201"),
+                "progress": format!("{base}/progress?i=10-128-136-201"),
+                "reject": format!("{base}/reject?i=10-128-136-201"),
+                "mediaAnswer": "cc://ma",
+                "udpTransport": "udp://52.123.144.224:3478/",
+            }}
+        }));
+
+        assert_eq!(links.accept(), Some(format!("{base}/attach?i=10-128-136-201").as_str()));
+        assert_eq!(links.reject(), Some(format!("{base}/reject?i=10-128-136-201").as_str()));
+        // `collect_links` admits only a URL, so the shorthand and the transport never enter
+        // the table at all — which is why the accept had nowhere to go before `attach` was
+        // a spelling it knew, and why it failed with "no link to answer on" rather than on a
+        // URL scheme.
+        assert_eq!(links.media_answer(), None);
+        assert_eq!(links.names(), vec!["attach", "progress", "reject"]);
     }
 
     #[test]

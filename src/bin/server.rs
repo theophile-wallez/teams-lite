@@ -699,6 +699,22 @@ const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(120);
 /// arrives too often costs one request; one that arrives too late drops the call.
 const CALL_KEEPALIVE: Duration = Duration::from_secs(20);
 
+/// How long a call NOBODY ANSWERED may hold the one call slot.
+///
+/// It exists because the service does not always close one. Measured 2026-09-04 on a real
+/// one-to-one: the caller rang, hung up, and no cancel, `callEnd` or any other frame
+/// followed — an endpoint that never attached to the forked leg is simply not told. The ring
+/// therefore stayed in the plane as a live call, and since only one call runs at a time every
+/// later invite was refused as `busy`: one missed call and this machine never rang again.
+///
+/// 60 s, and the direction of the error is what picks the number. Too SHORT takes the banner
+/// away while the phone is still ringing on the user's other devices, so Answer then fails on
+/// a call they could really have taken; too LONG only means incoming calls are ignored for a
+/// while, and it heals itself. Teams rings for about 35 s, so a minute is past any real ring
+/// and still frees the slot promptly. It can never cut a call somebody DID answer, because
+/// answering moves the phase out of the two this applies to.
+const CALL_RING_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// How often this MACHINE asks GitHub what the rolling `latest` release names.
 ///
 /// Two minutes, so an app somebody left open on a phone offers a build within two minutes
@@ -1678,6 +1694,15 @@ struct CallSession {
     muted: bool,
     /// When audio started, so the UI can count the duration from one clock.
     connected_at_ms: Option<i64>,
+    /// When this call entered the plane, which is what expires one nobody ever answered.
+    ///
+    /// Measured 2026-09-04: a one-to-one invite this endpoint never ATTACHED to is never
+    /// closed by the service — the caller hung up, no `callEnd` and no cancel of any kind
+    /// arrived, and the ring sat in the plane as a live call for ever. One call at a time is
+    /// the rule, so the next invite was refused as `busy` and this machine stopped ringing
+    /// altogether until it was restarted. A missed call must not cost every later one (see
+    /// [`CALL_RING_TIMEOUT`]).
+    started_at_ms: i64,
     /// Why it ended, for the line the UI shows afterwards.
     end_reason: Option<String>,
     /// True once the service said the invitation reached no endpoint at all — the callee has
@@ -5604,6 +5629,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     offer: None,
                     muted: false,
                     connected_at_ms: None,
+                    started_at_ms: now_ms(),
                     end_reason: None,
             unreachable: false,
                     renegotiation_answer_link: None,
@@ -5755,6 +5781,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         in_lobby: false,
                         muted: false,
                         connected_at_ms: None,
+                        started_at_ms: now_ms(),
                         end_reason: None,
             unreachable: false,
                         renegotiation_answer_link: None,
@@ -12336,6 +12363,7 @@ impl Ctx {
                 if ctx_keepalive.calling.lock().unwrap().connection.is_none() {
                     return; // calling was turned off; this connection is gone
                 }
+                ctx_keepalive.expire_unanswered_call().await;
                 ctx_keepalive.keep_call_alive().await;
             }
         });
@@ -12723,6 +12751,7 @@ impl Ctx {
             in_lobby: false,
             muted: false,
             connected_at_ms: None,
+            started_at_ms: now_ms(),
             end_reason: None,
             unreachable: false,
             renegotiation_answer_link: None,
@@ -12856,6 +12885,42 @@ impl Ctx {
         let session = self.session().await?;
         let ic3 = self.tokens.get(IC3_SCOPE).await?;
         calling::post_signal(&self.http, url, &session, &ic3, &correlation, payload).await
+    }
+
+    /// Drop a call NOBODY ANSWERED once it has held the one call slot for too long.
+    ///
+    /// This is the other half of "one call at a time": the service does not always tell an
+    /// endpoint that a ring is over. Measured 2026-09-04 — a real caller rang, hung up, and
+    /// not one further frame arrived, because this endpoint had never attached to the forked
+    /// leg. The ring stayed in the plane as a live call, so the NEXT invite was refused as
+    /// `busy` and this machine stopped ringing at all until it was restarted. A missed call
+    /// must not cost every later one.
+    ///
+    /// It applies to the two UNANSWERED phases only. Once somebody has answered, the phase
+    /// has moved on and the call lives or dies on the service's own frames — so this can
+    /// never cut a conversation short, whatever [`CALL_RING_TIMEOUT`] is set to.
+    ///
+    /// It reaches nobody: an unanswered ring holds no media and no leg of ours, and the
+    /// reject link belongs to the user's own Reject button — declining on their behalf is a
+    /// thing the caller would be SHOWN, which a timer must not decide.
+    async fn expire_unanswered_call(&self) {
+        let stale = {
+            let plane = self.calling.lock().unwrap();
+            plane.call.as_ref().is_some_and(|call| {
+                matches!(call.phase, CallPhase::Ringing | CallPhase::Dialing)
+                    && now_ms().saturating_sub(call.started_at_ms)
+                        >= CALL_RING_TIMEOUT.as_millis() as i64
+            })
+        };
+        if !stale {
+            return;
+        }
+        eprintln!(
+            "[calling] nobody answered within {}s — freeing the call slot so the next \
+             invite can ring",
+            CALL_RING_TIMEOUT.as_secs()
+        );
+        self.end_call_locally("CallEndReasonUnanswered").await;
     }
 
     /// Tell the service the live call is still here, if it gave us a link to say it on.
@@ -14512,6 +14577,7 @@ mod tests {
             in_lobby: false,
             muted: false,
             connected_at_ms: None,
+            started_at_ms: now_ms(),
             end_reason: None,
             unreachable: false,
             renegotiation_answer_link: None,
@@ -14564,6 +14630,7 @@ mod tests {
             in_lobby: false,
             muted: false,
             connected_at_ms: None,
+            started_at_ms: now_ms(),
             end_reason: None,
             unreachable: false,
             renegotiation_answer_link: None,
@@ -14612,6 +14679,62 @@ mod tests {
                  landing on that side of the emit would look like a live call."
             );
         }
+    }
+
+    /// A ring nobody answered has to free the call slot, and only such a ring may be freed.
+    ///
+    /// Measured 2026-09-04: the service told this endpoint nothing when a caller gave up, so
+    /// the ring stayed in the plane, the next invite was refused as `busy`, and one missed
+    /// call stopped the machine ringing until it was restarted. Two halves are pinned here
+    /// because either alone is useless — a sweep that runs on no tick never fires, and a
+    /// sweep that matched a CONNECTED call would hang up on people mid-conversation.
+    #[test]
+    fn a_ring_nobody_answered_frees_the_call_slot_and_a_live_call_is_untouched() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        let sweep = code
+            .split("async fn expire_unanswered_call")
+            .nth(1)
+            .expect("the sweep exists")
+            .split("\n    /// Tell the service the live call is still here")
+            .next()
+            .expect("it ends where the keep-alive's own doc comment begins");
+        assert!(
+            sweep.contains("CallPhase::Ringing | CallPhase::Dialing"),
+            "the sweep must free ONLY a call nobody answered. Widening it to a connected \
+             call would end a conversation on a timer.\n{sweep}"
+        );
+        assert!(
+            sweep.contains("end_call_locally"),
+            "the sweep must end the call down the one path every other ending takes, so the \
+             UI is told and the slot is really freed.\n{sweep}"
+        );
+        assert!(
+            !sweep.contains("reject()") && !sweep.contains("post_call_signal"),
+            "the sweep must reach NOBODY: declining on the user's behalf is shown to the \
+             caller, and a timer does not get to decide that.\n{sweep}"
+        );
+
+        let tick = code
+            .split("let mut ticks = tokio::time::interval(CALL_KEEPALIVE)")
+            .nth(1)
+            .expect("the keep-alive ticker exists")
+            .split("});")
+            .next()
+            .expect("the spawned loop ends");
+        assert!(
+            tick.contains("expire_unanswered_call"),
+            "nothing drives the sweep, so a stale ring is never swept.\n{tick}"
+        );
+
+        // Past a real Teams ring (~35 s), or the banner is taken away while the user's other
+        // devices are still ringing and Answer then fails on a call they could have taken.
+        assert!(
+            CALL_RING_TIMEOUT >= Duration::from_secs(45),
+            "CALL_RING_TIMEOUT is {:?}, which can expire a ring somebody could still answer",
+            CALL_RING_TIMEOUT
+        );
     }
 
     /// A one-to-one call negotiates the CAMERA and the SCREEN with the call itself, and a
