@@ -642,12 +642,51 @@ a meeting does (§ 10.3a), and this side is already answering it ready to RECEIV
     wrong is in the SECTION or in a step between the session and the offer — not in who is
     allowed to present, and not in the eight seconds of waiting that preceded it.
 
-  What that leaves as the next step is a DIFFERENT investigation from the one this file
-  previously pointed at: compare this app's `applicationsharing-video` section against a real
-  client's captured one, field by field, rather than asking again for a role that is already
-  held. Two facts to start from — the service also rejects the `x-data`/`data` section beside
-  it, and its own renegotiation offers `applicationsharing-video` at `RTP/AVP` where this app
-  offers `UDP/TLS/RTP/SAVPF`.
+  **AND IT IS NOT ABOUT SHARING AT ALL — the CAMERA is refused identically.** Measured
+  2026-09-04: `offered media: modalities=["audio","Video"] sending=["camera"]` came back
+  `video label=main-video REJECTED`. A camera asks for NO content-sharing session (§ 10.4 —
+  only the one screen is a session), so this single measurement removes the session, the
+  presenter role and everything sharing-specific from the question in one step. **Run the
+  camera first** (`bun run join-live -- --camera`): it is the cheaper experiment and it is what
+  finally narrowed this.
+
+  What is actually wrong is that **every video section this app offers MID-CALL is answered
+  with a zeroed port**, whatever the label.
+
+#### What has been RULED OUT, so nobody spends a day on it again
+
+Each was measured, not reasoned about:
+
+- **The presenter role and the sharing session** — held for the whole call (above).
+- **Sharing-specific anything** — the camera fails identically.
+- **`a=x-ssrc-range` spanning nonsense.** It took min-to-max over a section's SSRCs, so a video
+  section with a media and an `rtx` SSRC claimed 652 million of them
+  (`341013634-993826282`) where the service's own are `1000-1000` and `2403-2502`. That was a
+  REAL defect and it is fixed — the primary alone now, which leaves the accepted audio section
+  byte-for-byte unchanged — and the section is still rejected. So it was necessary and not
+  sufficient.
+- **Header-extension id collisions across the BUNDLE.** Chrome refuses the SERVICE's offers for
+  exactly that, so the symmetry was worth checking: our own offer has none (measured, 0
+  collisions over both sections).
+- **RESERVING the sections at the first negotiation.** Tried against the tenant earlier and it
+  made things worse: all three rejected, and the service's own renegotiations then echoed the
+  rejected slots instead of adding a live section, costing the RECEIVE path. `LocalSenders.reserve`
+  is the code for it and is deliberately called from nowhere — do not "fix" that by wiring it up
+  without reading the note at its call site first.
+
+#### What to try NEXT, in order
+
+1. **`startOutgoingNegotiation`.** The acceptance names it beside `mediaRenegotiation`, and this
+   app has only ever posted to the second. The names suggest the first is for offering media of
+   one's own rather than answering a negotiation the service began. Cheapest untried thing.
+2. **The four rewrites § 2.5 lists as unimplemented**, now that a refusal really is repeatable:
+   the simulcast envelope, the `red` payload, a per-section fingerprint, and `a=rtcp` on an
+   offer. § 2.5's rule was that a rewrite earns its place when a refusal names one — this
+   refusal names nothing, so the rule has to bend, and the way to bend it honestly is one
+   variable per run against this same meeting.
+3. **The `x-data`/`data` section**, which the service rejects beside the video on every run. It
+   is not ours — it arrives in the service's offer and we answer it — but a renegotiation
+   carrying a section the service dislikes may be refused whole.
 
   Three things WERE fixed on the way to that, each a real defect: a join published no
   `addModalitySuccess` link at all (so a grant could not have been delivered even by a tenant

@@ -398,6 +398,17 @@ impl Links {
         self.get(&["mediaRenegotiation"])
     }
 
+    /// Where media of OUR OWN is offered, when the service names a door for it.
+    ///
+    /// The acceptance names this beside `mediaRenegotiation` and nothing had ever posted to it.
+    /// The two read as a pair: one starts a negotiation this endpoint wants, the other answers
+    /// or updates one already going. Every video section this app has offered on the
+    /// renegotiation link has come back with a zeroed port, a camera as much as a screen
+    /// (§ 10.8), so this is the cheapest untried thing.
+    pub fn start_outgoing_negotiation(&self) -> Option<&str> {
+        self.get(&["startOutgoingNegotiation"])
+    }
+
     /// Where a MODALITY is added to a live conversation — a group modality on a 1:1, and the
     /// content-sharing session a screen share needs (see [`content_sharing_payload`]). It is
     /// not the second half of a JOIN, which is what reading it as one cost a debugging round.
@@ -1283,20 +1294,64 @@ pub fn media_offer_payload(
     callbacks: &CallbackBase,
     modalities: &[&str],
 ) -> Value {
+    json!({ "mediaNegotiation": offering_media(local, offer, callbacks, modalities) })
+}
+
+/// OFFERING media, whichever door it is posted through.
+///
+/// Two doors carry the same statement — I am this participant, this is what the offer declares,
+/// here is the blob, and here is where to answer or refuse it. `media_offer_payload` names it
+/// `mediaNegotiation` and [`start_outgoing_negotiation_payload`] names it
+/// `startOutgoingNegotiation`; built once, so the two cannot drift the day either gains a field.
+fn offering_media(
+    local: &LocalParticipant,
+    offer: &MediaContent,
+    callbacks: &CallbackBase,
+    modalities: &[&str],
+) -> Value {
     json!({
-        "mediaNegotiation": {
-            "sender": local.json(),
-            "callModalities": modalities,
-            "links": {
-                // Where the service answers this offer, and where it may refuse it. Both are
-                // ours: an offer nobody can answer is an offer that hangs.
-                "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
-                "mediaAcknowledgement": callbacks.link(paths::CALL_MEDIA_ACKNOWLEDGEMENT),
-                "rejection": callbacks.link(paths::CALL_MEDIA_REJECTION),
-            },
-            "mediaContent": offer.json(),
-        }
+        "sender": local.json(),
+        "callModalities": modalities,
+        "links": {
+            // Where the service answers this offer, and where it may refuse it. Both are
+            // ours: an offer nobody can answer is an offer that hangs.
+            "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
+            "mediaAcknowledgement": callbacks.link(paths::CALL_MEDIA_ACKNOWLEDGEMENT),
+            "rejection": callbacks.link(paths::CALL_MEDIA_REJECTION),
+        },
+        "mediaContent": offer.json(),
     })
+}
+
+/// Build the body that STARTS a negotiation this endpoint wants, on the door named for it.
+///
+/// The acceptance names `startOutgoingNegotiation` beside `mediaRenegotiation` and nothing had
+/// ever posted to it, while every video section offered on the second came back with a zeroed
+/// port — a camera as much as a screen (§ 10.8). Measured 2026-09-04, the first POST to it was
+/// refused with the field named:
+/// `400 {"errors":{"StartOutgoingNegotiation":["The StartOutgoingNegotiation field is required."]}}`
+/// — the same shape the incoming call's `attach` door wanted (§ 8a), so the door is real and
+/// only the envelope was wrong.
+pub fn start_outgoing_negotiation_payload(
+    local: &LocalParticipant,
+    offer: &MediaContent,
+    callbacks: &CallbackBase,
+    modalities: &[&str],
+) -> Value {
+    let mut body = offering_media(local, offer, callbacks, modalities);
+    // This door requires one link the other does not, and the service named it:
+    // `400 {"errors":{"StartOutgoingNegotiation.Links.MediaRenegotiation":["The
+    // MediaRenegotiation field is required."]}}`. It is where the service renegotiates what this
+    // offer started, so it is added HERE rather than to the shared statement — the
+    // `mediaNegotiation` door has never asked for it, and a body carrying a field one door does
+    // not know is how this plane earns a `400` that names nothing.
+    if let Some(links) = body.get_mut("links").and_then(Value::as_object_mut) {
+        links.insert(
+            "mediaRenegotiation".to_string(),
+            Value::String(callbacks.link(paths::CALL_MEDIA_RENEGOTIATION)),
+        );
+    }
+    json!({ "startOutgoingNegotiation": body })
 }
 
 /// Build the body that ends our leg of a call.
@@ -2632,6 +2687,50 @@ mod tests {
                 "a join that does not publish {name} can never be granted a screen share"
             );
         }
+    }
+
+    /// OFFERING media on the door named for it, and the two envelopes the service wants.
+    ///
+    /// Measured 2026-09-04, in two refusals that each named their own field:
+    /// `StartOutgoingNegotiation` (the envelope), then
+    /// `StartOutgoingNegotiation.Links.MediaRenegotiation` (a link the other door never asks
+    /// for). With both, the POST is accepted and the capture is retained — where every offer on
+    /// `mediaRenegotiation` had its video section zeroed, a camera as much as a screen.
+    ///
+    /// The statement inside is shared, so the two doors cannot drift; the extra link is added to
+    /// the outgoing one ALONE, because a body carrying a field the other door does not know is
+    /// how this plane earns a `400` that names nothing.
+    #[test]
+    fn offering_media_names_its_own_envelope_and_the_link_that_door_requires() {
+        let (local, callbacks) = (local(), callbacks());
+        let offer = MediaContent::sdp("v=0");
+        let mods = [MODALITY_AUDIO, "Video"];
+
+        let outgoing = start_outgoing_negotiation_payload(&local, &offer, &callbacks, &mods);
+        let plain = media_offer_payload(&local, &offer, &callbacks, &mods);
+
+        // Each names its own envelope and neither carries the other's.
+        assert!(outgoing.get("startOutgoingNegotiation").is_some(), "{outgoing}");
+        assert!(outgoing.get("mediaNegotiation").is_none(), "{outgoing}");
+        assert!(plain.get("mediaNegotiation").is_some(), "{plain}");
+        assert!(plain.get("startOutgoingNegotiation").is_none(), "{plain}");
+
+        // The link this door requires, and which the other must not grow by accident.
+        let links = &outgoing["startOutgoingNegotiation"]["links"];
+        assert!(
+            links.get("mediaRenegotiation").and_then(Value::as_str).is_some_and(|u| !u.is_empty()),
+            "the service refuses this door without it: {outgoing}"
+        );
+        assert!(plain["mediaNegotiation"]["links"].get("mediaRenegotiation").is_none(), "{plain}");
+
+        // And the statement itself is the same one, so the two cannot drift.
+        for field in ["sender", "callModalities", "mediaContent"] {
+            assert_eq!(
+                outgoing["startOutgoingNegotiation"][field], plain["mediaNegotiation"][field],
+                "{field} differs between the two doors"
+            );
+        }
+        assert_eq!(outgoing["startOutgoingNegotiation"]["mediaContent"]["blob"], "v=0");
     }
 
     /// The session's links are read APART from the call's, because it carries a `leave` of its

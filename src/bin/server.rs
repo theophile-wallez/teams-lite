@@ -6381,7 +6381,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             let sdp = param_str(params, "sdp")?;
             let modalities = param_modalities(params)?;
             let sending = param_str_list(params, "sending");
-            let (local, callbacks, url) = {
+            let (local, callbacks, url, outgoing) = {
                 let plane = ctx.calling.lock().unwrap();
                 let call = plane
                     .call
@@ -6394,19 +6394,36 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                          refuses new media on a call that is not established"
                     );
                 }
-                let url = call
+                // `startOutgoingNegotiation` FIRST, falling back to the renegotiation link.
+                // The acceptance names both and only the second had ever been used; every video
+                // section offered on it comes back with a zeroed port (§ 10.8), and the two
+                // names read as a pair — one starts a negotiation this endpoint wants, the other
+                // answers one already going.
+                // `startOutgoingNegotiation` FIRST, falling back to the renegotiation link. The
+                // acceptance names both and only the second had ever been used; every video
+                // section offered on it comes back with a zeroed port (§ 10.8), and the two names
+                // read as a pair — one starts a negotiation this endpoint wants, the other
+                // answers one already going. Each wants its OWN envelope, so which one matched
+                // decides the body: the first POST to the new door was refused `400` with the
+                // field named, exactly as the incoming call's `attach` was (§ 8a).
+                let (url, outgoing) = call
                     .links
-                    .media_renegotiation()
-                    .map(str::to_string)
+                    .start_outgoing_negotiation()
+                    .map(|url| (url.to_string(), true))
+                    .or_else(|| call.links.media_renegotiation().map(|url| (url.to_string(), false)))
                     .context(
                         "call_offer_media: this call has no renegotiation link — the service \
                          names it on the acceptance",
                     )?;
-                (call.local.clone(), call.callbacks.clone(), url)
+                (call.local.clone(), call.callbacks.clone(), url, outgoing)
             };
             let offer = calling::MediaContent::sdp(sdp);
             let names: Vec<&str> = modalities.iter().map(String::as_str).collect();
-            let payload = calling::media_offer_payload(&local, &offer, &callbacks, &names);
+            let payload = if outgoing {
+                calling::start_outgoing_negotiation_payload(&local, &offer, &callbacks, &names)
+            } else {
+                calling::media_offer_payload(&local, &offer, &callbacks, &names)
+            };
             let response = ctx.post_call_signal(&url, &payload).await?;
             {
                 let links = calling::Links::collect(&response);

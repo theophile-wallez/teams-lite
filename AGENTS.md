@@ -5474,15 +5474,22 @@ joins alone and waits for an offer. Six rules hold it together, and
     already takes, since nothing is being sent.
   - **The sentence says the call is still there** (`renegotiationRefusedMessage`). That half is
     load-bearing: the share stopping and an error arriving both say the opposite.
-- **The sections a camera and a screen go out on are negotiated with the CALL, not when
-  somebody presses share — on a ONE-TO-ONE.** That is the real client's own shape and it is
-  why a screen share was refused without it: its `addModalities` forces both modalities
-  `inactive` at the first negotiation of a one-to-one (`numVideoChannels` is 1 there), so
-  every section exists in the FIRST offer and turning a share on ACTIVATES one the service
-  already answered. This app offered one audio section and asked the service to accept a new
-  `applicationsharing-video` mid-call; the service zeroed its port and nothing was ever
-  shown. NATIVE-CALLING.md § 10.8 holds the client's code and the four things it settles.
-  Four rules, and each is pinned by a test:
+- **RESERVING the sections a camera and a screen go out on is WRITTEN AND NOT USED, and this
+  bullet used to claim the opposite.** `LocalSenders.reserve` exists, handles a one-to-one and
+  a conference, and is called from NOWHERE — verified 2026-09-04 by searching the whole of
+  `web/src`. So every section this app sends on is still added MID-CALL, on both paths, which
+  is what this bullet said had been fixed.
+  It is a deliberate dead end rather than an oversight, and the reason is recorded at the call
+  site that does not call it (`createCallMedia`, the audio-alone branch): reserving them was
+  tried against the tenant and made things WORSE — the service rejected all three sections and
+  from then on its own renegotiation offers echoed those rejected slots instead of adding the
+  live one, so it did not buy a send path and it cost the RECEIVE one.
+  The client's own shape is still what the paragraph below describes, and it is still the best
+  guess at what the service wants; what is not true is that this app does it. Read
+  NATIVE-CALLING.md § 10.8 for what has actually been ruled out.
+  The four rules below are about the CODE that exists, and each is pinned by a test — but note
+  what those tests pin: `reservedKindFor` and `conferenceVideoCodecs`, never that anything
+  calls `reserve`, which is how a bullet claiming a shipped fix outlived the fix.
   - **A CONFERENCE is the opposite, and its behaviour is unchanged.** With `isMultiparty` the
     client creates no video entity until one is asked for, so a meeting adds the section
     mid-call exactly as this app always did. One reaction for both is what was wrong.
