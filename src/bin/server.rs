@@ -5999,11 +5999,15 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 )
             };
             let answer = calling::MediaContent::sdp(sdp);
+            // Which door was used decides whether the media still has to be answered
+            // separately below: the acceptance body carries the answer, an attach does not.
+            let mut used_attach = false;
             let (url, payload) = match (accept, attach, media_answer) {
                 (Some(url), _, _) => {
                     (url, calling::acceptance_payload(&local, &answer, &callbacks))
                 }
                 (None, Some(url), _) => {
+                    used_attach = true;
                     (url, calling::attach_payload(&local, &answer, &callbacks))
                 }
                 (None, None, Some(url)) => {
@@ -6017,6 +6021,12 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             match ctx.post_call_signal(&url, &payload).await {
                 Ok(response) => {
                     let links = calling::Links::collect(&response);
+                    // What the service handed back, by NAME — the shape and never the
+                    // content, which is the discipline `calling::media_sections` already
+                    // follows. It is here because an ATTACH that succeeds is not yet a call:
+                    // the first live one came back with no `hangup` and no `end`, so the only
+                    // way to know what the rest of the handshake may use is to say so.
+                    eprintln!("[calling] the call was taken; the service answered with {:?}", links.names());
                     let held = {
                         let mut plane = ctx.calling.lock().unwrap();
                         match plane.call.as_mut().filter(|c| c.id == call_id && !c.ended()) {
@@ -6035,6 +6045,36 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         // links the acceptance answered with (see `call_place`).
                         ctx.hang_up_orphan("call_accept", &local, &links).await;
                         return Ok(json!({ "call_id": call_id, "cancelled": true }));
+                    }
+                    // TAKING the call and ANSWERING its media are two POSTs, and only the
+                    // acceptance carries both at once. Measured 2026-09-04: an `attach` that
+                    // the service accepted left the CALLER still ringing, because nothing had
+                    // sent our SDP — so where the service names a `mediaAnswer` of its own,
+                    // the answer goes there now.
+                    //
+                    // It is skipped for the acceptance door, whose body already carried the
+                    // answer: posting it twice would answer one offer two times, which is not
+                    // something the service asked for. A failure costs the MEDIA and never
+                    // the call — the call is taken either way, and the ending will arrive as a
+                    // frame like any other.
+                    // The guard is taken and DROPPED before the await: a `MutexGuard` held
+                    // across one makes the whole future non-Send.
+                    let media_url = if used_attach {
+                        let plane = ctx.calling.lock().unwrap();
+                        plane.call.as_ref().and_then(|call| call.links.media_answer().map(str::to_string))
+                    } else {
+                        None
+                    };
+                    if let Some(media_url) = media_url {
+                        let body = calling::media_answer_payload(
+                            &local,
+                            &answer,
+                            &callbacks,
+                            &[calling::MODALITY_AUDIO],
+                        );
+                        if let Err(e) = ctx.post_call_signal(&media_url, &body).await {
+                            eprintln!("[calling] the answer did not reach the service: {e:#}");
+                        }
                     }
                     ctx.emit_call_state();
                     Ok(json!({ "call_id": call_id }))
