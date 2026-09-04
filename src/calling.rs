@@ -373,8 +373,22 @@ impl Links {
     }
 
     /// End the call. `hangup` ends OUR leg; `leave` leaves the conversation.
+    ///
+    /// `callLeg` is LAST and is the only one of these an incoming one-to-one ever offers.
+    /// Measured 2026-09-04 over every frame of a call that really connected: the whole set of
+    /// link names the service ever named on that path holds no `hangup`, no `end`, no `leave`
+    /// and no `conversationEnd` — so the user's call ended here, their microphone was
+    /// released, and the CALLER was told nothing (§ 8a). An outgoing call is answered a
+    /// hangup link of its own, which is why only this direction was ever affected.
+    ///
+    /// **The leg is UNMEASURED as a hangup**, and it is last so it can only ever be used
+    /// where the four proper spellings are absent. [`hangup_payload`] already carries a
+    /// `callTransactionEnd`, which is what a leg would want; if the service refuses it, it
+    /// will name the reason and the call still ends locally — the POST failing and there
+    /// being no link at all are the same outcome for the user, so this can be no worse than
+    /// the silence it replaces.
     pub fn hangup(&self) -> Option<&str> {
-        self.get(&["hangup", "end", "leave", "conversationEnd"])
+        self.get(&["hangup", "end", "leave", "conversationEnd", "callLeg"])
     }
 
     /// Keep the service from tearing the call down while it is still up.
