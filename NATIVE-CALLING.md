@@ -19,6 +19,14 @@ and one authz call this app already makes on every start.
 
 ## 1. The short answer
 
+**Audio calling WORKS, verified against the real tenant on 2026-09-04.** A colleague and the
+user called each other in both directions from teams-lite and heard each other each time: a
+meeting join was already proved on 2026-08-05 (§ 8), an incoming one-to-one is § 8a, and an
+outgoing one is § 8b. What is still open is written up at the end of each of those, and the
+sharpest item is that hanging up an INCOMING call may not tell the caller.
+
+The rest of this section is the map the whole plane was written from, and it still holds.
+
 An audio call is reachable, and the missing piece is smaller than it looked. The Teams
 web client is not a special media citizen: it places a call with **one HTTPS POST** and
 carries the media over **a stock browser `RTCPeerConnection`**, with **standard TURN
@@ -557,20 +565,45 @@ call alive, and only for the two UNANSWERED phases.
 `notificationType: "MeetingStart"`. The only calling frames captured before this were the
 second kind, which is why the invite's shape was still unknown after months.
 
+### 8b. PLACING a one-to-one call — measured, and it works
+
+**The same pair placed one from teams-lite the other way on 2026-09-04: it rang, they heard
+each other, and pressing End ended it for BOTH of them.** So the outgoing path needed no
+change at all — `invitation_payload` was already carrying every field the join is accepted
+with, which is what § 8 predicted and the reason this direction cost nothing. The service
+answers an outgoing call a hangup link of its own, which is why the End button behaved
+correctly here while the incoming one did not (§ 8a).
+
+Its own journal, from the live call: `a media answer arrived: audio mid=0 label=main-audio
+accepted`, then an unprompted `media renegotiation offered: modalities=[]` answered with
+`["audio", "ScreenViewer"]` — so a one-to-one really does renegotiate on its own, exactly as
+a meeting does (§ 10.3a), and this side is already answering it ready to RECEIVE a screen.
+
 #### Still open on the incoming path
 
-- **HANGING UP DOES NOT REACH THE OTHER SIDE.** No step of the three answers a `hangup`, `end`,
-  `leave` or `conversationEnd`, so `Links::hangup` finds nothing and `call_hangup` writes
-  `no link to hang up on — dropping the call locally`. The user's own call really ends — the
-  microphone is released — but nothing tells the caller. The candidates are on the frames
-  already in hand and none is measured: `callLeg` and `callController` from step 1,
+- **HANGING UP MAY NOT REACH THE CALLER, and the fix for it is UNVERIFIED.** No step of the
+  three answers a `hangup`, `end`, `leave` or `conversationEnd` — measured over every frame of
+  the call that connected, whose whole set of link names holds none of them — so
+  `Links::hangup` found nothing and `call_hangup` wrote `no link to hang up on — dropping the
+  call locally`. The user's own call really ended and their microphone was released; nothing
+  told the caller.
+
+  `callLeg` is now tried LAST, because it is the only leg-shaped door that path offers and
+  `hangup_payload` already carries a `callTransactionEnd`. **Nobody has pressed End on an
+  incoming call since that shipped**, so whether the caller is really told is unmeasured. The
+  downside is bounded rather than argued: the local drop happens whether or not the POST
+  succeeds, so a refusal is exactly the old behaviour plus a named reason.
+
+  Three candidates remain if the leg is refused, none measured: `callController` from step 1,
   `updateCallState` from step 2, and the `conversationInvitation.conversationController` the
-  invite carries as a bare field rather than inside a `links` object (which is why
-  `collect_links` does not pick it up, and why `JoinedConversation.controller` — parsed for a
-  join and used nowhere — is the nearest prior art). Do not guess one: post the most likely and
-  read the refusal, which is how all three steps above were found.
-- **VIDEO on a one-to-one is untried from this direction.** The acceptance names
-  `controlVideoStreaming` and `mediaRenegotiation`, so the doors exist.
+  invite carries as a BARE field rather than inside a `links` object — which is why
+  `collect_links` never picks it up, and why `JoinedConversation.controller` (parsed for a join
+  and used nowhere) is the nearest prior art.
+- **VIDEO on a one-to-one is untried in both directions.** The acceptance names
+  `controlVideoStreaming` and `mediaRenegotiation` and the outgoing call answered a
+  renegotiation with `ScreenViewer`, so the doors exist and nothing has gone through them.
+- **A GROUP call has never been rung.** It is the same POST with a longer `participants.to`
+  (§ 6), and `MAX_GROUP_CALL_PEOPLE` bounds it.
 
 ### Still open
 

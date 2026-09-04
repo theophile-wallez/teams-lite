@@ -5221,10 +5221,30 @@ call does — this side never handles RTP, and the page never learns a Teams URL
     call would show a state that cannot end.
   - An INCOMING group call is still named after its CALLER: they are who the user decides
     about, and everybody else arrives on the roster.
-  - **It is unverified against the tenant**, like the 1:1 call and for the same reason: a
-    call has no pre-authorized target, so ringing a real group chat is the user's own click.
-    What the mock proves is the whole surface; what the protocol rests on is that the body
-    is the join's own shape with a longer `participants.to`.
+  - **A GROUP call is unverified against the tenant**, and it is now the only shape that is:
+    a call has no pre-authorized target, so ringing a real group chat is the user's own
+    click. What the mock proves is the whole surface; what the protocol rests on is that the
+    body is the join's own shape with a longer `participants.to` — and that the ONE-TO-ONE
+    it shares that POST with is measured (below).
+- **A ONE-TO-ONE CALL WORKS IN BOTH DIRECTIONS, verified 2026-09-04.** A colleague and the
+  user called each other from teams-lite and heard each other each way. Two things about it
+  are worth knowing before touching this area, and NATIVE-CALLING.md § 8a and § 8b hold them
+  in full:
+  - **Taking an INCOMING call is THREE POSTS on this tenant, not one.** The invite is forked
+    to the USER rather than sent to a device (`to.endpointId` all zeroes, the link path
+    reading `/cc/v1/forked/…`), so it offers `attach` and neither `accept` nor `acceptance`:
+    the endpoint that wants the call attaches to that leg, the attach hands back an
+    `acceptance` door, and the acceptance is what actually answers. An attach alone leaves
+    the CALLER ringing, which is the trap — it succeeds, and this app drew a live call for
+    twenty seconds while nothing had answered anybody.
+  - **A ring nobody answers is never closed by the service**, so it used to hold the one call
+    slot for ever and every later invite was refused as `busy`: one missed call and this
+    machine stopped ringing until it was restarted. `CALL_RING_TIMEOUT` frees it, for the two
+    UNANSWERED phases only.
+  - **What is still open is the incoming HANGUP**: no step of the three answers a `hangup`,
+    `end`, `leave` or `conversationEnd`, so `callLeg` is tried last and is UNMEASURED. The
+    user's own call ends regardless — the local drop runs whether or not the POST does — so
+    the risk is that the caller is not told, never that the call survives here.
 - **The microphone is released on ONE path.** Every ending — our hangup, theirs, a
   dropped connection, this machine stopping taking calls — arrives as the backend's
   `call_state` frame,
