@@ -113,7 +113,7 @@ describe("the rows a run is watched through", () => {
     expect(rowOf(rows, "agent").status).toBe("running");
     // The two phases, in the detail behind the running row's own chevron.
     expect(metaOf(rows, "agent", "Thinking")).toBe("now");
-    expect(metaOf(rows, "agent", "Writing the reading")).toBe("");
+    expect(metaOf(rows, "agent", "Writing the review")).toBe("");
   });
 
   it("walks forward through every stage without a row ever going back", () => {
@@ -144,7 +144,7 @@ describe("the rows a run is watched through", () => {
     expect(rowOf(rows, "read").amount).toBe("");
     expect(metaOf(rows, "read", "The merge request")).toBe("");
     expect(rowOf(rows, "prompt").amount).toBe("");
-    expect(metaOf(rows, "agent", "Writing the reading")).toBe("");
+    expect(metaOf(rows, "agent", "Writing the review")).toBe("");
   });
 
   it("states the facts it has learnt, in the words a reader reads", () => {
@@ -154,10 +154,11 @@ describe("the rows a run is watched through", () => {
     expect(metaOf(rows, "read", "The merge request")).toBe("a1b2c3d4");
     expect(rowOf(rows, "prompt").amount).toBe("18 KB");
     // The CLI and the model are named, because they are what the reader would go and change if this
-    // is the row that fails.
-    expect(rowOf(rows, "agent").label).toBe("claude reads it");
-    expect(rowOf(rows, "agent").amount).toBe("sonnet");
-    expect(metaOf(rows, "agent", "Writing the reading")).toBe("4.7 KB");
+    // is the row that fails — and BOTH are capitalized, through the review's own `capitalizedName`,
+    // so this row cannot say `sonnet` while the document above it says `Sonnet`.
+    expect(rowOf(rows, "agent").label).toBe("Claude reviews it");
+    expect(rowOf(rows, "agent").amount).toBe("Sonnet");
+    expect(metaOf(rows, "agent", "Writing the review")).toBe("4.7 KB");
   });
 
   it("says one file rather than 1 files", () => {
@@ -188,7 +189,7 @@ describe("the rows a run is watched through", () => {
     expect(rowOf(rows, "agent").status).toBe("failed");
     expect(metaOf(rows, "agent", "Thinking")).toBe("stopped");
     // The answer never started arriving, so it says nothing rather than claiming a second failure.
-    expect(metaOf(rows, "agent", "Writing the reading")).toBe("");
+    expect(metaOf(rows, "agent", "Writing the review")).toBe("");
     // A failed row OPENS itself: the reason is why the reader is looking.
     expect(rowOf(rows, "agent").defaultOpen).toBe(true);
   });
@@ -215,7 +216,7 @@ describe("the rows a run is watched through", () => {
     expect(rows.map((row) => row.label)).toEqual([
       "Read the branch",
       "Put the diff in the prompt",
-      "The agent reads it",
+      "The agent reviews it",
     ]);
   });
 

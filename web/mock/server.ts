@@ -5615,8 +5615,22 @@ async function mockReviewRun(
   state.answer_bytes = 4_800;
   if (!(await step("writing"))) return;
   state.themes = review.themes.length;
-  frame("done");
+  // THE TERMINAL FRAME RACES THE RESPONSE, and this mock has to race it too. The backend emits it
+  // just before its handler returns (`report.reached(RunStage::Done)` in src/bin/server.rs), so the
+  // two travel as separate messages and the frame can land AFTER the answer — the same race the
+  // follow-up conversation's own stream documents. Awaited inline, as this did, the mock could only
+  // ever deliver it BEFORE: so a page that drew rows again on a late `done` passed every test, and
+  // shipped a block of green `Completed` capsules between a finished review's headline and its first
+  // theme. It is scheduled rather than awaited for exactly that reason.
+  setTimeout(() => frame("done"), MOCK_REVIEW_DONE_AFTER_MS);
 }
+
+/** How long after the answer the mock's terminal `done` frame lands.
+ *
+ *  Small, because what is being reproduced is only the ORDER; long enough that it is really after the
+ *  response rather than merely queued behind it. `web/e2e/gitlab.spec.ts` waits past this before it
+ *  re-asserts that the rows stayed down. */
+const MOCK_REVIEW_DONE_AFTER_MS = 40;
 
 /** How long a HELD stage of a mock reading waits. Long enough for a capture to be taken and a spec to
  *  assert against it, and bounded so a hook nobody cleared cannot hang a whole run for ever. */

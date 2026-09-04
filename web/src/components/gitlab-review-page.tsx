@@ -38,6 +38,7 @@ import { formatMessageTime } from "~/lib/message-time";
 import { cn } from "~/lib/utils";
 import { ColumnSplitter } from "./column-splitter";
 import { useAppState, useController } from "./controller-context";
+import { AgentLogo } from "./agent-logo";
 import { GitLabLogo } from "./gitlab-logo";
 import { MergeRequestPageStrip } from "./gitlab-mr-pages";
 import { ReviewChatPanel } from "./gitlab-review-chat";
@@ -60,8 +61,25 @@ import { TrackerProjectProvider } from "./tracker-refs-context";
 // a URL gives are the point: it survives a reload, it can be sent to whoever is being asked to
 // review, and the browser's own Back leaves it. `lib/gitlab-review.ts` carries the same note.
 //
-// Seven rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
+// Ten rules hold the surface, and `web/e2e/gitlab.spec.ts` pins each:
 //
+//   - **THE PAGE HAS ONE LAYOUT, before and after the press.** The offer used to be a `bg-card` panel
+//     floating in the middle of an empty column, with the progress rows inside it as a second layer of
+//     cards — and the finished state is a flush document, so the two states looked like two surfaces.
+//     Both take `DOCUMENT_HEADER` now: the same measure, the same padding, the same 17px opening line
+//     with an 11px line of fact under it. The reader reported the old one, and what they said about it
+//     is the whole rule — a review page that does not look like itself until it has something to say
+//     reads as unfinished.
+//   - **THE ACCENT IS SPENT ON A PRESS THE READER STILL HAS TO MAKE, and never on one that undoes what
+//     is on screen.** On the empty page "Start the AI review" is the only thing to do, so it is the
+//     accent fill; on a finished document the same act throws that document away and makes the reader
+//     wait again, so it is QUIET and stands beside the title (`RunButton`'s two tones). As a filled
+//     pill under the meta line it was the loudest thing on a page whose point is the prose.
+//   - **THE STEPS GO WHEN THE REVIEW LANDS, and stay when it fails.** The document says everything
+//     three finished rows say and more, so a `Completed` list above it is scaffolding left standing —
+//     a failure's rows are half of the answer and are kept. It is the store that holds this, in BOTH
+//     places a run can end (see the `gitlab_mr_review_progress` handler: the terminal frame races the
+//     response, and after the response there is no watched run to measure it against).
 //   - **The document scrolls, and the page does not.** The header and the strip stay; one scroller
 //     under them, which is what makes a sticky heading mean anything at all.
 //   - **A theme's heading STICKS.** It is the one thing on screen that says which part of the branch
@@ -77,8 +95,10 @@ import { TrackerProjectProvider } from "./tracker-refs-context";
 //     document column is then some 800px and the prose used half of it, so a theme's own description
 //     read as a cropped column with a hand's width of nothing beside it. It was reported that way.
 //     The measure is now the document's own `max-w-5xl` — bounded by what a unified PATCH needs,
-//     which is the widest thing on the page — and the only `max-w-prose` left is the OFFER's, because
-//     that one really is a card rather than the document.
+//     which is the widest thing on the page. The one narrower measure left is the OFFER's own two
+//     lines, and its reason is not that it is a card (it is not, any more): that is the single state
+//     with no code and no conversation beside it, so the document really is the full 5xl there and a
+//     sentence run across all of it is unreadable.
 //   - **The code is the DIFF's, never the model's** — the patch the read already holds, so nothing
 //     on this page is code somebody's branch does not contain.
 //   - **A long patch opens FOLDED, and so does everything past the document's ceiling**
@@ -108,6 +128,16 @@ const CHAT_WIDTH_VAR = "--review-chat-width";
 /** Below this the page is ONE column at a time — the app's own `md`, and the width the diff page's own
  *  two columns collapse at. */
 const REVIEW_TWO_COLUMN_WIDTH = 768;
+
+/** THE DOCUMENT'S OWN OPENING BLOCK, and the reason it is a constant rather than two class lists.
+ *
+ *  This page has two first screens — the OFFER before anything has been reviewed, and the review's
+ *  own HEADLINE after — and the user reported the first as not looking like the page at all: it was a
+ *  `bg-card` box of its own, floating in a column whose finished state is a flush document, with the
+ *  progress rows inside it as a second layer of cards. So the two states are one shell now, spelled
+ *  once, and the offer really is the document's first paragraph rather than a panel standing in for
+ *  it. Neither can drift from the other, which is the whole value of the constant. */
+const DOCUMENT_HEADER = "flex flex-col gap-3 px-4 pt-5 pb-6 md:px-6";
 
 /** The viewport's width, which decides whether there are two columns to divide and how wide the
  *  conversation may be.
@@ -358,15 +388,15 @@ function ReviewDocument(props: {
           the prose held narrower inside it. Two measures, one column. */}
       <div className="mx-auto w-full max-w-5xl">
         {!review ? (
-          <div className="p-4 md:p-6">
-            <ReviewOffer
-              busy={props.busy}
-              error={props.error}
-              progress={props.progress}
-              onRun={props.onRun}
-              files={diff.files.length}
-            />
-          </div>
+          // No padding of its own: the offer IS the document's own header, so it takes that block's
+          // padding rather than sitting inside a second box with a second inset.
+          <ReviewOffer
+            busy={props.busy}
+            error={props.error}
+            progress={props.progress}
+            onRun={props.onRun}
+            files={diff.files.length}
+          />
         ) : (
           <article>
             <ReviewHeadline
@@ -397,11 +427,19 @@ function ReviewDocument(props: {
   );
 }
 
-/** What stands here before any reading has been made: what the press DOES, and what it costs.
+/** What stands here before any review has been made: what the press DOES, and what it costs.
  *
  *  The cost is named before the press, which is the rule the update button holds for its 130 MB and
  *  the expanded diff read holds for its half a megabyte. Here it is not bytes: it is that the code
- *  leaves this machine for a model provider, which is the one fact the reader cannot undo after. */
+ *  leaves this machine for a model provider, which is the one fact the reader cannot undo after.
+ *
+ *  **IT IS THE DOCUMENT'S OWN HEADER, not a card in front of it.** Both of those were wrong for what
+ *  this page is, and the user reported them together: a `bg-card` panel floating in a column whose
+ *  finished state is flush prose, and a paragraph explaining the feature to somebody who had already
+ *  pressed the tab. So it is the same shell the headline takes (`DOCUMENT_HEADER`), with the same type
+ *  scale — a 17px opening line, an 11px line of fact under it, the press, and the small print — and
+ *  the explanation is gone. What remains is what a reader decides with, which is what the review
+ *  gives them and where their code goes. */
 function ReviewOffer(props: {
   busy: boolean;
   error: string | null;
@@ -410,41 +448,44 @@ function ReviewOffer(props: {
   files: number;
 }) {
   return (
-    // The CARD is the measure here, and the two paragraphs inside it take it rather than one of them
-    // carrying a narrower rule of its own — two stacked paragraphs wrapping at two widths on one card
-    // reads as a rendering fault. This is the one place a prose measure survives on this page, because
-    // this really is a card rather than the document.
-    <div className="flex max-w-2xl flex-col items-start gap-3 rounded-xl bg-card p-5 shadow-card">
-      <h2 className="flex items-center gap-2 text-[15px] font-medium text-foreground">
-        <HugeiconsIcon icon={SparklesIcon} className="size-4 text-primary" strokeWidth={1.8} />
-        Read these changes by theme
+    <header data-testid="gitlab-review-offer" className={DOCUMENT_HEADER}>
+      {/* The document's own opening line, at the size the headline it stands in for is set at — so
+          the page reads as one surface across the press rather than swapping a panel for an article.
+          The measure is the OFFER's alone, because this is the one state with no code and no
+          conversation to be as wide as: the document is the full 5xl here, and a sentence run across
+          all of it is unreadable. */}
+      <h2 className="max-w-2xl text-[17px] leading-relaxed text-foreground">
+        Review these changes by theme
       </h2>
-      <p className="text-[13px] leading-relaxed text-text-dim">
-        A local agent reads the whole diff and writes it up: what the branch does, section by section,
-        with the code of each change under the paragraph that explains it. The {props.files} changed{" "}
-        {props.files === 1 ? "file" : "files"} are all accounted for.
+      {/* WHAT THE PRESS GIVES, in the slot and the ink the finished document states its coverage in
+          (`Claude · Sonnet · 3 of 3 files grouped`). It replaced three lines of prose about the
+          feature: a reader who has opened this tab has asked for it already, so what they are owed is
+          the fact, not the pitch — and the fact is the count and the grouping, in six words. That the
+          code of each change is drawn under the words explaining it is left to be MET rather than
+          promised, which is the same trade the fold's own note makes one state later. */}
+      <p className="text-[11px] text-text-faint">
+        {props.files === 1 ? "1 file" : `${props.files} files`} · grouped by what they do
       </p>
-      <RunButton busy={props.busy} onRun={props.onRun} label="Read the changes" />
+      <RunButton busy={props.busy} onRun={props.onRun} label="Start the AI review" />
       {/* WHAT THE RUN IS DOING, directly under the press that started it — the composer's own rule
           that an action reports itself where it was asked for. A run is tens of seconds at best and
           bounded at 35 minutes, and the button alone said one word for all of it. */}
       {props.progress && <ReviewRunProgressRows progress={props.progress} />}
-      {/* The failure sits with the ROWS rather than at the foot of the card, because the two are one
-          answer: the sentence says what went wrong and the rows say how far the reading got, and a
+      {/* The failure sits with the ROWS rather than at the foot of the block, because the two are one
+          answer: the sentence says what went wrong and the rows say how far the review got, and a
           paragraph of small print between them would separate the halves. */}
       {props.error && <ReviewError error={props.error} />}
       {/* It runs the CLI the reader chose in Settings › AI providers, and the diff travels in the
-          prompt — so this says where their code goes, in as many words. Last in the card, which is
-          where small print belongs once there is a report above it. */}
+          prompt — so this says where their code goes, in as many words. Last, which is where small
+          print belongs once there is a report above it. */}
       <p
         data-testid="gitlab-review-cost"
-        className="text-[11px] leading-relaxed text-text-faint"
+        className="max-w-2xl text-[11px] leading-relaxed text-text-faint"
       >
-        This runs the agent you chose in Settings › AI providers, on this machine. The diff is put in
-        the prompt, so this branch's code reaches that provider — exactly as it does when you write
-        to an agent in a chat. It is granted no access to your files.
+        Runs the agent you chose in Settings › AI providers, on this machine. The diff is put in the
+        prompt, so this branch's code reaches that provider. It is granted no access to your files.
       </p>
-    </div>
+    </header>
   );
 }
 
@@ -455,22 +496,22 @@ function ReviewOffer(props: {
 function ReviewRunProgressRows(props: { progress: ReviewRunProgress }) {
   const rows = useMemo(() => reviewRunRows(props.progress), [props.progress]);
   return (
-    // A rule above them, because they are a different KIND of thing from the offer they appear under:
-    // above is what a press would do, below is what it is doing. `self-stretch` so the line crosses
-    // the card rather than ending at the widest row — the card's own items are `items-start`.
+    // NO RULE ABOVE THEM AND NOTHING STRETCHED, which is what taking the card away corrected. The
+    // hairline was drawn to cross that card, and on the flush document it is a section break in the
+    // middle of a header — the one mark this page spends on separating a theme from the theme before
+    // it. The rows are already a different kind of object from the words above them, because they are
+    // raised off the page and the words are not.
     //
     // `aria-live="polite"` sits on the wrapper rather than in the vendor's file: a reader who is not
     // looking is told when a step finishes, and never interrupted mid-sentence to hear it. Polite is
     // the only honest setting for a run that lasts minutes.
-    <div
-      aria-live="polite"
-      aria-label="What the reading is doing"
-      className="flex w-full flex-col self-stretch border-t border-border-subtle pt-3"
-    >
-      {/* CAPSULES, which is the vendor's own default: each row a rounded card of its own. The LIST
-          variant is one bordered box with flush rows, and it is the wrong one here — this sits inside
-          a card already, and a card inside a card is two nested surfaces for one thing (the argument
-          `TabsList surface={false}` makes on the page strip above). */}
+    <div aria-live="polite" aria-label="What the review is doing" className="flex w-full flex-col">
+      {/* CAPSULES, which is the vendor's own default: each row a rounded card of its own, raised off
+          the page the way this document's own file boxes are. It is the right variant now there is no
+          card around it — inside one it was a card in a card, which is two nested surfaces for one
+          thing (the argument `TabsList surface={false}` makes on the page strip above) and is exactly
+          what the reader photographed. The LIST variant is one bordered box with flush rows, and it
+          would be a third surface vocabulary on a page that already has raised boxes. */}
       <TaskRows rows={rows} testId="gitlab-review-progress" />
     </div>
   );
@@ -510,48 +551,83 @@ function ReviewHeadline(props: {
     [review.headline, props.project, code],
   );
   return (
-    <header className="flex flex-col gap-3 px-4 pt-5 pb-6 md:px-6">
-      {review.headline ? (
-        // The branch in one sentence, set as the document's own opening line rather than as a card:
-        // this IS the first thing to read, so nothing frames it.
-        <div data-testid="gitlab-review-headline">
-          <RichNodes
-            nodes={headline}
-            className="text-[17px] leading-relaxed text-foreground [&_p]:m-0"
-          />
+    // The same shell the OFFER takes, so the page keeps its shape across the press that fills it.
+    <header className={DOCUMENT_HEADER}>
+      {/* THE OPENING LINE AND THE WAY TO ASK AGAIN, on one row — because the re-review is not what
+          this page is for. It stood under the meta line as a filled accent pill, which on a finished
+          document made the loudest thing on the screen a control that throws that document away: the
+          reader came to READ, and the accent is what this app spends on the one thing that earns it.
+          Beside the title and drawn quiet, it is where a document's own controls sit and it costs the
+          words nothing. `items-start` so it sits at the first line of a headline that wraps to three,
+          and `min-w-0` so a long one gives way rather than pushing it off the right. */}
+      {/* AND IT STACKS ON A PHONE, because there the button is not free. At 390px a labelled control
+          takes some 150px of the row, and the headline — the one thing on this page a reader came for
+          — was left wrapping in 200px, seven lines tall with an empty square beside it. Above `sm` the
+          words have width to spare and the control costs them nothing. */}
+      <div className="flex w-full flex-col items-start gap-3 sm:flex-row sm:items-start sm:gap-4">
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          {review.headline ? (
+            // The branch in one sentence, set as the document's own opening line rather than as a
+            // card: this IS the first thing to read, so nothing frames it.
+            <div data-testid="gitlab-review-headline">
+              <RichNodes
+                nodes={headline}
+                className="text-[17px] leading-relaxed text-foreground [&_p]:m-0"
+              />
+            </div>
+          ) : (
+            <p className="text-[17px] leading-relaxed text-text-dim">
+              This branch was reviewed, but the review said nothing about it as a whole.
+            </p>
+          )}
+          {/* WHICH machine reviewed it, and WHEN — the two facts a reader deciding how much to trust
+              a machine's reading of their branch is owed. The CLI's OWN MARK stands beside its name,
+              because that is what says at a glance which vendor read the code: the name is the
+              identifier the CLI is invoked with, and this app already draws that mark wherever an
+              agent speaks (the bubble, the composer's chips, Settings › AI providers). The moment is
+              drawn with the app's own words for one, so "Yesterday 14:32" means the same thing here
+              as in a chat. */}
+          {/* EVERY SEPARATOR BELONGS TO THE FACT AFTER IT, and is glued to it (`whitespace-nowrap`).
+              A wrapped line is where this shows: as standalone flex children the `·` could be the last
+              thing on a line, with the fact it introduced on the next one — measured on a phone, which
+              left "12:14 AM ·" hanging at the end of a line. A break now falls BETWEEN facts, which is
+              the only place it means anything. */}
+          <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-text-faint">
+            <AgentLogo
+              backend={review.provider}
+              className="size-3.5 shrink-0"
+              title={review.provider}
+            />
+            <span data-testid="gitlab-review-by" className="whitespace-nowrap text-text-dim">
+              {reviewAttribution(review)}
+            </span>
+            <span className="whitespace-nowrap">· {formatMessageTime(review.generated_ms)}</span>
+            <span data-testid="gitlab-review-coverage">
+              <span aria-hidden>· </span>
+              {coverage.grouped} of {coverage.total} files grouped
+              {/* IN HOW MANY PARTS, but only where a file was really split — a theme claims regions
+                  of files, so "12 of 14 files grouped, in 19 parts" says the review found more than
+                  one thing in some of them. Where every part is a whole file the clause says nothing,
+                  and a number that never varies is a number nobody reads. */}
+              {coverage.parts > coverage.grouped ? `, in ${coverage.parts} parts` : ""}
+            </span>
+          </p>
         </div>
-      ) : (
-        <p className="text-[17px] leading-relaxed text-text-dim">
-          This branch was read, but the reading said nothing about it as a whole.
+        <RunButton busy={props.busy} onRun={props.onRun} label="Review again" tone="quiet" />
+      </div>
+      {/* WHY A NAME MIGHT NOT BE MARKED, said once and at document level — the only level where a
+          missing chip can explain itself, since the chip that would have explained it is the thing
+          that is absent. A name is only marked against the patches that TRAVELLED, and on the real
+          instance 96 of one merge request's 149 files came back with none.
+          It is a LINE OF ITS OWN rather than the last clause of the meta line above, which is where it
+          used to sit: it is a whole sentence among that line's three short facts, so it wrapped and
+          left the `·` before it dangling at the end of the first line. Its neighbours below — the
+          limits and the fold — are the same kind of note and are already drawn this way. */}
+      {unmarked && (
+        <p data-testid="gitlab-review-unmarked" className="text-[11px] text-text-faint">
+          {unmarked}
         </p>
       )}
-      <p className="text-[11px] text-text-faint">
-        {/* WHICH machine read it, and WHEN — the two facts a reader deciding how much to trust a
-            machine's reading of their branch is owed. The moment is drawn with the app's own words
-            for one, so "Yesterday 14:32" means the same thing here as in a chat. */}
-        <span data-testid="gitlab-review-by">{reviewAttribution(review)}</span>
-        {" · "}
-        {formatMessageTime(review.generated_ms)}
-        {" · "}
-        <span data-testid="gitlab-review-coverage">
-          {coverage.grouped} of {coverage.total} files grouped
-          {/* IN HOW MANY PARTS, but only where a file was really split — a theme claims regions of
-              files, so "12 of 14 files grouped, in 19 parts" says the reading found more than one
-              thing in some of them. Where every part is a whole file the clause says nothing, and
-              a number that never varies is a number nobody reads. */}
-          {coverage.parts > coverage.grouped ? `, in ${coverage.parts} parts` : ""}
-        </span>
-        {/* WHY A NAME MIGHT NOT BE MARKED, said once and at document level — the only level where a
-            missing chip can explain itself, since the chip that would have explained it is the thing
-            that is absent. A name is only marked against the patches that TRAVELLED, and on the real
-            instance 96 of one merge request's 149 files came back with none. */}
-        {unmarked && (
-          <>
-            {" · "}
-            <span data-testid="gitlab-review-unmarked">{unmarked}</span>
-          </>
-        )}
-      </p>
       {props.stale && (
         // A reading is of ONE commit. It is not thrown away when the branch moves — it is still the
         // best account anybody has — but a reader must not take a grouping of files that have since
@@ -581,14 +657,16 @@ function ReviewHeadline(props: {
           data-testid="gitlab-review-folded"
           className="text-[11px] leading-relaxed text-text-faint"
         >
+          {/* THE COUNT AND THE RULE BEHIND IT, and nothing else. It used to carry two more clauses
+              explaining that the page opens on the words and that a press opens any of them — which
+              the reader can see, from the fold beside every file. What they cannot see is that some
+              of the code is folded at all, so that is what this says. */}
           {folded.folded} of {folded.total} diffs start folded — the long ones, and everything past
-          the first few — so this page opens on the words rather than on the code. Open any of them
-          where you want it.
+          the first few.
         </p>
       )}
-      <RunButton busy={props.busy} onRun={props.onRun} label="Read it again" />
-      {/* And the rows on a RE-READ too, which is the press this page's own reader makes most: a
-          reading that has gone stale is asked for again from here, and the document behind it means
+      {/* And the rows on a RE-REVIEW too, which is the press this page's own reader makes most: a
+          review that has gone stale is asked for again from here, and the document behind it means
           the offer's copy of these rows is not drawn at all. Same mapping, same component — the
           feedback belongs to the run rather than to whichever control started it. */}
       {props.progress && <ReviewRunProgressRows progress={props.progress} />}
@@ -810,17 +888,36 @@ function ReviewFile(props: {
   );
 }
 
-/** The one control that starts a run, in both of the places that offer one. */
-function RunButton(props: { busy: boolean; onRun: () => void; label: string }) {
+/** The one control that starts a run, in both of the places that offer one.
+ *
+ *  TWO TONES, because the same act is not the same offer twice. On an EMPTY page it is the only thing
+ *  to do and nothing else on screen competes with it, so it takes the accent. On a FINISHED document
+ *  it throws that document away and makes the reader wait again — so it is quiet, and stands beside
+ *  the title rather than under the words: this app has one accent to spend, and spending it there
+ *  made a control the loudest thing on a page whose point is the prose. */
+function RunButton(props: {
+  busy: boolean;
+  onRun: () => void;
+  label: string;
+  tone?: "accent" | "quiet";
+}) {
+  const quiet = props.tone === "quiet";
   return (
     <button
       type="button"
       data-testid="gitlab-review-run"
+      data-tone={quiet ? "quiet" : "accent"}
       disabled={props.busy}
       data-cuelume-press=""
       onClick={props.onRun}
       className={cn(
-        "flex items-center gap-1.5 self-start rounded-lg bg-primary px-3 py-1.5 text-[12px] font-medium text-primary-foreground transition-opacity",
+        // `active:scale-[0.97]` is the app's own press feedback (see `ui/button.tsx`): a control that
+        // starts a run of minutes must answer the press in the frame it happens, and the fill alone
+        // cannot say it on a quiet one. `ease-out` and 150ms are that file's numbers too.
+        "flex shrink-0 items-center gap-1.5 self-start rounded-lg px-3 py-1.5 text-[12px] font-medium transition-all duration-150 ease-out active:scale-[0.97]",
+        quiet
+          ? "bg-element text-text-dim hover:bg-accent hover:text-foreground"
+          : "bg-primary text-primary-foreground",
         props.busy && "opacity-70",
       )}
     >
@@ -830,8 +927,11 @@ function RunButton(props: { busy: boolean; onRun: () => void; label: string }) {
         <HugeiconsIcon icon={SparklesIcon} className="size-3.5" strokeWidth={1.8} />
       )}
       {/* A run is tens of seconds, so the button says it is going rather than looking pressed and
-          idle — the reader has no other signal that anything is happening. */}
-      {props.busy ? "Reading the changes…" : props.label}
+          idle — the reader has no other signal that anything is happening. It says REVIEWING rather
+          than reading, which is also what keeps it distinct from `ReviewLoading`'s own "Reading the
+          changes…": that one is the diff coming down from GitLab, and it is the same sentence the
+          Diffs page and the Overview's own summary use for that read. */}
+      {props.busy ? "Reviewing the changes…" : props.label}
     </button>
   );
 }

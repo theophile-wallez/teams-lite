@@ -26,6 +26,10 @@ import type { TaskRow, TaskRowStatus } from "../components/beautifului/task-rows
 // The GitLab side's own byte formatter, reused rather than respelled: it already answers `null` for
 // "nothing to say", which is exactly the shape every value on these rows takes.
 import { formatBytes } from "./gitlab-job-log";
+// The review's own rule for showing a CLI's or a model's name to a reader. Imported rather than
+// respelled: the document above these rows names the same two things, and one of them capitalized
+// while the other is not is the kind of drift a shared function makes impossible.
+import { capitalizedName } from "./gitlab-review";
 
 /** Where a reading has got to. Mirrors `gitlab_review::RunStage`, and the ORDER is the meaning:
  *  everything before the current stage is finished, which is what lets one frame say everything.
@@ -198,10 +202,14 @@ export function reviewRunRows(progress: ReviewRunProgress): TaskRow[] {
     },
     {
       key: "agent",
-      // The CLI doing the reading, named — because it is what the reader chose in Settings and what
-      // they would go and change if this row is the one that fails.
-      label: progress.backend ? `${progress.backend} reads it` : "The agent reads it",
-      amount: progress.model,
+      // The CLI doing the review, named — because it is what the reader chose in Settings and what
+      // they would go and change if this row is the one that fails. Both names are CAPITALIZED
+      // through the review's own rule (`capitalizedName`) rather than a second spelling of it: they
+      // arrive as the identifiers the CLI is invoked with, and the document these rows stand above
+      // draws the same two words, so `Claude · Sonnet` there and `claude … sonnet` here would be one
+      // fact told twice in two voices.
+      label: progress.backend ? `${capitalizedName(progress.backend)} reviews it` : "The agent reviews it",
+      amount: capitalizedName(progress.model),
       status: agentState,
       step: 3,
       defaultOpen: agentState === "running" || agentState === "failed",
@@ -211,7 +219,7 @@ export function reviewRunRows(progress: ReviewRunProgress): TaskRow[] {
         { label: "Thinking", meta: phaseMeta(asking) },
         // The answer so far. The one number on this page that moves while the model works, and it is
         // what really arrived — never a fraction of an answer whose length nothing knows.
-        { label: "Writing the reading", meta: formatBytes(progress.answerBytes) ?? phaseMeta(writing) },
+        { label: "Writing the review", meta: formatBytes(progress.answerBytes) ?? phaseMeta(writing) },
       ],
     },
   ];

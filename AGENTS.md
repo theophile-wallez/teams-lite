@@ -2934,8 +2934,34 @@ Twelve rules hold the document, and each is pinned by `web/e2e/gitlab.spec.ts` o
   `max-w-prose`, 65 characters, on every run of words — on the argument that a paragraph past that is
   unreadable. Against the CONVERSATION beside it that broke: the document column is then some 800px
   and the prose used half of it, so a theme's own description read as a cropped column with a hand's
-  width of nothing beside it. It was reported that way. The only `max-w-prose` left is the OFFER's,
-  because that one really is a card rather than the document.
+  width of nothing beside it. It was reported that way. The one narrower measure left is the OFFER's own
+  two lines, and its reason is NOT that it is a card — it is not one any more (below): that is the single
+  state with no code and no conversation beside it, so the document really is the full 5xl there and a
+  sentence run across all of it is unreadable.
+- **THE PAGE HAS ONE LAYOUT, BEFORE AND AFTER THE PRESS, and this is the second thing about it a reader
+  reported.** The offer was a `bg-card` panel floating in the middle of an empty column — with the
+  progress rows inside it as a second layer of cards — while the finished state is flush prose, so the
+  two states read as two surfaces and the empty one read as unfinished. Both take `DOCUMENT_HEADER` now,
+  spelled once so they cannot drift: the same padding, the same measure, a 17px opening line and an 11px
+  line of fact under it. The offer IS the document's first paragraph rather than a panel standing in for
+  one, and the three paragraphs explaining the feature are gone — a reader who has opened this tab has
+  asked for it already, so what they are owed is the fact and the cost rather than the pitch.
+- **THE ACCENT IS SPENT ON A PRESS THE READER STILL HAS TO MAKE, never on one that undoes what is on
+  screen.** On the empty page **Start the AI review** is the only thing to do and takes the accent fill;
+  on a finished document the same act throws that document away and makes the reader wait again, so it is
+  drawn QUIET and stands beside the title (`RunButton`'s two tones). As a filled pill under the meta line
+  it was the loudest thing on a page whose whole point is the prose. It STACKS below `sm`, because at
+  390px a labelled control takes 150px of the row and left the headline wrapping in 200px.
+- **A CLI AND A MODEL ARE NAMED WITH A CAPITAL AND A MARK.** `Claude · Sonnet` beside the CLI's own logo
+  (`AgentLogo`, the mark this app already draws wherever an agent speaks), rather than `claude · sonnet`
+  set as two lowercase words in a line of prose. `capitalizedName` is the one rule, shared with the
+  progress rows so the document cannot say `Sonnet` while the row beside it says `sonnet` — and only the
+  FIRST letter is touched, because opencode names a model `provider/model` and title-casing
+  `amazon-bedrock/eu.anthropic.claude-opus-5` would invent a name no vendor uses.
+- **EVERY SEPARATOR IN THE META LINE BELONGS TO THE FACT AFTER IT**, glued to it, so a wrapped line can
+  never end on a dangling `·` with the fact it introduced on the next one. Measured on a phone. The two
+  long footnotes — what could not be marked, and what starts folded — are LINES OF THEIR OWN rather than
+  clauses of that line, for the same reason.
 - **THE CODE IS THE DIFF'S, NEVER THE MODEL'S.** A model asked to quote a change would paraphrase it,
   and a paraphrased patch is invented code presented as somebody's branch — so the page renders the
   patch the read already holds and the model only ever NAMES files, which is the rule `from_answer`
@@ -3046,10 +3072,14 @@ everything they said — the ring keeps its accent arc against a pending row's p
 keep their colour, the disclosure still opens — and what goes is the sweep, the pop, the fade and the
 slide.
 
-**CAPSULES is the variant drawn, which is the vendor's own default.** Their `List` is one bordered box
-with flush rows, and it is the wrong one here: this sits inside a card already, and a card inside a
-card is two nested surfaces for one thing — the argument `TabsList surface={false}` makes on the page
-strip above.
+**CAPSULES is the variant drawn, which is the vendor's own default.** Each row is a rounded card of its
+own, raised off the page the way this document's own file boxes are — which is right now the rows sit
+DIRECTLY on the document. Inside the offer's old card they were a card in a card, two nested surfaces for
+one thing (the argument `TabsList surface={false}` makes on the page strip above), and that is exactly
+what the reader photographed. Their `List` variant is one bordered box with flush rows and would be a
+third surface vocabulary on a page that already has raised boxes. Nothing is drawn ABOVE them either: the
+hairline that used to separate them from the offer's words was there to cross that card, and on a flush
+document it reads as a section break in the middle of a header.
 
 **The MAPPING decides nothing about the drawing.** `reviewRunRows` returns the vendor's own shape —
 `{ key, label, amount, status, step, details: [{ label, meta }] }` — so every state and value arrives
@@ -3120,6 +3150,16 @@ Eleven rules hold it, and each is pinned by a test:
 - **A RUN THAT FAILED KEEPS ITS ROWS; one that SUCCEEDED loses them.** The document says everything
   they did and more, so a finished list above it is scaffolding left standing — while a failed one is
   half of the answer. They go when the reader presses again, or leaves the merge request.
+- **AND THAT RULE IS HELD IN BOTH PLACES A RUN CAN END, because the terminal frame RACES the answer.**
+  The backend emits `done` just before its handler returns, so the two travel as separate messages and
+  the frame can land AFTER the response — at which point `gitlabReviewProgress` is already null, which
+  `reviewProgressIsOurs` reads as "a backend too old to name a run" and waves through. So a finished
+  review kept all three rows, every one of them `Completed`, between its headline and its first theme:
+  the rule above was stated only where the response is handled. The frame handler now takes them down
+  too. **The MOCK had to become honest for any test to see it**: it awaited the whole walk before
+  answering, so it could only ever deliver `done` FIRST — it schedules that frame late now
+  (`MOCK_REVIEW_DONE_AFTER_MS`), which is what makes `gitlab.spec.ts`'s own "the rows go with it"
+  assertion mean something. It passed all along, in the moment before the frame arrived.
 
 **THE READ IS UNGATED AND NOTHING NEW IS.** No RPC was added: the frames are
 `gitlab_mr_review_progress` on the event bus the backend already broadcasts on — named beside

@@ -459,13 +459,13 @@ describe("reviewLimits", () => {
 
 describe("reviewAttribution", () => {
   it("names the CLI and the model, because they are two facts", () => {
-    expect(reviewAttribution(review())).toBe("claude · sonnet");
+    expect(reviewAttribution(review())).toBe("Claude · Sonnet");
   });
 
   it("names the CLI alone when no model was chosen", () => {
     const noModel = review();
     delete noModel.model;
-    expect(reviewAttribution(noModel)).toBe("claude");
+    expect(reviewAttribution(noModel)).toBe("Claude");
   });
 });
 

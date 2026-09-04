@@ -2099,6 +2099,21 @@ export class TeamsController {
       const key = { projectPath: frame.projectPath, iid: frame.iid };
       if (!sameMergeRequest(key, this.get().openMergeRequest)) return;
       if (!reviewProgressIsOurs(frame, this.get().gitlabReviewProgress)) return;
+      // A run that FINISHED reports nothing these rows can say that the document does not say better,
+      // so the terminal frame takes them DOWN rather than drawing three finished steps above the
+      // review it produced. That is the rule the response's own handler already states — "the rows go
+      // WITH it" — and stating it here as well is what makes it true whichever of the two arrives
+      // first: the last frame always races the response, and after the response `gitlabReviewProgress`
+      // is null, which `reviewProgressIsOurs` reads as "a backend too old to name a run" and waves
+      // through. So a finished reading kept a block of green `Completed` capsules between its headline
+      // and its first theme, which is what the reader photographed.
+      //
+      // A FAILURE is the opposite and is kept: the rows are half of that answer, because how far the
+      // run got is what says whose problem it is.
+      if (frame.stage === "done" && !frame.error) {
+        this.set({ gitlabReviewProgress: null });
+        return;
+      }
       this.set({ gitlabReviewProgress: frame });
     });
 

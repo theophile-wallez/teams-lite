@@ -90,13 +90,34 @@ export function reviewIsStale(
   return review.head_sha !== headSha;
 }
 
-/** What the panel says under the headline: which machine read it, and when.
+/** What the document says under the headline: which machine reviewed it.
  *
  *  The PROVIDER and the MODEL both, because a reader deciding how much to trust a machine's reading
  *  of their branch is owed the name of the machine — and the two are different facts, since one CLI
- *  runs several models. */
+ *  runs several models.
+ *
+ *  **BOTH ARE CAPITALIZED, and only their FIRST LETTER is touched.** They arrive as the identifiers
+ *  the CLI is invoked with (`claude`, `sonnet`), and set in a line of prose beside a date those read
+ *  as two lowercase words in the middle of a sentence — the user asked for a name. What is
+ *  deliberately not done is any further tidying: opencode names a model `provider/model` for
+ *  whichever providers that machine authenticated, so `amazon-bedrock/eu.anthropic.claude-opus-5` is
+ *  one real value here, and title-casing its parts would invent a name no vendor uses. One character
+ *  is a presentation of the name; the rest of it is the name. */
 export function reviewAttribution(review: GitLabReview): string {
-  return review.model ? `${review.provider} · ${review.model}` : review.provider;
+  const provider = capitalizedName(review.provider);
+  return review.model ? `${provider} · ${capitalizedName(review.model)}` : provider;
+}
+
+/** A CLI's or a model's own name, with its first letter in caps for a reader — and every other
+ *  character exactly as it arrived.
+ *
+ *  Shared with `review-progress.ts`, which names the same two things on the row a reader watches the
+ *  run through: one rule, so the document cannot say `Sonnet` while the row beside it says `sonnet`.
+ *  Only the first character is touched, for the reason `reviewAttribution` states — the rest of a
+ *  model id is the vendor's own string, and title-casing `amazon-bedrock/eu.anthropic.claude-opus-5`
+ *  would invent a name nobody uses. */
+export function capitalizedName(name: string): string {
+  return name ? name[0]!.toUpperCase() + name.slice(1) : name;
 }
 
 /** What a reading could NOT see, when it could not see something. `null` when it read the whole

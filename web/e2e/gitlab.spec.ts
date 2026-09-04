@@ -1534,7 +1534,7 @@ test.describe.serial("the GitLab merge-request page", () => {
     await expect(reviewDoc(page)).toHaveAttribute("data-has-review", "yes", { timeout: 20_000 });
     await expect(page.locator('[data-testid="gitlab-review-headline"]')).not.toBeEmpty();
     // WHICH machine read it — two facts, because one CLI runs several models.
-    await expect(page.locator('[data-testid="gitlab-review-by"]')).toHaveText("claude · sonnet");
+    await expect(page.locator('[data-testid="gitlab-review-by"]')).toHaveText("Claude · Sonnet");
 
     // Every changed file is accounted for: the sections plus the one of what nothing claimed.
     const sections = page.locator('[data-testid="gitlab-review-section"]');
@@ -1832,8 +1832,10 @@ test.describe.serial("the GitLab merge-request page", () => {
     // The values are MEASURED facts, not a proportion of anything: the count of files, which CLI is
     // reading, under which model, and how much patch really left this machine.
     await expect(row("read")).toContainText("8 files");
-    await expect(row("agent")).toContainText("claude reads it");
-    await expect(row("agent")).toContainText("sonnet");
+    // The CLI and the model are CAPITALIZED, through the same rule the document's own attribution
+    // line uses — so a reader never meets `Claude · Sonnet` above and `claude … sonnet` here.
+    await expect(row("agent")).toContainText("Claude reviews it");
+    await expect(row("agent")).toContainText("Sonnet");
     await expect(row("prompt")).toContainText("KB");
     // Nothing anywhere in the rows states a percentage — there is no total to take one against.
     await expect(rows).not.toContainText("%");
@@ -1861,6 +1863,14 @@ test.describe.serial("the GitLab merge-request page", () => {
     // a finished list above it would be scaffolding left standing.
     await expect(reviewDoc(page)).toHaveAttribute("data-has-review", "yes", { timeout: 30_000 });
     await expect(rows).toHaveCount(0);
+    // AND THEY STAY DOWN once the run's TERMINAL frame lands, which is the half that really shipped
+    // broken. That frame races the answer and often arrives after it (the mock now delivers it late
+    // on purpose, as the backend does), and a page that folded it drew all three rows again — every
+    // one of them `Completed`, above the document they had been standing in for. The assertion above
+    // passed all along, because it read the page in the moment before that frame arrived.
+    await page.waitForTimeout(250);
+    await expect(rows).toHaveCount(0);
+    await expect(page.locator('[data-testid="task-row"]')).toHaveCount(0);
 
     // A RE-READ is watched too, and it is the press this page's own reader makes most — a reading
     // that has gone stale is asked for again from the headline. It is also the only place the rule
