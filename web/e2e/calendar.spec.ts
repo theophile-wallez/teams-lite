@@ -578,3 +578,61 @@ function isWeekendToday(): boolean {
   const weekday = new Date().getDay();
   return weekday === 0 || weekday === 6;
 }
+
+/**
+ * A meeting the calendar cannot SEE is joined from its link.
+ *
+ * Measured 2026-09-04 against a real `/meet/{code}` meeting the user had just made: it was
+ * in no calendar event and no chat thread, because a "Meet now" meeting creates neither — so
+ * the app's two existing ways in (an event's Join button, a meeting chat's menu row) could
+ * not reach it at all.
+ *
+ * Three rules, and the first is the one that keeps this honest: a Join is offered only for a
+ * link this app can really join, so a mistaken paste earns a sentence rather than a request
+ * the service would refuse.
+ */
+test("a meeting is joined from a pasted link, and only a real one is offered", async ({
+  page,
+  consoleErrors,
+}) => {
+  await gotoApp(page);
+  await openCalendarTab(page);
+
+  // Joining is the calling plane, not a calendar write — the promise the header makes is
+  // untouched by this control standing next to it.
+  await expect(page.locator('[data-testid="calendar-read-only"]')).toBeVisible();
+
+  await page.locator('[data-testid="calendar-join-with-link"]').click();
+  const field = page.locator('[data-testid="join-link-field"]');
+  await expect(field).toBeVisible();
+  // Nothing is said about a form the reader has not filled in yet, and nothing is offered.
+  await expect(page.locator('[data-testid="join-link-error"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="meeting-join-here"]')).toHaveCount(0);
+
+  // Words that are not a link: the refusal, and still no way to act on them.
+  await field.fill("lets meet at 3");
+  await expect(page.locator('[data-testid="join-link-error"]')).toBeVisible();
+  await expect(page.locator('[data-testid="meeting-join-here"]')).toHaveCount(0);
+
+  // The SHORT shape this tenant's own meetings use. The button states the address it would
+  // join, which is what a sanctioned driver proves its target with.
+  const short = "https://teams.microsoft.com/meet/33706839527254?p=jkiUynI6WqHk33MlnY";
+  await field.fill(short);
+  await expect(page.locator('[data-testid="join-link-error"]')).toHaveCount(0);
+  const join = page.locator('[data-testid="meeting-join-here"]');
+  await expect(join).toBeVisible();
+  await expect(join).toHaveAttribute("data-join-url", short);
+
+  // And the LONG shape Graph hands the app for a scheduled meeting.
+  await field.fill(
+    "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=%7B%7D",
+  );
+  await expect(page.locator('[data-testid="meeting-join-here"]')).toBeVisible();
+
+  // The link is dropped with the dialog: a stale address must not be sitting in the field
+  // next time, where it is a join nobody meant to make.
+  await page.keyboard.press("Escape");
+  await page.locator('[data-testid="calendar-join-with-link"]').click();
+  await expect(page.locator('[data-testid="join-link-field"]')).toHaveValue("");
+  expect(realErrors(consoleErrors)).toEqual([]);
+});

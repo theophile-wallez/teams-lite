@@ -36,6 +36,13 @@ export function MeetingJoinButton(props: {
    *  exact shape in every other conversation. It is still what the CALENDAR and the incoming-call
    *  banner draw; a conversation's own join is a row of its menu (components/conversation-menu.tsx). */
   shape?: "pill" | "icon";
+  /** Called when the join has been DISPATCHED — not when it has succeeded, which this button
+   *  never learns: the join is fire-and-forget and its outcome arrives as a `call_state`
+   *  frame, with a failure reported by the app's own notice (§ Audio calls). It exists so the
+   *  dialog that holds a pasted link can close itself, and it deliberately promises no more
+   *  than the press: a caller that treated it as success would be claiming something this
+   *  side cannot know. */
+  onStarted?: () => void;
 }) {
   const controller = useController();
   const status = useAppState((s) => s.callStatus);
@@ -67,7 +74,10 @@ export function MeetingJoinButton(props: {
       data-meeting-thread={meeting.kind === "thread" ? meeting.thread : undefined}
       disabled={!ready}
       aria-label={ready ? "Join this meeting with audio" : reason}
-      onClick={() => void controller.joinMeeting(meeting, props.subject)}
+      onClick={() => {
+        void controller.joinMeeting(meeting, props.subject);
+        props.onStarted?.();
+      }}
       className={
         icon
           ? // The call button's own box, to the pixel: this is one row of header controls, and

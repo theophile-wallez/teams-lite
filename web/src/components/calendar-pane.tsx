@@ -18,6 +18,7 @@ import {
 import type { CalendarSettings } from "~/lib/store";
 import { cn } from "~/lib/utils";
 import { CalendarAgenda } from "./calendar-agenda";
+import { JoinWithLinkDialog } from "./join-with-link-dialog";
 import { CalendarEventPopover } from "./calendar-event-popover";
 import { useCalendarColors } from "./calendar-event";
 import { CalendarMonth } from "./calendar-month";
@@ -227,6 +228,13 @@ export function CalendarPane(props: { onBack?: () => void }) {
           onSelectMode={(next) => controller.setCalendarMode(next)}
           onToggleSetting={(key: keyof CalendarSettings) => controller.toggleCalendarSetting(key)}
         />
+
+        {/* The way into a meeting the calendar cannot show. It sits HERE because this is the
+            surface a meeting is looked for on, and because the alternative places are worse:
+            Settings is not where a meeting is joined, and the chat list has no meeting in it
+            to hang it off. It writes nothing to the calendar — joining is the calling plane,
+            which is the same reason an event may carry a Join button at all. */}
+        <JoinWithLinkDialog />
 
         <button
           type="button"
