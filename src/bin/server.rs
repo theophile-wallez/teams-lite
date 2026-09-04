@@ -12552,12 +12552,42 @@ impl Ctx {
             return;
         }
 
-        // The content-sharing session being GRANTED. It arrives here and not in the answer to
-        // the POST, which is `{}` — measured 2026-08-06 — so this is the moment this endpoint
-        // becomes the meeting's presenter, and `call_start_sharing` waits for it before the
-        // page offers a section. The links are kept on the session's own struct: merged into
-        // the call's, this frame's `leave` would overwrite the one a hangup posts to.
-        if frame.url.contains(calling::paths::CONVERSATION_ADD_MODALITY_SUCCESS) {
+        // THE SESSION ENDED — the service taking the screen back, which is what happens when
+        // somebody else presses Share (§ 10.4: the session changes hands). It is forgotten
+        // here, or the guard in `call_start_sharing` refuses every later press with `this call
+        // already holds a sharing session` and the reader can never share again in this call.
+        //
+        // The section is not torn down from here: the service rejects it in the same breath and
+        // the page's own `sectionIsStopped` reads that off the transceiver, which is the ONE
+        // path a capture is released on (AGENTS.md § Video in a meeting).
+        if frame.url.contains(calling::paths::CONVERSATION_CONTENT_SHARING_END) {
+            let mut plane = self.calling.lock().unwrap();
+            if let Some(call) = plane.call.as_mut().filter(|c| c.sharing.is_some()) {
+                eprintln!("[calling] the meeting ended our sharing session");
+                call.sharing = None;
+            }
+            return;
+        }
+
+        // The content-sharing session being GRANTED, on EITHER callback the service may use.
+        //
+        // `addModalitySuccess` is the conversation's own answer to the ask. `contentSharingUpdate`
+        // is the SESSION's, published in the `contentSharing.links.sessionUpdate` of the very POST
+        // that asks — and measured 2026-09-04 it is the one that matters here: over four live runs
+        // into a real meeting no `addModalitySuccess` frame EVER arrived, the wait timed out, and
+        // the screen section was then rejected for coming from an endpoint the service had no
+        // presenter record for. What proves the session was real all along is that its sibling
+        // `contentSharingEnd` DID arrive on every run — the service does not report the end of a
+        // session that never began, so the grant was being delivered to a callback nothing read.
+        //
+        // The answer to the POST stays `{}`, so neither of these is optional.
+        //
+        // The links are kept on the session's own struct: merged into the call's, this frame's
+        // `leave` would overwrite the one a hangup posts to, and giving a SHARE up would end the
+        // call. `from_frame` takes the DEEPEST `leave`, which on either frame is the session's.
+        if frame.url.contains(calling::paths::CONVERSATION_ADD_MODALITY_SUCCESS)
+            || frame.url.contains(calling::paths::CONVERSATION_CONTENT_SHARING_UPDATE)
+        {
             let mut plane = self.calling.lock().unwrap();
             if let Some(call) = plane.call.as_mut().filter(|c| !c.ended()) {
                 let correlation = call
