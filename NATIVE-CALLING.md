@@ -1,9 +1,16 @@
 # Native calling — audio only, the way the Teams web client does it
 
-Status: **a meeting join WORKS against the tenant, with audible audio both ways**
-(verified 2026-08-05: joined, held, voices heard, left cleanly — see § 8). A one-to-one call is built on the same plane and
-has never been rung: it has no sanctioned target, so the first one is the user's own click
-to somebody who agreed beforehand (§ 7).
+Status: **audio calling WORKS against the tenant, in every shape but a group call.** A
+MEETING join was verified 2026-08-05 (joined, held, voices heard, left cleanly — § 8) and
+again 2026-09-04 from a pasted LINK; a one-to-one call was verified 2026-09-04 in BOTH
+directions, with a colleague, voices heard each way — taking one is § 8a and placing one is
+§ 8b. A GROUP call has still never been rung: it is the same POST with a longer
+`participants.to`, it has no sanctioned target, so the first one is the user's own click to
+people who agreed beforehand (§ 7).
+
+Two things are open and each is written up where it belongs: hanging up an INCOMING call may
+not tell the caller (§ 8a), and SENDING a screen is still refused — narrowed 2026-09-04 to
+the sharing session never being granted, which is upstream of the SDP (§ 10.8).
 
 `src/calling.rs` signals, `web/src/lib/call-media.ts` carries the audio,
 `web/src/lib/ms-sdp.ts` is the one place an SDP is rewritten, and the whole flow is driven
