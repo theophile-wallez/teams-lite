@@ -34,6 +34,12 @@
 // produces a real offer with a real fingerprint and real candidates while nobody's actual
 // microphone is opened. That is the whole point: the SDP is what is under test.
 //
+// **And so is the CAMERA**, by the same flag: `getUserMedia({video})` answers with Chrome's own
+// rolling test pattern. It is a real video track — really encoded, really packetised — so
+// everything under test is real and no camera of the user's ever opens. The SCREEN is the same
+// bargain one flag over: this browser is headless, so its "entire screen" is the blank surface it
+// renders into (`--auto-select-desktop-capture-source`), and nothing of the user's is shown.
+//
 // **And it captures SILENCE, not Chrome's tone.** The fake device's default is a loud
 // repeating beep, and this meeting has real people in it — the user asked for it to stop
 // after the third run, which is a fair thing to ask of a driver that joins a room they are
@@ -47,6 +53,18 @@
 //   cd web && bun run join-live -- --local # the same meeting through this machine's front
 //   cd web && bun run join-live -- --hold 45   # stay 45s before hanging up
 //   cd web && bun run join-live -- --tone  # capture Chrome's beep instead of silence
+//
+// AND THE PAIR — two of this machine's own installs in the meeting at once, which is the only
+// end-to-end test of SENDING a picture that needs no second person (see {@link runPair}):
+//
+//   cd web && bun run join-live -- --pair            # 19442 sends its camera, 19440 watches
+//   cd web && bun run join-live -- --pair --share    # a screen instead
+//   cd web && bun run join-live -- --pair --swap     # the other way round
+//
+// It needs BOTH installs up, which is the user's own start:
+//
+//   systemctl --user enable --now teams-lite.target        # the staged pair, 19420/19440
+//   systemctl --user enable --now teams-lite-app.service   # the released build, 19422/19442
 
 import { chromium, type Browser, type Page } from "playwright-core";
 import { writeFileSync } from "node:fs";
@@ -270,6 +288,20 @@ export type JoinLiveSession = {
   send: (what: "screen" | "camera", holdMs?: number) => Promise<{ pressed: boolean; sending: string[] }>;
   /** OUR OWN offer, section by section — see {@link readLocalOffer}. */
   localOffer: () => Promise<string[]>;
+  /**
+   * Press one of the two sending controls and LEAVE it on.
+   *
+   * {@link JoinLiveSession.send} presses, holds and presses again, which is right for one
+   * session measuring its own offer and useless for a PAIR: the other install has to still be
+   * receiving when it looks. So the two halves are separate here, and `--pair` releases with
+   * {@link stopSendingNow} on the way out.
+   */
+  startSendingNow: (what: "screen" | "camera") => Promise<boolean>;
+  /** Press it again, if it is still on. Idempotent. */
+  stopSendingNow: (what: "screen" | "camera") => Promise<void>;
+  /** Every remote video TILE the stage is drawing, as the app itself labels it. The half a
+   *  receiver has to report: a mid, the service's own label, and whether it is a screen. */
+  remoteTiles: () => Promise<Array<{ mid: string; label: string; sharing: boolean }>>;
   /** Every description this side APPLIED, whole. For reading a refusal that names no line:
    *  the caller strips what must not be printed. */
   rawDescriptions: () => Promise<Array<{ type: string; sdp: string }>>;
@@ -392,6 +424,19 @@ export type MediaStats = {
   bytesReceived: number;
   packetsSent: number;
   packetsReceived: number;
+  /**
+   * Inbound RTP PER KIND, and `framesDecoded` with it — the one number that answers "did a
+   * picture arrive".
+   *
+   * The summed `bytesReceived` above cannot: audio flows on every working call, so a total in
+   * the hundreds of kilobytes says nothing about whether a single video frame ever came. Every
+   * measurement of the receive path so far read that total, which is why "no RTP arrives" and
+   * "no VIDEO RTP arrives" were never told apart.
+   */
+  inbound: Array<{ kind: string; bytes: number; packets: number; framesDecoded: number }>;
+  /** Outbound RTP per kind, for the SENDER's own half of a pair: bytes leaving on a video
+   *  track is what says the browser is really encoding into the section. */
+  outbound: Array<{ kind: string; bytes: number; packets: number; framesSent: number }>;
 };
 
 /**
@@ -492,6 +537,9 @@ export async function withJoinLive<T>(
       mediaStats: () => readMediaStats(page as Page),
       signals: () => readSignals(page as Page),
       send: (what, holdMs = SHARE_HOLD_MS) => sendSomething(page as Page, what, holdMs),
+      startSendingNow: (what) => startSendingNow(page as Page, what),
+      stopSendingNow: (what) => stopSendingNow(page as Page, what),
+      remoteTiles: () => readRemoteTiles(page as Page),
       localOffer: () => readLocalOffer(page as Page),
       rawDescriptions: () =>
         (page as Page).evaluate("window.__tlOffers || []") as Promise<
@@ -817,6 +865,7 @@ export async function readMediaStats(page: Page): Promise<MediaStats | null> {
     const stats = await pc.getStats();
     let bytesSent = 0, bytesReceived = 0, packetsSent = 0, packetsReceived = 0;
     let candidatePair = null;
+    const inbound = [], outbound = [];
     const candidates = new Map();
     stats.forEach((r) => {
       if (r.type === "local-candidate" || r.type === "remote-candidate") {
@@ -827,10 +876,22 @@ export async function readMediaStats(page: Page): Promise<MediaStats | null> {
       if (r.type === "outbound-rtp") {
         bytesSent += r.bytesSent || 0;
         packetsSent += r.packetsSent || 0;
+        outbound.push({
+          kind: r.kind || r.mediaType || "?",
+          bytes: r.bytesSent || 0,
+          packets: r.packetsSent || 0,
+          framesSent: r.framesSent || 0,
+        });
       }
       if (r.type === "inbound-rtp") {
         bytesReceived += r.bytesReceived || 0;
         packetsReceived += r.packetsReceived || 0;
+        inbound.push({
+          kind: r.kind || r.mediaType || "?",
+          bytes: r.bytesReceived || 0,
+          packets: r.packetsReceived || 0,
+          framesDecoded: r.framesDecoded || 0,
+        });
       }
       if (r.type === "candidate-pair" && r.state === "succeeded") {
         const local = candidates.get(r.localCandidateId) || {};
@@ -844,6 +905,7 @@ export async function readMediaStats(page: Page): Promise<MediaStats | null> {
       connectionState: pc.connectionState,
       iceConnectionState: pc.iceConnectionState,
       candidatePair, bytesSent, bytesReceived, packetsSent, packetsReceived,
+      inbound, outbound,
     };
   })()`) as Promise<MediaStats | null>;
 }
@@ -1112,8 +1174,7 @@ async function sendSomething(
   what: "screen" | "camera",
   holdMs: number,
 ): Promise<{ pressed: boolean; sending: string[] }> {
-  const testId = what === "screen" ? "call-share" : "call-camera";
-  const share = page.locator(`[data-testid="${testId}"]`).first();
+  const share = sendControl(page, what);
   if ((await share.count()) === 0) {
     console.log(`  no ${what} control on the stage — the call is not carrying media yet`);
     return { pressed: false, sending: [] };
@@ -1133,6 +1194,50 @@ async function sendSomething(
     await page.waitForTimeout(2_000);
   }
   return { pressed: true, sending };
+}
+
+/** The control on the stage for one of the two captures. One spelling, so `send` and the pair's
+ *  own press cannot disagree about which button they mean. */
+function sendControl(page: Page, what: "screen" | "camera") {
+  return page.locator(`[data-testid="${what === "screen" ? "call-share" : "call-camera"}"]`).first();
+}
+
+/** Press a sending control and leave it ON. See {@link JoinLiveSession.startSendingNow}. */
+async function startSendingNow(page: Page, what: "screen" | "camera"): Promise<boolean> {
+  const control = sendControl(page, what);
+  if ((await control.count()) === 0) {
+    console.log(`  no ${what} control on the stage — the call is not carrying media yet`);
+    return false;
+  }
+  console.log(`  pressing ${what} (and leaving it on)…`);
+  await control.click();
+  return true;
+}
+
+/** Press it again, if it is still on. */
+async function stopSendingNow(page: Page, what: "screen" | "camera"): Promise<void> {
+  const control = sendControl(page, what);
+  if ((await control.count()) === 0) return;
+  if ((await control.getAttribute("aria-pressed")) !== "true") return;
+  await control.click();
+  await page.waitForTimeout(1_500);
+}
+
+/** Every remote video tile the stage is drawing, as the app's own attributes state it. */
+async function readRemoteTiles(
+  page: Page,
+): Promise<Array<{ mid: string; label: string; sharing: boolean }>> {
+  const frames = page.locator('[data-testid="call-video-frame"]');
+  const out: Array<{ mid: string; label: string; sharing: boolean }> = [];
+  for (let i = 0; i < (await frames.count()); i += 1) {
+    const frame = frames.nth(i);
+    out.push({
+      mid: (await frame.getAttribute("data-mid")) ?? "?",
+      label: (await frame.getAttribute("data-label")) ?? "",
+      sharing: (await frame.getAttribute("data-sharing")) === "true",
+    });
+  }
+  return out;
 }
 
 /** What the BACKEND says this endpoint is sending, read off the stage's own attribute. */
@@ -1172,6 +1277,160 @@ export function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/** How long the receiver waits for a tile once the sender's capture is on. Two of the service's
+ *  own renegotiation cycles (~9 s each, § 10.3a), because the section arrives on one of them. */
+const PAIR_TILE_TIMEOUT_MS = 40_000;
+/** How long the picture is held once a tile exists, so `framesDecoded` is a rate rather than a
+ *  single frame that happened to land. */
+const PAIR_WATCH_MS = 15_000;
+
+/**
+ * TWO INSTALLS, ONE MEETING: the only end-to-end test of SENDING a camera or a screen that this
+ * machine can run by itself.
+ *
+ * **Every measurement of the send path so far was made ALONE in the meeting** (NATIVE-CALLING.md
+ * § 10.8: `received 0B`, and no `mediaRenegotiation` from the service, which is its own signal
+ * that it has nothing to negotiate). So "the POST is accepted and the capture is retained" was as
+ * far as anything could get: there was nobody to see the picture, and a conference SFU with no
+ * receiver in the meeting is a live hypothesis for every rejection that came before it. This
+ * closes that gap without needing a second person — the two installs on this machine hold a
+ * calling endpoint EACH (`endpoint_id_path` keys one per port), so the service sees two DEVICES
+ * and the meeting really has two participants.
+ *
+ * The RECEIVER joins first, deliberately: the service offers a section when the meeting has
+ * something to put on it, so the endpoint that is going to watch has to already be there when the
+ * capture starts.
+ *
+ * Both halves keep every rail the single-install path has — the same pinned meeting, the same
+ * proof out of the app's own state before each click, and a hang-up on every path out of both
+ * sessions, including a throw.
+ */
+async function runPair(opts: {
+  what: "screen" | "camera";
+  tone: boolean;
+  from: "calendar" | "chat";
+  receiver: "tailnet" | "local" | "released";
+  sender: "tailnet" | "local" | "released";
+}): Promise<void> {
+  console.log(
+    `\n  PAIR — ${opts.receiver} receives, ${opts.sender} sends its ${opts.what}\n` +
+      "  Two installs, two calling endpoints, one meeting.\n",
+  );
+  await withJoinLive(
+    async (receiver) => {
+      console.log("\n  [receiver] waiting to be in the meeting…");
+      const there = await receiver.waitForPhase(["connected", "ended"], 60_000);
+      if (there.phase !== "connected") {
+        throw new Error(
+          `the RECEIVER never connected (${there.phase ?? "-"} ${there.detail || there.notice}), ` +
+            "so there is nobody to see the picture and the run would measure nothing",
+        );
+      }
+      return withJoinLive(
+        async (sender) => {
+          console.log("\n  [sender] waiting to be in the meeting…");
+          const up = await sender.waitForPhase(["connected", "ended"], 60_000);
+          if (up.phase !== "connected") {
+            throw new Error(
+              `the SENDER never connected (${up.phase ?? "-"} ${up.detail || up.notice})`,
+            );
+          }
+          // Both endpoints are in. From here the sender's capture goes on and STAYS on, because
+          // the receiver has to be looking while it is.
+          if (!(await sender.startSendingNow(opts.what))) {
+            throw new Error(`the sender's stage drew no ${opts.what} control`);
+          }
+          try {
+            await reportPair(receiver, sender, opts.what);
+          } finally {
+            await sender.stopSendingNow(opts.what).catch(() => {});
+          }
+        },
+        { front: opts.sender, tone: opts.tone, from: opts.from },
+      );
+    },
+    { front: opts.receiver, tone: opts.tone, from: opts.from },
+  );
+}
+
+/** Wait for the receiver's tile, then say what BOTH ends measured — and end on a verdict. */
+async function reportPair(
+  receiver: JoinLiveSession,
+  sender: JoinLiveSession,
+  what: "screen" | "camera",
+): Promise<void> {
+  const wanted = what === "screen" ? "a shared screen" : "a camera";
+  const deadline = Date.now() + PAIR_TILE_TIMEOUT_MS;
+  let tiles: Array<{ mid: string; label: string; sharing: boolean }> = [];
+  for (;;) {
+    tiles = await receiver.remoteTiles();
+    if (tiles.some((tile) => tile.sharing === (what === "screen"))) break;
+    if (Date.now() > deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  console.log(
+    `\n  [receiver] tiles after waiting for ${wanted}: ` +
+      (tiles.length === 0 ? "NONE" : JSON.stringify(tiles)),
+  );
+  // Held, so the frame count is a rate rather than one frame that happened to land.
+  await new Promise((resolve) => setTimeout(resolve, PAIR_WATCH_MS));
+
+  const sending = await sender.callBar();
+  console.log(`\n  [sender] ${sending.phase ?? "-"} ${sending.detail}`);
+  console.log("  [sender] our own offer, section by section:");
+  for (const line of await sender.localOffer()) console.log(`      ${line}`);
+  const out = await sender.mediaStats();
+  if (out) {
+    console.log(
+      `  [sender] outbound: ${
+        out.outbound.map((r) => `${r.kind} ${r.bytes}B/${r.packets}p/${r.framesSent}f`).join("  ") ||
+        "(nothing)"
+      }`,
+    );
+  }
+  const inStats = await receiver.mediaStats();
+  if (inStats) {
+    console.log(
+      `  [receiver] inbound: ${
+        inStats.inbound
+          .map((r) => `${r.kind} ${r.bytes}B/${r.packets}p/${r.framesDecoded}f`)
+          .join("  ") || "(nothing)"
+      }`,
+    );
+  }
+  const signal = await receiver.signals();
+  console.log(`  [receiver] frames by path: ${JSON.stringify(signal.framePaths)}`);
+  for (const person of signal.publishers) {
+    console.log(
+      `  [receiver] roster ${person.name}${person.state ? ` (${person.state})` : ""}: ` +
+        JSON.stringify(person.mediaStreams),
+    );
+  }
+  for (const [path, lines] of Object.entries(signal.mediaLines)) {
+    console.log(`  [receiver] sdp on ${path}:`);
+    for (const line of lines) console.log(`      ${line}`);
+  }
+
+  // THE VERDICT, in one line, because that is the whole question this rig exists to answer.
+  const video = (inStats?.inbound ?? []).filter((r) => r.kind === "video");
+  const decoded = video.reduce((total, r) => total + r.framesDecoded, 0);
+  const bytes = video.reduce((total, r) => total + r.bytes, 0);
+  console.log(
+    `\n  VERDICT: ${
+      decoded > 0
+        ? `SEEN — ${decoded} video frames decoded (${bytes}B) from ${wanted}`
+        : bytes > 0
+          ? `RTP but no picture — ${bytes}B of video arrived and nothing decoded`
+          : tiles.length > 0
+            ? "a tile was drawn and NO video RTP arrived — the subscription is the open half"
+            : `no ${wanted} tile at all — the section was never negotiated for the receiver`
+    }\n` +
+      "  The journals hold the frames, one per install:\n" +
+      "    journalctl --user -u teams-lite-backend -n 80\n" +
+      "    journalctl --user -u teams-lite-app -n 80\n",
+  );
+}
+
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   // WHICH INSTALL drives, never which meeting. `--released` is the second install on this
@@ -1199,6 +1458,25 @@ if (import.meta.main) {
   // presenter-role question is beside the point.
   const share = argv.includes("--share");
   const camera = argv.includes("--camera");
+
+  // TWO INSTALLS IN ONE MEETING — see {@link runPair}. It is a MODE rather than a target: the
+  // meeting is the same constant, and what the flag chooses is how many of this machine's own
+  // installs are in it. `--from-chat` is the default here because the pinned meeting is in no
+  // calendar (see AUTHORIZED_MEETING_DAY), so the calendar search would find no button on either
+  // front and the run would fail before it measured anything.
+  if (argv.includes("--pair")) {
+    await runPair({
+      what: share ? "screen" : "camera",
+      tone,
+      from: argv.includes("--from-calendar") ? "calendar" : "chat",
+      // WHICH install does which, and the default is deliberate: the always-on service (19440)
+      // is the one the user's phone reaches and the one that is always up, so it watches, and
+      // the released build beside it (19442) is the one under test.
+      receiver: argv.includes("--swap") ? "released" : "local",
+      sender: argv.includes("--swap") ? "local" : "released",
+    });
+    process.exit(0);
+  }
 
   await withJoinLive(
     async (session) => {

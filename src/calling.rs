@@ -763,6 +763,46 @@ pub fn media_sections(sdp: &str) -> Vec<String> {
     out
 }
 
+/// Whether an SDP blob is an OFFER, read out of the blob itself.
+///
+/// **This is what tells a renegotiation apart from the answer to one, and reading it off a LINK
+/// instead is why a camera has never been seen.** `media_renegotiation_from_frame` used to
+/// classify a frame by whether it carried a `links.mediaAnswer` — but a `startOutgoingNegotiation`
+/// is REQUIRED to publish a `mediaRenegotiation` callback of its own (the service refused the POST
+/// by name until it did, § 8b), and the service then answers that negotiation on it. So the answer
+/// to our own camera offer arrived carrying an answer link, was read as a fresh OFFER, and applied
+/// to the connection as one — which in `have-local-offer` makes Chrome implicitly ROLL BACK the
+/// offer the camera was in. The section was never negotiated, no `mediaAnswer` frame was ever
+/// counted, and nothing anywhere reported it.
+///
+/// `a=setup:actpass` is the discriminator, and it is not a guess about this service: RFC 5763 has
+/// an offer OFFER both roles and an answer state the one it TOOK. `web/src/lib/ms-sdp.ts`'s own
+/// `isAnswer` already reads exactly this, for the same reason and in the same direction — read off
+/// the ABSENCE of `actpass` rather than the presence of a role, because one rejected section
+/// carrying a role of its own is enough to make a whole offer read as an answer.
+pub fn sdp_is_offer(sdp: &str) -> bool {
+    sdp.lines().any(|line| line.trim_end() == "a=setup:actpass")
+}
+
+/// Which of OUR callbacks the service posted to, as the trailing path alone.
+///
+/// The surl in front of it is a session key, so only the tail travels — the discipline
+/// [`media_sections`] and `web/scripts/join-live.ts` already hold for everything they print. It
+/// exists because "a media answer arrived" says nothing about WHICH negotiation it answers on a
+/// tenant that uses one callback for two jobs (see [`sdp_is_offer`]).
+pub fn callback_path(url: &str) -> &str {
+    // `…/callAgent/<session>/<correlation>/call/mediaAnswer/` — the last two segments are the
+    // whole of the answer, and everything before them names the call. A query goes first: the
+    // service appends one to some of the links it publishes (`?i=<ip>` on the forked leg, § 8a),
+    // and a path read through it would print the address rather than the door.
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rmatch_indices('/').nth(1) {
+        Some((at, _)) => &trimmed[at + 1..],
+        None => "?",
+    }
+}
+
 /// The content-sharing SESSION a meeting grants, and the links it hands back.
 ///
 /// **A meeting has ONE screen at a time, so sharing one is a session rather than a track.**
@@ -954,9 +994,16 @@ pub struct MediaRenegotiation {
 
 /// Read a renegotiation offer out of a frame, or `None` when the frame is not one.
 ///
-/// The test is the ANSWER LINK, not the body's name: a frame that offers media and tells us
-/// where to answer is a renegotiation, and one that does not is the answer to something we
-/// offered. That keeps the two apart without either reader guessing from a url.
+/// **The test is the SDP's own `a=setup:actpass`, and the link is only where to answer.** It used
+/// to be the ANSWER LINK — a frame that offered media and said where to answer read as a
+/// renegotiation, and one that did not read as the answer to something we offered — and that is
+/// wrong on this tenant in the one direction that matters: `startOutgoingNegotiation` must publish
+/// a `mediaRenegotiation` callback of its own, and the service answers our camera offer on it,
+/// carrying an answer link. So the answer read as an offer, the page applied it as one, and Chrome
+/// rolled our own offer back under it (see [`sdp_is_offer`]).
+///
+/// A blob that is an ANSWER therefore falls through here to [`media_answer_from_frame`], which is
+/// the reader that applies it to the offer it belongs to — whichever door the service used.
 pub fn media_renegotiation_from_frame(frame: &Value) -> Option<MediaRenegotiation> {
     let negotiation = [
         "/_decoded/mediaNegotiation",
@@ -973,6 +1020,10 @@ pub fn media_renegotiation_from_frame(frame: &Value) -> Option<MediaRenegotiatio
         // Some frames put the links beside the negotiation rather than inside it.
         .or_else(|| frame.pointer("/links/mediaAnswer").and_then(Value::as_str))?;
     let offer = negotiation.get("mediaContent").and_then(MediaContent::parse)?;
+    // An ANSWER is not a renegotiation, whatever links it carries beside it.
+    if !sdp_is_offer(&offer.blob) {
+        return None;
+    }
     Some(MediaRenegotiation {
         offer,
         answer_link: answer_link.to_string(),
@@ -3442,14 +3493,16 @@ mod tests {
     }
 
     /// The renegotiation the service makes ON ITS OWN, which is how a shared screen
-    /// arrives (NATIVE-CALLING.md § 10.3a). It is told from an answer by carrying a link to
-    /// answer ON, and reading it as an answer is what made a shared screen invisible.
+    /// arrives (NATIVE-CALLING.md § 10.3a). It is told from an answer by the SDP's own
+    /// `a=setup:actpass`, and reading it off a LINK instead is what made a shared screen
+    /// invisible — see the test below, which is the defect this one's discriminator was
+    /// changed for.
     #[test]
     fn a_media_renegotiation_is_read_as_an_offer_and_never_as_an_answer() {
         let frame = json!({
             "mediaNegotiation": {
                 "callModalities": ["audio", "ScreenViewer"],
-                "mediaContent": { "blob": "v=0\r\nm=video 3481 RTP/SAVP 107\r\n",
+                "mediaContent": { "blob": "v=0\r\nm=video 3481 RTP/SAVP 107\r\na=setup:actpass\r\n",
                                   "contentType": SDP_CONTENT_TYPE },
                 "links": { "mediaAnswer": "https://x/answer", "rejection": "https://x/no" },
             },
@@ -3460,13 +3513,81 @@ mod tests {
         assert_eq!(offered.reject_link.as_deref(), Some("https://x/no"));
         assert!(offered.offer.blob.contains("m=video"));
         assert_eq!(offered.modalities, vec!["audio", "ScreenViewer"]);
-        // An ANSWER to something we offered names no link to answer on, so it is not one.
+        // An ANSWER to something we offered is not one, on the plain path too.
         let answer = json!({
-            "mediaAnswer": { "mediaContent": { "blob": "v=0\r\n",
+            "mediaAnswer": { "mediaContent": { "blob": "v=0\r\na=setup:active\r\n",
                                                "contentType": SDP_CONTENT_TYPE } }
         });
         assert_eq!(media_renegotiation_from_frame(&answer), None);
         assert!(media_answer_from_frame(&answer).is_some());
+    }
+
+    /// **An ANSWER that carries an answer LINK is still an answer, and this is why no camera
+    /// has ever been seen.**
+    ///
+    /// `startOutgoingNegotiation` is REQUIRED to publish a `mediaRenegotiation` callback of its
+    /// own — the service refused the POST by name until it did (§ 8b) — and it then answers our
+    /// camera offer on it, naming where the next step goes. Classified by the presence of a
+    /// `links.mediaAnswer`, that answer read as a fresh OFFER: the page applied it as one, and in
+    /// `have-local-offer` Chrome implicitly ROLLED BACK the offer the camera was in. The section
+    /// was never negotiated, no `mediaAnswer` frame was ever counted (the measured run held
+    /// `{"/call/mediaRenegotiation/":2}` and no `mediaAnswer` at all), and nothing reported it.
+    #[test]
+    fn an_answer_is_not_a_renegotiation_however_many_links_it_carries() {
+        // The shape the service really posts to our own `mediaRenegotiation` callback: a
+        // `mediaNegotiation` body, an answer link beside it, and an ANSWER in the blob.
+        let frame = json!({
+            "mediaNegotiation": {
+                "callModalities": ["audio", "Video"],
+                "mediaContent": {
+                    "blob": "v=0\r\nm=audio 3478 RTP/SAVP 111\r\na=setup:passive\r\n\
+                             m=video 3481 RTP/SAVP 107\r\na=setup:passive\r\n",
+                    "contentType": SDP_CONTENT_TYPE,
+                },
+                "links": { "mediaAnswer": "https://x/answer", "rejection": "https://x/no" },
+            },
+        });
+        assert_eq!(
+            media_renegotiation_from_frame(&frame),
+            None,
+            "an answer read as an offer is applied to the connection as one, and the browser \
+             rolls our own pending offer back under it — which loses the camera in silence"
+        );
+        let answer = media_answer_from_frame(&frame).expect("the answer, on the same body");
+        assert!(answer.blob.contains("m=video"));
+    }
+
+    /// The discriminator itself, and the trap it is written to avoid.
+    #[test]
+    fn an_offer_is_told_from_an_answer_by_its_own_setup_role() {
+        assert!(sdp_is_offer("v=0\r\na=setup:actpass\r\n"));
+        assert!(!sdp_is_offer("v=0\r\na=setup:active\r\n"));
+        assert!(!sdp_is_offer("v=0\r\na=setup:passive\r\n"));
+        // Read off the ABSENCE of `actpass`, never the presence of a role — the lesson
+        // `web/src/lib/ms-sdp.ts`'s own `isAnswer` carries: an OFFER whose rejected section
+        // states a role of its own is still an offer, and scanning for `active` called it an
+        // answer.
+        assert!(sdp_is_offer(
+            "v=0\r\nm=audio 3478 RTP/SAVP 111\r\na=setup:actpass\r\n\
+             m=video 0 RTP/SAVP 107\r\na=setup:active\r\n"
+        ));
+        // A blob that states no role at all is not an offer: nothing may be applied as one on
+        // the strength of a line that is missing, and every real description carries one.
+        assert!(!sdp_is_offer("v=0\r\nm=audio 3478 RTP/SAVP 111\r\n"));
+    }
+
+    /// Which of our own callbacks a frame came in on, without the session key in front of it.
+    #[test]
+    fn a_callback_is_named_by_its_own_tail_and_never_by_the_surl() {
+        assert_eq!(
+            callback_path("https://go-eu.trouter.teams.microsoft.com/v3/c/x/callAgent/s/c1/call/mediaAnswer/"),
+            "call/mediaAnswer"
+        );
+        assert_eq!(callback_path("https://x/callAgent/s/c1/conversation/rosterUpdate/"), "conversation/rosterUpdate");
+        // A query is the service's own, and it carries an ADDRESS on the forked leg (§ 8a) — so it
+        // is cut before the path is read rather than printed as part of the door.
+        assert_eq!(callback_path("https://x/callAgent/s/c1/call/mediaAnswer/?i=1.2.3.4"), "call/mediaAnswer");
+        assert_eq!(callback_path("nothing"), "?");
     }
 
     /// Both spellings of a source request. The newer one addresses the section by mid and

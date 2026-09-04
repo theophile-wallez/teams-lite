@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { conferenceVideoCodecs, reservedKindFor, sectionIsStopped } from "./call-media";
+import {
+  conferenceVideoCodecs,
+  remoteOfferWouldRollBackOurs,
+  reservedKindFor,
+  sectionIsStopped,
+} from "./call-media";
 import { rejectedLabels, SHARING_LABEL } from "./ms-sdp";
 
 // A section the far side DROPPED. The service can reject a section this app offered, and the
@@ -35,6 +40,27 @@ describe("sectionIsStopped", () => {
 // How the same fact reads on the WIRE: the section still written down, its port zeroed. The
 // live path never needs this — it asks the transceiver — but the simulated media has none, so
 // it is what makes the failure above reviewable with no tenant and no camera.
+
+// The GLARE that cost every camera this app has ever tried to send: an offer of ours is pending
+// for a round trip after the press, the service's own next frame lands inside that window, and
+// applying it makes Chrome roll our offer back — silently, because the transceiver ends up rolled
+// back rather than stopped.
+
+describe("remoteOfferWouldRollBackOurs", () => {
+  it("says so while an offer of ours is waiting to be answered", () => {
+    expect(remoteOfferWouldRollBackOurs("have-local-offer")).toBe(true);
+  });
+
+  it("lets a remote offer through in every other state", () => {
+    // `stable` is the ordinary case — the service renegotiating on a settled call, which is the
+    // whole receive path and must never be refused. The other two are already mid-exchange and
+    // the queue in `liveCallMedia` is what serializes those.
+    expect(remoteOfferWouldRollBackOurs("stable")).toBe(false);
+    expect(remoteOfferWouldRollBackOurs("have-remote-offer")).toBe(false);
+    expect(remoteOfferWouldRollBackOurs("have-local-pranswer")).toBe(false);
+    expect(remoteOfferWouldRollBackOurs("closed")).toBe(false);
+  });
+});
 
 describe("rejectedLabels", () => {
   const section = (port: string, label: string) =>

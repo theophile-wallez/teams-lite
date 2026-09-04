@@ -12806,9 +12806,16 @@ impl Ctx {
             // No live call means there is nothing to renegotiate, and answering would put
             // this machine back into a call it has left.
             if let Some(id) = id {
+                // WHICH DOOR it came in on, beside what it offers. The service uses our
+                // `mediaRenegotiation` callback for the answer to a negotiation we started as
+                // well as for one of its own (§ 8b), so "an offer arrived" says nothing about
+                // which of the two until the path is beside it — and telling them apart wrong
+                // is what rolled every camera offer back under itself.
                 eprintln!(
-                    "[calling] media renegotiation offered: modalities={:?}",
-                    renegotiation.modalities
+                    "[calling] media renegotiation offered on {}: modalities={:?} sections={}",
+                    calling::callback_path(&frame.url),
+                    renegotiation.modalities,
+                    calling::media_sections(&renegotiation.offer.blob).join(" | ")
                 );
                 self.emit(
                     "call_media",
@@ -12856,7 +12863,8 @@ impl Ctx {
             // the service granted — and a screen share that was rejected mid-call left
             // nothing on this machine to read (`calling::media_sections`).
             eprintln!(
-                "[calling] a media answer arrived: {}",
+                "[calling] a media answer arrived on {}: {}",
+                calling::callback_path(&frame.url),
                 calling::media_sections(&answer.blob).join(" | ")
             );
             self.emit(

@@ -132,6 +132,17 @@ export type CallMedia = {
    */
   readonly negotiated: boolean;
   /**
+   * Whether an offer of OURS is still waiting to be answered.
+   *
+   * It is the state a camera lives in between the press and the service's answer, and it is the
+   * one this app used to sit in for ever: nothing here times an offer out, so an answer that
+   * never comes left the connection in `have-local-offer` with the camera light on, the button
+   * saying the meeting could see it, and nothing going out. Every later renegotiation was then
+   * rolled back under it by the browser — which is the failure `answerRemoteOffer` now refuses
+   * to be part of, and which is only safe to refuse because this can be BOUNDED.
+   */
+  readonly offerPending: boolean;
+  /**
    * Take back an offer of ours the far side answered in a way this browser cannot read, and
    * release what that offer was carrying.
    *
@@ -609,6 +620,25 @@ export function sectionIsStopped(
 }
 
 /**
+ * Whether applying a REMOTE offer right now would roll our own offer back under us.
+ *
+ * **This is the glare that has cost every camera this app has ever tried to send.** A capture
+ * press applies its section locally and then waits a round trip for the service's answer, and the
+ * service's own next frame lands inside that window — so `setRemoteDescription({type:"offer"})`
+ * arrives in `have-local-offer`, where Chrome performs an IMPLICIT ROLLBACK: the camera's
+ * `sendonly` reverts, the answer describes the service's audio-only offer instead, and nothing
+ * anywhere reports it. The transceiver is rolled back rather than STOPPED, so
+ * {@link LocalSenders.stoppedKinds} finds nothing to release, and the backend still says
+ * `sending: camera` because it recorded the RPC's own params.
+ *
+ * Pure and exported so the rule is pinned rather than read: it is one comparison, and a mutation
+ * of it is silent in every test that does not name it.
+ */
+export function remoteOfferWouldRollBackOurs(state: RTCSignalingState): boolean {
+  return state === "have-local-offer";
+}
+
+/**
  * What this page is sending, and the transceivers it goes out on.
  *
  * A transceiver is REUSED per kind: a camera turned off and on again takes the section it
@@ -972,6 +1002,11 @@ function liveCallMedia(
       // is exactly the question `negotiated` asks.
       return pc.currentRemoteDescription !== null;
     },
+    get offerPending() {
+      // `have-local-offer` is exactly "we have offered and nobody has answered": the browser
+      // leaves it the moment an answer is applied, and a rollback leaves it too.
+      return !stopped && pc.signalingState === "have-local-offer";
+    },
     async abandonLocalOffer(): Promise<{ released: SendKind[]; offer: string | null }> {
       if (stopped) return { released: [], offer: null };
       // The rollback is queued with every other description change, because it is one: run
@@ -997,6 +1032,29 @@ function liveCallMedia(
     async answerRemoteOffer(sdp: string): Promise<string | null> {
       const run = negotiating.then(async () => {
         if (stopped) return null;
+        // GLARE, and it is the reason a camera has never been seen. An offer of OURS is
+        // pending here whenever the user has just pressed a capture: the section is applied
+        // locally, the POST is a round trip away, and the service's next frame lands inside
+        // that window. `setRemoteDescription({type:"offer"})` in `have-local-offer` makes
+        // Chrome implicitly ROLL BACK our offer — so the camera's `sendonly` reverted, the
+        // answer described the service's audio-only offer instead, and nothing reported it:
+        // the transceiver was rolled back rather than stopped, so `stoppedKinds` found
+        // nothing and `call.sending` still said `camera` because the backend recorded the
+        // RPC's own params.
+        //
+        // The SERVICE is authoritative — it is the SFU — but our own offer is the thing the
+        // user just asked for, so it is not thrown away silently. This offer is DROPPED,
+        // which is exactly the contract the doc above states for one that cannot be answered
+        // right now, and the service renegotiates again within seconds. What makes that safe
+        // is the bound on the other side: an offer of ours that is never answered is
+        // abandoned rather than left pending for ever (see `abandonLocalOffer`'s caller).
+        if (remoteOfferWouldRollBackOurs(pc.signalingState)) {
+          console.warn(
+            "[call] a media offer arrived while ours was still pending — dropping theirs " +
+              "rather than rolling ours back; the service offers again",
+          );
+          return null;
+        }
         // The labels come off the OFFER, and they are read before it is applied: the
         // service says which section is a screen and which is a camera, the browser's own
         // description says neither, and the answer has to put each one back.
@@ -1158,6 +1216,11 @@ export function simulatedCallMedia(options: { answering: boolean }): CallMedia {
     get negotiated() {
       return negotiated;
     },
+    // Always FALSE here, and that is the honest answer rather than a shortcut: this stand-in
+    // holds no connection, so an offer of its own is complete the moment it is made — and the
+    // mock answers every one of them in its response. A hopeful `true` would make the bound the
+    // store puts on a pending offer fire against a mock that has nothing pending.
+    offerPending: false,
     async abandonLocalOffer(): Promise<{ released: SendKind[]; offer: string | null }> {
       // No connection to roll back — what the stand-in owns is what was being sent, and
       // releasing it is the half the surface shows.

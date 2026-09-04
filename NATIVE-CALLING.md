@@ -12,15 +12,32 @@ Two things are open and each is written up where it belongs.
 
 Hanging up an INCOMING call may not tell the caller (§ 8a).
 
-SENDING a camera or a screen is no longer REFUSED, and is not yet SEEN. Two beliefs about it
-were disproved on 2026-09-04 and both had stood for a month: it is not about the presenter role
-(the session is created and this endpoint holds it), and it is not about sharing at all — a
-CAMERA was refused identically, and a camera asks for no session. What it really was is the
-DOOR: the acceptance names `startOutgoingNegotiation` beside `mediaRenegotiation` and only the
-second had ever been posted to. On the first, with the two fields the service names, the POST is
-accepted and the capture is retained. What is still missing is that no `mediaAnswer` comes back
-for that offer and nobody has yet watched a camera arrive — every run that got this far was
-alone in the meeting (§ 10.8).
+SENDING a camera or a screen is no longer REFUSED, and is not yet SEEN. Three beliefs about it
+were disproved on 2026-09-04 and the first two had stood for a month: it is not about the presenter
+role (the session is created and this endpoint holds it), and it is not about sharing at all — a
+CAMERA was refused identically, and a camera asks for no session. Then the DOOR: the acceptance
+names `startOutgoingNegotiation` beside `mediaRenegotiation` and only the second had ever been
+posted to. On the first, with the two fields the service names, the POST is accepted and the
+capture is retained.
+
+**And the third is why that still showed nobody a picture: THE ANSWER WAS ARRIVING AND BEING READ
+AS A FRESH OFFER.** `startOutgoingNegotiation` is required to publish a `mediaRenegotiation`
+callback of its own, the service answers our camera offer on it, and this app classified an
+incoming frame as an offer-or-answer by whether it carried a `links.mediaAnswer` — which that
+answer does. So the answer was applied to the connection as an OFFER, and in `have-local-offer`
+Chrome performs an implicit ROLLBACK: the camera's `sendonly` reverted, the answer this side then
+produced described the service's audio-only offer, and nothing anywhere reported it. It fits every
+number the accepted run left behind — `{"/call/mediaRenegotiation/":2}` and no `mediaAnswer` at
+all, renegotiations "carrying audio only", and a backend still saying `sending: camera` because it
+recorded the RPC's own params. An offer and an answer are told apart by the SDP's own
+`a=setup:actpass` now (`calling::sdp_is_offer`), and the page refuses to let a remote offer roll
+its own back in silence.
+
+**That is UNVERIFIED against the tenant, and the rig for verifying it needs no second person:**
+`cd web && bun run join-live -- --pair` puts BOTH of this machine's installs in the pinned meeting
+— they hold a calling endpoint each, so the service sees two devices — has one send its camera and
+the other report whether a picture decoded (§ 10.8). Every earlier send measurement was made alone
+in the meeting, which is why "the POST is accepted" was as far as any of them could get.
 
 `src/calling.rs` signals, `web/src/lib/call-media.ts` carries the audio,
 `web/src/lib/ms-sdp.ts` is the one place an SDP is rewritten, and the whole flow is driven
@@ -700,27 +717,119 @@ section. `start_outgoing_negotiation_payload` shares its inner statement with th
 the two cannot drift, and the extra link is added to the outgoing one ALONE — a body carrying a
 field the other door does not know is how this plane earns a `400` that names nothing.
 
-#### What is still missing, and what to try next
+#### THE ANSWER WAS ARRIVING ALL ALONG, ON THE DOOR THE NEW ONE REQUIRES
 
-Nobody has SEEN a camera. Every run that got this far was alone in the meeting (`received 0B`),
-so there was no one to see it — that is the first thing to fix, and it needs a person rather
-than a change.
+Two facts came out of the accepted run and read as unexplained. They are one bug:
 
-Two facts from the frames of the accepted run, both unexplained:
-
-- **No `mediaAnswer` comes back for our offer.** `frames by path` held
+- **No `mediaAnswer` came back for our offer.** `frames by path` held
   `{"/call/acceptance/":1,"/call/mediaRenegotiation/":2,"/call/mediaAcknowledgement/":2}` and no
-  `mediaAnswer` and no `rejection` at all. The service accepted the POST and then said nothing
-  about the section.
-- **Its own renegotiations still carry audio only** — `audio port=3480 label:main-audio` and
-  nothing else — where a meeting that had accepted a video channel would be expected to describe
-  one.
+  `mediaAnswer` and no `rejection` at all.
+- **Its own renegotiations still carried audio only** — `audio port=3480 label:main-audio` and
+  nothing else — where a meeting that had accepted a video channel would describe one.
 
-So the next questions, in order: whether a second participant changes either of those; then the
-four rewrites § 2.5 lists as unimplemented (the simulcast envelope, the `red` payload, a
-per-section fingerprint, `a=rtcp` on an offer), one variable per run against this same meeting;
-and the `x-data`/`data` section the service rejects beside the video, which is not ours — it
-arrives in the service's offer and we answer it.
+`startOutgoingNegotiation` REQUIRES its body to publish a `mediaRenegotiation` link of its own —
+the service refused the POST by name until it did, twice, § 8b above — and the field means exactly
+what it says: it is where the service renegotiates what this offer started. So the answer comes
+back on `/call/mediaRenegotiation/`, which is why that path was posted to twice and `mediaAnswer`
+never was.
+
+**And this app read it as a fresh OFFER.** `media_renegotiation_from_frame` classified a frame by
+whether it carried a `links.mediaAnswer`, and its own doc comment said so: "a frame that offers
+media and tells us where to answer is a renegotiation, and one that does not is the answer to
+something we offered". The service's answer carries one. Both readers match the same
+`/mediaNegotiation` pointer and the renegotiation one runs first, so the answer never reached
+`media_answer_from_frame` at all.
+
+What that does to the connection is the whole failure, and none of it is reported:
+
+1. the page is handed `kind: "offer"` and calls `answerRemoteOffer`;
+2. `setRemoteDescription({type:"offer"})` in `have-local-offer` is GLARE, and Chrome's own
+   behaviour there is an **implicit rollback** — our offer is undone;
+3. so the camera's `sendonly` reverts and the answer this side produces describes the service's
+   audio-only offer instead;
+4. and nothing notices: the transceiver is ROLLED BACK rather than stopped, so
+   `LocalSenders.stoppedKinds` finds nothing to release, `noteAccepted` sees no `sendonly`
+   `currentDirection`, and `call.sending` still reads `camera` because the backend recorded what
+   the RPC's params claimed rather than what the media did.
+
+Three changes close it, and each is pinned by a test:
+
+- **`calling::sdp_is_offer`** — an offer is told from an answer by the SDP's own
+  `a=setup:actpass`, which is RFC 5763 rather than a guess about this service, and which
+  `web/src/lib/ms-sdp.ts`'s own `isAnswer` already read for the same reason. Read off the ABSENCE
+  of `actpass`, never the presence of a role: one rejected section carrying a role of its own is
+  enough to make a whole offer read as an answer. An ANSWER now falls through to
+  `media_answer_from_frame`, whichever door it came in on.
+- **`remoteOfferWouldRollBackOurs`** (`web/src/lib/call-media.ts`) — a remote offer arriving while
+  ours is pending is DROPPED rather than applied. The service is authoritative and it offers again
+  within seconds; what must not happen is our own offer being undone in silence.
+- **A bound on the wait** (`MEDIA_ANSWER_TIMEOUT_MS`, `Controller.boundTheMediaAnswer`) — which is
+  what makes dropping theirs safe. An offer of ours that nobody answers used to leave the
+  connection in `have-local-offer` for the rest of the call: camera light on, button saying the
+  meeting can see it, nothing going out. It is now given up down the path a refused answer already
+  took, so the capture is released and the user is told.
+
+**A SECOND, SEPARATE DEFECT on the receive side went with it: the answer never declared `Video`.**
+`answerRemoteOffer` posted `["audio", "ScreenViewer"]` — so this endpoint said it would watch a
+SCREEN and never said it would watch a CAMERA, in a vocabulary where `Video` is the camera modality
+in either direction (§ 10.1). It is declared now. Nothing about the user is published by it: the
+section is `recvonly` and no camera opens until they press for one. It explains nothing about the
+screen's own `bytesReceived: 0`, which stays open below.
+
+The next questions, in order: run the PAIR (below); then the four rewrites § 2.5 lists as
+unimplemented (the simulcast envelope, the `red` payload, a per-section fingerprint, `a=rtcp` on an
+offer), one variable per run; and the `x-data`/`data` section the service rejects beside the video,
+which is not ours — it arrives in the service's offer and we answer it.
+
+#### THE PAIR: two of this machine's own installs, in one meeting
+
+**Every send measurement in this file was made ALONE in the meeting**, and that is the flaw they
+share: `received 0B`, no other roster entry, and — the service's own signal that it has nothing to
+negotiate — no unprompted `mediaRenegotiation` at all (§ 10.3a measured that of five joins, the
+four that got one had a SECOND endpoint and the one that joined an empty meeting got none in 30 s).
+A conference SFU declining to allocate a video channel with no receiver in the meeting fits every
+rejection recorded here, and no single-install run can rule it out.
+
+It needs no second person. The two installs on this machine hold a calling endpoint EACH
+(`endpoint_id_path` keys one per port), so the service sees two DEVICES and the meeting really has
+two participants — the same arrangement as a phone beside a laptop.
+
+    cd web && bun run join-live -- --pair            # 19442 sends its camera, 19440 watches
+    cd web && bun run join-live -- --pair --share    # a screen instead
+    cd web && bun run join-live -- --pair --swap     # the other way round
+
+An earlier note in this file said the released build "is refused writes by its own write lock, so
+it cannot join". That is no longer true and has not been since a PINNED token stopped being
+published (AGENTS.md § Running the released build beside the staged one): each launcher mints a
+token per backend it spawns and hands it to the web server it runs in-process, so 19442's own front
+writes perfectly well.
+
+Both installs have to be UP, which is the user's own start — tooling may not start a send-capable
+backend (AGENTS.md § Automation safety):
+
+    systemctl --user enable --now teams-lite.target        # the staged pair, 19420/19440
+    systemctl --user enable --now teams-lite-app.service   # the released build, 19422/19442
+
+What the run answers, in one line, is the question every earlier one could not: **did a picture
+decode.** Three things were added for it, and each closes a gap in what was being read:
+
+- **Inbound RTP PER KIND, with `framesDecoded`.** The summed `bytesReceived` every earlier
+  measurement printed cannot answer it — audio flows on every working call, so a total in the
+  hundreds of kilobytes says nothing about whether one video frame ever arrived. "No RTP arrives"
+  and "no VIDEO RTP arrives" were never told apart.
+- **The RECEIVER's own tiles**, as the app labels them (`data-mid`, `data-label`, `data-sharing`),
+  so "a tile was drawn and nothing came down it" is distinguishable from "no section was ever
+  negotiated for the receiver" — which are different bugs with different next moves.
+- **WHICH DOOR each frame came in on**, in the journal
+  (`calling::callback_path`): `[calling] a media answer arrived on call/mediaRenegotiation: …`.
+  With one callback doing two jobs, "a media answer arrived" said nothing about which negotiation
+  it answered, and that is precisely what hid this bug.
+
+The RECEIVER joins first, deliberately: the service offers a section when the meeting has something
+to put on it, so the endpoint that is going to watch has to already be there when the capture
+starts. Both halves keep every rail the single-install path has — the same pinned meeting, the same
+proof out of the app's own state before each click, and a hang-up on every path out of both
+sessions, including a throw.
 
   Three things WERE fixed on the way to that, each a real defect: a join published no
   `addModalitySuccess` link at all (so a grant could not have been delivered even by a tenant
@@ -1385,11 +1494,18 @@ attempt cost.
   its own signal that it has something to negotiate. § 10.3a already measured that: of five
   joins, the four that got a renegotiation had a SECOND endpoint and the one that joined an empty
   meeting got none in 30 s. A conference SFU refusing to allocate a video channel with no
-  receiver in the meeting fits every measurement above, and it is the one hypothesis this
-  machine cannot test by itself — the second install (`--released`, the front this driver grew
-  for exactly that) is refused writes by its own write lock, so it cannot join.
+  receiver in the meeting fits every measurement above, and it was read here as the one hypothesis
+  this machine cannot test by itself — the second install (`--released`, the front this driver grew
+  for exactly that) being refused writes by its own write lock, so unable to join.
 
-  **So the next measurement needs a second participant in the meeting, and nothing else.**
+  **THAT LAST CLAUSE IS NO LONGER TRUE, and correcting it is what unlocked the pair rig.** A PINNED
+  write token stopped being published (AGENTS.md § Running the released build beside the staged
+  one): each launcher mints one per backend it spawns and hands it to the web server it runs
+  in-process, so 19442's own front writes perfectly well and holds a calling endpoint of its own.
+  `bun run join-live -- --pair` is what that buys — see § THE PAIR at the end of § 8b.
+
+  **So the next measurement needs a second participant in the meeting, and this machine can be
+  one.**
 - **MEASURED WITH A SECOND PARTICIPANT SHARING (2026-08-06), and it inverted the diagnosis.**
   The user joined the pinned meeting from real Teams with their camera on and their screen
   shared, and `bun run join-live` drove three variants against it. The roster named their

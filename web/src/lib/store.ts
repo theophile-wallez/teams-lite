@@ -1012,6 +1012,17 @@ const TYPING_TIMEOUT_MS = 8000;
 // must not leave a banner ringing forever. Comfortably past Teams' own ring window.
 const CALL_RING_TIMEOUT_MS = 45_000;
 
+/**
+ * How long an offer of ours may wait for its answer before the capture it carries is given up.
+ *
+ * See {@link Controller.boundTheMediaAnswer}. Generous rather than tight: the answer arrives in
+ * the POST's own response on this tenant sometimes and on a callback frame at others, and a
+ * renegotiation crossing a relay is not instant — so a bound that fired early would take a
+ * camera down that was about to work. What it must be shorter than is the reader's patience,
+ * because until it fires the button says the meeting can see them.
+ */
+const MEDIA_ANSWER_TIMEOUT_MS = 12_000;
+
 /** How long a fetched presence is trusted before the next person card refetches
  *  it. Short enough that a colleague who just joined a meeting reads as busy on
  *  the next hover, long enough that re-hovering the same name (or several
@@ -2533,7 +2544,18 @@ export class TeamsController {
     try {
       const answer = await media.answerRemoteOffer(signal.sdp);
       if (!answer) return;
-      await this.backend.callAnswerMedia(signal.call_id, answer, ["audio", "ScreenViewer"]);
+      // WHAT this endpoint is willing to RECEIVE, and `Video` had been missing from it — which
+      // is a second reason a colleague's camera has never appeared here. The modality list is
+      // the service's own vocabulary (§ 10.1): `ScreenViewer` is watching a screen and `Video`
+      // is a camera, in either direction. This app declared the first unconditionally and the
+      // second only while SENDING one, so an answer to an offer carrying `main-video` never
+      // said the section was wanted. Declaring it publishes nothing about the user: the section
+      // is `recvonly` and no camera is opened until they press for one.
+      await this.backend.callAnswerMedia(signal.call_id, answer, [
+        "audio",
+        "Video",
+        "ScreenViewer",
+      ]);
       await this.subscribeToRemoteVideo();
     } catch (error) {
       console.error("[call] a media renegotiation could not be answered", error);
@@ -2728,6 +2750,12 @@ export class TeamsController {
       }
       const offer = on ? await media.startSending(kind) : await media.stopSending(kind);
       await this.publishSending(offer, `${on ? "start" : "stop"} ${kind}`);
+      // An offer that turns a capture ON and is never answered is the state this whole surface
+      // must not sit in: the camera light on, the button saying the meeting can see it, and
+      // nothing going out. Bounded HERE rather than in the media, because only this side knows
+      // the answer may also arrive on a frame — and only on `on`, because abandoning an
+      // unanswered STOP would report a failure for a capture that is already down.
+      if (on) this.boundTheMediaAnswer(call.id);
     } catch (error) {
       // A refused camera is a decision, not a fault, so it is said in the user's words and
       // the call carries on. Whatever happened, the capture is released: `startSending` stops
@@ -2746,6 +2774,32 @@ export class TeamsController {
   /** Whether the meeting has granted this endpoint its content-sharing session. Not reactive:
    *  nothing on screen is drawn from it, and the button reads the backend's own `sending`. */
   private sharingSessionHeld = false;
+
+  /**
+   * Give up on an offer of ours that nobody answered, so the camera light goes out.
+   *
+   * **This is what makes dropping a remote offer during glare safe.** `answerRemoteOffer` now
+   * refuses to apply the service's offer while ours is pending — otherwise the browser rolls
+   * ours back and the capture is lost in silence — so without a bound here a single unanswered
+   * offer would stall the RECEIVE path for the rest of the call as well as the send one.
+   *
+   * The window is generous on purpose: the answer arrives in the POST's own response on this
+   * tenant sometimes and on a callback frame at others, and a renegotiation crossing a relay is
+   * not instant. What it costs when it fires is one capture and one sentence; what it saves is
+   * a call that quietly stops negotiating anything at all.
+   */
+  private boundTheMediaAnswer(callId: string): void {
+    if (!this.callMedia?.offerPending) return; // answered in the POST's own response
+    setTimeout(() => {
+      const media = this.callMedia;
+      const call = this.get().callStatus.call;
+      // A different call, a call that has ended, or an answer that arrived meanwhile: all three
+      // mean there is nothing to give up on.
+      if (!media || !media.offerPending || call?.id !== callId) return;
+      console.error("[call] our media offer was never answered — taking it back");
+      void this.abandonCallRenegotiation();
+    }, MEDIA_ANSWER_TIMEOUT_MS);
+  }
 
   /**
    * Give the meeting's sharing session back, once, if this endpoint holds one.
