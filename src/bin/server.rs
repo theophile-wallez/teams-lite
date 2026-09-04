@@ -5973,13 +5973,17 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
 
         // Answer the ringing call with our own SDP.
         //
-        // One POST where the service gave us an `accept` link — the acceptance
-        // carries the answer, which is what the web client does — and a plain
-        // `mediaAnswer` where it did not.
+        // THREE doors, and each wants its own envelope — which is why the body is chosen by
+        // the link that MATCHED and never by "whichever url we found". An `accept` link
+        // takes the acceptance, and the acceptance carries the answer, which is what the web
+        // client does. `attach` is what a FORKED one-to-one invite offers on this tenant
+        // (see `Links::attach`), and posting the acceptance body there is refused `400` with
+        // `The Attach field is required.` And a bare `mediaAnswer` is the fallback for an
+        // invite that named neither.
         "call_accept" => {
             let call_id = param_str(params, "call_id")?;
             let sdp = param_str(params, "sdp")?;
-            let (local, callbacks, accept, media_answer) = {
+            let (local, callbacks, accept, attach, media_answer) = {
                 let plane = ctx.calling.lock().unwrap();
                 let call = plane
                     .call
@@ -5990,16 +5994,22 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     call.local.clone(),
                     call.callbacks.clone(),
                     call.links.accept().map(str::to_string),
+                    call.links.attach().map(str::to_string),
                     call.links.media_answer().map(str::to_string),
                 )
             };
             let answer = calling::MediaContent::sdp(sdp);
-            let (url, payload) = match (accept, media_answer) {
-                (Some(url), _) => (url, calling::acceptance_payload(&local, &answer, &callbacks)),
-                (None, Some(url)) => {
+            let (url, payload) = match (accept, attach, media_answer) {
+                (Some(url), _, _) => {
+                    (url, calling::acceptance_payload(&local, &answer, &callbacks))
+                }
+                (None, Some(url), _) => {
+                    (url, calling::attach_payload(&local, &answer, &callbacks))
+                }
+                (None, None, Some(url)) => {
                     (url, calling::media_answer_payload(&local, &answer, &callbacks, &[calling::MODALITY_AUDIO]))
                 }
-                (None, None) => {
+                (None, None, None) => {
                     ctx.end_call_locally("CallEndReasonNoAcceptLink").await;
                     anyhow::bail!("call_accept: the invite carried no link to answer on")
                 }

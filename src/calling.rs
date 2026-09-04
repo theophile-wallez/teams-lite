@@ -336,17 +336,25 @@ impl Links {
     }
 
     /// Accept an incoming call (we take the call; media is negotiated separately).
-    ///
-    /// `attach` is the third spelling and it is the one that MATTERS on this tenant. A real
-    /// one-to-one invite, measured 2026-09-04, carried `attach`, `progress`, `reject` and
-    /// **no `accept` at all** — and its `to.endpointId` was all zeroes, so the invite is
-    /// addressed to the USER rather than to one device and is FORKED to every endpoint they
-    /// are signed in on. The link's own path says so (`/cc/v1/forked/…/attach`): an endpoint
-    /// that wants the call attaches itself to that leg, which is what taking the call IS
-    /// here. Without this the accept fell through to `mediaAnswer`, which the same invite
-    /// gives as the shorthand `cc://ma`, so an incoming call could not be answered at all.
     pub fn accept(&self) -> Option<&str> {
-        self.get(&["accept", "acceptance", "attach"])
+        self.get(&["accept", "acceptance"])
+    }
+
+    /// ATTACH this endpoint to a forked incoming call, which is how a call is taken on this
+    /// tenant — and it is a DIFFERENT door from `accept`, with a body of its own.
+    ///
+    /// A real one-to-one invite, measured 2026-09-04, carried `attach`, `progress`, `reject`
+    /// and no `accept` at all — its `to.endpointId` was all zeroes, so the invite is
+    /// addressed to the USER rather than to one device and forked to every endpoint they are
+    /// signed in on. The link's own path says so (`/cc/v1/forked/…/attach`).
+    ///
+    /// It is deliberately NOT a third spelling of `accept`. That was tried first and the
+    /// service refused it `400` with the field named — `{"errors":{"Attach":["The Attach
+    /// field is required."]}}` — because the two doors want two envelopes
+    /// ([`attach_payload`] against [`acceptance_payload`]). Folding them back together would
+    /// post the wrong body to whichever link happened to win.
+    pub fn attach(&self) -> Option<&str> {
+        self.get(&["attach"])
     }
 
     /// Refuse an incoming call.
@@ -1153,6 +1161,48 @@ pub fn invitation_payload(
     })
 }
 
+/// What TAKING a call says, whichever door it is posted through.
+///
+/// Two doors carry the same statement — "I am this participant, I accept audio, here is my
+/// answer, and here is where to reach me for the rest of the call" — so it is built once.
+/// `acceptance_payload` names it `callAcceptance` and `attach_payload` names it `attach`; a
+/// second copy of the fields would drift from the first the day either door gains one.
+fn taking_the_call(
+    local: &LocalParticipant,
+    answer: &MediaContent,
+    callbacks: &CallbackBase,
+) -> Value {
+    json!({
+        "sender": local.json(),
+        "acceptedCallModalities": [MODALITY_AUDIO],
+        "links": {
+            "mediaRenegotiation": callbacks.link(paths::CALL_MEDIA_RENEGOTIATION),
+            "transfer": callbacks.link(paths::CALL_TRANSFER),
+            "replacement": callbacks.link(paths::CALL_REPLACEMENT),
+            "end": callbacks.link(paths::CALL_END),
+        },
+        "mediaContent": answer.json(),
+    })
+}
+
+/// Build the body that ATTACHES this endpoint to a forked incoming call — which is how a
+/// call is taken on this tenant.
+///
+/// A one-to-one invite here is addressed to the USER (`to.endpointId` is all zeroes) and
+/// forked to every endpoint they are signed in on, so it offers `attach` and neither
+/// `accept` nor `acceptance`. Measured 2026-09-04: posting the ACCEPTANCE body to that link
+/// is refused `400` with the field named —
+/// `{"errors":{"Attach":["The Attach field is required."]}}` — so the door is right and only
+/// the envelope was wrong. The service names the property `Attach`; it binds case
+/// insensitively, and the lowercase spelling is the one every other body here uses.
+pub fn attach_payload(
+    local: &LocalParticipant,
+    answer: &MediaContent,
+    callbacks: &CallbackBase,
+) -> Value {
+    json!({ "attach": taking_the_call(local, answer, callbacks) })
+}
+
 /// Build the body that accepts an incoming call: we take it, and we publish the
 /// links the service may use for the rest of the call.
 pub fn acceptance_payload(
@@ -1160,19 +1210,7 @@ pub fn acceptance_payload(
     answer: &MediaContent,
     callbacks: &CallbackBase,
 ) -> Value {
-    json!({
-        "callAcceptance": {
-            "sender": local.json(),
-            "acceptedCallModalities": [MODALITY_AUDIO],
-            "links": {
-                "mediaRenegotiation": callbacks.link(paths::CALL_MEDIA_RENEGOTIATION),
-                "transfer": callbacks.link(paths::CALL_TRANSFER),
-                "replacement": callbacks.link(paths::CALL_REPLACEMENT),
-                "end": callbacks.link(paths::CALL_END),
-            },
-            "mediaContent": answer.json(),
-        }
-    })
+    json!({ "callAcceptance": taking_the_call(local, answer, callbacks) })
 }
 
 /// Build the body that answers a media offer on its own (a renegotiation, or an
@@ -2297,7 +2335,11 @@ mod tests {
             }}
         }));
 
-        assert_eq!(links.accept(), Some(format!("{base}/attach?i=10-128-136-201").as_str()));
+        // `attach` is its OWN door, not a spelling of `accept`: the two want different
+        // envelopes, and posting the acceptance body to this link is refused `400` with
+        // `The Attach field is required.`
+        assert_eq!(links.accept(), None);
+        assert_eq!(links.attach(), Some(format!("{base}/attach?i=10-128-136-201").as_str()));
         assert_eq!(links.reject(), Some(format!("{base}/reject?i=10-128-136-201").as_str()));
         // `collect_links` admits only a URL, so the shorthand and the transport never enter
         // the table at all — which is why the accept had nowhere to go before `attach` was
@@ -2305,6 +2347,28 @@ mod tests {
         // URL scheme.
         assert_eq!(links.media_answer(), None);
         assert_eq!(links.names(), vec!["attach", "progress", "reject"]);
+    }
+
+    /// The two doors that TAKE a call say the same thing under different names, and the
+    /// service reads the name. `attach` was refused `400` for carrying the acceptance
+    /// envelope, so a body that lost its own key would put that failure straight back.
+    #[test]
+    fn attaching_and_accepting_say_the_same_thing_under_their_own_names() {
+        let (local, callbacks) = (local(), callbacks());
+        let answer = MediaContent::sdp("v=0");
+
+        let attach = attach_payload(&local, &answer, &callbacks);
+        let acceptance = acceptance_payload(&local, &answer, &callbacks);
+
+        // Each names its own envelope, and neither carries the other's.
+        assert!(attach.get("attach").is_some(), "attach body: {attach}");
+        assert!(attach.get("callAcceptance").is_none(), "attach body: {attach}");
+        assert!(acceptance.get("callAcceptance").is_some(), "acceptance: {acceptance}");
+        assert!(acceptance.get("attach").is_none(), "acceptance: {acceptance}");
+        // And the statement inside is the same one, so the two cannot drift apart.
+        assert_eq!(attach["attach"], acceptance["callAcceptance"]);
+        // The answer really travels: an attach with no SDP takes a call and says nothing.
+        assert_eq!(attach["attach"]["mediaContent"]["blob"], "v=0");
     }
 
     #[test]
