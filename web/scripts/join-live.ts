@@ -63,21 +63,27 @@ import { LOCAL_ORIGIN, RELEASED_ORIGIN, TAILNET_ORIGIN } from "./sandbox-live";
  *
  * Never parameterise this, and never widen it to "the next meeting in the calendar".
  */
-export const AUTHORIZED_MEETING_CODE = "380284954783239";
+export const AUTHORIZED_MEETING_CODE = "33706839527254";
 
 /** The thread that code resolves to on this tenant, for the second half of the proof. */
 export const AUTHORIZED_MEETING_THREAD =
-  "19:meeting_OTY2MTc4ODQtMWQ5YS00NGY3LThiZjEtZThiOGI0Zjc4N2Ez@thread.v2";
+  "19:meeting_MWZkYjMxM2MtMWQ5MS00OTFhLTg2ZmItNWY3NDY0NThkODM0@thread.v2";
 
 /**
- * The day it sits on — 2026-08-05, TODAY, which is the easy case: the calendar opens on
- * today and the first agenda window holds it.
+ * The day it sits on — 2026-09-04, the day the user made it and sat a colleague in it so a
+ * SCREEN SHARE could be driven from here without costing them a click per round.
  *
- * The search below still walks backwards, because the meeting authorized before this one
- * was in the PAST and a past meeting stays joinable — its thread outlives its slot in the
- * calendar, which is what lets this be tested without booking anything.
+ * **This meeting is in NO CALENDAR**, which is the thing to know before reaching for the
+ * calendar mode: it was made from `teams.microsoft.com/meet`, and a "Meet now" meeting
+ * creates no event — measured, the app's own mirror holds none for this code. Its CHAT does
+ * exist (the join wrote "Call started" into it), so `--from-chat` is the mode that works
+ * here and the calendar search below will simply not find a button.
+ *
+ * The search still walks backwards, because a PAST meeting stays joinable — its thread
+ * outlives its slot in the calendar, which is what lets this be tested without booking
+ * anything.
  */
-export const AUTHORIZED_MEETING_DAY = "2026-08-05";
+export const AUTHORIZED_MEETING_DAY = "2026-09-04";
 
 /**
  * What a link to that meeting is RECOGNISED by, in either spelling Teams writes one.
@@ -90,7 +96,7 @@ export const AUTHORIZED_MEETING_DAY = "2026-08-05";
  */
 const MEETING_MARKERS = [
   AUTHORIZED_MEETING_CODE,
-  "meeting_OTY2MTc4ODQtMWQ5YS00NGY3LThiZjEtZThiOGI0Zjc4N2Ez",
+  "meeting_MWZkYjMxM2MtMWQ5MS00OTFhLTg2ZmItNWY3NDY0NThkODM0",
 ];
 
 /** Whether a join url names the pinned meeting. The ONE test both halves of this file use. */

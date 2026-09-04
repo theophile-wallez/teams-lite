@@ -1102,6 +1102,36 @@ pub fn call_accepted_in_frame(frame: &Value) -> bool {
 /// — is what posts the call line into that thread for all of them. So the shape a group
 /// chat's call button needs is the shape a 1:1 already sends; what a group adds is the
 /// roster the answer starts reporting, which [`CallSession::others`] already reads.
+/// The callbacks a conversation registers for itself, in ONE spelling for the call that
+/// starts one and the join that walks into one.
+///
+/// It is shared because a link missing from one of the two is INVISIBLE: both requests are
+/// accepted, the conversation works, and only the action whose answer had nowhere to land
+/// silently never happens. That is exactly what shipped — `join_payload` published no
+/// `addModalitySuccess`, so a screen share in a MEETING asked for a presenter session, the
+/// POST answered `{}` as it always does, and the grant frame could never arrive because the
+/// conversation had never named a URL to deliver it to. The section was then rejected for
+/// coming from an endpoint that is not the presenter, which sent two rounds of debugging at
+/// the SDP (§ 10.8). A CALL published the link all along, which is why the same feature was
+/// measured working there in August.
+///
+/// Every name here is one the captured web client sends (NATIVE-CALLING.md § 2.3).
+fn conversation_callback_links(callbacks: &CallbackBase) -> Value {
+    json!({
+        "conversationEnd": callbacks.link(paths::CONVERSATION_END),
+        "conversationUpdate": callbacks.link(paths::CONVERSATION_UPDATE),
+        "localParticipantUpdate": callbacks.link(paths::CONVERSATION_LOCAL_PARTICIPANT_UPDATE),
+        "addParticipantSuccess": callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_SUCCESS),
+        "addParticipantFailure": callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_FAILURE),
+        // Where the answer to a `contentSharing` ask lands. Without it a screen share can
+        // never be granted, and nothing about the refusal says so.
+        "addModalitySuccess": callbacks.link(paths::CONVERSATION_ADD_MODALITY_SUCCESS),
+        "addModalityFailure": callbacks.link(paths::CONVERSATION_ADD_MODALITY_FAILURE),
+        "confirmUnmute": callbacks.link(paths::CONVERSATION_CONFIRM_UNMUTE),
+        "receiveMessage": callbacks.link(paths::CONVERSATION_RECEIVE_MESSAGE),
+    })
+}
+
 pub fn invitation_payload(
     local: &LocalParticipant,
     to: &[String],
@@ -1121,22 +1151,7 @@ pub fn invitation_payload(
             "properties": {
                 "enableGroupCallEventMessages": true,
             },
-            "links": {
-                "conversationEnd": callbacks.link(paths::CONVERSATION_END),
-                "conversationUpdate": callbacks.link(paths::CONVERSATION_UPDATE),
-                "localParticipantUpdate":
-                    callbacks.link(paths::CONVERSATION_LOCAL_PARTICIPANT_UPDATE),
-                "addParticipantSuccess":
-                    callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_SUCCESS),
-                "addParticipantFailure":
-                    callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_FAILURE),
-                "addModalitySuccess":
-                    callbacks.link(paths::CONVERSATION_ADD_MODALITY_SUCCESS),
-                "addModalityFailure":
-                    callbacks.link(paths::CONVERSATION_ADD_MODALITY_FAILURE),
-                "confirmUnmute": callbacks.link(paths::CONVERSATION_CONFIRM_UNMUTE),
-                "receiveMessage": callbacks.link(paths::CONVERSATION_RECEIVE_MESSAGE),
-            },
+            "links": conversation_callback_links(callbacks),
         },
         "participants": { "from": local.json(), "to": recipients },
         // Everything on the next few lines is here because the JOIN taught it, and a call
@@ -1546,17 +1561,7 @@ pub fn join_payload(
                 "enableGroupCallUpgradeMessage": false,
                 "enableGroupCallMeetupGeneration": false,
             },
-            "links": {
-                "conversationEnd": callbacks.link(paths::CONVERSATION_END),
-                "conversationUpdate": callbacks.link(paths::CONVERSATION_UPDATE),
-                "localParticipantUpdate":
-                    callbacks.link(paths::CONVERSATION_LOCAL_PARTICIPANT_UPDATE),
-                "addParticipantSuccess":
-                    callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_SUCCESS),
-                "addParticipantFailure":
-                    callbacks.link(paths::CONVERSATION_ADD_PARTICIPANT_FAILURE),
-                "receiveMessage": callbacks.link(paths::CONVERSATION_RECEIVE_MESSAGE),
-            },
+            "links": conversation_callback_links(callbacks),
         },
         "groupContext": Value::Null,
         "participants": { "from": local.json() },
@@ -2591,6 +2596,42 @@ mod tests {
         // And no envelope. A wrapped body is refused `400` with `{}` and names nothing —
         // the failure § Joining a meeting cost days to.
         assert!(payload.get("payload").is_none());
+    }
+
+    /// A CALL and a JOIN register the SAME conversation callbacks.
+    ///
+    /// A link missing from one of the two is invisible: both requests are accepted, the
+    /// conversation works, and only the action whose answer had nowhere to land silently never
+    /// happens. That shipped — the join published no `addModalitySuccess`, so a screen share in
+    /// a MEETING could never be granted (the POST answers `{}` and the grant arrives on that
+    /// callback), the section was rejected for not coming from the presenter, and two rounds of
+    /// debugging went at the SDP instead. A call published it all along, which is why the same
+    /// feature measured fine there.
+    ///
+    /// So the set is compared rather than spelled twice, and `addModalitySuccess` is named on
+    /// its own because it is the one this cost.
+    #[test]
+    fn a_call_and_a_join_register_the_same_conversation_callbacks() {
+        let (local, callbacks) = (local(), callbacks());
+        let offer = MediaContent::sdp("v=0");
+        let call = invitation_payload(&local, &["8:orgid:them".into()], Some("19:t"), &offer, &callbacks);
+        let join = join_payload(
+            &local,
+            &MeetingJoin::from_join_url("https://teams.microsoft.com/meet/12345678?p=abc")
+                .expect("a short link"),
+            &callbacks,
+            Some(&offer),
+        );
+
+        let of = |p: &Value| p["conversationRequest"]["links"].clone();
+        assert_eq!(of(&call), of(&join), "a call and a join must register the same callbacks");
+
+        for name in ["addModalitySuccess", "addModalityFailure"] {
+            assert!(
+                of(&join).get(name).and_then(Value::as_str).is_some_and(|u| !u.is_empty()),
+                "a join that does not publish {name} can never be granted a screen share"
+            );
+        }
     }
 
     /// The session's links are read APART from the call's, because it carries a `leave` of its
