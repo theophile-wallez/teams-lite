@@ -6046,34 +6046,64 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         ctx.hang_up_orphan("call_accept", &local, &links).await;
                         return Ok(json!({ "call_id": call_id, "cancelled": true }));
                     }
-                    // TAKING the call and ANSWERING its media are two POSTs, and only the
-                    // acceptance carries both at once. Measured 2026-09-04: an `attach` that
-                    // the service accepted left the CALLER still ringing, because nothing had
-                    // sent our SDP — so where the service names a `mediaAnswer` of its own,
-                    // the answer goes there now.
+                    // AN ATTACH IS NOT AN ACCEPT, and this is the second half of taking a
+                    // call here. Measured 2026-09-04: the attach POST was accepted and the
+                    // CALLER went on ringing, and the links it answered with say why —
+                    // `["acceptance", "callController", "callLeg", "mediaAnswer", "newOffer",
+                    // "progress", "redirection"]`. There is an `acceptance` in there and no
+                    // `hangup` and no `end`, so what the attach did was claim the forked leg
+                    // and hand back the door that really accepts it. Posting only the media
+                    // answer was tried first and left the caller ringing exactly as before.
                     //
-                    // It is skipped for the acceptance door, whose body already carried the
-                    // answer: posting it twice would answer one offer two times, which is not
-                    // something the service asked for. A failure costs the MEDIA and never
-                    // the call — the call is taken either way, and the ending will arrive as a
-                    // frame like any other.
-                    // The guard is taken and DROPPED before the await: a `MutexGuard` held
-                    // across one makes the whole future non-Send.
-                    let media_url = if used_attach {
-                        let plane = ctx.calling.lock().unwrap();
-                        plane.call.as_ref().and_then(|call| call.links.media_answer().map(str::to_string))
-                    } else {
-                        None
-                    };
-                    if let Some(media_url) = media_url {
-                        let body = calling::media_answer_payload(
-                            &local,
-                            &answer,
-                            &callbacks,
-                            &[calling::MODALITY_AUDIO],
-                        );
-                        if let Err(e) = ctx.post_call_signal(&media_url, &body).await {
-                            eprintln!("[calling] the answer did not reach the service: {e:#}");
+                    // Nothing here is skipped for the acceptance door: that one posted its
+                    // acceptance already, and a second would accept one call twice.
+                    //
+                    // A failure leaves the call TAKEN as far as this side is concerned and
+                    // reports itself, because the ending arrives as a frame like any other —
+                    // and the reader is looking at a live call either way.
+                    if used_attach {
+                        // The guard is taken and DROPPED before the await: a `MutexGuard`
+                        // held across one makes the whole future non-Send.
+                        let next = {
+                            let plane = ctx.calling.lock().unwrap();
+                            plane.call.as_ref().and_then(|call| {
+                                call.links
+                                    .accept()
+                                    .map(|url| (url.to_string(), true))
+                                    .or_else(|| {
+                                        call.links.media_answer().map(|url| (url.to_string(), false))
+                                    })
+                            })
+                        };
+                        if let Some((url, is_acceptance)) = next {
+                            let body = if is_acceptance {
+                                calling::acceptance_payload(&local, &answer, &callbacks)
+                            } else {
+                                calling::media_answer_payload(
+                                    &local,
+                                    &answer,
+                                    &callbacks,
+                                    &[calling::MODALITY_AUDIO],
+                                )
+                            };
+                            match ctx.post_call_signal(&url, &body).await {
+                                Ok(response) => {
+                                    let more = calling::Links::collect(&response);
+                                    eprintln!(
+                                        "[calling] the call was accepted; the service answered with {:?}",
+                                        more.names()
+                                    );
+                                    let mut plane = ctx.calling.lock().unwrap();
+                                    if let Some(call) =
+                                        plane.call.as_mut().filter(|c| c.id == call_id && !c.ended())
+                                    {
+                                        call.links.merge(&more);
+                                    }
+                                }
+                                Err(e) => eprintln!(
+                                    "[calling] the acceptance did not reach the service: {e:#}"
+                                ),
+                            }
                         }
                     }
                     ctx.emit_call_state();
