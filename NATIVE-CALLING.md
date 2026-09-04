@@ -8,9 +8,11 @@ directions, with a colleague, voices heard each way — taking one is § 8a and 
 `participants.to`, it has no sanctioned target, so the first one is the user's own click to
 people who agreed beforehand (§ 7).
 
-Two things are open and each is written up where it belongs: hanging up an INCOMING call may
-not tell the caller (§ 8a), and SENDING a screen is still refused — narrowed 2026-09-04 to
-the sharing session never being granted, which is upstream of the SDP (§ 10.8).
+Two things are open and each is written up where it belongs. Hanging up an INCOMING call may
+not tell the caller (§ 8a). And SENDING a screen is still refused: the sharing SESSION is
+created and this endpoint really holds the presenter role — measured 2026-09-04, and it is the
+opposite of what was believed for a month — so what the rejected `applicationsharing-video`
+section is missing is in the SECTION rather than in a permission (§ 10.8).
 
 `src/calling.rs` signals, `web/src/lib/call-media.ts` carries the audio,
 `web/src/lib/ms-sdp.ts` is the one place an SDP is rewritten, and the whole flow is driven
