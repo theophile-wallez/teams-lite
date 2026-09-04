@@ -503,9 +503,78 @@ is created after the answer, and the `conversationUpdate` frames a second later 
 an object (measured). The backend's journal line says `audio_leg_in_answer=` for that
 reason — it is a record of the answer, not a verdict on the media.
 
+### 8a. TAKING an incoming one-to-one call — measured, and it works
+
+**A colleague rang this account from real Teams on 2026-09-04, teams-lite answered, and both
+people heard each other.** That is the first one-to-one call this app has ever been in. It
+took four rounds, every one of them pointed at by the thing that refused it, and the shape is
+NOT the one § 2.4 describes for a client that is offered `accept`.
+
+**THE INVITE IS FORKED TO THE USER, NOT SENT TO A DEVICE.** `to.endpointId` is all zeroes and
+the links live under a path that says so:
+
+```
+attach        https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-<region>-prod-aks.cc
+              .skype.com/cc/v1/forked/<guid>/27/i1/1351/attach?i=<ip>
+progress      …/1351/progress?i=<ip>
+reject        …/1351/reject?i=<ip>
+mediaAnswer   cc://ma            <- a shorthand, not a URL
+udpTransport  udp://<host>:3478/
+```
+
+There is **no `accept` and no `acceptance`**, so `Links::accept` found nothing and the accept
+fell through to `mediaAnswer` — which `collect_links` had already dropped for not being a URL.
+The reader was told "This call cannot be answered here."
+
+**THREE POSTS TAKE THE CALL, and each one hands back the next door:**
+
+1. **`attach`**, with `{"attach": {sender, acceptedCallModalities, links, mediaContent}}`. The
+   acceptance envelope is refused here, and the service names the field:
+   `400 {"errors":{"Attach":["The Attach field is required."]}}`. It answers with
+   `["acceptance", "callController", "callLeg", "mediaAnswer", "newOffer", "progress",
+   "redirection"]` — an absolute `mediaAnswer` at last, and the `acceptance` door.
+2. **`acceptance`**, with the ordinary `callAcceptance` body carrying our SDP answer. It
+   answers with `["callLeg", "controlVideoStreaming", "hold", "mediaRenegotiation", "monitor",
+   "replacement", "retargetCompletion", "startOutgoingNegotiation", "transfer",
+   "updateCallState", "updateMediaDescriptions"]`, which is an established call.
+3. Nothing else. The media answer rides step 2.
+
+**AN ATTACH THAT SUCCEEDS IS NOT A CALL, and that cost a round worth recording.** After step 1
+teams-lite drew a live call and the CALLER went on ringing for twenty seconds. Reading § 2.4 as
+"take the call, then answer the media" produced a media-answer POST that the service accepted
+— and the caller still rang. What the attach really does is CLAIM the forked leg and hand back
+the door that accepts it; the missing step was never the media.
+
+**A RING NOBODY ANSWERS IS NEVER CLOSED BY THE SERVICE.** Measured twice: the caller gave up,
+and no cancel, no `callEnd` and no frame of any kind followed — an endpoint that never attached
+is simply not told. One call at a time is the rule, so the ring sat in the plane and the NEXT
+invite was refused as `busy`: one missed call and this machine stopped ringing until it was
+restarted. `CALL_RING_TIMEOUT` (60 s) frees the slot, on the ticker that already keeps a live
+call alive, and only for the two UNANSWERED phases.
+
+**Two frames worth telling apart**, both `evt`-tagged: an invite is `evt: 107` with
+`callNotification` at its root, and a MeetingStart notification is `evt: 128` with
+`notificationType: "MeetingStart"`. The only calling frames captured before this were the
+second kind, which is why the invite's shape was still unknown after months.
+
+#### Still open on the incoming path
+
+- **HANGING UP DOES NOT REACH THE OTHER SIDE.** No step of the three answers a `hangup`, `end`,
+  `leave` or `conversationEnd`, so `Links::hangup` finds nothing and `call_hangup` writes
+  `no link to hang up on — dropping the call locally`. The user's own call really ends — the
+  microphone is released — but nothing tells the caller. The candidates are on the frames
+  already in hand and none is measured: `callLeg` and `callController` from step 1,
+  `updateCallState` from step 2, and the `conversationInvitation.conversationController` the
+  invite carries as a bare field rather than inside a `links` object (which is why
+  `collect_links` does not pick it up, and why `JoinedConversation.controller` — parsed for a
+  join and used nowhere — is the nearest prior art). Do not guess one: post the most likely and
+  read the refusal, which is how all three steps above were found.
+- **VIDEO on a one-to-one is untried from this direction.** The acceptance names
+  `controlVideoStreaming` and `mediaRenegotiation`, so the doors exist.
+
 ### Still open
 
-A ONE-TO-ONE call has never been rung. It shares the whole media path with the join — so
+A ONE-TO-ONE call has never been rung FROM here. It shares the whole media path with the join — so
 the five fixes above cover it — but it has its own POST, its own acceptance, and no
 sanctioned target: ringing anybody is the user's own click, to somebody who agreed
 beforehand (§ 7). `invitation_payload` now carries every field the join is known to be
