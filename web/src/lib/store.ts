@@ -1015,13 +1015,18 @@ const CALL_RING_TIMEOUT_MS = 45_000;
 /**
  * How long an offer of ours may wait for its answer before the capture it carries is given up.
  *
- * See {@link Controller.boundTheMediaAnswer}. Generous rather than tight: the answer arrives in
- * the POST's own response on this tenant sometimes and on a callback frame at others, and a
- * renegotiation crossing a relay is not instant — so a bound that fired early would take a
- * camera down that was about to work. What it must be shorter than is the reader's patience,
- * because until it fires the button says the meeting can see them.
+ * **35 seconds, because that is the real client's own number.** `mediaAnswerTimeoutSec: 35` in
+ * `calling-pluginless-<hash>.js` (fetched by NATIVE-CALLING.md § 9's recipe), started when its
+ * `startRenegotiationAsync` posts and stopped by `handleMediaAnswer` — and on firing it reports a
+ * rejection to the caller, which is what this does. So the bound is not a new idea and not a
+ * guess: it is the one piece of machinery this app was missing beside the client, and it was
+ * written here as 12 s before the client was read, which is short enough to have taken down a
+ * camera the service was still answering.
+ *
+ * What it must be shorter than is the reader's patience, because until it fires the button says
+ * the meeting can see them. See {@link Controller.boundTheMediaAnswer}.
  */
-const MEDIA_ANSWER_TIMEOUT_MS = 12_000;
+const MEDIA_ANSWER_TIMEOUT_MS = 35_000;
 
 /** How long a fetched presence is trusted before the next person card refetches
  *  it. Short enough that a colleague who just joined a meeting reads as busy on

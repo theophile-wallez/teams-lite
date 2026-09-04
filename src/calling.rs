@@ -765,21 +765,26 @@ pub fn media_sections(sdp: &str) -> Vec<String> {
 
 /// Whether an SDP blob is an OFFER, read out of the blob itself.
 ///
-/// **This is what tells a renegotiation apart from the answer to one, and reading it off a LINK
-/// instead is why a camera has never been seen.** `media_renegotiation_from_frame` used to
-/// classify a frame by whether it carried a `links.mediaAnswer` — but a `startOutgoingNegotiation`
-/// is REQUIRED to publish a `mediaRenegotiation` callback of its own (the service refused the POST
-/// by name until it did, § 8b), and the service then answers that negotiation on it. So the answer
-/// to our own camera offer arrived carrying an answer link, was read as a fresh OFFER, and applied
-/// to the connection as one — which in `have-local-offer` makes Chrome implicitly ROLL BACK the
-/// offer the camera was in. The section was never negotiated, no `mediaAnswer` frame was ever
-/// counted, and nothing anywhere reported it.
+/// **It is a rail rather than the primary mechanism, and saying so is the point.** The REAL CLIENT
+/// tells the two apart by the CALLBACK a frame arrived on — `pn.MEDIA_NEGOTIATION` routes to
+/// `handleMediaNegotiationOffer` and `pn.MEDIA_ANSWER` to `handleMediaAnswer`, read out of
+/// `calling-pluginless-<hash>.js` — so the answer to an outgoing renegotiation comes back on
+/// `/call/mediaAnswer/` and not on the renegotiation door. An earlier round of this work guessed
+/// the opposite and wrote it down as the cause of a lost camera; the client's own code disproves
+/// it, and the real cause was the GLARE that follows either way (see
+/// `remoteOfferWouldRollBackOurs` in web/src/lib/call-media.ts, measured in a real browser by
+/// web/e2e/webrtc-glare.spec.ts).
 ///
-/// `a=setup:actpass` is the discriminator, and it is not a guess about this service: RFC 5763 has
-/// an offer OFFER both roles and an answer state the one it TOOK. `web/src/lib/ms-sdp.ts`'s own
-/// `isAnswer` already reads exactly this, for the same reason and in the same direction — read off
-/// the ABSENCE of `actpass` rather than the presence of a role, because one rejected section
-/// carrying a role of its own is enough to make a whole offer read as an answer.
+/// What this still buys is that `media_renegotiation_from_frame` and [`media_answer_from_frame`]
+/// match the SAME `/mediaNegotiation` pointer, and the first runs first — so a frame the service
+/// puts an ANSWER in, on any door, would be handed to the page as an offer and applied as one. The
+/// discriminator costs a line scan and closes that whatever the routing does tomorrow.
+///
+/// `a=setup:actpass` is it, and it is not a guess about this service: RFC 5763 has an offer OFFER
+/// both roles and an answer state the one it TOOK. `web/src/lib/ms-sdp.ts`'s own `isAnswer` already
+/// reads exactly this, for the same reason and in the same direction — read off the ABSENCE of
+/// `actpass` rather than the presence of a role, because one rejected section carrying a role of
+/// its own is enough to make a whole offer read as an answer.
 pub fn sdp_is_offer(sdp: &str) -> bool {
     sdp.lines().any(|line| line.trim_end() == "a=setup:actpass")
 }
@@ -994,16 +999,16 @@ pub struct MediaRenegotiation {
 
 /// Read a renegotiation offer out of a frame, or `None` when the frame is not one.
 ///
-/// **The test is the SDP's own `a=setup:actpass`, and the link is only where to answer.** It used
-/// to be the ANSWER LINK — a frame that offered media and said where to answer read as a
-/// renegotiation, and one that did not read as the answer to something we offered — and that is
-/// wrong on this tenant in the one direction that matters: `startOutgoingNegotiation` must publish
-/// a `mediaRenegotiation` callback of its own, and the service answers our camera offer on it,
-/// carrying an answer link. So the answer read as an offer, the page applied it as one, and Chrome
-/// rolled our own offer back under it (see [`sdp_is_offer`]).
+/// **The test is the SDP's own `a=setup:actpass`, and the link is only where to answer.** It used to
+/// be the ANSWER LINK alone — a frame that offered media and said where to answer read as a
+/// renegotiation — and this reader and [`media_answer_from_frame`] match the SAME
+/// `/mediaNegotiation` pointer, with this one running first. So a body carrying an ANSWER and an
+/// answer link beside it was handed to the page as an offer and applied to the connection as one,
+/// which in `have-local-offer` costs the offer we were waiting on (see [`sdp_is_offer`], which also
+/// records what the real client does and what an earlier round of this got wrong).
 ///
-/// A blob that is an ANSWER therefore falls through here to [`media_answer_from_frame`], which is
-/// the reader that applies it to the offer it belongs to — whichever door the service used.
+/// A blob that is an ANSWER therefore falls through to [`media_answer_from_frame`], which is the
+/// reader that applies it to the offer it belongs to — whichever door the service used.
 pub fn media_renegotiation_from_frame(frame: &Value) -> Option<MediaRenegotiation> {
     let negotiation = [
         "/_decoded/mediaNegotiation",
@@ -1366,8 +1371,18 @@ fn offering_media(
         "links": {
             // Where the service answers this offer, and where it may refuse it. Both are
             // ours: an offer nobody can answer is an offer that hangs.
+            //
+            // **TWO LINKS, and `mediaAcknowledgement` is NOT one of them.** Read out of the real
+            // client's own builder for this body (`qH` in `calling-pluginless-<hash>.js`, fetched
+            // by NATIVE-CALLING.md § 9's recipe): it sends `mediaAnswer` and `rejection` and
+            // nothing else here. The acknowledgement belongs to the ANSWER body (`jH`), which is
+            // where this app already sends it — an offer is acknowledged by nobody, so publishing
+            // a callback for one is a field the door was never told about. That is the class of
+            // defect this plane has been bitten by twice: the SDK's `payload` envelope earned a
+            // `400 {}` for days (§ 2.3), and the outgoing door's own missing link earned two more
+            // — and a body the service merely does not recognise is answered by a section it
+            // silently zeroes rather than by a refusal that names anything.
             "mediaAnswer": callbacks.link(paths::CALL_MEDIA_ANSWER),
-            "mediaAcknowledgement": callbacks.link(paths::CALL_MEDIA_ACKNOWLEDGEMENT),
             "rejection": callbacks.link(paths::CALL_MEDIA_REJECTION),
         },
         "mediaContent": offer.json(),
@@ -2773,6 +2788,29 @@ mod tests {
             "the service refuses this door without it: {outgoing}"
         );
         assert!(plain["mediaNegotiation"]["links"].get("mediaRenegotiation").is_none(), "{plain}");
+
+        // THE REAL CLIENT'S OWN LINK SET for this body, and the one it must never grow again.
+        // `qH` in `calling-pluginless-<hash>.js` publishes `mediaAnswer` and `rejection` here and
+        // nothing else; the ACKNOWLEDGEMENT belongs to the answer body (`jH`), because an offer is
+        // acknowledged by nobody. This app sent one for months, and a field the door was never told
+        // about is answered by a silently zeroed section rather than by anything that names itself.
+        for door in [&plain["mediaNegotiation"], &outgoing["startOutgoingNegotiation"]] {
+            let links = door["links"].as_object().expect("a links object");
+            assert!(links.contains_key("mediaAnswer"), "{door}");
+            assert!(links.contains_key("rejection"), "{door}");
+            assert!(
+                !links.contains_key("mediaAcknowledgement"),
+                "an OFFER publishes no acknowledgement callback — the client's own `qH` does not, \
+                 and the ANSWER body is where this app already sends one: {door}"
+            );
+        }
+        // And the ANSWER really does carry it, so the pair above is a placement rule rather than a
+        // deletion: `jH` names `mediaAcknowledgement` and only that.
+        let answered = media_answer_payload(&local, &offer, &callbacks, &mods);
+        assert!(
+            answered["mediaAnswer"]["links"].get("mediaAcknowledgement").is_some(),
+            "{answered}"
+        );
 
         // And the statement itself is the same one, so the two cannot drift.
         for field in ["sender", "callModalities", "mediaContent"] {

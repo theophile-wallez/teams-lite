@@ -20,24 +20,41 @@ names `startOutgoingNegotiation` beside `mediaRenegotiation` and only the second
 posted to. On the first, with the two fields the service names, the POST is accepted and the
 capture is retained.
 
-**And the third is why that still showed nobody a picture: THE ANSWER WAS ARRIVING AND BEING READ
-AS A FRESH OFFER.** `startOutgoingNegotiation` is required to publish a `mediaRenegotiation`
-callback of its own, the service answers our camera offer on it, and this app classified an
-incoming frame as an offer-or-answer by whether it carried a `links.mediaAnswer` — which that
-answer does. So the answer was applied to the connection as an OFFER, and in `have-local-offer`
-Chrome performs an implicit ROLLBACK: the camera's `sendonly` reverted, the answer this side then
-produced described the service's audio-only offer, and nothing anywhere reported it. It fits every
-number the accepted run left behind — `{"/call/mediaRenegotiation/":2}` and no `mediaAnswer` at
-all, renegotiations "carrying audio only", and a backend still saying `sending: camera` because it
-recorded the RPC's own params. An offer and an answer are told apart by the SDP's own
-`a=setup:actpass` now (`calling::sdp_is_offer`), and the page refuses to let a remote offer roll
-its own back in silence.
+**And the third is why that still showed nobody a picture: GLARE, which is MEASURED in a real
+browser rather than argued.** The service renegotiates on its own every few seconds, so its offer
+lands inside the window our own camera offer is waiting in — and applying a remote offer in
+`have-local-offer` makes Chrome perform an implicit ROLLBACK. `web/e2e/webrtc-glare.spec.ts` runs
+that exchange on two real peer connections and reports what it leaves behind:
 
-**That is UNVERIFIED against the tenant, and the rig for verifying it needs no second person:**
-`cd web && bun run join-live -- --pair` puts BOTH of this machine's installs in the pinned meeting
-— they hold a calling endpoint each, so the service sees two devices — has one send its camera and
-the other report whether a picture decoded (§ 10.8). Every earlier send measurement was made alone
-in the meeting, which is why "the POST is accepted" was as far as any of them could get.
+```
+{ directionBeforeTheirOffer: "sendonly", currentDirectionAfter: null, directionAfter: "sendonly",
+  videoSectionInLocalSdpAfter: false, signalingStateAfter: "stable", trackStillAttached: true }
+```
+
+Every field of that is the bug. `direction` is still `sendonly` and NOTHING is `stopped`, so
+`sectionIsStopped` answers false and `LocalSenders.stoppedKinds` finds nothing to release;
+`signalingState` is back to `stable`, so the connection looks healthy; the track is still attached,
+so the camera light is on — and the video section is **not in our own description at all**. Every
+surface the app could look at says the camera is being sent and there is no section for it. That is
+why it survived a month of live measurement whose only symptom was a picture nobody saw.
+
+**AND THE REAL CLIENT'S OWN CODE SETTLES THREE MORE THINGS** — read out of
+`calling-pluginless-<hash>.js` by § 9's recipe, which is free and needs no account. It has a named
+`RENEGOTIATION_GLARE` state and a `getGlareError()`, so glare is not an edge case here; it posts an
+outgoing renegotiation to the `mediaRenegotiation` link and `startOutgoingNegotiation` appears
+NOWHERE in its 3.1 MB; its offer body publishes `mediaAnswer` and `rejection` and NOT
+`mediaAcknowledgement`, which this app was sending; and it waits `mediaAnswerTimeoutSec: 35` for the
+answer before reporting a failure. All three are now this app's too. § 10.8 holds the detail, and
+the correction: an earlier round wrote down that the answer arrives on the renegotiation door and
+was misread as an offer — the client answers on `/call/mediaAnswer/`, so that was wrong, and the
+glare above is the cause either way.
+
+**What is STILL unverified against the tenant is whether the service then answers, and the rig for
+it needs no second person:** `cd web && bun run join-live -- --pair` puts BOTH of this machine's
+installs in the pinned meeting — they hold a calling endpoint each, so the service sees two devices
+— has one send its camera and the other report whether a picture decoded (§ 10.8). Every earlier
+send measurement was made alone in the meeting, which is why "the POST is accepted" was as far as
+any of them could get.
 
 `src/calling.rs` signals, `web/src/lib/call-media.ts` carries the audio,
 `web/src/lib/ms-sdp.ts` is the one place an SDP is rewritten, and the whole flow is driven
@@ -717,9 +734,9 @@ section. `start_outgoing_negotiation_payload` shares its inner statement with th
 the two cannot drift, and the extra link is added to the outgoing one ALONE — a body carrying a
 field the other door does not know is how this plane earns a `400` that names nothing.
 
-#### THE ANSWER WAS ARRIVING ALL ALONG, ON THE DOOR THE NEW ONE REQUIRES
+#### IT WAS GLARE, AND THE CLIENT'S OWN CODE NAMES IT
 
-Two facts came out of the accepted run and read as unexplained. They are one bug:
+Two facts came out of the accepted run and read as unexplained:
 
 - **No `mediaAnswer` came back for our offer.** `frames by path` held
   `{"/call/acceptance/":1,"/call/mediaRenegotiation/":2,"/call/mediaAcknowledgement/":2}` and no
@@ -727,59 +744,87 @@ Two facts came out of the accepted run and read as unexplained. They are one bug
 - **Its own renegotiations still carried audio only** — `audio port=3480 label:main-audio` and
   nothing else — where a meeting that had accepted a video channel would describe one.
 
-`startOutgoingNegotiation` REQUIRES its body to publish a `mediaRenegotiation` link of its own —
-the service refused the POST by name until it did, twice, § 8b above — and the field means exactly
-what it says: it is where the service renegotiates what this offer started. So the answer comes
-back on `/call/mediaRenegotiation/`, which is why that path was posted to twice and `mediaAnswer`
-never was.
+**A CORRECTION FIRST, because a wrong reading of those two was written down here and acted on.** It
+said the answer arrives on `/call/mediaRenegotiation/` (the link `startOutgoingNegotiation` requires)
+and that this app misread it as a fresh offer. The real client disproves it: `handleMediaAnswer` is
+routed from the `MEDIA_ANSWER` callback and hands the body to the renegotiation manager while
+`isOutgoingRenegotiationInProgress()`, so an outgoing renegotiation is answered on
+`/call/mediaAnswer/`. Those two renegotiation frames were the service's OWN offers, and our offer
+really got no answer at all. The `sdp_is_offer` rail added for the wrong reason is kept for a right
+one — both frame readers match the same `/mediaNegotiation` pointer and the offer reader runs first
+— but it is a rail, not the cause.
 
-**And this app read it as a fresh OFFER.** `media_renegotiation_from_frame` classified a frame by
-whether it carried a `links.mediaAnswer`, and its own doc comment said so: "a frame that offers
-media and tells us where to answer is a renegotiation, and one that does not is the answer to
-something we offered". The service's answer carries one. Both readers match the same
-`/mediaNegotiation` pointer and the renegotiation one runs first, so the answer never reached
-`media_answer_from_frame` at all.
+**THE CAUSE IS GLARE, and it is now measured rather than argued.** The service renegotiates on its
+own every few seconds, so its offer lands inside the window our camera offer is waiting in, and this
+app applied it. `web/e2e/webrtc-glare.spec.ts` runs that exchange on two real peer connections in a
+real Chromium — no tenant, no app, no backend — and reports:
 
-What that does to the connection is the whole failure, and none of it is reported:
+```
+applying theirs: { directionBeforeTheirOffer: "sendonly", currentDirectionAfter: null,
+                   directionAfter: "sendonly", videoSectionInLocalSdpAfter: false,
+                   signalingStateAfter: "stable",           trackStillAttached: true }
+dropping theirs: { directionBeforeTheirOffer: "sendonly", currentDirectionAfter: null,
+                   directionAfter: "sendonly", videoSectionInLocalSdpAfter: true,
+                   signalingStateAfter: "have-local-offer", trackStillAttached: true }
+```
 
-1. the page is handed `kind: "offer"` and calls `answerRemoteOffer`;
-2. `setRemoteDescription({type:"offer"})` in `have-local-offer` is GLARE, and Chrome's own
-   behaviour there is an **implicit rollback** — our offer is undone;
-3. so the camera's `sendonly` reverts and the answer this side produces describes the service's
-   audio-only offer instead;
-4. and nothing notices: the transceiver is ROLLED BACK rather than stopped, so
-   `LocalSenders.stoppedKinds` finds nothing to release, `noteAccepted` sees no `sendonly`
-   `currentDirection`, and `call.sending` still reads `camera` because the backend recorded what
-   the RPC's params claimed rather than what the media did.
+Read the first row as the app reads it. `direction` is still `sendonly` and nothing is `stopped`, so
+`LocalSenders.stoppedKinds` finds nothing to release and `releaseDroppedSections` says nothing;
+`signalingState` is `stable`, so the connection looks healthy; the track is attached, so the camera
+light is on and the preview moves; `call.sending` reads `camera`, because the backend recorded what
+the RPC's params claimed. **And the video section is not in our own description at all.** That is
+the whole failure, and every part of it is silent.
 
-Three changes close it, and each is pinned by a test:
+**THE REAL CLIENT HAS A NAMED STATE FOR THIS**, which is how it was confirmed rather than guessed.
+`MEDIA_RENEGOTIATION_FSM_STATE` holds `RENEGOTIATION_GLARE` beside `OUTGOING_RENEGOTIATION` and
+`INCOMING_RENEGOTIATION`; `getGlareError()` is `{code: GLARE_ERROR, subCode: MEDIA_GLARE_ERROR,
+phrase: RENEGOTIATION_IN_PROGRESS}`; and `handleMediaNegotiationOffer` moves to GLARE and tracks
+BOTH negotiations to completion, while `rejectAndLog` posts a `mediaNegotiationFailure` to the
+offer's own `rejection` link when it cannot.
 
-- **`calling::sdp_is_offer`** — an offer is told from an answer by the SDP's own
-  `a=setup:actpass`, which is RFC 5763 rather than a guess about this service, and which
-  `web/src/lib/ms-sdp.ts`'s own `isAnswer` already read for the same reason. Read off the ABSENCE
-  of `actpass`, never the presence of a role: one rejected section carrying a role of its own is
-  enough to make a whole offer read as an answer. An ANSWER now falls through to
-  `media_answer_from_frame`, whichever door it came in on.
+**IT CAN AFFORD THAT AND THIS APP CANNOT, which is why the answers differ.** The client is
+REINVITELESS (§ 10.3): every section exists from the first offer, so an incoming offer arriving
+during an outgoing one reverts a `direction` the client re-applies — nothing is lost. This app ADDS a
+section mid-call, so a rollback removes the section itself. Dropping theirs is the adaptation, not a
+divergence for its own sake, and the service re-offers within seconds.
+
+Four changes close it, and each is pinned by a test:
+
 - **`remoteOfferWouldRollBackOurs`** (`web/src/lib/call-media.ts`) — a remote offer arriving while
-  ours is pending is DROPPED rather than applied. The service is authoritative and it offers again
-  within seconds; what must not happen is our own offer being undone in silence.
-- **A bound on the wait** (`MEDIA_ANSWER_TIMEOUT_MS`, `Controller.boundTheMediaAnswer`) — which is
-  what makes dropping theirs safe. An offer of ours that nobody answers used to leave the
-  connection in `have-local-offer` for the rest of the call: camera light on, button saying the
-  meeting can see it, nothing going out. It is now given up down the path a refused answer already
-  took, so the capture is released and the user is told.
+  ours is pending is DROPPED rather than applied.
+- **A bound on the wait, at the client's own number** (`MEDIA_ANSWER_TIMEOUT_MS` = 35 s, from
+  `mediaAnswerTimeoutSec: 35`; `Controller.boundTheMediaAnswer`). It is what makes dropping theirs
+  safe, and the client has exactly this timer — started when its renegotiation posts, stopped by the
+  answer, and reporting a rejection on firing. It was written here as 12 s before the client was
+  read, which is short enough to have taken down a camera the service was still answering.
+- **The OFFER body carries `mediaAnswer` and `rejection` and NOT `mediaAcknowledgement`** — the
+  client's own `qH`. This app sent all three for months; an offer is acknowledged by nobody, and a
+  field the door was never told about is answered by a silently zeroed section rather than by a
+  refusal that names anything. The ANSWER body keeps it, which is where the client puts it (`jH`).
+- **The DOOR is the client's**: `mediaRenegotiation` first, `startOutgoingNegotiation` as the
+  fallback. `startRenegotiationAsync` posts to `links[MEDIA_RENEGOTIATION]` and
+  `startOutgoingNegotiation` is absent from the whole bundle. This app had it the other way round on
+  the strength of "the POST is accepted and the capture is retained", which is now explained as no
+  answer arriving rather than as success.
 
-**A SECOND, SEPARATE DEFECT on the receive side went with it: the answer never declared `Video`.**
+**A SEPARATE DEFECT on the receive side went with them: the answer never declared `Video`.**
 `answerRemoteOffer` posted `["audio", "ScreenViewer"]` — so this endpoint said it would watch a
 SCREEN and never said it would watch a CAMERA, in a vocabulary where `Video` is the camera modality
 in either direction (§ 10.1). It is declared now. Nothing about the user is published by it: the
 section is `recvonly` and no camera opens until they press for one. It explains nothing about the
 screen's own `bytesReceived: 0`, which stays open below.
 
-The next questions, in order: run the PAIR (below); then the four rewrites § 2.5 lists as
-unimplemented (the simulcast envelope, the `red` payload, a per-section fingerprint, `a=rtcp` on an
-offer), one variable per run; and the `x-data`/`data` section the service rejects beside the video,
-which is not ours — it arrives in the service's offer and we answer it.
+**What is still NOT done, with the client's own reference for it:** a glare drop is silent here where
+the client POSTS a `mediaNegotiationFailure` to the offer's `rejection` link (`zH`: `{sender, code,
+subCode, phrase}`). `MediaRenegotiation.reject_link` is already parsed and nothing posts to it. What
+it would buy is the service being told at once instead of re-offering on its own clock; what it costs
+is a gated write of its own. And the answer body is missing `clientContentForMediaController`
+(`webRtcSignalingManager.getClientUrls()`), which the JOIN already sends and which is how the media
+controller learns our callback urls — a candidate for the `bytesReceived: 0` below, and untried.
+
+The next questions, in order: run the PAIR (below); then those two; then the four rewrites § 2.5
+lists as unimplemented (the simulcast envelope, the `red` payload, a per-section fingerprint,
+`a=rtcp` on an offer), one variable per run.
 
 #### THE PAIR: two of this machine's own installs, in one meeting
 

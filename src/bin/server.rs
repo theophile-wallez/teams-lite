@@ -6394,23 +6394,28 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                          refuses new media on a call that is not established"
                     );
                 }
-                // `startOutgoingNegotiation` FIRST, falling back to the renegotiation link.
-                // The acceptance names both and only the second had ever been used; every video
-                // section offered on it comes back with a zeroed port (§ 10.8), and the two
-                // names read as a pair — one starts a negotiation this endpoint wants, the other
-                // answers one already going.
-                // `startOutgoingNegotiation` FIRST, falling back to the renegotiation link. The
-                // acceptance names both and only the second had ever been used; every video
-                // section offered on it comes back with a zeroed port (§ 10.8), and the two names
-                // read as a pair — one starts a negotiation this endpoint wants, the other
-                // answers one already going. Each wants its OWN envelope, so which one matched
-                // decides the body: the first POST to the new door was refused `400` with the
-                // field named, exactly as the incoming call's `attach` was (§ 8a).
+                // `mediaRenegotiation` FIRST, which is THE REAL CLIENT'S OWN DOOR for a
+                // negotiation this endpoint starts — and that is a correction rather than a
+                // preference. Its `startRenegotiationAsync` posts to
+                // `this.links[LINKS.MEDIA_RENEGOTIATION]`, and `startOutgoingNegotiation` does not
+                // appear ANYWHERE in the 3.1 MB calling bundle (searched; zero hits). This app had
+                // it the other way round on the strength of one measurement — the POST accepted and
+                // the capture retained — which is now explained as no answer arriving at all rather
+                // than as success: the client answers an outgoing renegotiation on
+                // `/call/mediaAnswer/` (`handleMediaAnswer` → the renegotiation manager while
+                // `isOutgoingRenegotiationInProgress`), and that frame never came.
+                //
+                // The other door is kept as the FALLBACK, because a service that names only it is
+                // a service this app should still be able to send on. Each wants its OWN envelope,
+                // so which one matched decides the body: the outgoing door required one extra link
+                // and said so in a `400` naming the field (§ 8b).
                 let (url, outgoing) = call
                     .links
-                    .start_outgoing_negotiation()
-                    .map(|url| (url.to_string(), true))
-                    .or_else(|| call.links.media_renegotiation().map(|url| (url.to_string(), false)))
+                    .media_renegotiation()
+                    .map(|url| (url.to_string(), false))
+                    .or_else(|| {
+                        call.links.start_outgoing_negotiation().map(|url| (url.to_string(), true))
+                    })
                     .context(
                         "call_offer_media: this call has no renegotiation link — the service \
                          names it on the acceptance",
@@ -14879,6 +14884,37 @@ mod tests {
                  landing on that side of the emit would look like a live call."
             );
         }
+    }
+
+    /// An outgoing renegotiation goes out on the door the REAL CLIENT uses, and the other is the
+    /// fallback.
+    ///
+    /// `startRenegotiationAsync` in `calling-pluginless-<hash>.js` posts to
+    /// `this.links[LINKS.MEDIA_RENEGOTIATION]`, and `startOutgoingNegotiation` appears NOWHERE in
+    /// that 3.1 MB bundle. This app had the preference the other way round on the strength of one
+    /// measurement — the POST accepted and the capture retained — which turned out to mean no
+    /// answer arrived rather than that it worked. Only a scan can hold an order inside one match
+    /// arm, and only an order can be got wrong here without any test noticing.
+    #[test]
+    fn a_media_offer_prefers_the_door_the_real_client_posts_to() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        // Bounded at BOTH ends by markers the window cannot itself contain: the arm's own opening,
+        // and the next arm. A slice that ran to the end of the file would be satisfied by any later
+        // mention of either link.
+        let handler = code.split("\"call_offer_media\" => {").nth(1).expect("the arm");
+        let handler = handler.split("\"call_subscribe\" => {").next().expect("the next arm");
+        let renegotiation =
+            handler.find(".media_renegotiation()").expect("the client's own door is not used");
+        let outgoing = handler
+            .find(".start_outgoing_negotiation()")
+            .expect("the other door is dropped rather than kept as the fallback");
+        assert!(
+            renegotiation < outgoing,
+            "`startOutgoingNegotiation` is tried FIRST, and the real client never posts to it at \
+             all — its `startRenegotiationAsync` uses the `mediaRenegotiation` link. Prefer that \
+             one and keep this as the fallback."
+        );
     }
 
     /// A ring nobody answered has to free the call slot, and only such a ring may be freed.
