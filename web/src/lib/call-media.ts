@@ -1048,6 +1048,14 @@ function liveCallMedia(
         // right now, and the service renegotiates again within seconds. What makes that safe
         // is the bound on the other side: an offer of ours that is never answered is
         // abandoned rather than left pending for ever (see `abandonLocalOffer`'s caller).
+        //
+        // **This is now the BACKSTOP rather than the mechanism.** The backend refuses such an
+        // offer before it ever reaches a page and posts the client's own
+        // `mediaNegotiationFailure` on the offer's own rejection link, which is what tells the
+        // service to offer again at once (`outgoing_negotiation_at` in src/bin/server.rs). This
+        // stays because two open pages share one call and the two sides cannot agree to the
+        // millisecond: the backend clears its window on the answer, and a frame already in
+        // flight when it does would otherwise land here with ours still pending.
         if (remoteOfferWouldRollBackOurs(pc.signalingState)) {
           console.warn(
             "[call] a media offer arrived while ours was still pending — dropping theirs " +

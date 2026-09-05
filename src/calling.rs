@@ -1150,6 +1150,41 @@ pub fn acceptance_acknowledgement_payload(callbacks: &CallbackBase) -> Value {
     })
 }
 
+/// Where the MEDIA CONTROLLER may reach this endpoint — the client's own
+/// `clientContentForMediaController`.
+///
+/// **It is the one thing every body that carries an SDP sends and this app sent on none of them,
+/// and it is the leading candidate for a subscription the service ACCEPTS and then never sends a
+/// byte on.** The calling service and the media controller are two components: signaling accepts
+/// `applyChannelParameters` and answers 200, and the controller is what actually puts a source on
+/// a section. Read out of the real client (`getClientUrls` in `calling-pluginless-<hash>.js`):
+///
+/// ```js
+/// this.getClientUrls = () => {
+///   let i = null;
+///   return this.isWebRtcCall && (i = {
+///     controlVideoStreaming: yt(this.signalingSession, it.CONTROL_VIDEO_STREAMING),
+///     csrcInfo: yt(this.signalingSession, it.CSRC_INFO),
+///   }, …), i
+/// }
+/// ```
+///
+/// Note the `isWebRtcCall` gate: these urls are how a client DECLARES itself a WebRTC endpoint the
+/// controller can drive, which is exactly what this app is. It is sent on the call invitation, on
+/// the join, on the acceptance and on every media answer — four bodies, one statement — so it is
+/// built once here.
+///
+/// `dominantSpeakerInfo` is the client's third entry and is behind a config flag
+/// (`isDominantSpeakerInfoLinkEnabled`); it is deliberately not sent, because nothing here reads a
+/// dominant speaker and a link nothing posts to goes stale — the rule `takeControl` already
+/// follows.
+pub fn media_controller_content(callbacks: &CallbackBase) -> Value {
+    json!({
+        "controlVideoStreaming": callbacks.link(paths::CALL_CONTROL_VIDEO_STREAMING),
+        "csrcInfo": callbacks.link(paths::CALL_CSRC_INFO),
+    })
+}
+
 /// True when the frame says the far side accepted (they picked up). Audio still
 /// waits for the media answer; this is what stops the ringing tone.
 pub fn call_accepted_in_frame(frame: &Value) -> bool {
@@ -1252,6 +1287,8 @@ pub fn invitation_payload(
                 "redirection": callbacks.link(paths::CALL_REDIRECTION),
                 "end": callbacks.link(paths::CALL_END),
             },
+            // Where the media controller may reach us. See [`media_controller_content`].
+            "clientContentForMediaController": media_controller_content(callbacks),
             "mediaContent": offer.json(),
         },
     })
@@ -1277,6 +1314,8 @@ fn taking_the_call(
             "replacement": callbacks.link(paths::CALL_REPLACEMENT),
             "end": callbacks.link(paths::CALL_END),
         },
+        // Where the media controller may reach us. See [`media_controller_content`].
+        "clientContentForMediaController": media_controller_content(callbacks),
         "mediaContent": answer.json(),
     })
 }
@@ -1328,6 +1367,10 @@ pub fn media_answer_payload(
             "links": {
                 "mediaAcknowledgement": callbacks.link(paths::CALL_MEDIA_ACKNOWLEDGEMENT),
             },
+            // Where the media controller may reach us — the client's `jH` sends it here too, and
+            // this is the body a RECEIVE section is negotiated by. See
+            // [`media_controller_content`].
+            "clientContentForMediaController": media_controller_content(callbacks),
             "mediaContent": answer.json(),
         }
     })
@@ -1419,6 +1462,61 @@ pub fn start_outgoing_negotiation_payload(
     }
     json!({ "startOutgoingNegotiation": body })
 }
+
+/// How long an offer of ours may be in flight before this side stops treating it as pending.
+///
+/// **35 seconds, and it is the real client's own `mediaAnswerTimeoutSec: 35`** — the timer its
+/// `startRenegotiationAsync` starts and its `handleMediaAnswer` stops. The page carries the same
+/// number for its own half (`MEDIA_ANSWER_TIMEOUT_MS` in web/src/lib/store.ts), and the two are
+/// pinned together by a test: this one decides how long an incoming renegotiation is REFUSED for,
+/// so a window that outlived the page's would refuse every later offer for the rest of the call and
+/// take the receive path down with it.
+pub const OUTGOING_NEGOTIATION_TIMEOUT_MS: i64 = 35_000;
+
+/// Refuse a renegotiation offer that arrived while one of OURS is still in flight — the client's
+/// own `getGlareError`, posted to the offer's own `rejection` link.
+///
+/// **GLARE is a named state on this plane, not an edge case.** The real client's
+/// `MEDIA_RENEGOTIATION_FSM_STATE` holds `RENEGOTIATION_GLARE` beside `OUTGOING_RENEGOTIATION`, and
+/// its `rejectAndLog` posts exactly this when it cannot handle an incoming offer. This app used to
+/// APPLY one, and applying a remote offer in `have-local-offer` makes the browser roll our own
+/// offer back — which loses the camera the user just turned on, in silence (measured in a real
+/// browser by web/e2e/webrtc-glare.spec.ts).
+///
+/// The client can afford to apply one and this app cannot: it is REINVITELESS, so every section
+/// exists from the first offer and a rollback reverts a `direction` it re-applies, while this app
+/// ADDS a section mid-call and a rollback removes the section itself.
+///
+/// The body is the client's `zH`: a `mediaNegotiationFailure` naming who is refusing and why. It is
+/// the same shape the service POSTS to us on the `mediaNegotiationFailure` callback, which is what
+/// makes the pair readable in one direction as well as the other.
+pub fn media_glare_rejection_payload(local: &LocalParticipant) -> Value {
+    json!({
+        "mediaNegotiationFailure": {
+            "sender": local.json(),
+            // The client's own three, verbatim: `CALL_END_CODE.GLARE_ERROR`,
+            // `CALL_END_SUB_CODE.MEDIA_GLARE_ERROR`, `CALL_END_PHRASE.RENEGOTIATION_IN_PROGRESS`.
+            // A code the service does not recognise is how this plane earns a refusal that names
+            // nothing, so nothing here is invented.
+            "code": GLARE_ERROR_CODE,
+            "subCode": MEDIA_GLARE_ERROR_SUB_CODE,
+            "phrase": RENEGOTIATION_IN_PROGRESS_PHRASE,
+        }
+    })
+}
+
+/// `CALL_END_CODE.GLARE_ERROR` — the client's own code for "I cannot take your offer, I have one
+/// out". Read out of its `CALL_END_CODE` table; 491 is SIP's `Request Pending`, which is what glare
+/// is.
+pub const GLARE_ERROR_CODE: i64 = 491;
+/// `CALL_END_SUB_CODE.MEDIA_GLARE_ERROR`, read out of the client's own table. It sits in the
+/// `31xx` media block beside `MEDIA_RENEGOTIATION_ERROR: 3108`, and it is a value rather than a
+/// shape — so it is COPIED and never derived.
+pub const MEDIA_GLARE_ERROR_SUB_CODE: i64 = 3118;
+/// `CALL_END_PHRASE.RENEGOTIATION_IN_PROGRESS`, and the spelling is the client's own rather than
+/// the constant's: `"NegotiationIsInProgress"`. Guessing it from the name gives
+/// `RenegotiationInProgress`, which is a different string — this table is the only authority for it.
+pub const RENEGOTIATION_IN_PROGRESS_PHRASE: &str = "NegotiationIsInProgress";
 
 /// Build the body that ends our leg of a call.
 pub fn hangup_payload(local: &LocalParticipant) -> Value {
@@ -1737,6 +1835,8 @@ pub fn join_payload(
                 "redirection": callbacks.link(paths::CALL_REDIRECTION),
                 "end": callbacks.link(paths::CALL_END),
             },
+            // Where the media controller may reach us. See [`media_controller_content`].
+            "clientContentForMediaController": media_controller_content(callbacks),
             "mediaContent": offer.json(),
         });
     }
@@ -3593,6 +3693,99 @@ mod tests {
         );
         let answer = media_answer_from_frame(&frame).expect("the answer, on the same body");
         assert!(answer.blob.contains("m=video"));
+    }
+
+    /// EVERY body that carries an SDP tells the media controller where to reach us.
+    ///
+    /// The real client sends `clientContentForMediaController` on its call invitation, its join,
+    /// its acceptance and every media answer (`getClientUrls`, gated on `isWebRtcCall`), and this
+    /// app sent it on none of them — which is the leading candidate for a subscription the service
+    /// ACCEPTS and then never sends a byte on. Four bodies is four chances to forget one, so the
+    /// rule is checked over all four at once.
+    #[test]
+    fn every_body_that_carries_an_sdp_names_where_the_media_controller_reaches_us() {
+        let (local, callbacks) = (local(), callbacks());
+        let media = MediaContent::sdp("v=0");
+        let meeting = MeetingJoin {
+            thread_id: Some("19:meeting_x@thread.v2".into()),
+            message_id: "0".into(),
+            tenant_id: None,
+            organizer_mri: None,
+            meeting_code: None,
+            passcode: None,
+            join_url: "https://teams.microsoft.com/l/meetup-join/x/0".into(),
+        };
+        for (name, body) in [
+            ("invitation", invitation_payload(&local, &["8:orgid:her".into()], None, &media, &callbacks)),
+            ("join", join_payload(&local, &meeting, &callbacks, Some(&media))),
+            ("acceptance", acceptance_payload(&local, &media, &callbacks)),
+            ("attach", attach_payload(&local, &media, &callbacks)),
+            ("media answer", media_answer_payload(&local, &media, &callbacks, &[MODALITY_AUDIO])),
+        ] {
+            // Wherever the body puts it — inside `callInvitation`, inside `callAcceptance`, at the
+            // root of an `attach` — the statement is one object and it is found by NAME.
+            let mut found = None;
+            walk_for_key(&body, "clientContentForMediaController", &mut found);
+            let content = found
+                .unwrap_or_else(|| panic!("{name} names no clientContentForMediaController: {body}"));
+            for link in ["controlVideoStreaming", "csrcInfo"] {
+                assert!(
+                    content.get(link).and_then(Value::as_str).is_some_and(|u| u.contains(CALL_AGENT)),
+                    "{name} does not publish {link} as a callback of ours: {content}"
+                );
+            }
+            // `dominantSpeakerInfo` is the client's third and is behind a config flag; nothing here
+            // reads a dominant speaker, and a link nothing posts to goes stale.
+            assert!(content.get("dominantSpeakerInfo").is_none(), "{name}: {content}");
+        }
+    }
+
+    /// The first value of a key at any depth. The bodies nest it differently and the rule is about
+    /// the statement rather than about where one body happens to put it.
+    fn walk_for_key(value: &Value, key: &str, out: &mut Option<Value>) {
+        if out.is_some() {
+            return;
+        }
+        match value {
+            Value::Object(map) => {
+                if let Some(found) = map.get(key) {
+                    *out = Some(found.clone());
+                    return;
+                }
+                for child in map.values() {
+                    walk_for_key(child, key, out);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    walk_for_key(item, key, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A renegotiation refused for GLARE says so in the client's own words.
+    ///
+    /// The three values are COPIED out of its `CALL_END_CODE` / `CALL_END_SUB_CODE` /
+    /// `CALL_END_PHRASE` tables and not one of them is derivable from its name — guessing the
+    /// sub-code from the neighbouring media errors gives the wrong number, and guessing the phrase
+    /// from `RENEGOTIATION_IN_PROGRESS` gives `RenegotiationInProgress` where the table says
+    /// `NegotiationIsInProgress`. A code the service does not recognise is how this plane earns a
+    /// refusal that names nothing, so the values are pinned rather than trusted to a reader.
+    #[test]
+    fn a_glare_refusal_is_stated_in_the_clients_own_code_and_phrase() {
+        let body = media_glare_rejection_payload(&local());
+        let failure = &body["mediaNegotiationFailure"];
+        assert_eq!(failure["code"], json!(491));
+        assert_eq!(failure["subCode"], json!(3118));
+        assert_eq!(failure["phrase"], json!("NegotiationIsInProgress"));
+        // WHO is refusing. The service refuses a body that names nobody, which is what every other
+        // payload here already carries a sender for.
+        assert_eq!(failure["sender"], local().json());
+        // And it is the same envelope the service POSTS to us on its own failure callback, which is
+        // what makes the pair readable in both directions.
+        assert!(body.get("mediaNegotiation").is_none(), "{body}");
     }
 
     /// The discriminator itself, and the trap it is written to avoid.

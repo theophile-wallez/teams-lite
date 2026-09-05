@@ -1715,6 +1715,20 @@ struct CallSession {
     /// is that frame's own link and never the merged set. It is cleared as soon as it is
     /// used: answering the same negotiation twice is not something the service asked for.
     renegotiation_answer_link: Option<String>,
+    /// When an offer of OURS went out and has not been answered — the client's own
+    /// `OUTGOING_RENEGOTIATION` state, kept as the moment rather than as a flag.
+    ///
+    /// **It is what makes an incoming offer REFUSED rather than applied.** Applying one while ours
+    /// is pending makes the browser roll our offer back, which loses the camera the user just
+    /// turned on and reports nothing (measured — web/e2e/webrtc-glare.spec.ts). The real client has
+    /// a named `RENEGOTIATION_GLARE` state for exactly this and posts a `mediaNegotiationFailure`;
+    /// this is the same decision, in the process that holds the link to post it on.
+    ///
+    /// A MOMENT and not a boolean, so it can expire: a flag that never cleared would refuse every
+    /// later renegotiation for the rest of the call and take the RECEIVE path down with it. It is
+    /// cleared by the answer, by a negotiation failure, and by
+    /// [`calling::OUTGOING_NEGOTIATION_TIMEOUT_MS`] passing.
+    outgoing_negotiation_at: Option<i64>,
     /// The sequence number of the next source request, which the service reads to order
     /// them. One counter per call, because it numbers this client's own requests.
     source_request_sequence: u64,
@@ -5633,6 +5647,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     end_reason: None,
             unreachable: false,
                     renegotiation_answer_link: None,
+            outgoing_negotiation_at: None,
                     source_request_sequence: 0,
                     sending: Vec::new(),
                     sharing: None,
@@ -5785,6 +5800,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                         end_reason: None,
             unreachable: false,
                         renegotiation_answer_link: None,
+            outgoing_negotiation_at: None,
                         source_request_sequence: 0,
                         sending: Vec::new(),
                         sharing: None,
@@ -6436,6 +6452,10 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
                     call.links.merge(&links);
                     call.sending = sending.clone();
+                    // OURS IS NOW IN FLIGHT, which is the client's own `OUTGOING_RENEGOTIATION`.
+                    // Until it is answered, an incoming renegotiation is REFUSED rather than
+                    // applied — see `outgoing_negotiation_at`.
+                    call.outgoing_negotiation_at = Some(now_ms());
                 }
             }
             ctx.emit_call_state();
@@ -6457,6 +6477,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                     "[calling] the offer was answered at once: {}",
                     calling::media_sections(answer).join(" | ")
                 );
+                // Answered in the POST's own response, so nothing of ours is pending any more and
+                // the next incoming renegotiation must NOT be refused. Cleared here as well as on
+                // the frame, because the service does both.
+                let mut plane = ctx.calling.lock().unwrap();
+                if let Some(call) = plane.call.as_mut().filter(|c| c.id == call_id) {
+                    call.outgoing_negotiation_at = None;
+                }
             }
             Ok(json!({ "call_id": call_id, "answer_sdp": answer }))
         }
@@ -12798,16 +12825,56 @@ impl Ctx {
         // and this app used to hand the page an offer where it expected an answer — the
         // page checked its signaling state, dropped it, and nothing said so.
         if let Some(renegotiation) = calling::media_renegotiation_from_frame(&frame.body) {
-            let id = {
+            let (id, glare) = {
                 let mut plane = self.calling.lock().unwrap();
                 match plane.call.as_mut().filter(|c| c.phase != CallPhase::Ended) {
                     Some(call) => {
-                        call.renegotiation_answer_link = Some(renegotiation.answer_link.clone());
-                        Some(call.id.clone())
+                        // GLARE: an offer of OURS is still out. The client has a named state for
+                        // this and refuses; so does this app, because applying theirs makes the
+                        // browser roll ours back and the user's camera is lost in silence.
+                        //
+                        // The window EXPIRES, which is what stops one unanswered offer from
+                        // refusing every later renegotiation for the rest of the call — that would
+                        // cost the RECEIVE path, which is the half that works.
+                        let glare = call.outgoing_negotiation_at.is_some_and(|at| {
+                            now_ms().saturating_sub(at) < calling::OUTGOING_NEGOTIATION_TIMEOUT_MS
+                        });
+                        if !glare {
+                            call.outgoing_negotiation_at = None;
+                            call.renegotiation_answer_link =
+                                Some(renegotiation.answer_link.clone());
+                        }
+                        (Some(call.id.clone()), glare)
                     }
-                    None => None,
+                    None => (None, false),
                 }
             };
+            // Refused, in the client's own words, on the link the offer itself named. A refusal we
+            // cannot post is still a refusal here: the alternative is applying it, which is the
+            // defect. So the POST is best-effort and the drop is not.
+            if glare {
+                eprintln!(
+                    "[calling] refusing a renegotiation offered on {} while ours is still out \
+                     (glare) — modalities={:?}",
+                    calling::callback_path(&frame.url),
+                    renegotiation.modalities
+                );
+                if let Some(url) = &renegotiation.reject_link {
+                    let local = {
+                        let plane = self.calling.lock().unwrap();
+                        plane.call.as_ref().map(|c| c.local.clone())
+                    };
+                    if let Some(local) = local {
+                        let body = calling::media_glare_rejection_payload(&local);
+                        if let Err(e) = self.post_call_signal(url, &body).await {
+                            eprintln!("[calling] could not refuse the renegotiation: {e:#}");
+                        }
+                    }
+                } else {
+                    eprintln!("[calling] the offer named no rejection link — dropping it silently");
+                }
+                return;
+            }
             // No live call means there is nothing to renegotiate, and answering would put
             // this machine back into a call it has left.
             if let Some(id) = id {
@@ -12855,6 +12922,11 @@ impl Ctx {
                             call.phase = CallPhase::Connected;
                             call.connected_at_ms.get_or_insert(now_ms());
                         }
+                        // Whatever it answers, nothing of OURS is out any more — so the next
+                        // renegotiation is applied rather than refused. It is the client's own
+                        // `handleMediaAnswer`, which leaves `OUTGOING_RENEGOTIATION` for
+                        // `CALL_CONNECTED` on any answer at all.
+                        call.outgoing_negotiation_at = None;
                         (
                             call.id.clone(),
                             call.links.media_acknowledgement().map(str::to_string),
@@ -12960,6 +13032,7 @@ impl Ctx {
             end_reason: None,
             unreachable: false,
             renegotiation_answer_link: None,
+            outgoing_negotiation_at: None,
             source_request_sequence: 0,
             sending: Vec::new(),
             sharing: None,
@@ -14786,6 +14859,7 @@ mod tests {
             end_reason: None,
             unreachable: false,
             renegotiation_answer_link: None,
+            outgoing_negotiation_at: None,
             source_request_sequence: 0,
             sending: Vec::new(),
             sharing: None,
@@ -14839,6 +14913,7 @@ mod tests {
             end_reason: None,
             unreachable: false,
             renegotiation_answer_link: None,
+            outgoing_negotiation_at: None,
             source_request_sequence: 0,
             sending: Vec::new(),
             sharing: None,
@@ -14884,6 +14959,80 @@ mod tests {
                  landing on that side of the emit would look like a live call."
             );
         }
+    }
+
+    /// A renegotiation that lands while OURS is out is REFUSED, and never applied.
+    ///
+    /// Applying it makes the browser roll our own offer back, which loses the camera the user just
+    /// turned on and reports nothing — measured in a real browser by web/e2e/webrtc-glare.spec.ts.
+    /// The real client has a named `RENEGOTIATION_GLARE` state for it and posts a
+    /// `mediaNegotiationFailure`; this is the same decision in the process that holds the link.
+    ///
+    /// Only a scan can hold this: the whole reaction is inside one branch of one handler, and the
+    /// way to break it is to fall through to the emit rather than to change a value.
+    #[test]
+    fn a_renegotiation_that_lands_while_ours_is_out_is_refused_rather_than_applied() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        // Bounded at BOTH ends by markers the window cannot itself contain.
+        let branch = code
+            .split("if let Some(renegotiation) = calling::media_renegotiation_from_frame")
+            .nth(1)
+            .expect("the renegotiation branch");
+        let branch = branch
+            .split("// Their SDP answer")
+            .next()
+            .expect("the branch ends where the answer path begins");
+        assert!(
+            branch.contains("outgoing_negotiation_at"),
+            "the branch does not ask whether an offer of ours is still out, so it applies theirs \
+             and the browser rolls ours back"
+        );
+        assert!(
+            branch.contains("media_glare_rejection_payload"),
+            "a refused offer is dropped in silence — the client posts a mediaNegotiationFailure on \
+             the offer's own rejection link, which is what makes the service offer again at once"
+        );
+        // The refusal must RETURN. Falling through to the emit is the defect with a log line on it.
+        let refusal = branch.split("if glare {").nth(1).expect("the glare branch");
+        let refusal = refusal.split("// No live call means").next().expect("it ends before the emit");
+        assert!(
+            refusal.contains("return;"),
+            "the glare branch does not return, so the offer is refused AND handed to the page"
+        );
+        assert!(
+            calling::OUTGOING_NEGOTIATION_TIMEOUT_MS > 0,
+            "the window has to expire, or one unanswered offer refuses every later renegotiation \
+             for the rest of the call and the RECEIVE path goes with it"
+        );
+    }
+
+    /// The backend refuses offers for exactly as long as the page waits for its answer.
+    ///
+    /// Two numbers, two languages, one fact — and each is the real client's own
+    /// `mediaAnswerTimeoutSec: 35`. If the BACKEND's window outlived the page's, the page would
+    /// have given up on its offer and released the camera while the backend went on refusing every
+    /// renegotiation the service made: the send path down AND the receive path with it. Nothing but
+    /// a test can see across that process boundary.
+    #[test]
+    fn the_backend_refuses_offers_for_no_longer_than_the_page_waits_for_one() {
+        let store = include_str!("../../web/src/lib/store.ts");
+        let line = store
+            .lines()
+            .find(|line| line.contains("const MEDIA_ANSWER_TIMEOUT_MS"))
+            .expect("store.ts declares MEDIA_ANSWER_TIMEOUT_MS");
+        let page_ms: i64 = line
+            .split('=')
+            .nth(1)
+            .map(|rhs| rhs.trim().trim_end_matches(';').replace('_', ""))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("could not read the number out of `{}`", line.trim()));
+        assert_eq!(
+            calling::OUTGOING_NEGOTIATION_TIMEOUT_MS, page_ms,
+            "the backend stops refusing after {} ms and the page waits {page_ms} ms — one of them \
+             is acting on an offer the other has already given up on",
+            calling::OUTGOING_NEGOTIATION_TIMEOUT_MS
+        );
     }
 
     /// An outgoing renegotiation goes out on the door the REAL CLIENT uses, and the other is the

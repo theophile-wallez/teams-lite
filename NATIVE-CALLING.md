@@ -43,11 +43,13 @@ why it survived a month of live measurement whose only symptom was a picture nob
 `RENEGOTIATION_GLARE` state and a `getGlareError()`, so glare is not an edge case here; it posts an
 outgoing renegotiation to the `mediaRenegotiation` link and `startOutgoingNegotiation` appears
 NOWHERE in its 3.1 MB; its offer body publishes `mediaAnswer` and `rejection` and NOT
-`mediaAcknowledgement`, which this app was sending; and it waits `mediaAnswerTimeoutSec: 35` for the
-answer before reporting a failure. All three are now this app's too. § 10.8 holds the detail, and
-the correction: an earlier round wrote down that the answer arrives on the renegotiation door and
-was misread as an offer — the client answers on `/call/mediaAnswer/`, so that was wrong, and the
-glare above is the cause either way.
+`mediaAcknowledgement`, which this app was sending; it waits `mediaAnswerTimeoutSec: 35` for the
+answer before reporting a failure; and every body of its that carries an SDP names
+`clientContentForMediaController` — `{controlVideoStreaming, csrcInfo}`, how the media CONTROLLER
+learns where to reach an endpoint — which this app named on none of them. All five are now this
+app's too. § 10.8 holds the detail, and the correction: an earlier round wrote down that the answer
+arrives on the renegotiation door and was misread as an offer — the client answers on
+`/call/mediaAnswer/`, so that was wrong, and the glare above is the cause either way.
 
 **What is STILL unverified against the tenant is whether the service then answers, and the rig for
 it needs no second person:** `cd web && bun run join-live -- --pair` puts BOTH of this machine's
@@ -814,15 +816,43 @@ in either direction (§ 10.1). It is declared now. Nothing about the user is pub
 section is `recvonly` and no camera opens until they press for one. It explains nothing about the
 screen's own `bytesReceived: 0`, which stays open below.
 
-**What is still NOT done, with the client's own reference for it:** a glare drop is silent here where
-the client POSTS a `mediaNegotiationFailure` to the offer's `rejection` link (`zH`: `{sender, code,
-subCode, phrase}`). `MediaRenegotiation.reject_link` is already parsed and nothing posts to it. What
-it would buy is the service being told at once instead of re-offering on its own clock; what it costs
-is a gated write of its own. And the answer body is missing `clientContentForMediaController`
-(`webRtcSignalingManager.getClientUrls()`), which the JOIN already sends and which is how the media
-controller learns our callback urls — a candidate for the `bytesReceived: 0` below, and untried.
+**THE REFUSAL IS THE BACKEND'S, and it is the client's own body.** A glare drop was silent at first —
+the page dropped the offer and told nobody — where the client POSTs a `mediaNegotiationFailure` to the
+offer's own `rejection` link (`zH`: `{sender, code, subCode, phrase}`). It does that here now, in the
+process that holds the link: `CallSession.outgoing_negotiation_at` is the client's
+`OUTGOING_RENEGOTIATION` state kept as a MOMENT rather than a flag, so it EXPIRES — a flag that never
+cleared would refuse every later renegotiation for the rest of the call and take the receive path
+with it. The page's own drop stays as the backstop, because two open pages share one call and the two
+sides cannot agree to the millisecond.
 
-The next questions, in order: run the PAIR (below); then those two; then the four rewrites § 2.5
+**Its three values are COPIED and not one of them is derivable from its name**, which is why they are
+pinned: `CALL_END_CODE.GLARE_ERROR` is 491, `CALL_END_SUB_CODE.MEDIA_GLARE_ERROR` is **3118** (a
+guess from the neighbouring media errors gives the wrong number), and
+`CALL_END_PHRASE.RENEGOTIATION_IN_PROGRESS` is **`"NegotiationIsInProgress"`** — not
+`RenegotiationInProgress`, which is what reading the constant's own name gives. Two of the three were
+guessed wrong here before the table was read.
+
+**AND `clientContentForMediaController` IS NOW SENT ON ALL FOUR BODIES, which is the leading
+candidate for the `bytesReceived: 0` below.** The client's `getClientUrls()` is
+`{controlVideoStreaming, csrcInfo}` — OUR callbacks — and it is gated on `isWebRtcCall`, so it is how
+a client DECLARES itself a WebRTC endpoint the media controller can drive. It rides the call
+invitation, the join, the acceptance and every media answer; this app sent it on none of them. The
+calling service and the media controller are two components: signaling accepted
+`applyChannelParameters` and answered 200, and the controller is what actually puts a source on a
+section — so an accepted subscription that delivers no RTP is exactly the shape of a controller that
+was never told where we are.
+
+**And the SOURCE REQUEST itself is confirmed correct**, which narrows that further:
+`getSignalingSourceRequestMessage` is `{applyChannelParameters: {multiChannelParameter: {mids: [mid],
+mediaParameter: JSON.stringify({controlVideoStreaming: {sequenceNumber, controlInfo: {sourceId,
+streamMsid, fmtParams, subStreamIndex}}})}}}` — byte for byte what `source_request_payload` builds.
+The client also builds the DATA-CHANNEL twin (`{type:"sr", …}`) and hands both to one sender, which
+prefers the media control plane; this app has no data channel and takes the signaling one, which is
+the documented fallback.
+
+The next questions, in order: run the PAIR (below); then, if a subscription still delivers nothing,
+`updateMediaDescriptions` — the one mechanism the client's own `StartScreenSharing` decorator names
+(`waitFor: "_UpdateMediaDescriptions"`) and this app has never spoken; then the four rewrites § 2.5
 lists as unimplemented (the simulcast envelope, the `red` payload, a per-section fingerprint,
 `a=rtcp` on an offer), one variable per run.
 

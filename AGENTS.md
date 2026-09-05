@@ -5620,10 +5620,20 @@ joins alone and waits for an offer. Six rules hold it together, and
     afford to apply one and this app cannot**: the client is REINVITELESS, so every section exists
     from the first offer and a rollback reverts a `direction` it re-applies, while this app ADDS a
     section mid-call and a rollback removes the section itself.
-  - **So a remote offer arriving while OURS is pending is DROPPED, never applied**
-    (`remoteOfferWouldRollBackOurs`). The service is authoritative and offers again within seconds;
-    what must not happen is the user's own camera being undone in silence. It is exactly the
-    contract `answerRemoteOffer` already stated for an offer it cannot answer right now.
+  - **So a remote offer arriving while OURS is pending is REFUSED, never applied — and the BACKEND
+    is what refuses it**, because it holds the link to say so on. `CallSession.outgoing_negotiation_at`
+    is the client's own `OUTGOING_RENEGOTIATION` kept as a MOMENT rather than a flag, and
+    `calling::media_glare_rejection_payload` posts its `mediaNegotiationFailure` to the offer's own
+    `rejection` link — which is what makes the service offer again at once instead of on its own
+    clock. **The window EXPIRES**, and that is not a nicety: a flag that never cleared would refuse
+    every later renegotiation for the rest of the call and take the RECEIVE path — the half that
+    works — down with it. The three values in that body are COPIED from the client's own tables and
+    not one is derivable from its name (491, **3118**, **`"NegotiationIsInProgress"`**); two of the
+    three were guessed wrong here before the table was read.
+  - **The PAGE keeps its own drop as a BACKSTOP** (`remoteOfferWouldRollBackOurs`). Two open pages
+    share one call and the two sides cannot agree to the millisecond: the backend clears its window
+    on the answer, and a frame already in flight when it does would otherwise land in a page with
+    ours still pending.
   - **An offer of ours that nobody answers is GIVEN UP, at the client's own number**
     (`MEDIA_ANSWER_TIMEOUT_MS` = 35 s, from its `mediaAnswerTimeoutSec: 35`;
     `boundTheMediaAnswer`) — which is what makes dropping theirs safe. Unbounded, one unanswered
@@ -5654,6 +5664,15 @@ joins alone and waits for an offer. Six rules hold it together, and
     `links[MEDIA_RENEGOTIATION]`, and `startOutgoingNegotiation` appears NOWHERE in the 3.1 MB
     calling bundle. This app preferred the other one on the strength of "the POST is accepted and the
     capture is retained" — which is now explained as no answer arriving rather than as success.
+  - **EVERY body that carries an SDP names where the MEDIA CONTROLLER reaches us**
+    (`calling::media_controller_content` — `{controlVideoStreaming, csrcInfo}`, both OUR callbacks,
+    on the call invitation, the join, the acceptance and every media answer). The client's own
+    `getClientUrls()` is gated on `isWebRtcCall`, so it is how an endpoint DECLARES itself one the
+    controller can drive; this app named it on none of the four. It is the leading candidate for the
+    other open failure below — a subscription the service ACCEPTS and then never sends a byte on —
+    because signaling and the media controller are two components, and an accepted
+    `applyChannelParameters` says nothing about whether the controller knows where we are. Four
+    bodies is four chances to forget one, so the pin checks all four at once.
   - **The bundle is FREE to re-read and needs no account** (NATIVE-CALLING.md § 9). Reach for it
     before guessing at a body: it settled four separate questions here in one pass.
 - **AND THE ANSWER DECLARES `Video`, or a colleague's camera can never arrive.** The renegotiation
