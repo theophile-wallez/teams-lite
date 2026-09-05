@@ -606,12 +606,17 @@ async fn rescue(
         return None;
     }
     if !rescue_is_due() {
+        say_standing_down("it was tried too recently");
         return None;
     }
     // Never waits, unlike the sign-in a reader started: if an interactive call is already out —
     // theirs, or another failing token call's — this one has nothing to add and would only put a
     // second window on the broker's display.
-    let turn = try_interactive_turn()?;
+    let Some(turn) = try_interactive_turn() else {
+        say_standing_down("another interactive acquisition is already out");
+        return None;
+    };
+    say_standing_down("");
     eprintln!(
         "[broker] the silent path refuses {scope} — trying an interactive acquisition, which \
          needs nobody when the PRT can still do it"
@@ -692,12 +697,55 @@ fn try_interactive_turn() -> Option<InteractiveTurn> {
 /// implied a lifetime it did not have.
 static RESCUE_STATE: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// Say ONCE that the automatic rescue stood down, and why — and say when it stops.
+///
+/// **This is what made a real outage undiagnosable.** The rescue is the repair that ends most
+/// sign-in outages with nobody being told there was one, and it had THREE silent early returns:
+/// a read-only backend, the rate limit, and the interactive turn already being held. Two of
+/// those can be permanent — a poisoned `RESCUE_STATE` makes `rescue_is_due` answer false for
+/// ever, and a served sign-in nobody finished holds the turn for ever — and in both the app
+/// retries silently every thirty seconds with no line anywhere saying the one thing that would
+/// have explained it. Measured on the always-on instance: **167 `[auth]` lines, 775
+/// `[realtime] no credentials` lines, and not one word from the rescue**, so which of the three
+/// it was could not be told after the fact.
+///
+/// Deduped by REASON rather than rate-limited, because the reasons are a closed set of three
+/// and what matters is the CHANGE: one line when it starts standing down, one when it stops.
+/// A line per attempt would be 2 880 a day for a state that is one fact.
+fn say_standing_down(reason: &str) {
+    static SAID: Mutex<Option<String>> = Mutex::new(None);
+    let Ok(mut said) = SAID.lock() else { return };
+    // An absent value reads as "nothing was standing down", so the FIRST ordinary rescue — which
+    // calls this with an empty reason — prints nothing extra.
+    if said.as_deref().unwrap_or("") == reason {
+        return;
+    }
+    *said = Some(reason.to_string());
+    if reason.is_empty() {
+        // It is trying again. Said only after it had stood down, so an ordinary first rescue
+        // prints nothing extra.
+        eprintln!("[broker] the automatic sign-in repair is being tried again");
+    } else {
+        eprintln!(
+            "[broker] the automatic sign-in repair is standing down: {reason}. Sign in from the \
+             app if this does not clear."
+        );
+    }
+}
+
 /// May the automatic rescue try again?
+///
+/// A lock this cannot take answers YES, and that direction is deliberate: the rate limit is an
+/// optimisation — it spares the broker's display a second window — and never a safety rail, while
+/// the turn above is what really guarantees one attempt at a time. It used to answer `false` on a
+/// poisoned lock, which turns one panic anywhere near this state into the automatic sign-in repair
+/// being disabled for the life of the process, silently. Failing OPEN costs at most one extra
+/// interactive attempt; failing closed cost an outage nobody could explain.
 fn rescue_is_due() -> bool {
     RESCUE_STATE
         .lock()
         .map(|last| !last.is_some_and(|at| at.elapsed() < RESCUE_MIN_INTERVAL))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Record an attempt that did not mint a token, so the next one waits.
@@ -995,6 +1043,56 @@ mod tests {
         let turn_at = body.find("try_interactive_turn()").expect("the single-flight turn");
         let call_at = body.find("interactive_on(").expect("the call");
         assert!(read_only_at < turn_at && turn_at < call_at, "read-only comes first");
+    }
+
+    /// THE AUTOMATIC REPAIR SAYS WHEN IT STANDS DOWN, and it used to stand down in silence.
+    ///
+    /// It is the thing that ends most sign-in outages with nobody being told there was one, and it
+    /// had three silent early returns. Two of them can be PERMANENT — a poisoned `RESCUE_STATE`,
+    /// and an interactive turn nobody released — and in both the app retries every thirty seconds
+    /// for ever with no line anywhere naming the cause. Measured on the always-on instance: 167
+    /// `[auth]` lines, 775 `[realtime] no credentials` lines, and not one word from the rescue.
+    #[test]
+    fn a_rescue_that_stands_down_says_which_of_its_reasons_it_was() {
+        let whole = include_str!("auth.rs");
+        let source = &whole[..whole.find("\n#[cfg(test)]").unwrap_or(whole.len())];
+        let rescue = source.find("async fn rescue(").expect("rescue");
+        // Bounded at BOTH ends: the next item, so a later function's own call cannot satisfy this.
+        let body = &source[rescue..];
+        let body = &body[..body.find("\n/// The one interactive").unwrap_or(body.len())];
+        // Each of the two reachable stand-downs names itself, asserted on the EXACT call rather
+        // than on one found somewhere after it. A window bounded by the next `return None;` was
+        // written first and proved worthless: with the silent `?` restored there is no such
+        // return, the slice ran to the end of the body, and a LATER `say_standing_down` satisfied
+        // it — the mutation passed. The read-only stand-down deliberately says nothing: refusing
+        // is that backend's whole purpose, and a screenshot run must not print a line about a
+        // repair it was never going to make.
+        assert!(
+            body.contains(r#"say_standing_down("it was tried too recently")"#),
+            "the rate limit stands down without saying so"
+        );
+        assert!(
+            body.contains(r#"say_standing_down("another interactive acquisition is already out")"#),
+            "the turn stands down without saying so"
+        );
+        // And the `?` form cannot come back: it is what made the turn's refusal invisible, and it
+        // reads as ordinary Rust rather than as a missing line.
+        assert!(
+            !body.contains("try_interactive_turn()?"),
+            "`try_interactive_turn()?` returns None with nothing said — use the `let … else` that \
+             names the reason"
+        );
+        // And it says when it STOPS, or the line above would read as a state that never cleared.
+        assert!(body.contains("say_standing_down(\"\")"), "nothing says the repair resumed");
+        // The rate limit FAILS OPEN. Failing closed turns one panic near this state into the
+        // repair being disabled for the life of the process.
+        let due_at = source.find("fn rescue_is_due()").expect("rescue_is_due");
+        let due_body = &source[due_at..due_at + source[due_at..].find("\n}").unwrap_or(0)];
+        assert!(
+            due_body.contains("unwrap_or(true)"),
+            "a lock this cannot take must answer YES: the limit is an optimisation, and the TURN \
+             is what guarantees one attempt at a time"
+        );
     }
 
     #[test]

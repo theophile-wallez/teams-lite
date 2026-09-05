@@ -1523,6 +1523,20 @@ struct Ctx {
     /// readers would ask GitLab twice a second and earn the token a rate limit. See
     /// [`gitlab_cached`].
     gitlab_refreshing: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    /// When the CSA conversation/channel sync last STARTED, and whether one is running.
+    ///
+    /// **The same single-flight lesson as `gitlab_refreshing`, on a much hotter path, and this
+    /// one earned the rate limit rather than merely risking it.** `sync_csa_bg` fires on every
+    /// `conversations` AND every `channels` request — two per page connect, and a page
+    /// reconnects whenever its socket drops, which while sign-in is broken is every thirty
+    /// seconds. Measured on the always-on instance: **5 599 `CSA users/me -> 429 Too Many
+    /// Requests`** in one backend's life, against 5 696 sync attempts. So essentially every
+    /// sync it ever made was refused, and each refusal was this app asking again.
+    ///
+    /// Two guards, because they stop different things: the FLAG stops two requests arriving
+    /// together from making two fetches, and the MOMENT stops a reconnect loop from making one
+    /// per reconnect. See [`CSA_SYNC_FLOOR`].
+    csa_syncing: Arc<Mutex<(bool, Option<std::time::Instant>)>>,
     /// The Teams people a GitLab name can resolve to, and when the list was folded.
     ///
     /// It is a cache with a window, like the GitLab reads it serves (see
@@ -3339,6 +3353,7 @@ async fn main() -> Result<()> {
         signin: Arc::new(Mutex::new(None)),
         calling: Arc::new(Mutex::new(CallingPlane::default())),
         gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        csa_syncing: Arc::new(Mutex::new((false, None))),
         tracker_people: Arc::new(Mutex::new(None)),
         agent_runs_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
         channel_layouts: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -10399,8 +10414,71 @@ fn call_event_json(m: &Message, self_name: &str, self_mri: &str) -> Option<Value
 /// a channel post arriving live (before the first CSA sync) upserts a conversation
 /// row by id, and `persist_channels` deletes it. When healing happens we must emit
 /// `conversations_changed` too so the sidebar drops the stray chat entry.
+/// The shortest gap between two CSA syncs, however many pages ask.
+///
+/// It is a FLOOR on a background refresh rather than a cache window: the answer a page gets is
+/// the store's, served instantly, and this only decides how often the network is asked to top it
+/// up. Thirty seconds is well under the interval at which anybody notices a new conversation and
+/// well over the rate a reconnect loop asks at — which is the failure it exists for.
+///
+/// The live feed is what really keeps the list current; this sync is the backstop that catches
+/// what arrived while the app was closed. So a floor costs almost nothing, and its absence cost
+/// 5 599 rate-limit refusals in one backend's life (see [`Ctx::csa_syncing`]).
+const CSA_SYNC_FLOOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Clears the in-flight flag whichever way the sync ends.
+///
+/// A guard rather than a line at each return, because there are several: the fetch can fail, the
+/// store can be unreadable, and a future path will add another. A flag left set is this app never
+/// refreshing its chat list again, and the one thing worse than asking too often is not asking.
+struct CsaSyncGuard(Ctx);
+
+impl Drop for CsaSyncGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.csa_syncing.lock() {
+            state.0 = false;
+        }
+    }
+}
+
+/// Whether this caller may start a CSA sync, claiming it if so.
+///
+/// Pure over the state and the clock, so both refusals are unit-tested: they stop different
+/// things, and each of them alone leaves the storm this exists to end (see [`Ctx::csa_syncing`]).
+/// The moment is stamped at the START, so a slow sync does not push the next one out further than
+/// the floor.
+fn claim_csa_sync(
+    state: &mut (bool, Option<std::time::Instant>),
+    now: std::time::Instant,
+) -> bool {
+    let (running, last) = *state;
+    // One in flight already: a second fetch would ask CSA the same question twice.
+    if running {
+        return false;
+    }
+    // Too soon: a reconnect loop asks on every reconnect, and the answer has not moved.
+    if last.is_some_and(|at| now.duration_since(at) < CSA_SYNC_FLOOR) {
+        return false;
+    }
+    *state = (true, Some(now));
+    true
+}
+
 fn sync_csa_bg(ctx: Ctx) {
+    // SINGLE-FLIGHT, and floored. Claimed before the spawn so two requests arriving in the same
+    // millisecond cannot both get in — the check and the claim are one critical section.
+    {
+        let mut state = ctx.csa_syncing.lock().unwrap();
+        if !claim_csa_sync(&mut state, std::time::Instant::now()) {
+            return;
+        }
+    }
     tokio::spawn(async move {
+        // Released on EVERY path out, including the early return below: a flag left set would
+        // stop this app ever refreshing its own chat list again, which is worse than the storm
+        // it replaces. The moment stays as it was set — at the START — so a slow sync does not
+        // push the next one further out than the floor.
+        let _release = CsaSyncGuard(ctx.clone());
         let http = ctx.http.clone();
         let (convs, teams) = match ctx
             .retry_on_auth(|session, csa| {
@@ -15032,6 +15110,37 @@ mod tests {
             "the backend stops refusing after {} ms and the page waits {page_ms} ms — one of them \
              is acting on an offer the other has already given up on",
             calling::OUTGOING_NEGOTIATION_TIMEOUT_MS
+        );
+    }
+
+    /// THE CHAT-LIST SYNC IS SINGLE-FLIGHT AND FLOORED, and each guard stops a different thing.
+    ///
+    /// Measured on the always-on instance: **5 599 `CSA users/me -> 429 Too Many Requests`** in
+    /// one backend's life, against 5 696 attempts — so essentially every sync it ever made was
+    /// refused, and every refusal was this app asking again. `sync_csa_bg` fires on both
+    /// `conversations` and `channels`, which is two per page connect, and a page reconnects
+    /// whenever its socket drops.
+    #[test]
+    fn the_chat_list_sync_is_asked_for_once_and_not_again_at_once() {
+        let mut state = (false, None);
+        let t0 = std::time::Instant::now();
+        // The first caller goes, and the claim is taken in the same breath as the check.
+        assert!(claim_csa_sync(&mut state, t0));
+        assert_eq!(state.0, true, "the claim was not taken, so a second caller would also pass");
+        // The SECOND request of the same connect — `channels` right behind `conversations` — is
+        // refused while the first is in flight. One CSA fetch feeds both lists, so there is
+        // nothing for it to do anyway.
+        assert!(!claim_csa_sync(&mut state, t0));
+        // Done. The FLOOR is what stops a reconnect loop, and it is measured from the START of
+        // the last sync rather than its end, so a slow one does not push the next out further.
+        state.0 = false;
+        assert!(!claim_csa_sync(&mut state, t0 + CSA_SYNC_FLOOR / 2));
+        assert!(claim_csa_sync(&mut state, t0 + CSA_SYNC_FLOOR));
+        // And a FLOOR alone would not have been enough: the two guards are not one.
+        let mut running = (true, Some(t0));
+        assert!(
+            !claim_csa_sync(&mut running, t0 + CSA_SYNC_FLOOR * 10),
+            "a sync still in flight must not be joined by a second one however long it has taken"
         );
     }
 

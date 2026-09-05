@@ -5078,6 +5078,28 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
   - **A CSA chat's `members` array is NOT the roster** — it lists only us on 281 of those
     957 chats — so "the members are only me" finds hundreds of ordinary colleagues' chats.
     It cost one wrong diagnosis: the id is the signal.
+- **THE SYNC BEHIND THAT LIST IS SINGLE-FLIGHT AND FLOORED, and it earned a rate limit before
+  it was** (`claim_csa_sync` / `CSA_SYNC_FLOOR`, over `Ctx::csa_syncing`). `sync_csa_bg` fires
+  on every `conversations` AND every `channels` request — two per page connect, and a page
+  reconnects whenever its socket drops, which while sign-in is broken is every thirty seconds.
+  **Measured on the always-on instance: 5 599 `CSA users/me -> 429 Too Many Requests` in one
+  backend's life, against 5 696 attempts** — so essentially every sync it ever made was
+  refused, and every refusal was this app asking again. It is the lesson
+  `Ctx::gitlab_refreshing` already records ("one merge request under two readers would ask
+  GitLab twice a second and earn the token a rate limit"), on a hotter path and after the fact.
+  Three rules, each pinned by a test:
+  - **The two guards stop DIFFERENT things and neither is redundant.** The in-flight flag stops
+    two requests arriving together from making two fetches; the FLOOR stops a reconnect loop
+    from making one per reconnect. A test asserts a sync still running is refused however long
+    it has taken, and that a finished one is refused until the floor has passed.
+  - **The moment is stamped at the START.** Measured from the end, a slow sync would push the
+    next one out by its own duration on top of the floor.
+  - **The flag is released on EVERY path out** (`CsaSyncGuard`, a `Drop`), because the fetch can
+    fail and the store can be unreadable. A flag left set is this app never refreshing its own
+    chat list again, and the one thing worse than asking too often is not asking at all.
+  What a floor costs is nothing the reader sees: the answer a page gets is the STORE's, served
+  instantly, and the live feed is what really keeps the list current — this sync is the backstop
+  that catches what arrived while the app was closed.
 
 ## ONE MENU in a conversation's header (everything the thread offers, behind one trigger)
 
@@ -8875,6 +8897,34 @@ user's. What changes is only what is asked.
   backend that no longer existed. Every send and every update was refused on the door a
   phone reaches through (§ Automation safety names that state `foreign`), and the caller got
   no JSON at all, so it blocked on the output for a day.
+- **AND IT WATCHES THE BACKEND IT SPAWNED, which it did not** (`superviseBackend` in
+  launcher/src/backend.ts). `launch()` started the child and never looked at it again:
+  `waitForExit` existed but was only ever awaited by a restart or an update, both of which ASK
+  for the exit. So a backend that died for any other reason — a crash, an OOM kill, an idle
+  exit whose keepalive had dropped — left the launcher serving the app against a dead socket
+  for ever. **Measured on the always-on instance: the web front had been up 11 h 40 min with
+  no backend behind it**, so every page said "Backend lost" and nothing on the machine was
+  going to change that — the backend is the launcher's child, so only the launcher could bring
+  it back, and it was not trying. Four rules hold the fix, and each is pinned by a test:
+  - **An exit somebody ASKED for is not a crash**, and a GENERATION counter is what tells them
+    apart: `stop()` bumps it and then kills, so by the time the dying child's `exited` resolves
+    its own generation is stale and the supervisor stands down. Without that ordering a
+    Settings restart and an in-app update would each race a respawn of their own — two
+    backends fighting for one port, which is worse than the outage.
+  - **A launcher that is itself going away respawns nothing** (`gone`), which is the update's
+    own last step: an orphan holding the port is exactly what the update's ordering avoids.
+  - **A start that FAILS is retried and never thrown.** `startBackend` throws after waiting a
+    minute for the port, and an unhandled rejection there would take the web server down with
+    it. Giving up is the behaviour that caused the outage.
+  - **It SAYS both halves** — that the backend died, and that it came back — and names the log.
+    A silent respawn is a backend restarting in a loop with nothing to explain it.
+- **The backend's log is APPENDED, and there is one per PORT** (`backendLogPath`). A `BunFile`
+  handed to `spawn` truncates and each writer keeps its own offset, so the two send-capable
+  installs on this machine (§ Running the released build beside the staged one) spliced their
+  output into ONE file: whole lines overwritten mid-word, and one run's startup banner
+  appearing at two offsets as though it had happened twice. Reading a real outage out of that
+  took an hour. The default port keeps the historical `/tmp/teams-lite-server.log`, because
+  that path is in every doc and every error message already.
 
 ## Ports
 
@@ -9567,6 +9617,30 @@ and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
   every connection attempt and backs off to 30 s, so the first attempt that succeeds
   fills the session in (`Ctx::adopt_session`) and the app catches up with no restart.
   A `sign_in` retry loop beside it would be a second thing hammering the same bus.
+- **AND THE AUTOMATIC REPAIR SAYS WHEN IT STANDS DOWN, which it did not** (`say_standing_down`
+  in src/auth.rs). `auth::rescue` is the thing that ends most sign-in outages with nobody being
+  told there was one (§ Signing in again), and it had THREE silent early returns: a read-only
+  backend, the rate limit, and the interactive turn already being held. Two of those can be
+  PERMANENT — a poisoned `RESCUE_STATE`, and a served sign-in nobody finished — and in both the
+  app retries every thirty seconds for ever with nothing anywhere naming the cause. Measured on
+  the always-on instance during a real outage: **167 `[auth]` lines, 775 `[realtime] no
+  credentials` lines, and not one word from the rescue**, so which of the three it was could not
+  be told after the fact. Three rules, each pinned by a test:
+  - **The two reachable stand-downs name themselves, ONCE**, deduped by REASON rather than
+    rate-limited: the set is closed and what matters is the CHANGE, so it is one line when the
+    repair starts standing down and one when it resumes. A line per attempt would be 2 880 a day
+    for a state that is one fact. The READ-ONLY stand-down deliberately says nothing — refusing
+    is that backend's whole purpose, and a screenshot run must not print a line about a repair it
+    was never going to attempt.
+  - **The rate limit FAILS OPEN.** `rescue_is_due` answers YES on a lock it cannot take: the
+    limit is an optimisation (it spares the broker's display a second window) and the TURN is
+    what really guarantees one attempt at a time, so failing closed turned one panic near that
+    state into the repair being disabled for the life of the process.
+  - **`try_interactive_turn()?` may not come back.** It reads as ordinary Rust and is exactly
+    what made the turn's refusal invisible, so the test scans for it by name. **That test was
+    worthless on its first writing** and is worth knowing about: it bounded a window at the next
+    `return None;`, which the `?` form does not have — the slice ran to the end of the body and a
+    LATER `say_standing_down` satisfied it, so the mutation passed. It asserts the exact call now.
 - **The identity is the ONE thing a local read needed from the session**, which is why
   an outage broke reads at all: the mri decides whether a stored message is ours, and a
   1:1 is titled after the other party. It lives in the store now

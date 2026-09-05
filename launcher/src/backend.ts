@@ -3,7 +3,7 @@
 // kill it on exit. One command starts everything.
 
 import { spawn, type Subprocess } from "bun";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -37,6 +37,21 @@ export function backendPort(): number {
 /// The WebSocket URL of that backend.
 export function backendUrl(): string {
   return `ws://${HOST}:${backendPort()}`;
+}
+
+/// Where the backend we spawn writes its output — one file PER PORT.
+///
+/// Two send-capable installs share this machine (AGENTS.md § Running the released build
+/// beside the staged one), and they used to share one log path as well: each writer kept its
+/// own offset into a truncated file, so the two runs' output was spliced together with lines
+/// cut mid-word. The port is what already tells the two backends apart everywhere else, so it
+/// is what names the file. The DEFAULT port keeps the historical name, because that is the
+/// path every doc, every error message and every reader's muscle memory already holds.
+export function backendLogPath(): string {
+  const port = backendPort();
+  return port === DEFAULT_PORT
+    ? "/tmp/teams-lite-server.log"
+    : `/tmp/teams-lite-server-${port}.log`;
 }
 
 /// Are we running as a `bun build --compile` standalone binary? In that mode the
@@ -228,12 +243,42 @@ export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise
   // rather than capturing one child, so the exit handlers registered ONCE always kill
   // whichever backend is current.
   let proc = await startBackend(bin, opts.keepAlive === true, writeToken);
+  /// WHICH child is the current one. A deliberate stop bumps it BEFORE it kills, so the
+  /// dying child's own exit reads as superseded and the supervisor stands down — see
+  /// {@link superviseBackend} for why that ordering is the whole of it.
+  let generation = 0;
+  /// Set once this launcher is going away for good: the exit hooks, and the in-app update,
+  /// which kills the backend and then replaces this whole process.
+  let gone = false;
   const stop = () => {
+    generation += 1;
     try {
       proc.kill(9);
     } catch {}
   };
-  killChildOnExit(stop);
+  killChildOnExit(() => {
+    gone = true;
+    stop();
+  });
+  /// Spawn a replacement and re-arm the watch over it. One place, so the first child and
+  /// every one after it are supervised identically.
+  const spawnSupervised = async (): Promise<void> => {
+    proc = await startBackend(bin, opts.keepAlive === true, writeToken);
+    generation += 1;
+    watch(proc, generation);
+  };
+  const watch = (child: Subprocess, mine: number) => {
+    void superviseBackend({
+      exited: () => child.exited.then(() => {}),
+      gone: () => gone,
+      current: () => mine === generation,
+      start: spawnSupervised,
+      log: (message) => console.error(message),
+      wait: (ms) => Bun.sleep(ms),
+      logPath: backendLogPath(),
+    });
+  };
+  watch(proc, generation);
   return {
     stop,
     writeToken,
@@ -243,13 +288,93 @@ export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise
       await proc.exited;
     },
     restart: async () => {
+      // `stop` bumps the generation first, so the child it kills does not read its own
+      // death as a crash and race this replacement.
       stop();
       // AWAITED for the reason `waitForExit` exists: a signalled process still holds its
       // port for a moment, and the replacement's own bind would fail on it.
       await proc.exited;
-      proc = await startBackend(bin, opts.keepAlive === true, writeToken);
+      await spawnSupervised();
     },
   };
+}
+
+/// How long to wait before trying again when the backend will not START.
+///
+/// Only reached when `startBackend` THREW, which it does after waiting 60 s for the port —
+/// so this is the pause between minute-long attempts rather than a busy loop's throttle.
+const RESTART_BACKOFF_MS = 5_000;
+
+/**
+ * Why the backend is SUPERVISED, and what the generation counter is for.
+ *
+ * **This is a real outage, not a hypothetical.** `launch()` spawned the backend as a child
+ * and never looked at it again: `waitForExit` existed but was only ever awaited by a restart
+ * or an update, both of which ask for the exit. So a backend that died for any other reason —
+ * a crash, an OOM kill, an idle exit whose keepalive had dropped — left this process serving
+ * the app against a dead socket, for ever. Measured on the always-on EC2 instance: the web
+ * front had been up for **11 hours 40 minutes** with no backend behind it, so every page said
+ * "Backend lost" and nothing on the machine was going to change that. The app cannot bring
+ * itself back — the backend is our child and only we can spawn another — so nobody could.
+ *
+ * The GENERATION is what keeps that apart from an exit somebody ASKED for, and the ordering is
+ * the whole of it: `stop()` bumps the counter and then kills, so by the time the dying child's
+ * `exited` resolves its own generation is stale and the supervisor stands down. Without that,
+ * a Settings restart and an in-app update would each race a respawn of their own — two
+ * backends fighting for one port, which is worse than the bug being fixed.
+ *
+ * `gone` covers the one exit that must never be followed by a respawn: this launcher itself
+ * going away, which is the update's own last step.
+ *
+ * An ATTACHED backend gets none of this. It is somebody else's child, we cannot wait for it
+ * and we must not start a second one on its port — `ensureBackend`'s attach branch returns a
+ * handle whose `waitForExit` resolves at once, and a supervisor over that would respawn in a
+ * tight loop against a backend that is perfectly healthy.
+ */
+export type SupervisorDeps = {
+  /** Resolves when the child being watched has really gone. */
+  exited: () => Promise<void>;
+  /** Whether this launcher is going away for good. */
+  gone: () => boolean;
+  /** Whether the child that just exited was still the CURRENT one — false once a restart
+   *  or an update has bumped past it. */
+  current: () => boolean;
+  /** Start a replacement, and re-arm the watch over it. Throws when it will not come up. */
+  start: () => Promise<void>;
+  log: (message: string) => void;
+  wait: (ms: number) => Promise<void>;
+  /** Where the backend's own output went, so the line that says it died can point at it. */
+  logPath: string;
+};
+
+/**
+ * Watch one backend child and bring it back if it dies on its own.
+ *
+ * Injected for the reason {@link RelaunchDeps} is: the ORDER and the refusals are the whole of
+ * the behaviour, and a test that spawns real processes to check them would be slower and would
+ * pin how it is spelled rather than what it does.
+ */
+export async function superviseBackend(deps: SupervisorDeps): Promise<void> {
+  await deps.exited();
+  for (;;) {
+    // Both refusals, re-read on every pass: a stop can land while a start is in flight.
+    if (deps.gone() || !deps.current()) return;
+    deps.log(
+      `[backend] the backend exited on its own — starting it again. See ${deps.logPath}`,
+    );
+    try {
+      await deps.start();
+      deps.log("[backend] back up");
+      return;
+    } catch (e) {
+      // `startBackend` already waits a minute for the port, so a failing attempt is not a
+      // tight loop — but it THROWS, and an unhandled rejection here would take the web
+      // server down with it. Said and retried: giving up is what left the app serving pages
+      // against nothing for eleven hours.
+      deps.log(`[backend] could not start it: ${e instanceof Error ? e.message : String(e)}`);
+      await deps.wait(RESTART_BACKOFF_MS);
+    }
+  }
 }
 
 /// Spawn one backend and resolve once it is listening.
@@ -263,9 +388,20 @@ async function startBackend(
   keepAlive: boolean,
   writeToken: string,
 ): Promise<Subprocess> {
+  // APPENDED, and one file per PORT.
+  //
+  // Both halves were got wrong and both cost a diagnosis. A `BunFile` handed to `spawn`
+  // TRUNCATES and each writer keeps its own offset, so two backends on one machine — a
+  // `teams` run beside the always-on service, which is the arrangement AGENTS.md § Running
+  // the released build describes — spliced their output into one file: whole lines from one
+  // run overwritten mid-word by the other, and the same startup banner appearing at two
+  // offsets as though it had happened twice. Reading a real outage out of that took an hour.
+  // Per port, so the two never share; appended, so a RESTART does not erase the reason the
+  // last backend died, which is the one thing worth having after one.
+  const log = openSync(backendLogPath(), "a");
   const proc: Subprocess = spawn([bin], {
-    stdout: Bun.file("/tmp/teams-lite-server.log"),
-    stderr: Bun.file("/tmp/teams-lite-server.log"),
+    stdout: log,
+    stderr: log,
     stdin: "ignore",
     env: { ...process.env, ...backendEnv(keepAlive, writeToken) },
   });
@@ -275,14 +411,14 @@ async function startBackend(
   while (Date.now() < deadline) {
     if (proc.exitCode !== null) {
       throw new Error(
-        `backend exited (code ${proc.exitCode}). See /tmp/teams-lite-server.log`,
+        `backend exited (code ${proc.exitCode}). See ${backendLogPath()}`,
       );
     }
     if (await portOpen()) return proc;
     await Bun.sleep(300);
   }
   try { proc.kill(9); } catch {}
-  throw new Error("backend still not listening after 60s. See /tmp/teams-lite-server.log");
+  throw new Error(`backend still not listening after 60s. See ${backendLogPath()}`);
 }
 
 /// Kill the backend whenever this process goes away, for any reason.
