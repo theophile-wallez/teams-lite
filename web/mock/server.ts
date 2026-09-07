@@ -6766,28 +6766,6 @@ function parseSendSubject(
  */
 const MOCK_MAX_THREAD_ROOT_CHARS = 128;
 
-/** How many replies the mock's own threads digest reads before it leaves a thread out. It is
- *  the backend's own `MAX_THREAD_MESSAGES`, because a spec that drives the "these are your most
- *  recent threads" line has to be able to reach it. */
-const MOCK_THREAD_DIGEST_LIMIT = 400;
-
-/**
- * The COMPOSE TIME of the message a reply body answers, or null when it answers none — the
- * mock's own half of the backend's second pass (`Store::thread_messages`, over
- * `teams_read::quoted_message_from_html`).
- *
- * Only a REPLY names one: Teams sends a FORWARD with no author, no time and no id, so a
- * forward is nobody's reply — the same rule the page's own `replyTargetTime` holds.
- */
-function mockReplyTarget(content: string): number | null {
-  const open = content.match(/<blockquote[^>]*schema\.skype\.com\/Reply[^>]*>/i);
-  if (!open) return null;
-  const onTag = open[0].match(/itemid="(\d+)"/i);
-  if (onTag) return Number(onTag[1]);
-  const onTime = content.match(/itemprop="time"[^>]*itemid="(\d+)"/i);
-  return onTime ? Number(onTime[1]) : null;
-}
-
 /**
  * The CHANNEL THREAD a send is a post in, refused exactly as
  * `teams_send::parse_thread_root` refuses it: only a channel has threads, only a message id
@@ -8189,50 +8167,6 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         .sort((a, b) => (a.scheduled_time ?? 0) - (b.scheduled_time ?? 0))
         .map((m) => nicknamed(m));
       return { messages: held };
-    }
-
-    // EVERY REPLY ACROSS EVERY CONVERSATION, and the message each one answers — what the THREADS
-    // view is built from. An ordinary read on the real backend too (`Store::thread_messages`): a
-    // thread IS its messages, so the store already holds them.
-    //
-    // It answers the WHOLE store rather than the page the app has loaded, which is the one thing
-    // this read exists for: a list of "every thread I am in" taken off the loaded page would hold
-    // the threads of whichever conversation happened to be open.
-    //
-    // It DECIDES NOTHING about a thread — which reply belongs to which root is the page's own
-    // derivation (`chatThreads`) — so, exactly like the backend, it answers ordinary messages plus
-    // the bound it read them under.
-    case "thread_digest": {
-      const everywhere: ChatMessage[] = [
-        ...[...store.values()].flatMap((c) => c.messages),
-        ...[...channelStore.values()].flatMap((c) => c.messages),
-      ];
-      const now = Date.now();
-      const delivered = everywhere.filter((m) => !m.deleted && (m.scheduled_time ?? 0) <= now);
-      // A REPLY is one whose body carries Teams' own reply blockquote, which is the very
-      // marker the backend's SQL prefilters on.
-      const replies = delivered.filter((m) => m.content.includes("schema.skype.com/Reply"));
-      const held = new Set(replies.map((m) => `${m.conversation_id}\u0000${m.id}`));
-      // …and the ROOT each one answers, looked up by the address its own quote carries. It is
-      // the backend's own second pass, and without it the view has a reply with nothing to
-      // draw above it.
-      const roots: ChatMessage[] = [];
-      for (const reply of replies) {
-        const target = mockReplyTarget(reply.content);
-        if (target === null) continue;
-        const root = delivered.find(
-          (m) => m.conversation_id === reply.conversation_id && m.compose_time === target,
-        );
-        if (!root) continue;
-        const key = `${root.conversation_id}\u0000${root.id}`;
-        if (held.has(key)) continue;
-        held.add(key);
-        roots.push(root);
-      }
-      return {
-        messages: [...replies, ...roots].map((m) => nicknamed(m)),
-        limit: MOCK_THREAD_DIGEST_LIMIT,
-      };
     }
 
     // Every message of one conversation that carries a game of CHESS — what the head-to-head score

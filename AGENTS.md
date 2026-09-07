@@ -554,10 +554,9 @@ conversation, and a reader who pressed the button they have always pressed watch
 leave the history they put it in. Discord's shape is the one that holds: reply, or start a thread,
 as two rows.
 
-`web/src/lib/chat-threads.ts` is the derivation, `threads-view.ts` and
-`web/src/components/threads-pane.tsx` are the view that lists every thread the reader is in,
-`teams_send::parse_thread_only` is the wire's trust boundary and `Store::thread_messages` is the
-one read a page cannot make for itself.
+`web/src/lib/chat-threads.ts` is the derivation, `web/src/components/conversation-threads-list.tsx`
+lists every thread of the open conversation, and `teams_send::parse_thread_only` is the wire's trust
+boundary.
 
 **THE QUOTE GRAPH IS THE THREAD GRAPH, and nothing about that is invented here.** Teams composes a
 reply with the quoted message's id in the blockquote's own `itemid` and again in its
@@ -602,9 +601,9 @@ Fourteen rules hold it, and each is pinned by a test:
 - **IT NEEDS NO GATE OF ITS OWN, and the reason is sharper than the title's.** `send` is already an
   `OUTWARD_METHODS` entry and the flag rides in its params exactly as a picture, a title and a
   thread address do — but this one *publishes nothing new at all*: the reply reaches the same
-  people either way, and the property only decides how this app draws it. The read behind the view
-  (`thread_digest`) is OPEN for the reason `chess_messages` and `pet_messages` are: a thread IS its
-  messages, so the store already holds every one of them and it makes no network request.
+  people either way, and the property only decides how this app draws it. And it needs no READ of
+  its own either: a thread IS its messages, so the conversation's own loaded history is what both
+  the fold and the list of threads are derived from.
 - **ONLY A REPLY MAY CARRY IT** (`parse_thread_only`, mirrored by the mock's own
   `parseSendThreadOnly`). A top-level message belongs to no thread, so the flag on one would hide
   it from the running history of every teams-lite reader with nothing anywhere able to say where it
@@ -678,8 +677,10 @@ Fourteen rules hold it, and each is pinned by a test:
   does not rename it under everybody; a thread nobody named keeps `""`, which is what makes the
   heading fall back to the root's words. An EDIT keeps it, from the store, exactly as a channel
   post's title is kept — so fixing a typo in the naming reply does not un-name the thread. The
-  name reaches the panel's heading and the threads view's own row, because those are the two
-  places a reader is choosing which thread to open.
+  name reaches the panel's heading and the row in the conversation's own list of threads, because
+  those are the two places a reader is choosing which thread to open. On that row it stands ABOVE
+  the author rather than in place of them: who opened a thread is the other half of what a reader
+  recognises it by.
   What it does NOT buy is a RENAME: there is no way to retitle a thread without editing that
   reply, and no surface offers one. Stated rather than papered over.
 - **A THREAD'S DRAFT IS APP STATE AND NOT A BACKEND DRAFT** (`threadDrafts`, keyed by
@@ -718,10 +719,12 @@ Fourteen rules hold it, and each is pinned by a test:
   already follows, generalized to both. A deep link then opens the panel beside it, and a link to a
   ROOT does NOT: that press asked to see THAT message, and opening the thread under it would answer
   a question nobody asked.
-- **"OPEN THIS THREAD" IS ITS OWN ASK** (`openThread` / `pendingThreadRoot`), beside the deep-link
-  scroll rather than inside it. A deep link SHOWS a message and deliberately does not aim the
-  composer at it; a press in the threads view says "open this thread", so it aims exactly as a
-  press on the foot row does.
+- **"OPEN THIS THREAD" IS A DIFFERENT ASK FROM A DEEP LINK, and only one of them aims the
+  composer.** A deep link SHOWS a message and deliberately does not answer it for the reader; a
+  press in the list of this conversation's threads says "open this thread", so it aims exactly as a
+  press on the foot row does (`openThreadPanel`). It used to need a piece of cross-route state
+  (`openThread` / `pendingThreadRoot`) because the ask arrived from a page in the sidebar; the list
+  is now beside the conversation, so the press calls that function directly and the state is gone.
 - **THE TICK BELONGS TO THE THREAD BEING ANSWERED**, keyed on its own root, so walking from one
   thread to another does not carry the last one's choice into it. It starts UNTICKED, which is what
   having chosen a thread means.
@@ -746,53 +749,82 @@ Fourteen rules hold it, and each is pinned by a test:
   aims the conversation's bar at the thread. So the menu never carries a row that would do what the
   row above it already did.
 
-### THE THREADS VIEW (`/threads`, the row under the search field)
+### A CONVERSATION'S OWN THREADS (a list in the panel column, from that conversation's menu)
 
-Every thread the reader is in, across every conversation, newest activity first — Slack's own All
-Threads, reached from a row under the search field where they put it. It is a WAY IN and never a
-second place to read a thread: a row answers the three questions a reader has before opening one
-(who answered, how many, when the last one landed) and then takes them to the thread in its own
-conversation. Drawing the messages again would be a second message renderer, a second composer and
-a second answer to "where does the next Enter land", which is what the panel's own header refuses.
+Every thread of the OPEN conversation, newest activity first, in the same column the thread itself
+opens in — reached from a row of the conversation's own menu (§ ONE MENU in a conversation's
+header). It is a WAY IN and never a second place to read a thread: a row answers the three
+questions a reader has before opening one (who answered, how many, when the last one landed) and
+then opens that thread beside them. Drawing the messages again would be a second message renderer,
+a second composer and a second answer to "where does the next Enter land".
+`web/src/components/conversation-threads-list.tsx` is the whole of it.
 
-- **A ROUTE, never a piece of state** — the rule all five merge-request pages hold, for the three
-  things a URL gives that a `useState` cannot: it survives a reload, it can be sent to whoever is
-  being asked to look, and the browser's own Back leaves it.
-- **A ROW rather than a sixth TAB.** The strip is five icons of one weight, and a thread belongs to
-  no section of the list because it is in a chat AND in a channel. It clears the 44px floor every
-  target this app draws for a thumb clears.
-- **"IN" MEANS THE READER WROTE IN IT**, root or reply (`threadsAcross`). That is Slack's own rule
-  for the list — it holds the threads you are following, which is the ones you took part in — and
-  it is the only version this app can answer honestly: a thread between two colleagues in a group
-  chat is not the reader's to be handed a list of, and `is_self` is a fact the backend already
-  resolves on every message.
-- **BOTH DERIVATIONS ARE USED, per conversation, and the conversation's own id picks.** A channel
-  is TOLD the shape of its threads, a chat's are read out of its quotes — so reading a chat as a
-  channel would list a thread per message, and reading a channel as a chat would find no quote on a
-  reply into a thread and list nothing at all.
-- **THE DIGEST IS PUT BACK IN SEQ ORDER FIRST.** `Store::thread_messages` answers newest first
-  (`ORDER BY seq DESC`) and both derivations walk a history in the order it was written: taken as
-  it arrives, a thread's replies are listed backwards and its "last reply" is its first.
-- **THE READ IS ASKED BY THE VIEW**, on every open, and never on connect — the split
-  `loadChessArchive` already makes: a reader who never opens it never pays for it, and a thread
-  they were in a minute ago has moved. A read that FAILS is said rather than drawn as an empty
-  list: "you are in no threads" is a claim about the reader's own conversations, and a failed read
-  is not one.
-- **WHAT THE LIST LEFT OUT IS COUNTED** (`MAX_THREAD_MESSAGES` = 400 replies, and the bound travels
-  in the answer so the page can say the list is the NEWEST rather than all of them). A list that
-  stops without saying so reads as a complete one — the rule the update panel's own count holds —
-  and a backend that named no bound claims nothing.
-- **THE SQL PREFILTER IS THE WHOLE QUOTE MARKER**, and that is correctness rather than tidiness:
-  the `LIMIT` runs BEFORE the parse, so every row a looser `LIKE` over-matched would eat a slot
-  ahead of a real reply. It is the trap `Store::pet_messages` states in full.
-- **THE ROOT EACH REPLY ANSWERS IS LOOKED UP ONCE PER PAIR**, by the address the reply's own quote
-  carries, through `teams_read::quoted_message_from_html` — the parser that already existed, EXTENDED
-  rather than copied, so there is one Rust answer to "what does this reply answer". A root the store
-  does not hold is simply absent, and the view draws the thread it can see.
-- **A ROW NAMES ITS CONVERSATION THROUGH THE APP'S OWN TWO NAMERS** (`channelLabel` /
-  `convLabel`), which is where the self-chat's name, a group with no title and the nickname the user
-  gave a colleague are already decided. A conversation neither list holds is named "Conversation"
-  rather than by its id: a row reading `19:…@thread.v2` is a row nobody can read.
+**IT REPLACED A GLOBAL `/threads` PAGE, and that reversal is what the section is really about.**
+That page listed every thread the reader was in ACROSS every conversation — Slack's own All
+Threads — reached first from a labelled row under the sidebar's search field and then from an icon
+in the sidebar header. Both placements were arguments about a page that should not have existed: a
+thread is part of ONE conversation, so a list that crossed them all had to name which conversation
+each row was in (`threadsRowLabel`), navigate to get there, and carry a piece of cross-route state
+to open the panel once it arrived (`openThread` / `pendingThreadRoot`) — plus a backend read of its
+own (`thread_digest` / `Store::thread_messages`, 400 replies across the store, with a bound the
+view had to state). Every one of those is GONE. What the reader gets instead is the same list where
+the threads are.
+
+- **NOT A ROUTE, and that is what it costs.** The global page was one, for the three things a URL
+  gives that a `useState` cannot: it survived a reload, it could be sent to somebody, and Back left
+  it. This list is state on the pane, exactly as the open THREAD already was — a panel is a
+  conversation plus which thread, and naming which panel is state the URL never carried anyway. So
+  a reload lands on the conversation with the list closed. What is bought is that there is one
+  answer to "where do I see this conversation's threads" rather than two.
+- **IT IS THE PANE'S OWN `Thread[]`** (`panelThreads` in message-pane.tsx), which is the same list
+  the panel draws and the foot rows are built from — so the count the menu states, the rows the
+  list draws and the thread a press opens cannot disagree. Both derivations still feed it, per
+  conversation, and the conversation's own id still picks: a channel is TOLD the shape of its
+  threads and a chat's are read out of its quotes.
+- **SO THE LIST IS AS COMPLETE AS THE LOADED HISTORY, and that is stated rather than hidden.** A
+  conversation pages a screen at a time, so a thread whose root has scrolled out of the loaded
+  window is not in it — which is exactly what the conversation beside it is showing, and it grows
+  as the reader scrolls back. It is deliberately NOT the `withPetArchive` case: a short answer here
+  draws fewer rows, where a short answer there had the menu offer a SPAWN that posts a message for
+  a creature the reader already owns. A backend read would close it (`chess_messages` is the shape
+  it would take, scoped to one conversation); nothing needs one yet.
+- **IT LISTS EVERY THREAD HERE, not only the reader's own.** The global page held the threads the
+  reader had WRITTEN in, root or reply (`threadsAcross`) — Slack's rule for a list that crosses
+  conversations, and the only one it could answer honestly, since a thread between two colleagues
+  in a group chat is not the reader's to be handed a list of. Inside ONE conversation that filter
+  is wrong: the reader is in the room, the foot rows under those posts already say the threads are
+  there, and a list that hid half of them would disagree with the column beside it.
+- **NEWEST FIRST, which is the opposite of the history's own order.** A reader opens this to find
+  the thread something just happened in. A thread nobody has answered is dated by its ROOT, so both
+  are compared on the newest message they hold.
+- **A ROW NAMES NO CONVERSATION**, because there is one — the header above the history beside it
+  says which. It names the thread's own TITLE where it has one (a channel post carries one, a chat
+  message never does) and its author where it does not.
+- **A THREAD NOBODY HAS ANSWERED SAYS SO** rather than being left out. The foot row under a post
+  draws nothing at all there ("a control that opens an empty panel is a bug"), but this list holds
+  one the moment the reader starts a thread, so the row says "No replies yet" — the same sentence
+  the panel's own empty state carries.
+- **THE ROW IS DRAWN ONLY WHERE A PANEL CAN BE OPENED**, which is `panelThreads` being non-null: a
+  channel drawn as POSTS keeps every reply under its own post, so a list there would be a second
+  way to see what is already on screen. The menu carries no row at all rather than a row that
+  reports a refusal.
+- **IT IS THE FIRST ROW OF THE MENU, twice over.** It is the one row there that publishes NOTHING —
+  it opens a column and makes no request — so the top of a menu a thumb reaches for holds the act
+  nothing can regret, with the ones that ring somebody below it. And it is a PLACE rather than an
+  action, which is what a reader looks for first.
+- **THE COUNT IS ON THE ROW, and nothing at all where it is zero.** A reader knows whether the
+  press is worth making before they make it; a "0" is a number somebody has to read in order to
+  learn nothing.
+- **A THREAD WINS OVER THE LIST, and the list is left standing behind it.** Both live in the one
+  panel column and only one is drawn: a thread is the more specific answer to "what is this column
+  showing". Closing that thread hands the reader back the list they came from rather than nothing,
+  which is why the two are separate flags rather than one three-valued state.
+- **BELOW `md` IT REPLACES THE HISTORY**, on the same terms the thread panel does and for its
+  reason: at 390px two columns is neither. The history is HIDDEN rather than unmounted, so closing
+  returns the reader to their place.
+- **IT BELONGS TO THE CONVERSATION IT WAS OPENED IN.** Walking away closes it — the rule a pasted
+  picture, a typed title and the thread panel itself already follow — and here it is the sharper
+  version of that rule: left open it would silently become a list of somebody else's threads.
 - **AND THE WIRE NEVER REACHES IT.** A row shows the root's words with any machine-readable line
   taken off them (`withoutWireLine`) — a colleague running teams-lite can post a game or a
   companion into a conversation, and § THE SIX SURFACES THE WIRE MUST NEVER REACH gains one more,
@@ -801,19 +833,18 @@ a second answer to "where does the next Enter land", which is what the panel's o
 `web/mock/server.ts` reproduces the whole feature with no tenant: it refuses the flag exactly as
 the backend does (`parseSendThreadOnly`), ECHOES it on the reply — which is what makes the fold
 testable at all, since a mock that withheld it would draw the reply inline and let a broken fold
-pass every test — and answers `thread_digest` over the WHOLE store rather than the page the app
-loaded, which is the one thing that read exists for. Its fixture is `Thread Demo`, and both halves
-of the rule are in it on purpose: two FOLDED replies (one of them the reader's own, so the thread is
-one they are IN) and one BROADCAST, because a fixture with only folded replies would let a page that
-folded EVERY reply pass every test.
+pass every test. Its fixture is `Thread Demo`, and both halves of the rule are in it on purpose:
+two FOLDED replies and one BROADCAST, because a fixture with only folded replies would let a page
+that folded EVERY reply pass every test.
 
 `cd web && bun run preview -- --out /tmp/thr --threads --dpr 3` captures the running history with
 the thread folded out of it in both themes, the foot row cropped to itself, the OPTION in a
 message's own menu, the panel in both themes with its own reply bar at the foot, that BAR cropped to
-itself in both themes, the NAME field a thread nobody has named yet offers in both themes, the view
-in both themes, ONE ROW cropped, the row under the search field that leads there, and a PHONE's
-width where the panel REPLACES the conversation. `web/e2e/chat-threads.spec.ts` pins every rule the page owns,
-`web/src/lib/chat-threads.test.ts` and `threads-view.test.ts` the pure ones, and
+itself in both themes, the NAME field a thread nobody has named yet offers in both themes, the
+conversation's MENU with the Threads row and its count on it, the LIST in both themes, ONE ROW
+cropped, and a PHONE's width where the panel REPLACES the conversation.
+`web/e2e/chat-threads.spec.ts` pins every rule the page owns,
+`web/src/lib/chat-threads.test.ts` the pure ones, and
 `teams_send::tests`, `teams_read::tests`, `store::tests` and the `edit` handler's own scan the wire.
 
 **What is UNVERIFIED against the tenant is the PROPERTY.** No probe has posted a reply carrying
@@ -4892,8 +4923,9 @@ user. Two independent mechanisms enforce that split:
   foot row cropped to itself, the OPTION in a message's own menu (Reply, and "Reply in thread"
   beside it — threading is opt-in), the panel in both themes with its OWN reply bar at the foot,
   that bar cropped to itself in both themes (its "Reply…" placeholder and the broadcast row), the
-  NAME field an unnamed thread's bar offers in both themes, the threads VIEW in both themes, one of its rows cropped, the row under the search field that leads
-  there, and a PHONE's width where the panel REPLACES the conversation (pass `--dpr 3`: the foot
+  NAME field an unnamed thread's bar offers in both themes, the conversation's own MENU carrying the
+  Threads row, the LIST in both themes, one of its rows cropped, and a PHONE's width where the panel
+  REPLACES the conversation (pass `--dpr 3`: the foot
   row is 20px faces beside 12px type and the broadcast row is 11px):
   `bun run preview -- --out /tmp/thr --threads`.
   For the chat list's sections and the "…"
@@ -5416,10 +5448,16 @@ and `web/e2e/chat-menu.spec.ts` pins the lot.
 ## ONE MENU in a conversation's header (everything the thread offers, behind one trigger)
 
 A conversation's header holds ONE control at its right, and it opens a menu with everything the
-thread offers in it: the CALL — or the JOIN, where the thread was minted for a meeting — a game of
-CHESS, whether the local agent answers here, and whether the chat is ENCRYPTED.
-`web/src/components/conversation-menu.tsx` is the whole of it, and it replaced three separate
-controls standing side by side.
+thread offers in it: its own THREADS, the CALL — or the JOIN, where the thread was minted for a
+meeting — a game of CHESS, a COMPANION, whether the local agent answers here, and whether the chat
+is ENCRYPTED. `web/src/components/conversation-menu.tsx` is the whole of it, and it replaced three
+separate controls standing side by side.
+
+**THREADS IS THE FIRST ROW, and it is where a GLOBAL page in the sidebar used to be** (§ A
+CONVERSATION'S OWN THREADS). It is first for two reasons: it is the only row here that publishes
+NOTHING at all — it opens a column beside the history and makes no request — so the top of a menu a
+thumb reaches for holds the act nothing can regret, with the ones that ring somebody below it; and
+it is a PLACE rather than an action, which is what a reader looks for first.
 
 **THE THING THE READER AIMS AT USED TO MOVE BETWEEN CONVERSATIONS.** Each of those three drew
 itself only where it would work, which is the right rule for a control and the wrong shape for a

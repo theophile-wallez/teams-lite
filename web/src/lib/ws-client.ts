@@ -623,17 +623,6 @@ export class Backend {
   backfill(conversation: string, beforeSeq: number): Promise<MessagePage> {
     return this.request<MessagePage>("backfill", { conversation, before_seq: beforeSeq });
   }
-  /** Every REPLY across every conversation, and the message each one answers — what the
-   *  THREADS view is built from (§ A CHAT HAS THREADS TOO).
-   *
-   *  An ordinary OPEN read: a thread IS its messages, so the store already holds every one of
-   *  them and this makes no network request. It decides nothing about a thread — which reply
-   *  belongs to which root is `chatThreads`' one derivation — so it answers ordinary messages
-   *  in the ordinary shape, plus the bound it read them under, which is what lets the view say
-   *  the list is the NEWEST threads rather than all of them. */
-  threadDigest(): Promise<{ messages: ChatMessage[]; limit?: number }> {
-    return this.request<{ messages: ChatMessage[]; limit?: number }>("thread_digest");
-  }
   setDraft(conversation: string, text: string): Promise<{ saved: boolean }> {
     return this.request<{ saved: boolean }>("set_draft", { conversation, text });
   }

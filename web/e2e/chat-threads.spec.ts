@@ -5,6 +5,7 @@ import {
   composerField,
   fetchCapturedSends,
   gotoApp,
+  openConversationMenu,
   openConversationNamed,
   realErrors,
   sendFromThreadComposer,
@@ -281,53 +282,78 @@ test.describe("threads in a chat", () => {
   });
 });
 
-test.describe("the threads view", () => {
-  test("is reached from the row under the search field and lists the reader's threads", async ({
+test.describe("a conversation's own threads", () => {
+  // THE LIST IS THIS CONVERSATION'S, reached from the conversation's own menu. A GLOBAL
+  // `/threads` page came first, in the sidebar, and it was wrong about where a thread belongs: it
+  // is part of one conversation, so the list of them lives beside that conversation.
+  test("is reached from the conversation's own menu and lists that conversation's threads", async ({
     page,
     consoleErrors,
   }) => {
     await gotoApp(page);
+    await openConversationNamed(page, THREAD_CHAT);
+    await openConversationMenu(page);
 
-    await page.locator('[data-testid="open-threads"]').click();
-    await expect(page.locator('[data-testid="threads-pane"]')).toBeVisible();
-    // It is a ROUTE, so the URL says so — which is what makes it survive a reload and be
-    // sendable to somebody.
-    expect(new URL(page.url()).pathname).toBe("/threads");
+    // The row says HOW MANY before the press is made, so the reader knows whether it is worth
+    // making — and the count is the pane's own, so it cannot disagree with the rows below.
+    const row = page.locator('[data-testid="open-threads"]');
+    await expect(row).toBeVisible();
+    const count = Number(await row.getAttribute("data-thread-count"));
+    expect(count).toBeGreaterThan(0);
 
-    const rows = page.locator('[data-testid="threads-row"]');
-    await expect.poll(() => rows.count(), { timeout: 10_000 }).toBeGreaterThan(0);
-    // The fixture's own thread is one of them: the reader replied in it.
+    await row.click();
+    const list = page.locator('[data-testid="conversation-threads-list"]');
+    await expect(list).toBeVisible();
+    const rows = list.locator('[data-testid="threads-row"]');
+    await expect(rows).toHaveCount(count);
+    // The fixture's own thread is one of them, and a row answers what has happened in it — the
+    // same three facts the foot row under the root carries.
     const mine = rows.filter({ hasText: ROOT_WORDS });
     await expect(mine).toHaveCount(1);
-    // A row says WHERE the thread is, what it is CALLED where somebody named it, and WHAT has
-    // happened in it — the same three facts the foot row under the root carries.
-    await expect(mine).toContainText(THREAD_CHAT);
+    // A row says what the thread is CALLED where somebody named it, and WHAT has happened in
+    // it — two of the three facts the foot row under the root carries. It names no
+    // CONVERSATION, which the global page's own row had to: there is one, and the header above
+    // the history beside it says which.
     await expect(mine.locator('[data-testid="threads-row-name"]')).toHaveText(THREAD_NAME);
+    await expect(mine).not.toContainText(THREAD_CHAT);
     await expect(mine).toContainText("replies");
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
-  test("a press opens that thread in its own conversation", async ({ page }) => {
+  test("a press opens that thread in the panel, and closing it hands the list back", async ({
+    page,
+  }) => {
     await gotoApp(page);
+    await openConversationNamed(page, THREAD_CHAT);
+    await openConversationMenu(page);
     await page.locator('[data-testid="open-threads"]').click();
-    const row = page.locator('[data-testid="threads-row"]').filter({ hasText: ROOT_WORDS });
-    await expect(row).toHaveCount(1);
-    const conversation = await row.getAttribute("data-conversation-id");
 
+    const row = page
+      .locator('[data-testid="conversation-threads-list"] [data-testid="threads-row"]')
+      .filter({ hasText: ROOT_WORDS });
+    const rootId = await row.getAttribute("data-thread-root");
     await row.click();
-    // The conversation, with the thread's own panel open beside it — the press said "open
-    // this thread", which is a different ask from a deep link that merely shows a message.
-    await expect(page.locator('[data-testid="conversation-title"]')).toContainText(THREAD_CHAT);
-    await expect(panel(page)).toBeVisible({ timeout: 10_000 });
-    await expect(panel(page)).toHaveAttribute("data-thread-root", /.+/);
-    expect(new URL(page.url()).pathname).toBe(`/c/${encodeURIComponent(conversation ?? "")}`);
+
+    // The THREAD wins over the list: it is the more specific answer to what this column shows.
+    await expect(panel(page)).toBeVisible();
+    await expect(panel(page)).toHaveAttribute("data-thread-root", rootId ?? "");
+    await expect(page.locator('[data-testid="conversation-threads-list"]')).toHaveCount(0);
+    // …and closing it returns the reader to where they came from rather than to nothing.
+    await page.locator('[data-testid="threads-panel-close"]').click();
+    await expect(page.locator('[data-testid="conversation-threads-list"]')).toBeVisible();
   });
 
-  test("survives a reload, because it is a route", async ({ page }) => {
+  test("the list belongs to the conversation it was opened in, and is dropped on the way out", async ({
+    page,
+  }) => {
     await gotoApp(page);
+    await openConversationNamed(page, THREAD_CHAT);
+    await openConversationMenu(page);
     await page.locator('[data-testid="open-threads"]').click();
-    await expect(page.locator('[data-testid="threads-pane"]')).toBeVisible();
-    await page.reload();
-    await expect(page.locator('[data-testid="threads-pane"]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-testid="conversation-threads-list"]')).toBeVisible();
+
+    // Left open it would silently become a list of somebody else's threads.
+    await openConversationNamed(page, "Custom Emoji");
+    await expect(page.locator('[data-testid="conversation-threads-list"]')).toHaveCount(0);
   });
 });

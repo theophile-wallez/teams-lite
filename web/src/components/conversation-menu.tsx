@@ -8,6 +8,7 @@ import {
   CpuIcon,
   Download04Icon,
   LockIcon,
+  Message02Icon,
   MoreHorizontalIcon,
 } from "@hugeicons/core-free-icons";
 import {
@@ -55,6 +56,7 @@ import {
 import { PET_DEFAULT_SKIN, PET_SKINS } from "~/lib/pet-skin";
 import { usePrefersReducedMotion } from "~/lib/platform";
 import { petSlotKey, type Pet } from "~/lib/pet-thread";
+import type { Thread } from "~/lib/threads";
 import { sealCanBeUsed, sealMenuLabel } from "~/lib/seal";
 import { cn } from "~/lib/utils";
 import {
@@ -226,6 +228,17 @@ export function ConversationMenu(props: {
    */
   pets: Pet[];
   messages: ChatMessage[];
+  /**
+   * Every thread this conversation holds, from the PANE's own derivation (`panelThreads`) — the
+   * same list the panel draws and the foot rows are built from, so the count this menu states
+   * and the rows that press opens cannot disagree. It arrives as a prop for the reason `pets`
+   * and `messages` do: two answers to "what threads are here?" is the bug.
+   *
+   * NULL where there is no panel to open — a channel drawn as POSTS keeps every reply under its
+   * own post — and the row is then not drawn at all rather than drawn and refused.
+   */
+  threads: readonly Thread[] | null;
+  onOpenThreads: () => void;
 }) {
   const controller = useController();
   const conversation = useAppState((s) =>
@@ -673,6 +686,39 @@ export function ConversationMenu(props: {
           align="end"
           className="max-h-[min(32rem,70vh)] w-72 overflow-y-auto"
         >
+          {/* THIS CONVERSATION'S OWN THREADS, and it is the FIRST row on purpose — twice over.
+              It is the one row here that publishes nothing at all (it opens a column beside the
+              history and makes no request), so the top of a menu a thumb reaches for holds the
+              act nothing can regret, with the ones that ring somebody below it. And it is a
+              PLACE rather than an action, which is what a reader looks for first.
+
+              It replaced a GLOBAL threads page in the sidebar: a thread belongs to one
+              conversation, so the list of them belongs beside that conversation (see
+              components/conversation-threads-list.tsx). It is drawn only where a panel can be
+              opened at all — never on a channel drawn as POSTS, whose replies are already under
+              their post — so this menu never carries a row that would show what is on screen. */}
+          {props.threads && (
+            <>
+              <DropdownMenuItem
+                data-testid="open-threads"
+                data-thread-count={props.threads.length}
+                onSelect={props.onOpenThreads}
+              >
+                <HugeiconsIcon icon={Message02Icon} className={ITEM_ICON} strokeWidth={1.8} />
+                <span className="flex-1">Threads</span>
+                {/* HOW MANY, so the reader knows whether the press is worth making before they
+                    make it. Nothing at all where there are none: a "0" is a number somebody has
+                    to read in order to learn nothing. */}
+                {props.threads.length > 0 && (
+                  <span className="shrink-0 text-[11px] tabular-nums text-text-faint">
+                    {props.threads.length}
+                  </span>
+                )}
+              </DropdownMenuItem>
+              {showCallRow && <DropdownMenuSeparator />}
+            </>
+          )}
+
           {showCallRow && (
             <>
               <DropdownMenuItem

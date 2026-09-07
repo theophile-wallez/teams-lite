@@ -147,17 +147,6 @@ const READ_ONLY_PORT: u16 = 19430;
 /// by anything the user does.
 const MAX_SCHEDULED_LISTED: i64 = 200;
 
-/// How many REPLIES the threads digest reads before it starts leaving threads out.
-///
-/// It is the newest 400 replies across the whole store, which on this tenant's own history
-/// is several months of them — and the view they feed is "the threads I am in", a list
-/// nobody scrolls to the end of. The bound is what keeps a read that grows with every
-/// message the user has ever received from growing without limit; what it costs is that a
-/// thread nobody has answered in a long time falls off the list rather than the app
-/// pretending otherwise: the bound travels in the answer, so the view says the list is the
-/// newest threads rather than every one of them.
-const MAX_THREAD_MESSAGES: i64 = 400;
-
 /// How many chess-carrying messages one conversation's head-to-head score is counted over.
 ///
 /// A game is TWO messages — one ledger per player, edited in place — so this is some six hundred
@@ -6738,34 +6727,6 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(|m| message_json(m, &me.name, &me.mri, Some(&store)))
                 .collect();
             Ok(json!({ "messages": messages }))
-        }
-
-        // EVERY REPLY ACROSS EVERY CONVERSATION, and the message each one answers — what the
-        // THREADS view is built from (§ A CHAT HAS THREADS TOO).
-        //
-        // An ORDINARY READ, ungated like `scheduled_messages` and `chess_messages`, and it makes
-        // no network request: a thread IS its messages, so the store already holds every one of
-        // them. It publishes nothing a page cannot already read — these are rows of the user's own
-        // history, in the shape the history itself answers with.
-        //
-        // It decides NOTHING about a thread. Which reply belongs to which root, which threads the
-        // reader is part of and what a row says are the page's ONE derivation
-        // (web/src/lib/chat-threads.ts); this answers which rows are in a thread at all, which is
-        // the one question a page cannot answer for the conversations it has not opened.
-        "thread_digest" => {
-            let me = ctx.identity().await?;
-            let store = ctx.store()?;
-            let held = store.thread_messages(MAX_THREAD_MESSAGES)?;
-            let messages: Vec<Value> = held
-                .iter()
-                .map(|m| message_json(m, &me.name, &me.mri, Some(&store)))
-                .collect();
-            // The bound travels with the answer, so the page can say the list is the NEWEST
-            // rather than ALL of them: a list that stops without saying so reads as a
-            // complete one (the rule the update panel's own count holds). It is compared
-            // against the REPLIES the page derives, which is what the bound really counts —
-            // the roots beside them are looked up on top of it.
-            Ok(json!({ "messages": messages, "limit": MAX_THREAD_MESSAGES }))
         }
 
         // Every message of one conversation that carries a game of CHESS — what the head-to-head

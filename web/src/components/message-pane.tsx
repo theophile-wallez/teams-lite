@@ -84,6 +84,7 @@ import {
   replyTargetTime,
 } from "~/lib/chat-threads";
 import { ChannelThreadsPanel } from "./channel-threads-panel";
+import { ConversationThreadsList } from "./conversation-threads-list";
 import { Composer } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
 import { FadeArc } from "./loading-ui/fade-arc";
@@ -305,8 +306,6 @@ export function MessagePane(props: { onBack?: () => void }) {
   const messagesError = useAppState((s) => s.messagesError);
   const olderError = useAppState((s) => s.olderError);
   const pendingScroll = useAppState((s) => s.pendingScroll);
-  // A thread the reader asked to OPEN from the threads view (see `openThread`).
-  const pendingThreadRoot = useAppState((s) => s.pendingThreadRoot);
   const scrollToBottomNonce = useAppState((s) => s.scrollToBottomNonce);
   const readReceipts = useAppState((s) => s.readReceipts);
   // Which thread the composer is aimed at, if any. There is ONE composer and it stands a
@@ -685,6 +684,20 @@ export function MessagePane(props: { onBack?: () => void }) {
     setPanelRootId(null);
   }, []);
 
+  /**
+   * WHETHER THE PANEL COLUMN IS SHOWING THIS CONVERSATION'S OWN LIST OF THREADS, asked for from
+   * the conversation's own menu (see components/conversation-threads-list.tsx).
+   *
+   * Two flags rather than one three-valued state, because the two answer different questions and
+   * a reader uses them together: the LIST is where they came from, so a thread opened out of it
+   * leaves it standing behind and closing that thread hands them the list back rather than
+   * nothing. Only one is drawn at a time — a thread wins, because it is the more specific answer
+   * to "what is this column showing".
+   */
+  const [panelListOpen, setPanelListOpen] = useState(false);
+  const openThreadList = useCallback(() => setPanelListOpen(true), []);
+  const closeThreadList = useCallback(() => setPanelListOpen(false), []);
+
   // Deep-linking to a reply: in the POSTS layout expand that thread so the scroll effect can
   // find and centre the target node; in the CONVERSATION layout the reply is not in the main
   // column at all, so the panel that holds it is opened instead.
@@ -712,9 +725,12 @@ export function MessagePane(props: { onBack?: () => void }) {
 
   // A panel belongs to the conversation it was opened in. Walking away closes it — the rule a
   // pasted picture and a typed title already follow — rather than leaving it to resolve against
-  // another channel's threads and draw nothing.
+  // another channel's threads and draw nothing. The LIST goes with it, and for the sharper
+  // version of the same reason: it lists THIS conversation's threads, so left open it would
+  // silently become a list of somebody else's.
   useEffect(() => {
     setPanelRootId(null);
+    setPanelListOpen(false);
   }, [openId]);
 
   // The rows the virtualizer works in: one per message for a chat and for a CONVERSATIONAL
@@ -1139,31 +1155,11 @@ export function MessagePane(props: { onBack?: () => void }) {
     setPanelFocusToken((t) => t + 1);
   }, []);
 
-  /**
-   * OPEN THE THREAD THE READER ASKED FOR FROM SOMEWHERE ELSE — the threads view.
-   *
-   * It is its own ask rather than a deep link, because the two mean different things: a deep
-   * link SHOWS a message and deliberately does not answer it for the reader, while a press in
-   * the threads view says "open this thread". So this one aims the composer at it exactly as a
-   * press on the foot row does (`openThreadPanel`), and it is cleared the moment it is
-   * consumed so a later navigation back cannot re-open a panel the reader closed.
-   *
-   * Declared AFTER the reset above so a navigation into the conversation cannot clear it in
-   * the same commit: effects run in declaration order.
-   */
-  useEffect(() => {
-    if (!pendingThreadRoot || pendingThreadRoot.convId !== openId) return;
-    const thread = panelThreads?.find(
-      (t) => t.rootId === pendingThreadRoot.rootId,
-    );
-    // The history pages a screen at a time, so the thread may simply not be loaded yet — the
-    // scroll that travels with this request is what pages toward it, and this runs again on
-    // the render that lands. It is dropped once the thread is found, and by the pane going
-    // away with it.
-    if (!thread) return;
-    openThreadPanel(thread);
-    controller.clearThreadTarget(pendingThreadRoot.nonce);
-  }, [pendingThreadRoot, openId, panelThreads, openThreadPanel, controller]);
+  // A thread the reader asked for from SOMEWHERE ELSE needed a piece of cross-route state to
+  // survive the navigation into this conversation (`openThread` / `pendingThreadRoot`). Nothing
+  // asks from somewhere else any more: the list of a conversation's threads is drawn beside that
+  // conversation, so a press on a row calls `openThreadPanel` directly and the state, its RPC
+  // and the global page it served are all gone.
 
   // "Answer with <agent>": reply to that message, with that agent's tag already leading
   // the draft. Nothing is sent — the reply banner shows which message the answer is
@@ -1524,6 +1520,13 @@ export function MessagePane(props: { onBack?: () => void }) {
               games={chessGames}
               pets={pets}
               messages={petHistory}
+              // THIS CONVERSATION'S OWN THREADS, from the pane's one derivation — so the count
+              // the menu states and the rows the panel draws cannot disagree. Null where there
+              // is no panel to open at all: a channel drawn as POSTS keeps its replies under
+              // their post, in its own card, so a list would be a second way to see what is
+              // already on screen.
+              threads={panelThreads}
+              onOpenThreads={openThreadList}
             />
           </div>
         )}
@@ -1546,8 +1549,14 @@ export function MessagePane(props: { onBack?: () => void }) {
             the messages. */}
         <div
           className={cn(
+            // NO `relative` here: the history and everything that floats over it keep a box of
+            // their own below, because this column now holds the composer too (see the note
+            // under it — a `relative` on the whole thing put a companion's floor 99px lower).
             "flex min-h-0 flex-1 flex-col",
-            panelThread && "hidden md:flex",
+            // HIDDEN rather than unmounted below `md`, so closing the panel returns the reader
+            // to their place in the history. The LIST takes the screen there on the same terms
+            // the thread does: at 390px two columns is neither.
+            (panelThread || (panelListOpen && panelThreads)) && "hidden md:flex",
           )}
         >
           {/* THE HISTORY AND EVERYTHING THAT FLOATS OVER IT, in a box of their own.
@@ -1764,6 +1773,16 @@ export function MessagePane(props: { onBack?: () => void }) {
             <Composer focusToken={focusToken} agentAnswer={agentAnswer} />
           )}
         </div>
+        {/* THE PANEL COLUMN. A thread wins over the list, because it is the more specific answer
+            to "what is this column showing" — and the list is left OPEN behind it, so closing
+            the thread hands the reader back where they came from rather than nothing. */}
+        {!panelThread && panelListOpen && panelThreads && (
+          <ConversationThreadsList
+            threads={panelThreads}
+            onOpen={openThreadPanel}
+            onClose={closeThreadList}
+          />
+        )}
         {panelThread && (
           <ChannelThreadsPanel
             thread={panelThread}

@@ -10,7 +10,6 @@ import {
   GhostIcon,
   HashIcon,
   Mail01Icon,
-  Message02Icon,
   MessageMultiple01Icon,
   Moon02Icon,
   PinIcon,
@@ -105,8 +104,6 @@ export function ConversationList(props: {
   onOpenSettings: () => void;
   onOpenSettingsPage: () => void;
   settingsActive: boolean;
-  onOpenThreads: () => void;
-  threadsActive: boolean;
 }) {
   const controller = useController();
   const sidebarTab = useAppState((s) => s.sidebarTab);
@@ -183,35 +180,6 @@ export function ConversationList(props: {
           >
             <ShortcutChord keyName="K" modifier={modifier} />
           </kbd>
-        </button>
-      </div>
-
-      {/* THE WAY INTO THE THREADS VIEW, under the search field and above the sections — where
-          Slack puts its own and for the same reason: it belongs to no section, because a thread
-          is in a chat AND in a channel. It is a row rather than a sixth tab: the strip is five
-          icons of one weight already, and this is a place rather than a section of the list
-          (§ A CHAT HAS THREADS TOO). */}
-      <div className="px-3 pb-1.5">
-        <button
-          type="button"
-          data-testid="open-threads"
-          data-cuelume-press=""
-          aria-current={props.threadsActive ? "page" : undefined}
-          onClick={props.onOpenThreads}
-          className={cn(
-            // 44px under a thumb, which every target this app draws for one clears.
-            "flex h-11 w-full items-center gap-2 rounded-lg px-3 text-left text-[13px] transition-colors",
-            props.threadsActive
-              ? "bg-primary/12 font-medium text-primary"
-              : "text-text-dim hover:bg-accent hover:text-foreground",
-          )}
-        >
-          <HugeiconsIcon
-            icon={Message02Icon}
-            className="size-[17px] shrink-0"
-            strokeWidth={1.6}
-          />
-          <span className="flex-1 truncate">Threads</span>
         </button>
       </div>
 

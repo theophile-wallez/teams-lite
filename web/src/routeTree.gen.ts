@@ -12,7 +12,6 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
-import { Route as AppThreadsRouteImport } from './routes/_app.threads'
 import { Route as AppCConversationIdRouteImport } from './routes/_app.c.$conversationId'
 import { Route as AppMMailIdRouteImport } from './routes/_app.m.$mailId'
 import { Route as AppMrMergeRequestIdRouteImport } from './routes/_app.mr.$mergeRequestId'
@@ -37,11 +36,6 @@ const AppIndexRoute = AppIndexRouteImport.update({
 const AppSettingsRoute = AppSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
-  getParentRoute: () => AppRoute,
-} as any)
-const AppThreadsRoute = AppThreadsRouteImport.update({
-  id: '/threads',
-  path: '/threads',
   getParentRoute: () => AppRoute,
 } as any)
 const AppCConversationIdRoute = AppCConversationIdRouteImport.update({
@@ -109,7 +103,6 @@ const AppMrMergeRequestIdJobsJobIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/settings': typeof AppSettingsRoute
-  '/threads': typeof AppThreadsRoute
   '/c/$conversationId': typeof AppCConversationIdRouteWithChildren
   '/m/$mailId': typeof AppMMailIdRoute
   '/mr/$mergeRequestId': typeof AppMrMergeRequestIdRouteWithChildren
@@ -124,7 +117,6 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
-  '/threads': typeof AppThreadsRoute
   '/': typeof AppIndexRoute
   '/m/$mailId': typeof AppMMailIdRoute
   '/mr/$mergeRequestId/commits': typeof AppMrMergeRequestIdCommitsRoute
@@ -140,7 +132,6 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
   '/_app/settings': typeof AppSettingsRoute
-  '/_app/threads': typeof AppThreadsRoute
   '/_app/': typeof AppIndexRoute
   '/_app/c/$conversationId': typeof AppCConversationIdRouteWithChildren
   '/_app/m/$mailId': typeof AppMMailIdRoute
@@ -159,7 +150,6 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/settings'
-    | '/threads'
     | '/c/$conversationId'
     | '/m/$mailId'
     | '/mr/$mergeRequestId'
@@ -174,7 +164,6 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/settings'
-    | '/threads'
     | '/'
     | '/m/$mailId'
     | '/mr/$mergeRequestId/commits'
@@ -189,7 +178,6 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_app'
     | '/_app/settings'
-    | '/_app/threads'
     | '/_app/'
     | '/_app/c/$conversationId'
     | '/_app/m/$mailId'
@@ -229,13 +217,6 @@ declare module '@tanstack/react-router' {
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof AppSettingsRouteImport
-      parentRoute: typeof AppRoute
-    }
-    '/_app/threads': {
-      id: '/_app/threads'
-      path: '/threads'
-      fullPath: '/threads'
-      preLoaderRoute: typeof AppThreadsRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/c/$conversationId': {
@@ -354,7 +335,6 @@ const AppMrMergeRequestIdRouteWithChildren =
 
 interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute
-  AppThreadsRoute: typeof AppThreadsRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCConversationIdRoute: typeof AppCConversationIdRouteWithChildren
   AppMMailIdRoute: typeof AppMMailIdRoute
@@ -363,7 +343,6 @@ interface AppRouteChildren {
 
 const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
-  AppThreadsRoute: AppThreadsRoute,
   AppIndexRoute: AppIndexRoute,
   AppCConversationIdRoute: AppCConversationIdRouteWithChildren,
   AppMMailIdRoute: AppMMailIdRoute,

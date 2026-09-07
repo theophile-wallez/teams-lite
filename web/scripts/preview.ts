@@ -4727,7 +4727,7 @@ if (import.meta.main) {
   // Nothing here leaves the machine — pin, mute and hide are local overrides, and the
   // mock answers `mark_read` itself.
   // THREADS IN A CHAT: the fold, the foot row it leaves behind, the panel that holds the
-  // replies, the broadcast box, and the view that lists every thread the reader is in
+  // replies, the broadcast box, and the LIST of this conversation's own threads
   // (§ A CHAT HAS THREADS TOO).
   if (args.includes("--threads")) {
     await withPreview(async ({ page, shot, setTheme }) => {
@@ -4777,21 +4777,25 @@ if (import.meta.main) {
       await shot(`${out}-bar-dark.png`, '[data-testid="thread-composer-shell"]');
       await setTheme("light");
 
-      // THE VIEW: every thread the reader is in, across every conversation.
+      await page.locator('[data-testid="threads-panel-close"]').click();
+
+      // THE LIST: every thread of THIS conversation, in the panel column beside it, reached
+      // from the conversation's own menu — which is the ROW that press is made on, captured
+      // with the menu open, because that is how the whole feature is found at all.
+      await openConversationMenu(page);
+      await page.locator('[data-testid="open-threads"]').waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-entry-light.png`);
       await page.locator('[data-testid="open-threads"]').click();
-      await page.locator('[data-testid="threads-row"]').first().waitFor();
+      await page.locator('[data-testid="conversation-threads-list"]').waitFor();
       await page.waitForTimeout(400);
       await shot(`${out}-view-light.png`);
       await setTheme("dark");
       await shot(`${out}-view-dark.png`);
       await setTheme("light");
-      // ONE ROW cropped to itself: where the thread is, who opened it, and the three facts
+      // ONE ROW cropped to itself: who opened the thread, what they said, and the three facts
       // about what has happened since — all of it under 13px.
       await shot(`${out}-row-light.png`, '[data-testid="threads-row"]');
-      // …and the row under the search field that leads here, which is how the whole feature
-      // is found at all.
-      await shot(`${out}-entry-light.png`, '[data-testid="open-threads"]');
-
       // A THREAD BEING NAMED: the field a chat thread's own bar offers while it has no name,
       // which is where Discord asks for one too.
       //

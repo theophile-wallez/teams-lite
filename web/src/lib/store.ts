@@ -640,23 +640,11 @@ export type AppState = {
    *  scheduled messages" lists. Loaded on demand and after anything that changes it;
    *  empty until then, because a list nobody has opened is a read nobody asked for. */
   scheduledMessages: ChatMessage[];
-  /** Every REPLY the store holds across every conversation, plus the message each one
-   *  answers — what the THREADS view lists (see lib/chat-threads.ts). Read once, on demand,
-   *  by the view itself: a reader who never opens it never pays for it. */
-  threadDigest: ChatMessage[];
-  /** The bound the digest was read under, so the view can say the list is the NEWEST threads
-   *  rather than all of them. Absent until it has been read, and from a backend too old to
-   *  say — the view then claims nothing. */
-  threadDigestLimit: number | null;
-  threadDigestLoading: boolean;
-  /** Why the digest could not be read, in the backend's own words. The view says it rather
-   *  than drawing an empty list, which reads as "you are in no threads". */
-  threadDigestError: string | null;
-  /** The thread a reader asked to OPEN from somewhere other than the conversation — the
-   *  threads view. It travels beside `pendingScroll` rather than inside it because the two
-   *  are different asks: a deep link SHOWS a message (and must not answer it for them), while
-   *  this one says "open this thread's panel". Consumed by the pane and cleared there. */
-  pendingThreadRoot: { convId: string; rootId: string; nonce: number } | null;
+  // A conversation's THREADS are derived from its own loaded messages (`panelThreads` in
+  // components/message-pane.tsx) and listed beside it, so nothing about them is state here.
+  // A global read (`thread_digest`) and a cross-route "open this thread" request
+  // (`pendingThreadRoot`) both lived here while there was a `/threads` page; a thread belongs
+  // to one conversation, so the page went and both went with it.
   /**
    * What is half-written in each THREAD's own composer, by {@link threadDraftKey}.
    *
@@ -1264,11 +1252,6 @@ function initialState(): AppState {
     chessEngine: NO_CHESS_ENGINE,
     chessSounds: NO_CHESS_SOUNDS,
     scheduledMessages: [],
-    threadDigest: [],
-    threadDigestLimit: null,
-    threadDigestLoading: false,
-    threadDigestError: null,
-    pendingThreadRoot: null,
     threadDrafts: {},
     composerRestore: null,
     replyingTo: null,
@@ -5469,52 +5452,9 @@ export class TeamsController {
     this.set({ pendingScroll: { convId, messageId, nonce: this.scrollNonce } });
   }
 
-  /**
-   * Read every thread this machine holds, across every conversation — what the THREADS view
-   * lists (§ A CHAT HAS THREADS TOO).
-   *
-   * It is asked BY THE VIEW rather than on connect, the split `loadChessArchive` already
-   * makes: a reader who never opens the threads view never pays for it. It re-reads on every
-   * open, because a thread the reader was in a minute ago has moved.
-   */
-  async loadThreadDigest(): Promise<void> {
-    this.set({ threadDigestLoading: true, threadDigestError: null });
-    try {
-      const { messages, limit } = await this.backend.threadDigest();
-      this.set({
-        threadDigest: messages,
-        threadDigestLimit: typeof limit === "number" ? limit : null,
-        threadDigestLoading: false,
-      });
-    } catch (e) {
-      // Said rather than drawn as an empty list: "you are in no threads" is a claim about the
-      // reader's own conversations, and a failed read is not one.
-      this.set({ threadDigestLoading: false, threadDigestError: errText(e) });
-    }
-  }
-
-  /** Ask a conversation to OPEN one of its threads, and to scroll to its root on the way.
-   *
-   *  Two asks rather than one: the scroll is what puts the root on screen (the machine a
-   *  notification already uses), and the thread root is what opens the panel beside it. A deep
-   *  link deliberately does NOT do the second — a panel opened to SHOW a message must not aim
-   *  the composer at it — so this is its own field. */
-  openThread(convId: string, rootId: string): void {
-    this.scrollNonce += 1;
-    this.set({
-      pendingScroll: { convId, messageId: rootId, nonce: this.scrollNonce },
-      pendingThreadRoot: { convId, rootId, nonce: this.scrollNonce },
-    });
-  }
-
   /** Hold what is being written in one thread's own composer (see `threadDrafts`). */
   setThreadDraftText(key: string, text: string): void {
     this.set({ threadDrafts: { ...this.get().threadDrafts, [key]: text } });
-  }
-
-  /** Clear a consumed thread request, guarded by nonce so a newer one is never dropped. */
-  clearThreadTarget(nonce: number): void {
-    if (this.get().pendingThreadRoot?.nonce === nonce) this.set({ pendingThreadRoot: null });
   }
 
   /** Clear a consumed (or abandoned) scroll request, guarded by nonce so a newer
