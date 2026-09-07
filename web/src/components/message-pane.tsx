@@ -376,6 +376,9 @@ export function MessagePane(props: { onBack?: () => void }) {
   // rather than by thread, because the thread object is rebuilt on every live frame while
   // what the reader opened is one address (the discipline `data-thread-root` already holds).
   const [panelRootId, setPanelRootId] = useState<string | null>(null);
+  /** Bumped to put the caret in the PANEL's own reply bar — the press that opened it asked to
+   *  write, so the field takes the caret in the same task as that click. */
+  const [panelFocusToken, setPanelFocusToken] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const prevOpenIdRef = useRef<string | null>(null);
@@ -632,13 +635,11 @@ export function MessagePane(props: { onBack?: () => void }) {
   }, [panelThreads]);
 
   const closeThreadPanel = useCallback(() => {
+    // Nothing to take back: the panel had its own bar, and the words half-written in it are
+    // kept under that thread's own key (`threadDrafts`) so re-opening the thread finds them.
+    // The conversation's own bar was never aimed at anything by opening the panel.
     setPanelRootId(null);
-    // The panel aimed the composer at its thread when it opened (see `openThreadPanel`), so
-    // closing it takes that aim back: words written with no panel on screen belong to the
-    // channel, and leaving the reply standing would post them into a thread the reader can
-    // no longer see.
-    controller.cancelReply();
-  }, [controller]);
+  }, []);
 
   // Deep-linking to a reply: in the POSTS layout expand that thread so the scroll effect can
   // find and centre the target node; in the CONVERSATION layout the reply is not in the main
@@ -997,13 +998,32 @@ export function MessagePane(props: { onBack?: () => void }) {
    * show the reader where their answer goes (the card it lands in, or the panel they opened to
    * write it).
    */
-  const doReply = useCallback(
+  /** REPLY: an ordinary reply, in the bar under the conversation, exactly as it always was. */
+  const doReply = useCallback((m: ChatMessage) => {
+    controller.startReply(m);
+    setFocusToken((t) => t + 1);
+  }, [controller]);
+
+  /**
+   * REPLY IN THREAD: the same answer, written in a thread of its own.
+   *
+   * **THREADING IS AN OPTION AND NEVER THE DEFAULT.** It shipped the other way round first —
+   * every Reply started a thread and folded itself out of the running history — and that is the
+   * wrong default for a chat: most answers are one line in a conversation, and a reader who
+   * pressed the button they have always pressed watched their message leave the history. So the
+   * two acts are two rows, which is Discord's own shape: Reply answers in the chat, and this
+   * one starts (or joins) the thread on that message.
+   *
+   * It opens the thread's panel and puts the caret in ITS bar rather than aiming the
+   * conversation's — the reader types where their words are going to appear.
+   */
+  const doReplyInThread = useCallback(
     (m: ChatMessage) => {
-      controller.startReply(m);
-      if (chatThreadModel) setPanelRootId(chatThreadRootOf(chatThreadModel, m));
-      setFocusToken((t) => t + 1);
+      if (!chatThreadModel) return;
+      setPanelRootId(chatThreadRootOf(chatThreadModel, m));
+      setPanelFocusToken((t) => t + 1);
     },
-    [controller, chatThreadModel],
+    [chatThreadModel],
   );
 
   /**
@@ -1026,14 +1046,14 @@ export function MessagePane(props: { onBack?: () => void }) {
    * opens to SHOW a message, and aiming the composer at it would be this app deciding to
    * answer for them), which is why nothing here holds the two in lockstep.
    */
-  const openThreadPanel = useCallback(
-    (thread: Thread) => {
-      setPanelRootId(thread.rootId);
-      controller.startReply(thread.lead);
-      setFocusToken((t) => t + 1);
-    },
-    [controller],
-  );
+  const openThreadPanel = useCallback((thread: Thread) => {
+    setPanelRootId(thread.rootId);
+    // The caret goes into THE PANEL's own field, in the same task as the click that asked —
+    // the rule `focusEditor` states, applied to the bar the reply really lands in. Nothing
+    // aims the conversation's own bar any more: the panel brings its own (see
+    // `ChannelThreadsPanel`), so a press here leaves the message box alone.
+    setPanelFocusToken((t) => t + 1);
+  }, []);
 
   /**
    * OPEN THE THREAD THE READER ASKED FOR FROM SOMEWHERE ELSE — the threads view.
@@ -1067,12 +1087,7 @@ export function MessagePane(props: { onBack?: () => void }) {
   const doAnswerWith = useCallback(
     (m: ChatMessage, agent: AgentCandidate) => {
       if (!openId) return;
-      // AND IT BROADCASTS. The request is a reply, so the composer would fold it out of the
-      // running history — while the ANSWER is posted with no flag at all (the reader asked for it
-      // in the conversation and watches it being written there). Folded, the question would be
-      // hidden in a thread with its answer standing in the history beside it, which reads as the
-      // app having lost the request. It is a DEFAULT: the reader may still untick it.
-      controller.startReply(m, { broadcast: true });
+      controller.startReply(m);
       setFocusToken((t) => t + 1);
       setAgentAnswer((prev) => ({
         token: (prev?.token ?? 0) + 1,
@@ -1090,9 +1105,7 @@ export function MessagePane(props: { onBack?: () => void }) {
   const doReviewWith = useCallback(
     (m: ChatMessage, agent: AgentCandidate, mergeRequest: MergeRequestLink) => {
       if (!openId) return;
-      // Broadcast for the reason "Answer with" is: the answer this asks for is posted into the
-      // conversation, so the question must not be folded out of it.
-      controller.startReply(m, { broadcast: true });
+      controller.startReply(m);
       setFocusToken((t) => t + 1);
       setAgentAnswer((prev) => ({
         token: (prev?.token ?? 0) + 1,
@@ -1256,6 +1269,9 @@ export function MessagePane(props: { onBack?: () => void }) {
             agentTranscriptOpen={agentTranscriptsOpen[m.id] ?? null}
             onAgentTranscriptToggle={doAgentTranscriptToggle}
             onReply={doReply}
+            // Only in a CHAT: a channel's replies are already threaded by address, and its own
+            // reply row aims the conversation's bar at the thread (see `ThreadGroup`).
+            onReplyInThread={chatThreadModel ? doReplyInThread : undefined}
             onQuoteJump={doQuoteJump}
             onCopy={doCopy}
             answerAgents={answerAgents}
@@ -1590,6 +1606,23 @@ export function MessagePane(props: { onBack?: () => void }) {
                 ? (reply) => replyTargetTime(reply) === panelThread.lead.compose_time
                 : undefined
             }
+            // WHAT THE PANEL'S OWN BAR POSTS INTO. `threadRoot` is the CHANNEL address where
+            // there is one and null in a chat, which has none — the same field a pending reply
+            // carries, because the send is the same send either way.
+            //
+            // Absent while a live call holds this app's composers: the stage is full-screen at
+            // that moment, so a second bar would be a box nobody can see (see
+            // `useCallOwnsComposer`).
+            composerTarget={
+              callOwnsComposer || !openId
+                ? null
+                : {
+                    conversationId: openId,
+                    root: panelThread.lead,
+                    threadRoot: chatThreadModel ? null : panelThread.rootId,
+                  }
+            }
+            focusToken={panelFocusToken}
           />
         )}
       </div>

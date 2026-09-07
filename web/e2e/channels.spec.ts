@@ -1131,22 +1131,33 @@ test.describe("a channel's layout", () => {
       .toBeGreaterThan(1);
   });
 
-  test("aims the ONE composer at the thread it opened, and takes that aim back", async ({
-    page,
-  }) => {
+  test("brings its own reply bar, and leaves the channel's own alone", async ({ page }) => {
     await openNamedChannel(page, "Research");
     await page.locator(repliesRow).first().click();
     await expect(page.locator(panel)).toBeVisible();
-    // There is one composer in this app: the panel brings none of its own, so opening it aims
-    // that one — otherwise the reader's next Enter would post to the CHANNEL and land as a new
-    // untitled thread beside the post rather than as an answer under it.
+    // THE PANEL HAS A BAR OF ITS OWN, at its foot. It used to bring none and aim the channel's
+    // instead; read on screen that gave the reader a box in the MIDDLE for a thread open on the
+    // RIGHT (§ A CHAT HAS THREADS TOO). What the bar closes is the same defect either way: a
+    // panel with no way to reply would leave the answer landing as a new untitled thread beside
+    // the post rather than under it.
+    await expect(page.locator('[data-testid="thread-composer-shell"]')).toHaveCount(1);
+    await expect(page.locator('[data-testid="thread-composer-shell"]')).toHaveAttribute(
+      "data-thread-root",
+      /.+/,
+    );
+    // …and the LIVE SENTINEL still answers exactly once, which is what a sanctioned live driver
+    // proves its target with (§ Automation safety).
     await expect(page.locator('[data-testid="composer-shell"]')).toHaveCount(1);
-    await expect(page.locator('[data-testid="reply-banner"]')).toBeVisible();
+    // The channel's own bar is untouched: nothing is aimed at it, so no banner is drawn.
+    await expect(page.locator('[data-testid="reply-banner"]')).toHaveCount(0);
+    // A CHANNEL thread's bar offers no broadcast box: its reply is filed by ADDRESS, so it is
+    // out of the channel's column whatever this app does, and broadcasting one would mean
+    // posting a SECOND message to the root.
+    await expect(page.locator('[data-testid="reply-broadcast"]')).toHaveCount(0);
 
     await page.locator('[data-testid="threads-panel-close"]').click();
     await expect(page.locator(panel)).toHaveCount(0);
-    // Closing takes the aim back: words written with no panel on screen belong to the channel.
-    await expect(page.locator('[data-testid="reply-banner"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="thread-composer-shell"]')).toHaveCount(0);
   });
 
   test("replaces the conversation on a phone rather than squeezing it", async ({ page }) => {

@@ -4,22 +4,28 @@ import {
   clearComposer,
   composerField,
   fetchCapturedSends,
-  fillComposer,
   gotoApp,
   openConversationNamed,
   realErrors,
+  sendFromThreadComposer,
+  threadComposerField,
 } from "./helpers";
 import type { Page } from "@playwright/test";
 
-// THREADS IN A CHAT: a reply is folded out of the running history and into the thread it
-// answers, the root carries a foot row saying what is behind it, and the panel beside the
-// conversation is where it is read (§ A CHAT HAS THREADS TOO).
+// THREADS IN A CHAT: a message can be answered IN A THREAD instead of in the conversation, the
+// root then carries a foot row saying what is behind it, and the panel beside the conversation
+// is where the thread is read and answered — in a reply bar of its own (§ A CHAT HAS THREADS
+// TOO).
+//
+// **THREADING IS AN OPTION.** Reply answers in the chat, exactly as it always did; "Reply in
+// thread" is the row beside it. That is what these specs pin first, because it shipped the other
+// way round and the wrong default takes a reader's message out of the history they put it in.
 //
 // The fixture is `Thread Demo` — a chat with one thread whose two replies are FOLDED
-// (`thread_only`) and one that is a BROADCAST, so both halves of the rule are on screen and
+// (`thread_only`) and one that is a BROADCAST, so both halves of the fold are on screen and
 // neither can pass by accident. It is named rather than indexed, for the reason
-// `openConversationNamed` states: one mock process serves the whole run, and the sidebar's
-// order is shared state.
+// `openConversationNamed` states: one mock process serves the whole run, and the sidebar's order
+// is shared state.
 const THREAD_CHAT = "Thread Demo";
 
 /** The words of the root the fixture's thread hangs under. */
@@ -34,6 +40,15 @@ function history(page: Page) {
 }
 function panel(page: Page) {
   return page.locator('[data-testid="threads-panel"]');
+}
+
+/** Take the OPTION on the newest message of the open chat: start (or join) its thread. */
+async function replyInThread(page: Page) {
+  const bubble = page.locator('[data-testid="message-scroll"] [data-testid="message"]').last();
+  await bubble.hover();
+  await bubble.locator('[data-testid="message-actions"]').click();
+  await page.locator('[data-testid="action-reply-in-thread"]').click();
+  await expect(panel(page)).toBeVisible();
 }
 
 test.describe("threads in a chat", () => {
@@ -76,110 +91,134 @@ test.describe("threads in a chat", () => {
     await expect(panel(page).locator('[data-testid="message-quote"]')).toHaveCount(0);
     // The history behind it still draws the broadcast reply's own quote: there the root may be
     // a screen away, so the quote is the only thing that says which thread the answer is from.
-    await expect(
-      history(page).locator('[data-testid="message-quote"]').first(),
-    ).toBeVisible();
+    await expect(history(page).locator('[data-testid="message-quote"]').first()).toBeVisible();
 
     await page.locator('[data-testid="threads-panel-close"]').click();
     await expect(panel(page)).toHaveCount(0);
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
-  test("opening the panel aims the composer at that thread, and closing takes the aim back", async ({
+  test("THREADING IS AN OPTION: Reply answers in the chat, a second row starts the thread", async ({
     page,
   }) => {
     await gotoApp(page);
     await openConversationNamed(page, THREAD_CHAT);
+    await clearComposer(page);
 
-    await page.locator('[data-testid="post-replies"]').click();
-    // There is ONE composer in this app, so the panel does not bring a second: opening it
-    // aims the app's own, and the banner is the one authority on where the next Enter lands.
+    const bubble = page.locator('[data-testid="message-scroll"] [data-testid="message"]').last();
+    await bubble.hover();
+    await bubble.locator('[data-testid="message-actions"]').click();
+    // BOTH rows are there, and Reply comes first: it is the answer most people want, and it is
+    // the row they have always pressed.
+    await expect(page.locator('[data-testid="action-reply"]')).toBeVisible();
+    await expect(page.locator('[data-testid="action-reply-in-thread"]')).toBeVisible();
+
+    // Reply aims the bar under the CONVERSATION and opens no thread at all.
+    await page.locator('[data-testid="action-reply"]').click();
     await expect(page.locator('[data-testid="reply-banner"]')).toBeVisible();
-    await expect(page.locator('[data-testid="composer-shell"]')).toHaveCount(1);
-    // The caret is in the field already, in the same task as the click that asked.
-    await expect(composerField(page)).toBeFocused();
+    await expect(panel(page)).toHaveCount(0);
+    // …and it carries no broadcast box: a reply written there is already in the running
+    // history, so there is nothing for the box to ask.
+    await expect(page.locator('[data-testid="reply-broadcast"]')).toHaveCount(0);
+    await page.locator('[data-testid="reply-cancel"]').click();
 
-    await page.locator('[data-testid="threads-panel-close"]').click();
+    // The OPTION opens the thread instead, and leaves the conversation's own bar alone.
+    await replyInThread(page);
     await expect(page.locator('[data-testid="reply-banner"]')).toHaveCount(0);
   });
 
-  test("a chat reply offers 'Also send to the chat', unticked, and the send says which", async ({
+  test("the thread has a reply bar of its OWN, and the conversation keeps its own", async ({
     page,
   }) => {
     await gotoApp(page);
     await openConversationNamed(page, THREAD_CHAT);
-    await clearComposer(page);
-
     await page.locator('[data-testid="post-replies"]').click();
-    const box = page.locator('[data-testid="reply-broadcast"] input[type="checkbox"]');
-    // UNTICKED by default, which is Slack's own default and the whole point of the feature:
-    // the noise a thread keeps out of the running history is what it is for.
-    await expect(box).not.toBeChecked();
 
-    await fillComposer(page, "folded answer");
-    await composerField(page).press("Enter");
-    await expect
-      .poll(async () => (await fetchCapturedSends(page)).length, { timeout: 10_000 })
-      .toBeGreaterThan(0);
-    const sends = await fetchCapturedSends(page);
-    const last = sends.at(-1)!;
-    expect(last.reply_to).toBeTruthy();
-    expect(last.thread_only).toBe(true);
+    // TWO BARS, which is the shape the reference has: one to answer the thread, one to post to
+    // the chat. A single bar under the conversation while a thread stands open beside it reads
+    // as belonging to neither column.
+    await expect(page.locator('[data-testid="thread-composer-shell"]')).toHaveCount(1);
+    // …and the LIVE SENTINEL still resolves to exactly one element, which is what a sanctioned
+    // live driver proves its target with (§ Automation safety).
+    await expect(page.locator('[data-testid="composer-shell"]')).toHaveCount(1);
+    // It states which thread it posts into, for the reason the panel does.
+    await expect(page.locator('[data-testid="thread-composer-shell"]')).toHaveAttribute(
+      "data-thread-root",
+      /.+/,
+    );
+    // The caret is in the THREAD's field already, in the same task as the click that asked.
+    await expect(threadComposerField(page)).toBeFocused();
 
-    // …and TICKING it sends the same reply with no flag at all, which is a reply drawn where
-    // every other client draws it.
-    await page.locator('[data-testid="post-replies"]').first().click();
-    await expect(box).not.toBeChecked();
-    // The LABEL is what is pressed, not the input: the row's 44px target is a pseudo-element
-    // grown over it (the technique the thread foot row already uses), so it is what a pointer
-    // really lands on — which is also true of a reader's thumb.
-    await page.locator('[data-testid="reply-broadcast"]').click();
-    await expect(box).toBeChecked();
-    await fillComposer(page, "broadcast answer");
-    await composerField(page).press("Enter");
-    await expect
-      .poll(async () => (await fetchCapturedSends(page)).length, { timeout: 10_000 })
-      .toBeGreaterThan(sends.length);
-    const after = await fetchCapturedSends(page);
-    expect(after.at(-1)!.thread_only).toBeUndefined();
-    await clearComposer(page);
+    // The two boxes hold their own words: typing in one leaves the other empty.
+    await threadComposerField(page).fill("into the thread");
+    await expect(composerField(page)).toHaveText("");
+    await page.locator('[data-testid="threads-panel-close"]').click();
+    await expect(page.locator('[data-testid="thread-composer-shell"]')).toHaveCount(0);
+    // …and re-opening the thread finds the half-written reply where it was left.
+    await page.locator('[data-testid="post-replies"]').click();
+    await expect(threadComposerField(page)).toHaveText("into the thread");
+    await threadComposerField(page).fill("");
   });
 
-  test("a CHANNEL is offered no broadcast box — a reply there is filed by address", async ({
+  test("a thread's reply is FOLDED, and 'Also send to the chat' is how it is not", async ({
     page,
   }) => {
     await gotoApp(page);
+    await openConversationNamed(page, THREAD_CHAT);
+    await page.locator('[data-testid="post-replies"]').click();
+
+    const box = page.locator('[data-testid="reply-broadcast"] input[type="checkbox"]');
+    // UNTICKED, which is what having chosen a thread means: the answer belongs in it.
+    await expect(box).not.toBeChecked();
+    const before = (await fetchCapturedSends(page)).length;
+    await sendFromThreadComposer(page, "folded answer");
+    await expect.poll(async () => (await fetchCapturedSends(page)).length).toBeGreaterThan(before);
+    const sends = await fetchCapturedSends(page);
+    expect(sends.at(-1)!.reply_to).toBeTruthy();
+    expect(sends.at(-1)!.thread_only).toBe(true);
+
+    // …and TICKING it sends the same reply with no flag at all, which is a reply drawn where
+    // every other client draws it. The LABEL is what is pressed, not the input: the row's 44px
+    // target is a pseudo-element grown over it, so it is what a pointer really lands on.
+    await page.locator('[data-testid="reply-broadcast"]').click();
+    await expect(box).toBeChecked();
+    await sendFromThreadComposer(page, "broadcast answer");
+    await expect
+      .poll(async () => (await fetchCapturedSends(page)).length)
+      .toBeGreaterThan(sends.length);
+    expect((await fetchCapturedSends(page)).at(-1)!.thread_only).toBeUndefined();
+  });
+
+  test("a threaded reply lands in the thread and not in the history behind it", async ({
+    page,
+  }) => {
+    await gotoApp(page);
+    await openConversationNamed(page, THREAD_CHAT);
+    await page.locator('[data-testid="post-replies"]').click();
+
+    const marker = `mine-${Date.now()}`;
+    await sendFromThreadComposer(page, marker);
+    await expect(panel(page).getByText(marker)).toBeVisible({ timeout: 10_000 });
+    await expect(history(page).getByText(marker)).toHaveCount(0);
+  });
+
+  test("a CHANNEL is offered neither the option nor the box", async ({ page }) => {
+    await gotoApp(page);
     await page.locator('[data-testid="tab-channels"]').click();
-    const channel = page.locator('[data-testid="channel-row"]').first();
-    await channel.click();
+    await page.locator('[data-testid="channel-row"]').first().click();
     await expect
       .poll(() => page.locator('[data-testid="message"]').count(), { timeout: 10_000 })
       .toBeGreaterThan(0);
 
-    // The posts layout's own reply row aims the composer at a thread; the box must not be
-    // there, because broadcasting a channel reply would mean posting a SECOND message.
-    const reply = page.locator('[data-testid="thread-reply"]').first();
-    if ((await reply.count()) > 0) {
-      await reply.click();
-      await expect(page.locator('[data-testid="reply-banner"]')).toBeVisible();
-      await expect(page.locator('[data-testid="reply-broadcast"]')).toHaveCount(0);
-    }
-  });
-
-  test("a threaded reply of the reader's own is not shown twice", async ({ page }) => {
-    // The optimistic half and the echo are two things that could each draw the reply, and the
-    // fold has to survive both: a reply the reader just sent must appear in the panel and
-    // nowhere in the history behind it.
-    await gotoApp(page);
-    await openConversationNamed(page, THREAD_CHAT);
-    await clearComposer(page);
-    await page.locator('[data-testid="post-replies"]').click();
-    await fillComposer(page, "a reply of my own");
-    await composerField(page).press("Enter");
-
-    await expect(panel(page).getByText("a reply of my own")).toBeVisible({ timeout: 10_000 });
-    await expect(history(page).getByText("a reply of my own")).toHaveCount(0);
-    await clearComposer(page);
+    // A channel reply is filed by ADDRESS, so it is already out of the channel's own column and
+    // there is no second act to offer: no "Reply in thread" row, and no broadcast box (which
+    // would mean posting a SECOND message to the channel root).
+    const bubble = page.locator('[data-testid="message"]').first();
+    await bubble.hover();
+    await bubble.locator('[data-testid="message-actions"]').click();
+    await expect(page.locator('[data-testid="action-reply"]')).toBeVisible();
+    await expect(page.locator('[data-testid="action-reply-in-thread"]')).toHaveCount(0);
+    await page.keyboard.press("Escape");
   });
 });
 

@@ -6,19 +6,27 @@
 // it, because a wall of inline replies is what the POSTS layout is for. The panel therefore
 // draws the root post, a centred line counting the replies, and the replies themselves.
 //
-// **IT BRINGS NO COMPOSER OF ITS OWN, and that is the one place this deliberately differs
-// from the reference.** There is ONE composer in this app — its `data-conversation-id` is what
-// a sanctioned live driver proves its target with, so two of them would give that question two
-// answers — and the panel does not need a second: opening it AIMS the app's own composer at
-// this thread (`openThreadPanel`), the composer's banner names the thread the next Enter lands
-// in, and closing the panel takes that aim back. What the reader gets is the same act with one
-// box instead of two.
+// **IT BRINGS ITS OWN REPLY BAR, at its foot, and that REVERSES what shipped first.** The panel
+// used to bring no composer: opening it aimed the app's own — the one under the conversation —
+// on the argument that there is ONE composer here and a second would give the live driver's
+// sentinel two answers. Read on screen, that was wrong, and the reference is right: a thread
+// stands open on the RIGHT while the only bar sits under the conversation in the MIDDLE, so the
+// box the reader is about to type their reply into belongs to neither column. It was reported
+// exactly that way.
+//
+// So the panel ends in a bar of its own, and the conversation keeps its own — Slack's two bars.
+// The sentinel is untouched: `composer-shell` still resolves to exactly ONE element (a thread's
+// bar is `thread-composer-shell`), and what a keystroke can reach is unchanged either way,
+// because a thread's bar posts a reply into a thread OF THIS CONVERSATION. Both bars name the
+// same conversation, so the proof means what it always meant.
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import type { ReactNode } from "react";
 import { copyableMessageText, withoutWireLine } from "~/lib/protocol";
 import type { ChatMessage } from "~/lib/protocol";
 import { threadPanelHeading, type Thread, type ThreadReplies } from "~/lib/threads";
+import type { ThreadTarget } from "~/lib/store";
+import { Composer } from "./composer";
 
 export function ChannelThreadsPanel(props: {
   thread: Thread;
@@ -30,6 +38,12 @@ export function ChannelThreadsPanel(props: {
    *  decides that its quote is not drawn (see the call site below). Absent on a CHANNEL, where
    *  a reply to the root carries no quote at all because the thread travels as an address. */
   repliesToRoot?: (reply: ChatMessage) => boolean;
+  /** What this panel's own reply bar posts into. Absent only where nothing may be posted at
+   *  all — a live call holds the app's composers, so the panel draws no second one under it. */
+  composerTarget?: ThreadTarget | null;
+  /** Bumped to put the caret in this bar's field: the press that opened the panel asked to
+   *  write, so the field takes the caret in the same task as that click. */
+  focusToken?: unknown;
   /** The pane's own row renderer, exactly as `ThreadGroup` takes it: one message drawn with
    *  this app's bubble, its receipts and its whole "…" menu. The panel renders nothing about
    *  a message itself, so a reaction, an edit and a deletion work here as they do anywhere. */
@@ -40,7 +54,7 @@ export function ChannelThreadsPanel(props: {
     opts?: { onPanel?: boolean; threadPost?: boolean; showQuote?: boolean },
   ) => ReactNode;
 }) {
-  const { thread, replies, onClose, renderMsg, repliesToRoot } = props;
+  const { thread, replies, onClose, renderMsg, repliesToRoot, composerTarget } = props;
   // The post's own words for the heading, with any WIRE line taken off them: a colleague
   // running teams-lite can post a game or a companion into a channel, and the machine-readable
   // line those carry must never be what a header shows (§ THE SIX SURFACES THE WIRE MUST NEVER
@@ -143,6 +157,21 @@ export function ChannelThreadsPanel(props: {
           )
         )}
       </div>
+
+      {/* THE THREAD'S OWN REPLY BAR, at the foot of the panel and outside its scroller — so it
+          stays put while the thread is read, exactly as the conversation's own bar does under
+          the history. It is the SAME composer component, so the pictures, the mentions, the
+          emoji and the seal are the ones the reader already has; what it does not carry is a
+          post title (a thread's title belongs to its first post) or any banner, because the
+          panel above it is the banner. */}
+      {composerTarget && (
+        // `shrink-0` so the bar keeps its height while the thread above it scrolls: the
+        // scroller is the `flex-1 min-h-0` element, which is what makes the panel one column
+        // with a fixed head and a fixed foot.
+        <div className="shrink-0 pt-2">
+          <Composer thread={composerTarget} focusToken={props.focusToken} />
+        </div>
+      )}
     </section>
   );
 }

@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ArrowTurnBackwardIcon,
+  Message02Icon,
   ArrowTurnForwardIcon,
   BanIcon,
   CopyIcon,
@@ -343,6 +344,10 @@ function MessageBubbleImpl(props: {
    *  says `!298` (see lib/tracker-ref.ts). */
   trackerProject?: string;
   onReply: (message: ChatMessage) => void;
+  /** Start (or join) this message's own THREAD and write the answer there — the OPTION beside
+   *  Reply (§ A CHAT HAS THREADS TOO). Absent in a channel, whose replies are already threaded
+   *  by address, so the menu draws no row. */
+  onReplyInThread?: (message: ChatMessage) => void;
   /** Take the reader to the message this one quotes. Passed only where the jump can
    *  really happen — the pane that owns the scroll — and absent on a surface with no
    *  history to move (the bubble then draws the quote as the recessed block it always
@@ -1375,6 +1380,11 @@ function MessageBubbleImpl(props: {
                 onCopy={() => props.onCopy(props.message)}
                 onDelete={() => props.onDelete(props.message)}
                 answerAgents={props.answerAgents ?? []}
+                onReplyInThread={
+                  props.onReplyInThread
+                    ? () => inComposer(() => props.onReplyInThread?.(props.message))
+                    : undefined
+                }
                 onAnswerWith={(agent) =>
                   inComposer(() => props.onAnswerWith?.(props.message, agent))
                 }
@@ -1461,6 +1471,9 @@ function MessageActionsMenu(props: {
   customEmoji: readonly CustomEmojiType[];
   onEdit: () => void;
   onReply: () => void;
+  /** Start (or join) this message's own THREAD and write the answer there. Absent where there
+   *  is no panel to open — a channel, whose replies are already threaded by address. */
+  onReplyInThread?: () => void;
   onCopy: () => void;
   onDelete: () => void;
   /** The agents this thread could summon; empty draws no row. */
@@ -1542,6 +1555,20 @@ function MessageActionsMenu(props: {
           <HugeiconsIcon icon={ArrowTurnBackwardIcon} className="size-4" strokeWidth={1.6} />
           Reply
         </DropdownMenuItem>
+        {/* AND THE SAME ANSWER IN A THREAD OF ITS OWN, as a second row rather than as what
+            Reply does. Threading is an OPTION here: most answers in a chat are one line in the
+            conversation, so a Reply that quietly took the message out of the running history is
+            the wrong default (§ A CHAT HAS THREADS TOO). It is Discord's shape — reply, or start
+            a thread — and it is offered only where there is a thread panel to open: a chat. */}
+        {props.onReplyInThread && (
+          <DropdownMenuItem
+            data-testid="action-reply-in-thread"
+            onSelect={props.onReplyInThread}
+          >
+            <HugeiconsIcon icon={Message02Icon} className="size-4" strokeWidth={1.6} />
+            Reply in thread
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem data-testid="action-copy" onSelect={props.onCopy}>
           <HugeiconsIcon icon={CopyIcon} className="size-4" strokeWidth={1.6} />
           Copy

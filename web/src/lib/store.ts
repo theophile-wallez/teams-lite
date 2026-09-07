@@ -273,19 +273,31 @@ export type PendingReply = {
    *  the thread's own card lights up while it is the one being answered, and the composer's
    *  banner says the reader is posting IN a thread rather than quoting a message. */
   threadRoot: string | null;
-  /**
-   * Whether this reply's default is to be sent to the CHAT as well as to its thread — the
-   * composer's "Also send to the chat" box, ticked (see lib/chat-threads.ts).
-   *
-   * It rides on the pending reply rather than being decided by the composer, because it is a
-   * property of WHY the reply was started: an ordinary Reply folds (which is the feature), while
-   * an "Answer with <agent>" broadcasts — the answer is posted with no flag at all, so a folded
-   * question would be hidden in a thread with its own answer standing in the history beside it.
-   * Reading it here is also what keeps it free of ordering: the composer initialises the tick
-   * from the reply it is showing, in one place, rather than from an effect racing another.
-   */
-  broadcast?: boolean;
 };
+
+/**
+ * THE THREAD a panel's own composer posts into.
+ *
+ * A thread has its own reply bar now, at the foot of the panel that shows it — Slack's own
+ * shape, and the one the reference gets right: a bar under the CONVERSATION while a thread is
+ * open on the right reads as belonging to neither (§ A CHAT HAS THREADS TOO). So the panel's
+ * composer names its target outright rather than aiming the app's other one.
+ *
+ * `threadRoot` is the CHANNEL address (`;messageid=<root>`) where there is one and `null` in a
+ * chat, which has none — exactly what `PendingReply.threadRoot` carries, because the send is
+ * the same send either way.
+ */
+export type ThreadTarget = {
+  conversationId: string;
+  /** The thread's own root message: what the reply quotes, and who it answers. */
+  root: ChatMessage;
+  threadRoot: string | null;
+};
+
+/** The key a thread's own draft is held under — one conversation can hold several threads. */
+export function threadDraftKey(target: { conversationId: string; root: ChatMessage }): string {
+  return `${target.conversationId}/${target.root.id}`;
+}
 
 /** The recording in flight, as the UI reads it.
  *
@@ -468,6 +480,16 @@ export type AppState = {
    *  at the foot of the sidebar, which is not on screen at all on a phone — so a refused
    *  send read as a button that chimed and did nothing. */
   sendError: string | null;
+  /**
+   * WHICH bar the last failure belongs to: the thread's root id, or null for the one under the
+   * conversation.
+   *
+   * A conversation has TWO composers on screen while a thread is open (§ A CHAT HAS THREADS
+   * TOO), and a sentence beside the words that did not leave belongs beside THOSE words —
+   * drawn in both bars it would report a failed reply under a message box that never sent
+   * anything. It is one slot rather than two, because there is one failure at a time.
+   */
+  sendErrorAt: string | null;
   /** Why the last CHESS message did not leave, in the same one sentence and for the same
    *  reason (see {@link sendFailureMessage}). It is its own slice rather than `sendError`
    *  because it is drawn somewhere else — at the board, where the player pressed — and a
@@ -625,6 +647,16 @@ export type AppState = {
    *  are different asks: a deep link SHOWS a message (and must not answer it for them), while
    *  this one says "open this thread's panel". Consumed by the pane and cleared there. */
   pendingThreadRoot: { convId: string; rootId: string; nonce: number } | null;
+  /**
+   * What is half-written in each THREAD's own composer, by {@link threadDraftKey}.
+   *
+   * It is app state rather than a backend draft, and that is a stated limit: `set_draft` is
+   * keyed per CONVERSATION, so a per-thread draft would need a wire of its own. What this buys
+   * is that closing the panel, opening another thread and walking to another conversation all
+   * keep the words; what it costs is that a reload loses them, where the conversation's own
+   * draft survives one.
+   */
+  threadDrafts: Record<string, string>;
   /** Words handed BACK to a composer that is already open — today only from the scheduled
    *  list, whose Edit cancels a queued message and returns it to be written again.
    *
@@ -1211,6 +1243,7 @@ function initialState(): AppState {
     updateProgress: null,
     draft: "",
     sendError: null,
+    sendErrorAt: null,
     chessError: {},
     chessPending: {},
     chessPremove: {},
@@ -1226,6 +1259,7 @@ function initialState(): AppState {
     threadDigestLoading: false,
     threadDigestError: null,
     pendingThreadRoot: null,
+    threadDrafts: {},
     composerRestore: null,
     replyingTo: null,
     notifications: { activity: [], mentions: [], following: [] },
@@ -2251,7 +2285,7 @@ export class TeamsController {
       // backend is not reachable" under a green dot is a sentence the page can no longer
       // stand behind, and the token is re-read below. The words stay in the composer, so
       // the user retries rather than retypes.
-      this.set({ live: "connected", fatal: null, status: "reconnected", sendError: null });
+      this.set({ live: "connected", fatal: null, status: "reconnected", sendError: null, sendErrorAt: null });
       // Refetch the write token. The backend mints a new one per PROCESS, so a
       // backend that restarted — a crash, an update, a `systemctl restart` of the
       // always-on service — invalidates the one this page fetched at startup. Reads
@@ -5463,6 +5497,11 @@ export class TeamsController {
     });
   }
 
+  /** Hold what is being written in one thread's own composer (see `threadDrafts`). */
+  setThreadDraftText(key: string, text: string): void {
+    this.set({ threadDrafts: { ...this.get().threadDrafts, [key]: text } });
+  }
+
   /** Clear a consumed thread request, guarded by nonce so a newer one is never dropped. */
   clearThreadTarget(nonce: number): void {
     if (this.get().pendingThreadRoot?.nonce === nonce) this.set({ pendingThreadRoot: null });
@@ -5505,6 +5544,7 @@ export class TeamsController {
       draft: nextDraft,
       // A send fails in one thread; the sentence about it belongs to that thread alone.
       sendError: null,
+      sendErrorAt: null,
       // NOTHING chess-related is dropped on a conversation change any more, and that is the
       // key doing its job: every slot is keyed by conversation AND game, so a sentence about a
       // refused move cannot hang over another chat and a move pending in the thread the reader
@@ -5677,6 +5717,7 @@ export class TeamsController {
       readReceipts: [],
       mentionCandidates: [],
       sendError: null,
+      sendErrorAt: null,
       });
   }
 
@@ -5740,18 +5781,13 @@ export class TeamsController {
     this.persistDraft(id, this.draftCache.get(id) ?? "");
   }
 
-  startReply(message: ChatMessage, opts?: { broadcast?: boolean }): void {
+  startReply(message: ChatMessage): void {
     // A CHANNEL is threaded and a chat is not, so a reply means two different things and the
     // difference is settled here rather than at each of the three surfaces that read it (see
     // `PendingReply.threadRoot`).
     const inChannel = this.get().channels.some((c) => c.id === message.conversation_id);
     this.set({
-      replyingTo: {
-        message,
-        marker: null,
-        threadRoot: inChannel ? threadRootOf(message) : null,
-        broadcast: opts?.broadcast,
-      },
+      replyingTo: { message, marker: null, threadRoot: inChannel ? threadRootOf(message) : null },
     });
   }
 
@@ -7212,7 +7248,8 @@ export class TeamsController {
     } catch (e) {
       this.set({ status: `send failed: ${errText(e)}` });
       if (this.get().openId === message.conversation_id) {
-        this.set({ sendError: sendFailureMessage(e) });
+        // A held message is re-sent from the conversation's own bar, never from a thread's.
+        this.set({ sendError: sendFailureMessage(e), sendErrorAt: null });
       }
       playCue("error");
       return false;
@@ -7314,15 +7351,31 @@ export class TeamsController {
      *  the chat" (see lib/chat-threads.ts). It rides in the send that posts the reply, exactly
      *  as the title and the pictures do, because it is part of that one message. */
     threadOnly?: boolean,
+    /**
+     * The THREAD this send is a reply into, when it comes from a thread's own composer rather
+     * than from the one under the conversation (see `ThreadTarget`).
+     *
+     * It REPLACES `replyingTo` for this send rather than adding a second way to reply: the
+     * panel has no pending reply of its own — the thread it is showing IS the target — so
+     * reading the pending one here would post the panel's words at whatever the main composer
+     * happened to be aimed at.
+     */
+    thread?: ThreadTarget,
   ): Promise<boolean> {
-    const id = this.get().openId;
+    const id = thread?.conversationId ?? this.get().openId;
     if (!id) return false;
     const clean = text.trim();
     const richHtml = html?.trim() || undefined;
     if (!clean && !richHtml && images.length === 0) return false;
 
-    const submittedDraft = this.draftCache.get(id) ?? this.get().draft;
-    const reply = this.get().replyingTo;
+    const submittedDraft = thread
+      ? (this.get().threadDrafts[threadDraftKey(thread)] ?? "")
+      : (this.draftCache.get(id) ?? this.get().draft);
+    // WHICH reply this send is. A thread's own composer names it outright; the composer under
+    // the conversation reads the pending reply it was aimed at.
+    const reply: PendingReply | null = thread
+      ? { message: thread.root, marker: null, threadRoot: thread.threadRoot }
+      : this.get().replyingTo;
     // Which thread this post lands in, decided when the reply started (`startReply`). A reply
     // into a channel thread QUOTES only when it answers another reply: a quote of the
     // announcement above the first answer in the announcement's own thread says one thing
@@ -7357,7 +7410,9 @@ export class TeamsController {
       // this one, and a sentence about it hanging over another thread would name nothing.
       this.set({ status: `send failed: ${errText(e)}` });
       if (this.get().openId === id) {
-        this.set({ sendError: sendFailureMessage(e) });
+        // …and beside WHICH box: a conversation holds two composers while a thread is open,
+        // so a failed reply must not draw a red line under the message bar that sent nothing.
+        this.set({ sendError: sendFailureMessage(e), sendErrorAt: thread?.root.id ?? null });
       }
       playCue("error");
       return false;
@@ -7367,6 +7422,20 @@ export class TeamsController {
     // the thread already say it left, and a chime on every send is noise in the one
     // action the user repeats all day. A FAILED send still sounds, above: that one
     // the user must notice.
+    if (thread) {
+      // The thread's own draft, cleared only while it still holds exactly the words that left
+      // — the rule the conversation's draft below follows, and `removeSentWords` in the field.
+      const key = threadDraftKey(thread);
+      if (this.get().threadDrafts[key] === submittedDraft) this.setThreadDraftText(key, "");
+      if (this.get().openId === id) {
+        this.set({
+          scrollToBottomNonce: this.get().scrollToBottomNonce + 1,
+          sendError: null,
+          sendErrorAt: null,
+        });
+      }
+      return true;
+    }
     if (this.draftCache.get(id) === submittedDraft) {
       const pending = this.draftSaveTimers.get(id);
       if (pending) {
@@ -7383,6 +7452,7 @@ export class TeamsController {
         scrollToBottomNonce: this.get().scrollToBottomNonce + 1,
         // A message that left answers the last one that did not.
         sendError: null,
+        sendErrorAt: null,
       });
     }
     // A SCHEDULED send leaves nothing in the thread, so what accounts for the words is the

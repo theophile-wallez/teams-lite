@@ -36,6 +36,7 @@ import {
 import { copyableMessageText } from "~/lib/protocol";
 import { replyHeading } from "~/lib/threads";
 import { BROADCAST_HINT, BROADCAST_LABEL, broadcastOffered } from "~/lib/chat-threads";
+import { threadDraftKey, type ThreadTarget } from "~/lib/store";
 import { cn } from "~/lib/utils";
 import { FadeArc } from "./loading-ui/fade-arc";
 import { ScheduleSendMenu } from "./schedule-send-menu";
@@ -104,12 +105,49 @@ export function Composer(props: {
   /** An "Answer with <agent>" the reader picked on a message, drafted here rather than
    *  sent (see lib/agent-answer.ts). */
   agentAnswer?: AgentAnswer | null;
+  /**
+   * THE THREAD THIS BAR POSTS INTO, when it is a thread's own composer rather than the one
+   * under the conversation (`ThreadTarget`).
+   *
+   * A thread has its own reply bar at the foot of its panel — Slack's shape, and the one the
+   * reference gets right: a single bar under the CONVERSATION while a thread stands open beside
+   * it reads as belonging to neither. So this is the SAME component drawn twice rather than a
+   * second, lesser box: the pictures, the mentions, the emoji, the seal and the agent tag are
+   * all the ones the reader already has.
+   *
+   * What differs is only what it is aimed at and what it holds: its own draft, its own Send,
+   * its own broadcast box, no post TITLE (a thread's title belongs to its first post) and no
+   * banner of any kind — the panel above it IS the banner.
+   */
+  thread?: ThreadTarget | null;
 }) {
   const controller = useController();
-  const draft = useAppState((s) => s.draft);
+  const thread = props.thread ?? null;
+  /** The key this box's own draft lives under, or null for the conversation's one. */
+  const threadKey = thread ? threadDraftKey(thread) : null;
+  /**
+   * EVERY HANDLE THIS BAR PUBLISHES, prefixed in a thread's own bar.
+   *
+   * A conversation holds TWO composers while a thread is open, so an unprefixed name would
+   * resolve to two elements — and every selector in this app's own suite and in
+   * `web/scripts/preview.ts` that names one would silently become ambiguous. The live sentinel
+   * is the sharpest case (`composer-shell` must answer exactly one conversation), and the rest
+   * are what a spec drives: the send, the format bar, the picture picker.
+   *
+   * So the conversation's bar keeps every name it had, byte for byte, and a thread's bar takes
+   * `thread-` in front of each — which is also what tells a spec WHICH bar it is driving.
+   */
+  const tid = (name: string) => (thread ? `thread-${name}` : name);
+  const conversationDraft = useAppState((s) => s.draft);
+  const threadDraft = useAppState((s) => (threadKey ? (s.threadDrafts[threadKey] ?? "") : ""));
+  const draft = threadKey ? threadDraft : conversationDraft;
   // Why the last send in this thread did not leave, in one sentence. The controller
   // sets it and clears it on the next send that works (see `sendDraft`).
-  const sendError = useAppState((s) => s.sendError);
+  const sendErrorText = useAppState((s) => s.sendError);
+  const sendErrorAt = useAppState((s) => s.sendErrorAt);
+  /** THIS bar's own failure. A conversation holds two composers while a thread is open, so the
+   *  sentence belongs beside the words that did not leave rather than in both boxes. */
+  const sendError = (thread?.root.id ?? null) === sendErrorAt ? sendErrorText : null;
   // Where the words went when the last send here was SCHEDULED. The mirror of `sendError`,
   // in the same place: the box is empty and the message is not in the thread yet.
   // What is QUEUED for this conversation. Derived rather than announced by the send that
@@ -137,12 +175,17 @@ export function Composer(props: {
   const isChannel = channels.some((channel) => channel.id === openId);
   const subjectOffered = postSubjectOffered({
     isChannel,
-    replying: replyingTo !== null,
+    // A thread's own bar posts a reply, and a reply carries no title whichever bar wrote it.
+    replying: replyingTo !== null || thread !== null,
     layout: channelLayout,
   });
-  // Whether this reply is offered "Also send to the chat" — a CHAT reply only (see
-  // `broadcastOffered`).
-  const broadcast = broadcastOffered({ isChannel, replying: replyingTo !== null });
+  // Whether this bar offers "Also send to the chat" — a chat THREAD's own bar and nothing else
+  // (see `broadcastOffered`). The bar under the conversation writes an ordinary reply, which is
+  // already in the running history: there is nothing for the box to ask for there.
+  const broadcast = broadcastOffered({
+    inThread: thread !== null,
+    isChannelThread: thread?.threadRoot != null,
+  });
   /** Whether the reader ticked it. Local to the composer like the pending pictures and the
    *  title, and for the same reason: the choice belongs to the reply being written, so it is
    *  dropped when the reply is cancelled or the reader walks away rather than following them
@@ -162,24 +205,17 @@ export function Composer(props: {
    * `gitlab-review-chat.tsx` records for its own `ask`.
    */
   const threadOnlyRef = useRef(false);
-  const replyTargetId = replyingTo?.message.id ?? null;
   /**
-   * The tick belongs to the reply being written: a new reply starts at ITS OWN default, and
-   * cancelling one or walking away throws it away.
+   * The tick belongs to the THREAD being answered: opening another thread starts UNTICKED, which
+   * is the whole point of having chosen a thread at all — the answer belongs in it. The reader
+   * may tick it to put the reply in the running history as well.
    *
-   * That default is UNTICKED for an ordinary Reply — Slack's own default, and the whole point of
-   * the feature, since the noise a thread keeps out of the running history is what it is for —
-   * and TICKED where the reply's own reason says so (`PendingReply.broadcast`, which is what an
-   * "Answer with <agent>" sets). It is read from the reply rather than from a second effect for
-   * the reason that field states: two effects writing one tick is a race, and the version that
-   * had one sent every agent request folded whatever the box showed.
+   * It is keyed on the thread's own root, so walking from one thread to another does not carry
+   * the last one's choice into it.
    */
   useEffect(() => {
-    setAlsoToChat(replyingTo?.broadcast === true);
-    // `replyingTo` itself is deliberately not a dependency: it is a fresh object on every
-    // change of anything in it, and the tick is the reader's from the moment the reply starts.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [replyTargetId, openId]);
+    setAlsoToChat(false);
+  }, [threadKey]);
   // The title being written. Local to the composer, like the pending pictures and for the
   // same reason: a title belongs to the post it is being written for, so it is dropped when
   // the reader walks to another conversation rather than following them into one.
@@ -389,10 +425,14 @@ export function Composer(props: {
       scheduledAt ?? undefined,
       submittedSubject,
       // Whether this reply is drawn in its thread alone — from the REF, which is the only
-      // thing this closure can read (see `threadOnlyRef`). It is already narrowed to a reply
-      // where the box is really offered, so a stale tick from a channel reply can never reach
-      // the wire, where the backend refuses it (`parse_thread_only`).
+      // thing this closure can read (see `threadOnlyRef`). It is already narrowed to a chat
+      // thread's own bar, so the bar under the conversation and a channel thread's bar can
+      // never send a flag the backend refuses (`parse_thread_only`).
       threadOnlyRef.current,
+      // …and WHICH thread these words are a reply into, where this bar is a thread's own. It
+      // REPLACES the pending reply for this send rather than adding a second way to reply: the
+      // panel has no pending reply, the thread it shows IS the target.
+      thread ?? undefined,
     );
     if (sendVersion.current !== version) return sent;
     sendingRef.current = false;
@@ -420,8 +460,8 @@ export function Composer(props: {
   // holds — the backend's own seal status, and the messages on screen — so neither costs a
   // request and neither can go stale behind a reader who is already typing.
   // What the next send would carry, kept where `send` can read it (see `threadOnlyRef`). It is
-  // the WHOLE decision rather than the tick alone, so a reply in a channel — where the box is
-  // not offered at all — can never send a flag the backend refuses.
+  // the WHOLE decision rather than the tick alone: `broadcast` is false for the bar under the
+  // conversation and for a channel thread's, so neither can ever fold a reply.
   useEffect(() => {
     threadOnlyRef.current = broadcast && !alsoToChat;
   }, [broadcast, alsoToChat]);
@@ -445,31 +485,49 @@ export function Composer(props: {
 
   return (
     <div
-      data-testid="composer-shell"
-      // The live sentinel. `web/scripts/sandbox-live.ts` is allowed to type into the
-      // REAL account in exactly one conversation (the sandbox chat in AGENTS.md), and
-      // it proves which one is open by reading this attribute before every keystroke.
-      // It carries the app's own `openId`, not the URL and not the script's
-      // assumption, so a redirect or a click that moved the thread cannot fool it —
-      // the live counterpart of `[data-testid="backend-badge"]`. Keep it stable.
+      // THE LIVE SENTINEL IS THE CONVERSATION'S OWN BAR AND NOTHING ELSE.
+      //
+      // `web/scripts/sandbox-live.ts` is allowed to type into the REAL account in exactly one
+      // conversation (the sandbox chat in AGENTS.md) and proves which one is open by reading
+      // `data-conversation-id` off `composer-shell` before every keystroke. A thread's bar is a
+      // SECOND box on screen, so it takes a name of its own: `composer-shell` still resolves to
+      // exactly one element, and that element still carries the app's own `openId` rather than
+      // the URL or the script's assumption. Keep both stable.
+      //
+      // What a keystroke can reach is unchanged either way — a thread's bar posts a reply into
+      // a thread OF THIS CONVERSATION, so both bars name the same conversation and the proof
+      // means what it always meant.
+      data-testid={thread ? "thread-composer-shell" : "composer-shell"}
       data-conversation-id={openId ?? ""}
-      className="composer-shell relative shrink-0 bg-background px-4"
+      // WHICH thread this bar posts into, for the reason the conversation is stated: a panel
+      // opened from a row that has since scrolled away is still this thread's.
+      data-thread-root={thread ? thread.root.id : undefined}
+      className={cn(
+        "composer-shell relative shrink-0 bg-background",
+        // A thread's bar sits INSIDE its panel, which already carries the panel's own padding,
+        // so it takes the narrower gutter the panel is written at.
+        thread ? "px-3 pb-3 md:px-4" : "px-4",
+      )}
     >
       {/* The history dissolves into the page immediately above the bar. The overlay
           hangs off the composer's own top edge (bottom-full) rather than the bottom
           of the scroll area, so no unfaded strip of padding is left between the two
           — the fade lands exactly where the bar (or its reply banner) begins. */}
-      <div
-        aria-hidden
-        className="composer-fade pointer-events-none absolute inset-x-0 bottom-full h-14"
-      />
+      {/* Only under the CONVERSATION: the fade dissolves the history into the page above the
+          bar, and a thread's panel has its own scroller with its own end. */}
+      {!thread && (
+        <div
+          aria-hidden
+          className="composer-fade pointer-events-none absolute inset-x-0 bottom-full h-14"
+        />
+      )}
 
       {/* The reading column. The bar is capped a touch wider than the history
           (`max-w-composer` vs `max-w-chat`), so it reads as a frame under the
           messages rather than a box that ends exactly where they do. The fade
           above stays full-width, because it belongs to the whole history. */}
-      <div className="mx-auto w-full max-w-composer">
-        {replyingTo && (
+      <div className={cn("mx-auto w-full", thread ? "max-w-none" : "max-w-composer")}>
+        {!thread && replyingTo && (
           <div
             data-testid="reply-banner"
             className="mb-2 flex items-start gap-2 rounded-xl border-l-2 border-primary bg-card px-3 py-2 shadow-chip animate-in fade-in slide-in-from-bottom-1 duration-150 ease-out"
@@ -485,32 +543,12 @@ export function Composer(props: {
               <div className="truncate text-xs text-text-faint">
                 {copyableMessageText(replyingTo.message)}
               </div>
-              {/* AND WHETHER IT ALSO LANDS IN THE RUNNING HISTORY — the one thing Slack
-                  added after shipping threads, because replies disappearing from the
-                  channel is what readers feared about them (§ A CHAT HAS THREADS TOO).
-                  It sits INSIDE the banner because the banner is the one authority on
-                  where the next Enter lands, and this is the other half of that sentence.
-                  A CHANNEL is offered none: a reply there is filed by address, so
-                  broadcasting it would mean posting a second message (`broadcastOffered`). */}
-              {broadcast && (
-                <label
-                  data-testid="reply-broadcast"
-                  title={BROADCAST_HINT}
-                  // The 44px target is GROWN rather than drawn, the technique the thread
-                  // foot row and the dialog's close already use: this row sits under two
-                  // lines of a banner above the field, so a box a thumb tall would push the
-                  // composer down by half a centimetre on every reply.
-                  className="relative mt-1.5 inline-flex h-6 cursor-pointer items-center gap-2 text-[11px] text-text-dim after:absolute after:inset-x-0 after:-bottom-2.5 after:-top-2.5 after:content-['']"
-                >
-                  <input
-                    type="checkbox"
-                    checked={alsoToChat}
-                    onChange={(event) => setAlsoToChat(event.currentTarget.checked)}
-                    className="size-3.5 shrink-0 accent-primary"
-                  />
-                  <span>{BROADCAST_LABEL}</span>
-                </label>
-              )}
+              {/* AND WHETHER IT ALSO LANDS IN THE RUNNING HISTORY. In THIS bar the box sits
+                  in the banner, because the banner is the one authority on where the next
+                  Enter lands and this is the other half of that sentence. A thread's own bar
+                  has no banner, so it carries the box under its field instead — which is
+                  where the reference puts it (see the second `BroadcastBox` below). */}
+              {broadcast && <BroadcastBox checked={alsoToChat} onChange={setAlsoToChat} />}
             </div>
             <button
               type="button"
@@ -528,7 +566,7 @@ export function Composer(props: {
             box rather than inside it, because the message is in NO thread and this line
             plus the list it links to are the only things on screen accounting for them.
             Inside the box it read as part of the message being written. */}
-        {scheduleBanner && (
+        {!thread && scheduleBanner && (
           <div
             data-testid="composer-schedule-note"
             className="mb-2 flex items-start gap-2 px-1 text-xs text-text-dim"
@@ -579,7 +617,7 @@ export function Composer(props: {
             <div
               role="toolbar"
               aria-label="Formatting"
-              data-testid="composer-toolbar"
+              data-testid={tid("composer-toolbar")}
               className="flex min-h-7 items-center gap-0.5 border-b border-border-subtle pb-2 animate-in fade-in slide-in-from-bottom-1 duration-150 ease-out"
             >
               <Suspense fallback={null}>{editor && <FormatToolbar editor={editor} />}</Suspense>
@@ -613,7 +651,7 @@ export function Composer(props: {
               with that field and a channel cannot be sealed (`sealCanBeUsed`). */}
           {sealed && (
             <span
-              data-testid="composer-seal-mark"
+              data-testid={tid("composer-seal-mark")}
               data-seal-mismatch={sealMismatch ? "true" : undefined}
               role="img"
               // A `title` on an `<svg>` is not a tooltip, so the span carries both it and the
@@ -660,11 +698,11 @@ export function Composer(props: {
               and they are drawn SMALLER than a single one, because ten pictures at the
               height one gets is a composer that has eaten the conversation. */}
           {images.length > 0 && (
-            <div data-testid="composer-images" className="flex flex-wrap items-start gap-3 pt-1">
+            <div data-testid={tid("composer-images")} className="flex flex-wrap items-start gap-3 pt-1">
               {images.map((image) => (
                 <div
                   key={image.id}
-                  data-testid="composer-image-preview"
+                  data-testid={tid("composer-image-preview")}
                   data-image-name={image.name}
                   className="relative w-fit max-w-full"
                 >
@@ -680,7 +718,7 @@ export function Composer(props: {
                     type="button"
                     aria-label={`Remove ${image.name}`}
                     title="Remove image"
-                    data-testid="composer-image-remove"
+                    data-testid={tid("composer-image-remove")}
                     onClick={() => removeImage(image.id)}
                     className="absolute -right-2 -top-2 grid size-7 place-items-center rounded-full bg-popover text-foreground shadow-pop hover:bg-accent"
                   >
@@ -694,7 +732,7 @@ export function Composer(props: {
             </div>
           )}
           {imageError && (
-            <div role="alert" data-testid="composer-image-error" className="text-xs text-destructive">
+            <div role="alert" data-testid={tid("composer-image-error")} className="text-xs text-destructive">
               {imageError}
             </div>
           )}
@@ -703,7 +741,7 @@ export function Composer(props: {
               whoever debugs it; this is the half the user reads, and without it a refused
               send is a button that chimes and does nothing (see lib/send-failure.ts). */}
           {sendError && (
-            <div role="alert" data-testid="composer-send-error" className="text-xs text-destructive">
+            <div role="alert" data-testid={tid("composer-send-error")} className="text-xs text-destructive">
               {sendError}
             </div>
           )}
@@ -714,7 +752,10 @@ export function Composer(props: {
               the editor arrives. */}
           <Suspense fallback={<div className={COMPOSER_FIELD_CLASS} aria-hidden />}>
             <RichEditor
-              key={openId ?? "none"}
+              // Keyed per BOX: the conversation's bar is keyed by the conversation, and a
+              // thread's by its own thread — so opening another thread gets a fresh field
+              // seeded from that thread's own draft rather than the last one's words.
+              key={threadKey ?? openId ?? "none"}
               initialContent={draftToHtml(draft)}
               focusToken={props.focusToken}
               toolbarVisible={toolbarOpen}
@@ -724,7 +765,9 @@ export function Composer(props: {
               onEditorChange={setEditor}
               // Mirror the editor's text into the draft, so a half-written message
               // survives a walk through other conversations.
-              onChangeText={(text) => controller.setDraftText(text)}
+              onChangeText={(text) =>
+                threadKey ? controller.setThreadDraftText(threadKey, text) : controller.setDraftText(text)
+              }
               onPaste={handlePaste}
               onSubmit={(html, mentions) => send("", html, mentions)}
               mentionCandidates={mentionCandidates}
@@ -739,15 +782,28 @@ export function Composer(props: {
               // Words the scheduled list handed back. Never another thread's: a message
               // cancelled in one conversation must not appear in the box of another.
               restoreDraft={
-                composerRestore && composerRestore.conversation === openId
+                // Never in a THREAD's bar: the words handed back are a message that was queued
+                // for the CONVERSATION, and putting them in a thread would re-post them
+                // somewhere nobody sent them (see the scheduled list's Edit).
+                !thread && composerRestore && composerRestore.conversation === openId
                   ? { html: draftToHtml(composerRestore.text), token: composerRestore.token }
                   : null
               }
+              testId={tid("composer-rich")}
+              // A thread's bar says what it answers. The two bars stand side by side, so an
+              // identical placeholder would make them read as one box drawn twice.
+              placeholder={thread ? "Reply…" : undefined}
               onMentionQuery={() => void controller.ensureMentionCandidates()}
               customEmojiPack={customEmojiPack}
               unicodeShortcodes={unicodeShortcodes}
             />
           </Suspense>
+
+          {/* A THREAD'S OWN BROADCAST BOX, under the words and above the controls, which is
+              where the reference draws it. This bar writes nothing but a reply, so there is no
+              banner to hang it in — and the box is the one thing on screen that says the reply
+              can also land in the running history (§ A CHAT HAS THREADS TOO). */}
+          {thread && broadcast && <BroadcastBox checked={alsoToChat} onChange={setAlsoToChat} />}
 
           {/* Bottom control bar: format bar toggle and image picker on the left, send
               on the right. */}
@@ -758,7 +814,7 @@ export function Composer(props: {
                 aria-label={toolbarOpen ? "Hide formatting options" : "Show formatting options"}
                 aria-pressed={toolbarOpen}
                 title={toolbarOpen ? "Hide formatting options" : "Show formatting options"}
-                data-testid="composer-format-toggle"
+                data-testid={tid("composer-format-toggle")}
                 data-cuelume-toggle=""
                 onClick={toggleToolbar}
                 className={cn(
@@ -777,7 +833,7 @@ export function Composer(props: {
                 type="file"
                 multiple
                 accept={composerImageAccept()}
-                data-testid="composer-image-input"
+                data-testid={tid("composer-image-input")}
                 className="sr-only"
                 onChange={(event) => {
                   const files = Array.from(event.target.files ?? []);
@@ -789,7 +845,7 @@ export function Composer(props: {
                 type="button"
                 aria-label={images.length > 0 ? "Add another image" : "Add image"}
                 title={images.length > 0 ? "Add another image" : "Add image"}
-                data-testid="composer-image-button"
+                data-testid={tid("composer-image-button")}
                 disabled={imageLoading || sending}
                 onClick={() => fileInputRef.current?.click()}
                 className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-50"
@@ -806,7 +862,7 @@ export function Composer(props: {
                 They answer one question — now, or then — so two separate buttons would ask
                 the reader to tell them apart. Slack's own shape. */}
             <div
-              data-testid="composer-send-group"
+              data-testid={tid("composer-send-group")}
               className={cn(
                 "flex shrink-0 items-center rounded-full transition-all",
                 canSend && "shadow-chip",
@@ -816,7 +872,7 @@ export function Composer(props: {
                 type="button"
                 aria-label={sending ? "Sending message" : "Send message"}
                 title="Send (Enter)"
-                data-testid="composer-send"
+                data-testid={tid("composer-send")}
                 disabled={!canSend}
                 onClick={() => submit()}
                 className={cn(
@@ -838,5 +894,34 @@ export function Composer(props: {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * "ALSO SEND TO THE CHAT" — one row, drawn wherever a reply is being written.
+ *
+ * It is one component because it is one control: the bar under the conversation hangs it in the
+ * reply banner (which is what says where the next Enter lands there) and a thread's own bar
+ * carries it under its field, and neither may say it differently from the other.
+ *
+ * THE BOX IS THE INK and the 44px target is GROWN — the technique the thread foot row, the
+ * dialog's close and the slider's thumb already use. A box a thumb tall would push the field
+ * down by half a centimetre on every reply, in a bar the reader is about to type in.
+ */
+function BroadcastBox(props: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label
+      data-testid="reply-broadcast"
+      title={BROADCAST_HINT}
+      className="relative mt-1.5 inline-flex h-6 w-fit cursor-pointer items-center gap-2 text-[11px] text-text-dim after:absolute after:inset-x-0 after:-bottom-2.5 after:-top-2.5 after:content-['']"
+    >
+      <input
+        type="checkbox"
+        checked={props.checked}
+        onChange={(event) => props.onChange(event.currentTarget.checked)}
+        className="size-3.5 shrink-0 accent-primary"
+      />
+      <span>{BROADCAST_LABEL}</span>
+    </label>
   );
 }

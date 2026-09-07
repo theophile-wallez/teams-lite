@@ -159,22 +159,25 @@ export function chatThreads(messages: readonly ChatMessage[]): ChatThreadModel {
 }
 
 /**
- * Whether the composer offers "Also send to the chat" for the reply being written.
+ * Whether a reply bar offers "Also send to the chat".
  *
- * **Only in a CHAT.** A channel reply is filed by ADDRESS — Teams keeps it out of the
- * channel's own column whatever this app does (`teams_send::parse_thread_root`) — so
- * broadcasting one there would mean posting a SECOND message to the channel root, which is a
- * different act with a different cost, and this app does not offer it. In a chat the reply is
- * genuinely in the conversation for every client there is, so the box decides only whether
- * teams-lite folds it out of the running history: one message, one send, one property.
+ * **ONLY A THREAD'S OWN BAR, and only in a CHAT.** Two halves:
  *
- * It is drawn only while a reply is being written, because there is nothing else it could be
- * about — a top-level message belongs to no thread, and a flag on one would hide it from the
- * running history with nothing anywhere able to say where it went (which is why
- * `parse_thread_only` refuses exactly that).
+ *  - The bar under the CONVERSATION never offers it, because a reply written there is an
+ *    ordinary reply: it is in the running history, which is what the box would ask for. That is
+ *    the whole shape of the feature after it became an OPTION — a reader who wants their answer
+ *    in the chat presses Reply, and a reader who wants a thread presses "Reply in thread".
+ *  - A CHANNEL's thread bar never offers it either. A channel reply is filed by ADDRESS, so it
+ *    is out of the channel's own column whatever this app does (`teams_send::parse_thread_root`)
+ *    — broadcasting one would mean posting a SECOND message to the channel root, which is a
+ *    different act with a different cost, and this app does not offer it.
+ *
+ * So it is a chat thread's own bar: there the reply is genuinely in the conversation for every
+ * client there is, and the box decides only whether teams-lite folds it out of the running
+ * history. One message, one send, one property.
  */
-export function broadcastOffered(opts: { isChannel: boolean; replying: boolean }): boolean {
-  return opts.replying && !opts.isChannel;
+export function broadcastOffered(opts: { inThread: boolean; isChannelThread: boolean }): boolean {
+  return opts.inThread && !opts.isChannelThread;
 }
 
 /** What the checkbox says, and what unticking it costs — the words the reader decides on.

@@ -313,17 +313,18 @@ Nine rules hold the conversation layout, and each is pinned by `web/e2e/channels
     row controls is the 6px, and the rest is the band the bubble owns. `mb-7` is deliberately
     NOT narrowed for a post whose own foot row follows it — it would buy 4px, cost a prop
     threaded through `renderMsg`, and bring the target's top back to the chips' own edge.
-- **THE PANEL BRINGS NO COMPOSER, and opening it AIMS the app's own.** There is ONE composer here —
-  its `data-conversation-id` is what a sanctioned live driver proves its target with — so the panel
-  deliberately differs from the reference on this one point and takes what already exists:
-  `openThreadPanel` calls `startReply` on the thread's root, the banner names the thread the next
-  Enter lands in (`replyHeading`), and closing the panel takes that aim back. A panel that opened
-  WITHOUT aiming would leave the reader answering a thread into the channel — a new untitled thread
-  beside the post rather than under it, which is the defect § A CHANNEL THREAD exists to close.
-  **The BANNER stays the one authority on where Enter lands**: a reader who presses its own Cancel
-  has said "not a reply", and the panel is left open rather than closed under them — which is also
-  the state a DEEP LINK into a reply produces, since a panel opened to SHOW a message must not
-  answer it for them.
+- **THE PANEL BRINGS ITS OWN COMPOSER, at its foot.** It used to bring none and aim the app's own
+  instead, on the argument that there is ONE composer here; read on screen that was wrong for the
+  reason § A CHAT HAS THREADS TOO states in full — a thread open on the RIGHT with the only bar
+  under the conversation in the MIDDLE gives the reader a box that belongs to neither column. Both
+  panels take the same bar, because there is one panel: `ChannelThreadsPanel` draws a chat thread
+  and a conversational channel's alike. The LIVE SENTINEL is untouched — `composer-shell` still
+  resolves to exactly one element, and a thread's bar is `thread-composer-shell` with every handle
+  inside it prefixed the same way.
+  A panel that opened with NO way to reply would leave the reader answering a thread into the
+  channel — a new untitled thread beside the post rather than under it, which is the defect
+  § A CHANNEL THREAD exists to close — so the bar is what closes it here, and the address it posts
+  at is the thread's own (`ThreadTarget.threadRoot`).
 - **The panel states WHICH thread it is** (`data-thread-root`), names it by its TITLE where it has
   one and by its opening words where it does not (`threadPanelHeading`, bounded to
   `PANEL_HEADING_CHARS` — a header is one line), scrolls ITSELF, and separates the post from its
@@ -541,9 +542,19 @@ a thread address there because the service publishes none. So a chat's reply use
 message in the running conversation, and a thread of eight answers was eight messages between
 whatever else was being said.
 
-It is a thread now: pressing Reply starts one, the replies are drawn in the panel beside the
-conversation, and the root carries the foot row that says who answered, how many of them and when
-the last one landed. `web/src/lib/chat-threads.ts` is the derivation, `threads-view.ts` and
+It can be a thread now, and **THAT IS AN OPTION RATHER THAN WHAT REPLY DOES**: a message's own
+menu offers **Reply** — an ordinary answer in the conversation, exactly as it always was — and
+**Reply in thread** beside it. Taking the second opens the message's thread in the panel beside
+the conversation, with a reply bar of its own at its foot; the root then carries the foot row that
+says who answered, how many of them and when the last one landed.
+
+It shipped the other way round first — every Reply started a thread and folded itself out of the
+running history — and that is the wrong default for a chat: most answers are one line in a
+conversation, and a reader who pressed the button they have always pressed watched their message
+leave the history they put it in. Discord's shape is the one that holds: reply, or start a thread,
+as two rows.
+
+`web/src/lib/chat-threads.ts` is the derivation, `threads-view.ts` and
 `web/src/components/threads-pane.tsx` are the view that lists every thread the reader is in,
 `teams_send::parse_thread_only` is the wire's trust boundary and `Store::thread_messages` is the
 one read a page cannot make for itself.
@@ -567,12 +578,13 @@ draws it in the running history as well as in its thread — which is exactly th
 § A CHANNEL IS DRAWN THE WAY TEAMS DRAWS IT already makes when a conversational channel draws its
 thread LEADS and puts the replies one press away.
 
-**SLACK'S BROADCAST IS WHY THE FEATURE IS ACCEPTABLE AT ALL**, and it is the half their own design
-history says settled the model: replies no longer appearing in the channel is the one thing readers
-feared about threads, so the reply may be sent to the thread AND to the conversation. Here it is
-one checkbox in the reply banner — **Also send to the chat**, unticked, which is Slack's default and
-the whole point (a box that started ticked would make every reply a broadcast and the fold a thing
-nobody ever saw).
+**SLACK'S BROADCAST IS BESIDE IT**, and it is the half their own design history says settled the
+model: replies no longer appearing in the channel is the one thing readers feared about threads, so
+the reply may be sent to the thread AND to the conversation. Here it is one checkbox in the
+THREAD's own reply bar — **Also send to the chat**, unticked, which is what having chosen a thread
+means: the answer belongs in it. It is offered NOWHERE ELSE, because nowhere else needs it: a reply
+written in the bar under the conversation is already in the running history, which is what the box
+would ask for.
 
 **IT IS A CUSTOM `properties` FIELD, and this is the one place that is acceptable.**
 `teams_send::THREAD_ONLY` (`tlthreadonly`, a quoted `"1"` — the shape `SCHEDULED_SEND_TIME` is
@@ -622,22 +634,35 @@ Fourteen rules hold it, and each is pinned by a test:
   A chat thread has no TITLE (Teams offers the field in a channel and nowhere else), so the heading
   falls back to the root's opening words, which is what `threadPanelHeading` was already written to
   do.
-- **OPENING THE PANEL AIMS THE APP'S ONE COMPOSER**, and closing it takes the aim back. There is
-  ONE composer here — its `data-conversation-id` is what a sanctioned live driver proves its target
-  with — so this is the channel panel's own rule inherited whole, and the banner stays the one
-  authority on where the next Enter lands.
-- **AND PRESSING REPLY OPENS THAT PANEL, which is what stops the sharpest surprise the fold can
-  cause.** A reply is folded by default, so a reader who pressed Reply on a bubble, typed and
-  pressed Enter watched their message VANISH — into a thread they had never been shown, behind a
-  foot row under a message that may be a screen up. `doReply` therefore opens the panel of the
-  thread the reply will really be in, which for an answer to another reply is the ROOT's: the same
-  resolution the send makes, so what the reader is shown and what their message joins cannot
-  disagree. It is Slack's own flow in as many words — *click on reply, the thread is opened in the
-  right sidebar* — and it is the change that made `messaging.spec.ts`'s own "replies to a message
-  via the actions menu" mean something different: the reply is in the panel, and in the running
-  history it is not.
-  A CHANNEL opens nothing, because both of its layouts already show the reader where their answer
-  goes: the card it lands in, or the panel they opened to write it in.
+- **THE PANEL BRINGS ITS OWN REPLY BAR, and that REVERSES the rule this app shipped first.** It
+  used to bring none: opening it aimed the app's own composer — the one under the conversation — on
+  the argument that there is ONE composer here and a second would give the live driver's sentinel
+  two answers. Read on screen that was wrong, and the reference is right: a thread stands open on
+  the RIGHT while the only bar sits under the conversation in the MIDDLE, so the box the reader is
+  about to type their reply into belongs to neither column. It was reported exactly that way. So
+  the panel ends in a bar of its own and the conversation keeps its own — the reference's two bars.
+- **AND THE SENTINEL IS UNTOUCHED, which is what made the reversal safe to make.**
+  `composer-shell` still resolves to exactly ONE element: a thread's bar is
+  `thread-composer-shell`, and EVERY handle inside it is prefixed the same way (`tid` in
+  composer.tsx), so no selector in this app's own suite or in `web/scripts/preview.ts` can
+  silently become ambiguous. What a keystroke may REACH is unchanged either way — a thread's bar
+  posts a reply into a thread OF THIS CONVERSATION — so both bars name the same conversation and
+  the proof means what it always meant.
+- **IT IS THE SAME COMPONENT DRAWN TWICE, never a second lesser box.** `Composer` takes a
+  `ThreadTarget`, so the pictures, the mentions, the emoji, the custom emoji, the seal and the
+  agent tag are the ones the reader already has. What differs is what it is aimed at and what it
+  holds: its own draft, its own broadcast box, no post TITLE (a thread's title belongs to its first
+  post) and no banner of any kind — the panel above it IS the banner. It says **"Reply…"** rather
+  than "Write a message…", because two bars side by side must not read as one box drawn twice.
+- **A THREAD'S DRAFT IS APP STATE AND NOT A BACKEND DRAFT** (`threadDrafts`, keyed by
+  `threadDraftKey`). `set_draft` is keyed per CONVERSATION, so a per-thread draft would need a wire
+  of its own. What this buys is that closing the panel, opening another thread and walking to
+  another conversation all keep the words; what it costs is stated rather than hidden — a RELOAD
+  loses them, where the conversation's own draft survives one.
+- **A FAILURE IS REPORTED AT THE BAR THAT SENT IT** (`sendErrorAt`, the thread's root id or null).
+  A conversation now holds two composers, and the sentence beside the words that did not leave
+  belongs beside THOSE words: drawn in both bars it would report a failed reply under a message box
+  that sent nothing. One slot rather than two, because there is one failure at a time.
 - **A THREAD NOBODY HAS ANSWERED IS STILL A PANEL.** A chat's threads are derived from its quotes,
   so a message nobody has answered is in none of them — and the panel that Reply opens would be
   nothing at all. It is synthesized for exactly that root, with no replies, and the panel already
@@ -669,25 +694,29 @@ Fourteen rules hold it, and each is pinned by a test:
   scroll rather than inside it. A deep link SHOWS a message and deliberately does not aim the
   composer at it; a press in the threads view says "open this thread", so it aims exactly as a
   press on the foot row does.
-- **THE TICK BELONGS TO THE REPLY, AND ITS DEFAULT TRAVELS WITH IT** (`PendingReply.broadcast`,
-  read once by the composer where the reply starts). An ordinary Reply is UNTICKED; an
-  "Answer with <agent>" and a "Review <ref> with <agent>" are TICKED, because the ANSWER is
-  posted with no flag at all — the reader asked for it in the conversation and watches it being
-  written there, so a folded question would be hidden in a thread with its own answer standing in
-  the history beside it. It is a DEFAULT and not a rule: the reader may untick it.
-  It is a field on the pending reply rather than a second effect in the composer, and that is a
-  correctness matter rather than tidiness: the version with two effects raced, and every agent
-  request went out FOLDED whatever the box showed.
+- **THE TICK BELONGS TO THE THREAD BEING ANSWERED**, keyed on its own root, so walking from one
+  thread to another does not carry the last one's choice into it. It starts UNTICKED, which is what
+  having chosen a thread means.
+  It used to be a field on the PENDING REPLY (`PendingReply.broadcast`) because the bar under the
+  conversation folded by default and the agent flows had to opt out of that; with threading an
+  OPTION there is nothing to opt out of, so the field is gone and both agent paths are a plain
+  `startReply` again. That is worth knowing before adding a third default: the version with two
+  effects writing one tick RACED, and every agent request went out folded whatever the box showed.
 - **WHAT THE SEND CARRIES IS READ FROM A REF, because `send` cannot read the state.** The rich
   editor holds this composer's `onSubmit` from the render it was mounted in (`submitRef`), so a
   send closes over the FIRST render's values — which is why the pending pictures and the
   scheduled moment are already refs here. Read from the state, every reply went out folded
   whatever the reader had ticked; it is the defect § AND THE READER CAN ASK ABOUT IT records for
   its own `ask`, in another file.
-- **A CHANNEL IS OFFERED NO BROADCAST BOX** (`broadcastOffered`). A channel reply is filed by
-  ADDRESS, so it is out of the channel's own column whatever this app does — broadcasting one would
+- **A CHANNEL IS OFFERED NEITHER THE OPTION NOR THE BOX** (`broadcastOffered`, and the menu row
+  drawn only where `chatThreadModel` exists). A channel reply is filed by ADDRESS, so it is already
+  out of the channel's own column and there is no second act to offer; and broadcasting one would
   mean posting a SECOND message to the channel root, which is a different act with a different cost
   and this app does not offer it. That limit is stated rather than papered over.
+- **THE OPTION IS OFFERED ONLY WHERE A THREAD CAN BE OPENED.** "Reply in thread" is drawn on a
+  chat's bubbles and nowhere else — a channel's replies are already threaded, and its own reply row
+  aims the conversation's bar at the thread. So the menu never carries a row that would do what the
+  row above it already did.
 
 ### THE THREADS VIEW (`/threads`, the row under the search field)
 
@@ -751,10 +780,10 @@ one they are IN) and one BROADCAST, because a fixture with only folded replies w
 folded EVERY reply pass every test.
 
 `cd web && bun run preview -- --out /tmp/thr --threads --dpr 3` captures the running history with
-the thread folded out of it in both themes, the foot row cropped to itself, the panel in both
-themes, the broadcast box cropped to the banner it sits in in both themes, the view in both themes,
-ONE ROW cropped, the row under the search field that leads there, and a PHONE's width where the
-panel REPLACES the conversation. `web/e2e/chat-threads.spec.ts` pins every rule the page owns,
+the thread folded out of it in both themes, the foot row cropped to itself, the OPTION in a
+message's own menu, the panel in both themes with its own reply bar at the foot, that BAR cropped to
+itself in both themes, the view in both themes, ONE ROW cropped, the row under the search field that
+leads there, and a PHONE's width where the panel REPLACES the conversation. `web/e2e/chat-threads.spec.ts` pins every rule the page owns,
 `web/src/lib/chat-threads.test.ts` and `threads-view.test.ts` the pure ones, and
 `teams_send::tests`, `teams_read::tests`, `store::tests` and the `edit` handler's own scan the wire.
 
@@ -4831,10 +4860,12 @@ user. Two independent mechanisms enforce that split:
   filter, a cut log, a job that has not run, a live one and a refused read:
   `bun run preview -- --out /tmp/log --job-log`, or `openJobLog` from the same file.
   For THREADS IN A CHAT — the running history with a thread folded out of it in both themes, the
-  foot row cropped to itself, the panel in both themes, the broadcast box cropped to the banner it
-  sits in, the threads VIEW in both themes, one of its rows cropped, the row under the search field
-  that leads there, and a PHONE's width where the panel REPLACES the conversation (pass `--dpr 3`:
-  the foot row is 20px faces beside 12px type and the broadcast box is 11px):
+  foot row cropped to itself, the OPTION in a message's own menu (Reply, and "Reply in thread"
+  beside it — threading is opt-in), the panel in both themes with its OWN reply bar at the foot,
+  that bar cropped to itself in both themes (its "Reply…" placeholder and the broadcast row), the
+  threads VIEW in both themes, one of its rows cropped, the row under the search field that leads
+  there, and a PHONE's width where the panel REPLACES the conversation (pass `--dpr 3`: the foot
+  row is 20px faces beside 12px type and the broadcast row is 11px):
   `bun run preview -- --out /tmp/thr --threads`.
   For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
@@ -6201,11 +6232,15 @@ What the page itself decides:
     the open one and nothing changes; a call they ANSWER in a thread they were not looking at
     publishes that read when the page opens with its chat. That is the price of the default,
     it was asked for deliberately, and Ghost mode still decides whether Teams is told.
-- **There is ONE composer in this app, and the panel TAKES it rather than adding a second**
-  (`useCallOwnsComposer`). It carries the live sentinel `sandbox-live.ts` proves its target
-  with (`data-conversation-id`), so two of them would give that question two answers — the
-  spec asserts the count. Nothing is hidden by the handover: the panel only holds it while
+- **There is ONE CONVERSATION composer in this app, and the panel TAKES it rather than adding a
+  second** (`useCallOwnsComposer`). It carries the live sentinel `sandbox-live.ts` proves its
+  target with (`data-conversation-id`), so two of THEM would give that question two answers —
+  the spec asserts the count. Nothing is hidden by the handover: the panel only holds it while
   the stage is FULL, and a full stage covers the message pane completely.
+  A THREAD's own reply bar is a second box on screen and not a second answer to that question:
+  it is `thread-composer-shell`, every handle inside it is prefixed, and it posts into a thread
+  OF THE SAME CONVERSATION (§ A CHAT HAS THREADS TOO). While a call holds the composers the
+  thread panel draws none at all, because the stage covers the pane it would sit in.
 - **A message is read here and acted on there.** No reactions, no edit, no delete, no "…"
   menu in the panel: a call's side column is for following what is being said and saying
   something back, and everything else is one fold away in the conversation itself, where it
@@ -7318,9 +7353,10 @@ which is the right place to play A MOVE and the wrong place to play a GAME.
   it. It is a CHILD of the conversation's route, so the shell opens the thread exactly as it always
   did and the page never loads a history of its own.
 - **The shell draws it INSTEAD of the sidebar and the pane**, rather than over them: there is no
-  overlay to dismiss, and the app's ONE composer is this page's while it is up — the pane that
-  usually holds it is not mounted, so the sentinel a sanctioned driver proves its target with still
-  has exactly one answer. A live call's chat panel is the one thing that can also hold it, so the
+  overlay to dismiss, and the app's one CONVERSATION composer is this page's while it is up — the
+  pane that usually holds it is not mounted, so the sentinel a sanctioned driver proves its target
+  with still has exactly one answer (a thread's own bar lives in that pane too, and takes a name of
+  its own — § A CHAT HAS THREADS TOO). A live call's chat panel is the one thing that can also hold it, so the
   page asks (`useCallOwnsComposer`) rather than drawing a second.
 - **THE BOARD COLUMN HOLDS THE BOARD AND THE TWO SEATS, AND NOTHING ELSE AT ALL.** Everything a
   reader presses or reads ABOUT the game — the four move controls, the sentence saying what the board

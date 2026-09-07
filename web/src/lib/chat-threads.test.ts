@@ -136,14 +136,15 @@ describe("chatThreads", () => {
 });
 
 describe("broadcastOffered", () => {
-  it("is offered on a CHAT reply and nowhere else", () => {
-    expect(broadcastOffered({ isChannel: false, replying: true })).toBe(true);
-    // A channel reply is filed by ADDRESS, so it is out of the channel's column whatever this
-    // app does — broadcasting one would mean posting a SECOND message to the channel root.
-    expect(broadcastOffered({ isChannel: true, replying: true })).toBe(false);
-    // A top-level message belongs to no thread, which is why the backend refuses the flag on
-    // one: it would hide the message with nothing able to say where it went.
-    expect(broadcastOffered({ isChannel: false, replying: false })).toBe(false);
+  it("is offered by a chat THREAD's own bar and nowhere else", () => {
+    expect(broadcastOffered({ inThread: true, isChannelThread: false })).toBe(true);
+    // The bar under the CONVERSATION writes an ordinary reply, which is already in the running
+    // history: there is nothing for the box to ask for. Threading is the OPTION here — a reader
+    // who wants their answer in the chat presses Reply.
+    expect(broadcastOffered({ inThread: false, isChannelThread: false })).toBe(false);
+    // A CHANNEL thread's reply is filed by ADDRESS, so it is out of the channel's own column
+    // whatever this app does — broadcasting one would mean posting a SECOND message to the root.
+    expect(broadcastOffered({ inThread: true, isChannelThread: true })).toBe(false);
   });
 
   it("says the reply reaches the same people either way", () => {

@@ -57,6 +57,23 @@ export function composerField(page: Page) {
   return page.locator('[data-testid="composer-rich"] .tiptap-message');
 }
 
+/** The field of a THREAD's own reply bar, at the foot of its panel.
+ *
+ *  A conversation holds TWO composers while a thread is open (§ A CHAT HAS THREADS TOO), so
+ *  every handle inside a thread's bar is prefixed — which is also what lets a spec say WHICH
+ *  bar it is typing into. `composerField` above still resolves to exactly one element. */
+export function threadComposerField(page: Page) {
+  return page.locator('[data-testid="thread-composer-rich"] .tiptap-message');
+}
+
+/** Type into a THREAD's own reply bar and send it. */
+export async function sendFromThreadComposer(page: Page, text: string): Promise<void> {
+  const field = threadComposerField(page);
+  await field.click();
+  await field.fill(text);
+  await field.press("Enter");
+}
+
 /** Replace whatever the composer holds with `text`. `fill` works on a contenteditable,
  *  so this stays as terse as the old textarea call it replaces. */
 export async function fillComposer(page: Page, text: string): Promise<void> {

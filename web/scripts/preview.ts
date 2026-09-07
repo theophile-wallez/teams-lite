@@ -4745,8 +4745,19 @@ if (import.meta.main) {
       // says nothing about whether either can be read (pass `--dpr 3`).
       await shot(`${out}-foot-light.png`, '[data-testid="post-replies"]');
 
-      // The PANEL, with every reply in it — and the composer's banner beside it naming the
-      // thread the next Enter lands in.
+      // THE OPTION, in a message's own menu: Reply answers in the chat, and the row under it
+      // starts a thread instead (§ A CHAT HAS THREADS TOO). It is the whole of what makes
+      // threading opt-in, so it is the picture that says so.
+      const bubble = page.locator('[data-testid="message"]').first();
+      await bubble.hover();
+      await bubble.locator('[data-testid="message-actions"]').click();
+      await page.locator('[data-testid="action-reply-in-thread"]').waitFor();
+      await page.waitForTimeout(250);
+      await shot(`${out}-option-light.png`);
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(200);
+
+      // The PANEL, with every reply in it, and its own reply bar at the foot.
       await foot.click();
       await page.locator('[data-testid="threads-panel"]').waitFor();
       await page.waitForTimeout(400);
@@ -4754,11 +4765,12 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-panel-dark.png`);
       await setTheme("light");
-      // THE BROADCAST BOX, cropped to the banner it sits in: this is the one control the
-      // feature adds to the composer, and it is 11px type beside a 14px checkbox.
-      await shot(`${out}-broadcast-light.png`, '[data-testid="reply-banner"]');
+      // THE THREAD'S OWN REPLY BAR, cropped to itself: the box the reader answers a thread in,
+      // its "Reply…" placeholder and the broadcast row under it. This is the whole of what the
+      // panel gained, and it is 13px type beside a 14px checkbox.
+      await shot(`${out}-bar-light.png`, '[data-testid="thread-composer-shell"]');
       await setTheme("dark");
-      await shot(`${out}-broadcast-dark.png`, '[data-testid="reply-banner"]');
+      await shot(`${out}-bar-dark.png`, '[data-testid="thread-composer-shell"]');
       await setTheme("light");
 
       // THE VIEW: every thread the reader is in, across every conversation.
@@ -4777,8 +4789,9 @@ if (import.meta.main) {
       await shot(`${out}-entry-light.png`, '[data-testid="open-threads"]');
       console.log(
         `[preview] wrote ${out}-folded-{light,dark}.png, ${out}-foot-light.png, ` +
-          `${out}-panel-{light,dark}.png, ${out}-broadcast-{light,dark}.png, ` +
-          `${out}-view-{light,dark}.png, ${out}-row-light.png and ${out}-entry-light.png`,
+          `${out}-panel-{light,dark}.png, ${out}-bar-{light,dark}.png, ` +
+          `${out}-view-{light,dark}.png, ${out}-row-light.png, ${out}-option-light.png ` +
+          `and ${out}-entry-light.png`,
       );
     });
     // A PHONE, where the panel REPLACES the conversation rather than standing beside it —

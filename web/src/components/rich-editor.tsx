@@ -56,7 +56,8 @@ import { EmojiSuggestions } from "./emoji-suggestions";
 // links, and bullet/ordered lists. Headings, horizontal rules, code blocks, and
 // blockquotes are disabled so we never emit markup Teams would drop or mangle
 // (the reply quote is a blockquote the backend owns).
-const EXTENSIONS = [
+function extensionsWith(placeholder: string) {
+  return [
   StarterKit.configure({
     heading: false,
     horizontalRule: false,
@@ -69,9 +70,7 @@ const EXTENSIONS = [
       HTMLAttributes: { rel: "noopener noreferrer", target: "_blank" },
     },
   }),
-  Placeholder.configure({
-    placeholder: "Write a message…",
-  }),
+  Placeholder.configure({ placeholder }),
   // @mentions: an atomic inline node that carries who is mentioned, shrinks by one
   // word per Backspace, and serializes to the markup Teams notifies people from.
   MentionNode,
@@ -81,7 +80,13 @@ const EXTENSIONS = [
   // Custom emoji: an atomic inline node holding an emoji name, which serializes to the
   // bare :name: text the backend substitutes. One Backspace removes it whole.
   CustomEmojiNode,
-];
+  ];
+}
+
+/** The words a bar shows when it is empty. A THREAD's own bar says "Reply…", which is what the
+ *  reference says there: the two bars stand side by side, so the box that answers a thread and
+ *  the box that posts to the chat must not read as the same box (§ A CHAT HAS THREADS TOO). */
+const DEFAULT_PLACEHOLDER = "Write a message…";
 
 /** `useLayoutEffect` in the browser, `useEffect` on the server (where there is no
  *  layout and React warns about the former). */
@@ -226,6 +231,11 @@ export function RichEditor(props: {
   toolbarVisible?: boolean;
   /** Handles image clipboard items before ProseMirror inserts them as content. */
   onPaste?: (event: ReactClipboardEvent) => void;
+  /** The handle a spec drives this field with, `composer-rich` by default. A thread's own bar
+   *  passes its own, because a conversation holds two composers while a thread is open. */
+  testId?: string;
+  /** What the empty field says. A thread's own bar says "Reply…" (see `DEFAULT_PLACEHOLDER`). */
+  placeholder?: string;
   /** Registers the editor's submit fn so an outside control (send button) can call it. */
   submitRef?: MutableRefObject<(() => void) | null>;
   /** Registers a focus fn so clicking the composer's dead space can focus the editor. */
@@ -347,7 +357,7 @@ export function RichEditor(props: {
     // TanStack Start renders on the server; ProseMirror needs the DOM, so defer
     // creation to the client to avoid a hydration mismatch.
     immediatelyRender: false,
-    extensions: EXTENSIONS,
+    extensions: extensionsWith(props.placeholder ?? DEFAULT_PLACEHOLDER),
     content: props.initialContent,
     onCreate: ({ editor }) => props.onEmptyChange?.(editor.isEmpty),
     onUpdate: ({ editor }) => {
@@ -671,7 +681,14 @@ export function RichEditor(props: {
           <FormatToolbar editor={editor} />
         </BubbleMenu>
       )}
-      <EditorContent editor={editor} data-testid="composer-rich" onPaste={props.onPaste} />
+      <EditorContent
+        editor={editor}
+        // The handle a spec drives the field with. It is a PROP because a conversation holds two
+        // composers while a thread is open (§ A CHAT HAS THREADS TOO), and an unprefixed name
+        // would resolve to two elements in every selector this app's own suite already has.
+        data-testid={props.testId ?? "composer-rich"}
+        onPaste={props.onPaste}
+      />
     </div>
   );
 }
