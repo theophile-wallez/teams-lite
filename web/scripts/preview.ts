@@ -4765,6 +4765,10 @@ if (import.meta.main) {
       await setTheme("dark");
       await shot(`${out}-panel-dark.png`);
       await setTheme("light");
+      // THE PANEL AND THE CONVERSATION, both bars on ONE BASELINE — which is what the whole-page
+      // shot above is really for now: each column ends in its own reply bar, so a crop of either
+      // one says nothing about whether they line up.
+      //
       // THE THREAD'S OWN REPLY BAR, cropped to itself: the box the reader answers a thread in,
       // its "Reply…" placeholder and the broadcast row under it. This is the whole of what the
       // panel gained, and it is 13px type beside a 14px checkbox.
@@ -4787,11 +4791,33 @@ if (import.meta.main) {
       // …and the row under the search field that leads here, which is how the whole feature
       // is found at all.
       await shot(`${out}-entry-light.png`, '[data-testid="open-threads"]');
+
+      // A THREAD BEING NAMED: the field a chat thread's own bar offers while it has no name,
+      // which is where Discord asks for one too.
+      //
+      // It is drawn only on an UNNAMED thread, so the message is picked by its WORDS rather than
+      // by position: the fixture's newest message is a reply in the thread that already HAS a
+      // name, and starting a thread from it correctly offers no field at all (measured — that is
+      // what the first capture of this showed).
+      await openConversation(page, "Thread Demo");
+      const unnamed = page
+        .locator('[data-testid="message-scroll"] [data-testid="message"]')
+        .filter({ hasText: "lunch at one" })
+        .first();
+      await unnamed.hover();
+      await unnamed.locator('[data-testid="message-actions"]').click();
+      await page.locator('[data-testid="action-reply-in-thread"]').click();
+      await page.locator('[data-testid="thread-composer-shell"]').waitFor();
+      await page.waitForTimeout(300);
+      await shot(`${out}-name-light.png`, '[data-testid="thread-composer-shell"]');
+      await setTheme("dark");
+      await shot(`${out}-name-dark.png`, '[data-testid="thread-composer-shell"]');
+      await setTheme("light");
       console.log(
         `[preview] wrote ${out}-folded-{light,dark}.png, ${out}-foot-light.png, ` +
           `${out}-panel-{light,dark}.png, ${out}-bar-{light,dark}.png, ` +
-          `${out}-view-{light,dark}.png, ${out}-row-light.png, ${out}-option-light.png ` +
-          `and ${out}-entry-light.png`,
+          `${out}-view-{light,dark}.png, ${out}-row-light.png, ${out}-option-light.png, ` +
+          `${out}-entry-light.png and ${out}-name-{light,dark}.png`,
       );
     });
     // A PHONE, where the panel REPLACES the conversation rather than standing beside it —

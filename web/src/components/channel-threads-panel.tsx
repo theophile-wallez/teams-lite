@@ -165,9 +165,10 @@ export function ChannelThreadsPanel(props: {
           post title (a thread's title belongs to its first post) or any banner, because the
           panel above it is the banner. */}
       {composerTarget && (
-        // `shrink-0` so the bar keeps its height while the thread above it scrolls: the
-        // scroller is the `flex-1 min-h-0` element, which is what makes the panel one column
-        // with a fixed head and a fixed foot.
+        // `shrink-0` so the bar keeps its height while the thread above it scrolls: the scroller
+        // is the `flex-1 min-h-0` element, which is what makes the panel one column with a fixed
+        // head and a fixed foot — and what puts this bar on the SAME BASELINE as the
+        // conversation's own, since both columns now reach the bottom of the pane.
         <div className="shrink-0 pt-2">
           <Composer thread={composerTarget} focusToken={props.focusToken} />
         </div>

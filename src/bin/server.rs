@@ -4865,11 +4865,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // one POST is the whole feature — the service holds the message and posts it
             // at that moment, so nothing on this machine has to be running then.
             let scheduled_ms = teams_send::parse_scheduled_time(params)?;
-            // The post's TITLE, where a channel post has one. It rides in this method's
-            // params for the reason the pictures and the moment do — `send` is already the
-            // OUTWARD_METHODS entry, and the title is part of the message it posts, not a
-            // second action. A reply is refused one here (see `parse_subject`).
-            let subject = teams_send::parse_subject(params)?;
+            // The post's TITLE, where a channel post has one — or the NAME of the thread a
+            // CHAT reply is in, which is the same property read on the other surface (see
+            // `parse_subject`, which is where the conversation decides which of the two it is).
+            // It rides in this method's params for the reason the pictures and the moment do:
+            // `send` is already the OUTWARD_METHODS entry, and the title is part of the message
+            // it posts rather than a second action.
+            let subject = teams_send::parse_subject(params, &conv)?;
             // Which CHANNEL THREAD this post belongs to, where it answers one. It decides the
             // POST's address rather than anything in the body (see
             // `teams_send::parse_thread_root`), so it needs no gate of its own either: it

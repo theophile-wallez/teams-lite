@@ -159,21 +159,31 @@ pub const SUBJECT: &str = "subject";
 /// clear of every real title.
 pub const MAX_SUBJECT_CHARS: usize = 250;
 
-/// Read the optional `subject` a `send` may carry: the TITLE of a channel post.
+/// Read the optional `subject` a `send` may carry: the TITLE of a channel post, or the NAME of
+/// the thread a chat reply is in.
 ///
-/// This is the trust boundary — a client supplies it — so the rules that make a title mean
-/// something are enforced here rather than in the composer that also states them:
+/// **ONE PROPERTY, TWO SURFACES, and the conversation decides which.** `properties.subject` is
+/// the field Teams itself titles a channel post with, and the read path already decodes it into
+/// `Message::thread_subject` on EVERY message it parses — so a chat thread's name needs no
+/// property, no column and no wire field of its own. What differs is where it may be written:
 ///
-///   * a REPLY carries none. A thread has one title and it belongs to the root post, so a
-///     reply that carried its own would be a second answer to "what is this thread
+///   * in a CHANNEL a REPLY carries none. A thread has one title and it belongs to the root
+///     post, so a reply that carried its own would be a second answer to "what is this thread
 ///     called" — and Teams' own composer offers the field only on a new post.
+///   * in a CHAT it is the OPPOSITE: only a reply may carry one. A chat has no threads on the
+///     service, so a thread here is the fold over a root and its replies (§ A CHAT HAS THREADS
+///     TOO) and the ROOT is an ordinary message somebody wrote before the thread existed —
+///     nobody can retitle it, and this app never rewrites the record of a Teams frame. The
+///     reply that starts the thread is what can name it, which is also where Discord asks:
+///     *you can add a title to your Thread (optional) and then type your message*. A top-level
+///     chat message is refused one, because there is no thread for it to name.
 ///   * it is bounded, and it is one LINE. A newline in a title is a title that draws as
 ///     two, so it is refused rather than quietly flattened.
 ///
 /// An empty or whitespace-only value is `None`: the property is then never written at
 /// all, which is what keeps an untitled post byte-identical to what this app sent before
 /// the field existed.
-pub fn parse_subject(params: &Value) -> Result<Option<String>> {
+pub fn parse_subject(params: &Value, conversation_id: &str) -> Result<Option<String>> {
     let Some(value) = params.get("subject").filter(|v| !v.is_null()) else {
         return Ok(None);
     };
@@ -181,10 +191,18 @@ pub fn parse_subject(params: &Value) -> Result<Option<String>> {
     if subject.is_empty() {
         return Ok(None);
     }
-    anyhow::ensure!(
-        params.get("reply_to").is_none_or(Value::is_null),
-        "a reply carries no title — the thread's title is its first post's"
-    );
+    let replying = params.get("reply_to").is_some_and(|v| !v.is_null());
+    if crate::teams_read::is_channel_thread_id(conversation_id) {
+        anyhow::ensure!(
+            !replying,
+            "a reply carries no title — the thread's title is its first post's"
+        );
+    } else {
+        anyhow::ensure!(
+            replying,
+            "a chat message carries no title — only a reply names the thread it is in"
+        );
+    }
     anyhow::ensure!(
         subject.chars().count() <= MAX_SUBJECT_CHARS,
         "a title is at most {MAX_SUBJECT_CHARS} characters"
@@ -2169,46 +2187,85 @@ mod tests {
         );
     }
 
+    /// IN A CHAT THE SAME PROPERTY NAMES THE THREAD, and only a REPLY may carry it.
+    ///
+    /// That asymmetry is the whole of a chat thread's name. A chat has no threads on the service,
+    /// so a thread here is the fold over a root and its replies — and the ROOT is an ordinary
+    /// message somebody wrote before the thread existed, which nobody can retitle and which this
+    /// app never rewrites. The reply that starts the thread is what names it, which is where
+    /// Discord asks for one too.
+    #[test]
+    fn in_a_chat_a_reply_names_the_thread_it_is_in() {
+        const CHANNEL: &str = "19:abc@thread.tacv2";
+        const CHAT: &str = "19:one@thread.v2";
+        let reply = json!({
+            "subject": "Staging migration timeout",
+            "reply_to": { "id": "1", "author": "Ada", "text": "hi" }
+        });
+        assert_eq!(
+            parse_subject(&reply, CHAT).unwrap(),
+            Some("Staging migration timeout".to_string())
+        );
+        // A TOP-LEVEL chat message is refused one: there is no thread for it to name, and Teams
+        // itself offers the field in a channel and nowhere else.
+        assert!(parse_subject(&json!({ "subject": "Ship it" }), CHAT).is_err());
+        // …and the channel keeps the opposite rule, which is what makes this an asymmetry rather
+        // than a relaxation: there a thread's title belongs to its first POST.
+        assert!(parse_subject(&reply, CHANNEL).is_err());
+        // Every other rule holds on both surfaces: bounded, and ONE line.
+        assert!(parse_subject(&json!({ "subject": "a\nb", "reply_to": {} }), CHAT).is_err());
+        assert!(
+            parse_subject(
+                &json!({ "subject": "x".repeat(MAX_SUBJECT_CHARS + 1), "reply_to": {} }),
+                CHAT
+            )
+            .is_err()
+        );
+    }
+
     /// The title is bounded and refused at the TRUST BOUNDARY, where a client supplies it.
     #[test]
     fn a_title_is_bounded_and_belongs_to_a_new_post() {
+        /// A channel, where a TITLE belongs to a new post.
+        const CHANNEL: &str = "19:abc@thread.tacv2";
+        /// A chat, where the same property NAMES the thread a reply is in.
+        const CHAT: &str = "19:one@thread.v2";
         // Absent, null, empty and whitespace all mean "no title", which is every send this
         // app made before the field existed.
-        assert_eq!(parse_subject(&json!({})).unwrap(), None);
-        assert_eq!(parse_subject(&json!({ "subject": null })).unwrap(), None);
-        assert_eq!(parse_subject(&json!({ "subject": "   " })).unwrap(), None);
+        assert_eq!(parse_subject(&json!({}), CHANNEL).unwrap(), None);
+        assert_eq!(parse_subject(&json!({ "subject": null }), CHANNEL).unwrap(), None);
+        assert_eq!(parse_subject(&json!({ "subject": "   " }), CHANNEL).unwrap(), None);
         // A title is trimmed and taken verbatim.
         assert_eq!(
-            parse_subject(&json!({ "subject": "  Ship it  " })).unwrap(),
+            parse_subject(&json!({ "subject": "  Ship it  " }), CHANNEL).unwrap(),
             Some("Ship it".to_string())
         );
-        // A REPLY carries none: a thread has one title and it is its first post's.
-        assert!(
-            parse_subject(&json!({
-                "subject": "Ship it",
-                "reply_to": { "id": "1", "author": "Ada", "text": "hi" }
-            }))
-            .is_err()
-        );
+        // In a CHANNEL a REPLY carries none: a thread has one title and it is its first post's.
+        let reply = json!({
+            "subject": "Ship it",
+            "reply_to": { "id": "1", "author": "Ada", "text": "hi" }
+        });
+        assert!(parse_subject(&reply, CHANNEL).is_err());
+        let _ = CHAT;
         // A `reply_to` of null is not a reply, so the title stands.
         assert_eq!(
-            parse_subject(&json!({ "subject": "Ship it", "reply_to": null })).unwrap(),
+            parse_subject(&json!({ "subject": "Ship it", "reply_to": null }), CHANNEL).unwrap(),
             Some("Ship it".to_string())
         );
         // A whole message pasted into the title field is refused rather than drawn as a
         // heading in every client in the thread. Counted in CHARACTERS, so an accented
         // title of legal length is not refused for its bytes.
         let long = "é".repeat(MAX_SUBJECT_CHARS);
-        assert_eq!(parse_subject(&json!({ "subject": &long })).unwrap(), Some(long));
-        assert!(parse_subject(&json!({ "subject": "x".repeat(MAX_SUBJECT_CHARS + 1) })).is_err());
+        assert_eq!(parse_subject(&json!({ "subject": &long }), CHANNEL).unwrap(), Some(long));
+        assert!(parse_subject(&json!({ "subject": "x".repeat(MAX_SUBJECT_CHARS + 1) }), CHANNEL).is_err());
         // A title is ONE line: a newline would draw as two, and so would every other
         // character a browser breaks on — U+2028/U+2029 are NOT `char::is_control`, and
         // `trim` leaves an interior one alone, so they are named rather than assumed.
-        assert!(parse_subject(&json!({ "subject": "Ship\nit" })).is_err());
-        assert!(parse_subject(&json!({ "subject": "Ship\u{2028}it" })).is_err());
-        assert!(parse_subject(&json!({ "subject": "Ship\u{2029}it" })).is_err());
-        assert!(parse_subject(&json!({ "subject": "Ship\u{0085}it" })).is_err());
-        assert!(parse_subject(&json!({ "subject": 7 })).is_err());
+        assert!(parse_subject(&json!({ "subject": "Ship\nit" }), CHANNEL).is_err());
+        assert!(parse_subject(&json!({ "subject": "Ship\u{2028}it" }), CHANNEL).is_err());
+        assert!(parse_subject(&json!({ "subject": "Ship\u{2029}it" }), CHANNEL).is_err());
+        assert!(parse_subject(&json!({ "subject": "Ship\u{0085}it" }), CHANNEL).is_err());
+        assert!(parse_subject(&json!({ "subject": 7 }), CHANNEL).is_err());
     }
 
     /// A CHANNEL is threaded and a chat is not, so the value that decides where a post lands

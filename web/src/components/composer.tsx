@@ -173,12 +173,27 @@ export function Composer(props: {
   // conversation has a chat's own composer, with no title in it (see lib/post-subject.ts).
   const channelLayout = useAppState((s) => (openId ? s.channelLayouts[openId] : undefined));
   const isChannel = channels.some((channel) => channel.id === openId);
-  const subjectOffered = postSubjectOffered({
-    isChannel,
-    // A thread's own bar posts a reply, and a reply carries no title whichever bar wrote it.
-    replying: replyingTo !== null || thread !== null,
-    layout: channelLayout,
-  });
+  /**
+   * WHETHER THIS BAR OFFERS A NAME FOR THE THREAD it is answering — a CHAT thread that has none
+   * yet, and nothing else.
+   *
+   * A chat thread can be named, and only by a reply: the name is Teams' own
+   * `properties.subject`, and the ROOT is an ordinary message written before the thread existed
+   * (`teams_send::parse_subject` is where that is enforced). It is where Discord asks for one
+   * too — *you can add a title to your Thread (optional) and then type your message* — and it
+   * stops being offered the moment the thread HAS a name, because a field that renames nothing
+   * is a control that changes nothing.
+   */
+  const threadNameOffered = thread !== null && thread.threadRoot === null && !thread.named;
+  const subjectOffered =
+    threadNameOffered ||
+    postSubjectOffered({
+      isChannel,
+      // A reply carries no post TITLE whichever bar wrote it. A thread's NAME is the same
+      // property on the other surface and is decided above, not here.
+      replying: replyingTo !== null || thread !== null,
+      layout: channelLayout,
+    });
   // Whether this bar offers "Also send to the chat" — a chat THREAD's own bar and nothing else
   // (see `broadcastOffered`). The bar under the conversation writes an ordinary reply, which is
   // already in the running history: there is nothing for the box to ask for there.
@@ -216,10 +231,17 @@ export function Composer(props: {
   useEffect(() => {
     setAlsoToChat(false);
   }, [threadKey]);
-  // The title being written. Local to the composer, like the pending pictures and for the
-  // same reason: a title belongs to the post it is being written for, so it is dropped when
-  // the reader walks to another conversation rather than following them into one.
+  // The title (or the THREAD's name) being written. Local to the composer, like the pending
+  // pictures and for the same reason: it belongs to the message it is being written for, so it
+  // is dropped when the reader walks away rather than following them into somebody else's
+  // channel — or, in a thread's own bar, into another thread.
   const [subject, setSubject] = useState("");
+  // A NAME half-typed for another thread names THIS one or nothing, so it is dropped with the
+  // thread — the rule the tick above follows, and the one a pasted picture already follows for
+  // the conversation.
+  useEffect(() => {
+    setSubject("");
+  }, [threadKey]);
   // Who this thread can @mention. Loaded on the first "@" (see
   // `ensureMentionCandidates`), so a conversation nobody mentions in costs nothing.
   const mentionCandidates = useAppState((s) => s.mentionCandidates);
@@ -680,9 +702,9 @@ export function Composer(props: {
                 focusField();
               }}
               maxLength={POST_SUBJECT_MAX_CHARS}
-              placeholder="Add a subject"
-              aria-label="Post title"
-              data-testid="composer-subject"
+              placeholder={threadNameOffered ? "Name this thread (optional)" : "Add a subject"}
+              aria-label={threadNameOffered ? "Thread name" : "Post title"}
+              data-testid={tid("composer-subject")}
               // 16px so iOS does not zoom the page on focus (the rule
               // COMPOSER_FIELD_CLASS states), and 44px tall so it clears the touch floor
               // every other target in this app clears — this box is aimed at with a thumb.

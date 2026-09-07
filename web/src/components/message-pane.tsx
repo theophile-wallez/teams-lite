@@ -38,7 +38,10 @@ import { agentAuthorship } from "~/lib/agent-message";
 import { agentRunIsLive, type AgentRun } from "~/lib/agent-run";
 import { defaultAgentCandidatesFor, type AgentCandidate } from "~/lib/mentions";
 import { reviewRequest, type MergeRequestLink } from "~/lib/merge-request";
-import { recordingsInConversation, type CallRecording } from "~/lib/call-recording";
+import {
+  recordingsInConversation,
+  type CallRecording,
+} from "~/lib/call-recording";
 import { chessGamesInThread, type ChessGame } from "~/lib/chess-thread";
 import { petsInThread, withPetArchive } from "~/lib/pet-thread";
 import { petWireIn } from "~/lib/pet-wire";
@@ -49,7 +52,12 @@ import { useAppState, useController } from "./controller-context";
 import { ConversationMenu } from "./conversation-menu";
 import { useCallOwnsComposer } from "./call-stage-context";
 import { AgentPendingBubble } from "./agent-reply";
-import { Avatar, conversationFallback, conversationPhoto, type AvatarPhoto } from "./avatar";
+import {
+  Avatar,
+  conversationFallback,
+  conversationPhoto,
+  type AvatarPhoto,
+} from "./avatar";
 import { threadProjects } from "~/lib/tracker-ref";
 import { MessageBubble } from "./message-bubble";
 import { useTrackerVocabulary } from "./tracker-refs-context";
@@ -70,7 +78,11 @@ import {
   type Thread,
   type ThreadReplies,
 } from "~/lib/threads";
-import { chatThreadRootOf, chatThreads, replyTargetTime } from "~/lib/chat-threads";
+import {
+  chatThreadRootOf,
+  chatThreads,
+  replyTargetTime,
+} from "~/lib/chat-threads";
 import { ChannelThreadsPanel } from "./channel-threads-panel";
 import { Composer } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
@@ -133,7 +145,10 @@ const AT_BOTTOM_PX = 120;
 /** How close to the top (in px) the viewport must get before older history is
  *  prefetched — a couple of screens ahead so loading stays invisible. */
 function prependTriggerPx(el: HTMLElement): number {
-  return Math.max(PREPEND_TRIGGER_MIN_PX, el.clientHeight * PREPEND_TRIGGER_SCREENS);
+  return Math.max(
+    PREPEND_TRIGGER_MIN_PX,
+    el.clientHeight * PREPEND_TRIGGER_SCREENS,
+  );
 }
 // Deep-link scroll: how many older pages to page through looking for the target
 // message before giving up, and how long to keep it visually highlighted.
@@ -144,7 +159,13 @@ const HIGHLIGHT_MS = 1600;
  *  (its root post plus its collapsible replies), or the agent's reply before the message
  *  it is being written into has reached us. */
 export type HistoryRow =
-  | { kind: "message"; key: string; message: ChatMessage; prev?: ChatMessage; next?: ChatMessage }
+  | {
+      kind: "message";
+      key: string;
+      message: ChatMessage;
+      prev?: ChatMessage;
+      next?: ChatMessage;
+    }
   | { kind: "thread"; key: string; thread: Thread }
   | { kind: "agent"; key: string; run: AgentRun }
   | { kind: "recording"; key: string; recording: CallRecording }
@@ -177,7 +198,11 @@ export type HistoryRow =
 export function chatHistoryRows(
   messages: ChatMessage[],
   chessGames: ChessGame[],
-): { rows: HistoryRow[]; rowOfMessage: Map<string, number>; petMessages: ChatMessage[] } {
+): {
+  rows: HistoryRow[];
+  rowOfMessage: Map<string, number>;
+  petMessages: ChatMessage[];
+} {
   const rowOfMessage = new Map<string, number>();
   const rows: HistoryRow[] = [];
   /** The pet ledgers this walk left out, HANDED BACK rather than found again.
@@ -251,7 +276,9 @@ export function petRowNeighbours(
   const at = new Map<string, number>();
   for (const message of petMessages) {
     const after = rows.findIndex(
-      (row) => row.kind === "message" && row.message.compose_time > message.compose_time,
+      (row) =>
+        row.kind === "message" &&
+        row.message.compose_time > message.compose_time,
     );
     const index = after === -1 ? rows.length - 1 : after;
     // A thread holding nothing but pet ledgers has no row to point at, and pointing at one that
@@ -288,7 +315,9 @@ export function MessagePane(props: { onBack?: () => void }) {
   const replyingTo = useAppState((s) => s.replyingTo);
   // The agent run writing in THIS thread, if any. One per conversation, and a transient
   // overlay on the message it is writing into (see lib/agent-run.ts).
-  const agentRun = useAppState((s) => (s.openId ? s.agentRuns[s.openId] : undefined));
+  const agentRun = useAppState((s) =>
+    s.openId ? s.agentRuns[s.openId] : undefined,
+  );
   // What the runs this page watched worked out, by the message each one wrote into, and
   // which of those panels the reader opened. Both outlive their run: the transcript is the
   // only record of the reasoning (the Teams message holds the answer alone), and the fold
@@ -309,7 +338,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   // names the account its answer went out under, and a run that has not been echoed
   // back yet has no message of its own to read it from.
   const selfName = useMemo(
-    () => [...messages].reverse().find((m) => m.is_self && m.sender.trim())?.sender,
+    () =>
+      [...messages].reverse().find((m) => m.is_self && m.sender.trim())?.sender,
     [messages],
   );
   const modifier = useModifierLabel();
@@ -363,7 +393,9 @@ export function MessagePane(props: { onBack?: () => void }) {
   const [atBottom, setAtBottom] = useState(true);
   // Which channel threads are expanded (keyed by root message id). Threads are
   // collapsed by default — a thread shows its root post plus an "N replies" chip.
-  const [expandedThreads, setExpandedThreads] = useState<Set<string>>(new Set());
+  const [expandedThreads, setExpandedThreads] = useState<Set<string>>(
+    new Set(),
+  );
   const toggleThread = useCallback((rootId: string) => {
     setExpandedThreads((prev) => {
       const next = new Set(prev);
@@ -401,7 +433,9 @@ export function MessagePane(props: { onBack?: () => void }) {
   const openConv = conversations.find((c) => c.id === openId) ?? null;
   // A thread the pane opens is either a chat (in `conversations`) or a channel
   // (in `channels`). The header, subtitle and sender-name display key off which.
-  const openChannel = !openConv ? (channels.find((c) => c.id === openId) ?? null) : null;
+  const openChannel = !openConv
+    ? (channels.find((c) => c.id === openId) ?? null)
+    : null;
   // Show sender names in any multi-party thread: every channel, and group chats — read
   // through `isGroupChat`, so a thread stored as `unknown` counts. That is not a
   // pedantic case: it is what the backend writes for a thread it has synced an id for
@@ -409,7 +443,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   // conversation with several people in it, which is exactly where the name is the
   // reader's question. Spelled `kind === "group"` here, it was the one multi-party shape
   // in the app that drew no sender at all.
-  const isGroup = openChannel !== null || (openConv !== null && isGroupChat(openConv));
+  const isGroup =
+    openChannel !== null || (openConv !== null && isGroupChat(openConv));
   const headerLabel = openConv
     ? convLabel(openConv)
     : openChannel
@@ -428,11 +463,13 @@ export function MessagePane(props: { onBack?: () => void }) {
   // in colour, in its glyph and in its title — so the name keeps the whole row. A
   // group, a channel and the notes chat name no single human, so they ask for
   // nothing (an undefined MRI fetches nothing) and show nothing.
-  const partnerMri = openConv?.kind === "one_on_one" ? openConv.avatar_mri : undefined;
+  const partnerMri =
+    openConv?.kind === "one_on_one" ? openConv.avatar_mri : undefined;
   const partnerPresence = usePresence(partnerMri, { refresh: true });
   // Only once the state is actually known: a header that reads "Offline" while the
   // lookup is in flight states something we have not been told.
-  const presenceKnown = partnerPresence !== undefined && !presenceIsUnknown(partnerPresence);
+  const presenceKnown =
+    partnerPresence !== undefined && !presenceIsUnknown(partnerPresence);
 
   // A channel's posts are regrouped by `thread_root_id`, so a thread's root post and its
   // replies sit together even though the API interleaves posts from different threads. Chats
@@ -469,7 +506,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   /** The threads drawn as CARDS — the posts layout, and nothing else. A conversational
    *  channel still has threads: they are what the replies row counts and what the panel
    *  shows, and they are read off `channelThreads` below. */
-  const threads = isChannel && channelLayout === "posts" ? channelThreads : null;
+  const threads =
+    isChannel && channelLayout === "posts" ? channelThreads : null;
 
   /**
    * The messages the main column really draws.
@@ -503,7 +541,8 @@ export function MessagePane(props: { onBack?: () => void }) {
    * own card, so there is no panel to open and nothing to fold.
    */
   const panelThreads = useMemo(
-    () => (threads ? null : (channelThreads ?? chatThreadModel?.threads ?? null)),
+    () =>
+      threads ? null : (channelThreads ?? chatThreadModel?.threads ?? null),
     [threads, channelThreads, chatThreadModel],
   );
 
@@ -542,7 +581,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   // replies that used to fall between the marks are in the panel — so "the day changed" and
   // "an hour passed" say something true about the gap above a post again.
   const timeMarks = useMemo(
-    () => (threads ? new Map<string, string>() : messageTimeMarks([drawnMessages])),
+    () =>
+      threads ? new Map<string, string>() : messageTimeMarks([drawnMessages]),
     [threads, drawnMessages],
   );
 
@@ -579,7 +619,9 @@ export function MessagePane(props: { onBack?: () => void }) {
    * reader costs one store read (network-free) and no more.
    */
   const petsShown = useAppState((s) => s.petsShown);
-  const petArchive = useAppState((s) => (s.openId ? s.petArchive[s.openId] : undefined));
+  const petArchive = useAppState((s) =>
+    s.openId ? s.petArchive[s.openId] : undefined,
+  );
   useEffect(() => {
     if (!openId || isChannel || !petsShown) return;
     void controller.loadPetArchive(openId);
@@ -615,7 +657,9 @@ export function MessagePane(props: { onBack?: () => void }) {
     // empty, which is the same sentence a channel's own unanswered thread gets.
     if (!chatThreadModel) return null;
     const lead = messages.find((m) => m.id === panelRootId);
-    return lead ? { rootId: panelRootId, subject: "", lead, replies: [] } : null;
+    return lead
+      ? { rootId: panelRootId, subject: "", lead, replies: [] }
+      : null;
   }, [panelThreads, panelRootId, chatThreadModel, messages]);
   /**
    * The foot row each drawn post earns, by the post's own id — a pass over the threads for
@@ -650,13 +694,17 @@ export function MessagePane(props: { onBack?: () => void }) {
     // the map from a reply's id to the root that holds it.
     const rootId = threads
       ? replyRootOf?.get(pendingScroll.messageId)
-      : (replyRootOf ?? chatThreadModel?.threadOf)?.get(pendingScroll.messageId);
+      : (replyRootOf ?? chatThreadModel?.threadOf)?.get(
+          pendingScroll.messageId,
+        );
     // A ROOT is not a reply: a deep link to a top-level message asked to see THAT message,
     // and opening the thread under it would answer a question nobody asked. (A channel's own
     // map holds only replies, so this only ever bites the derived one.)
     if (!rootId || rootId === pendingScroll.messageId) return;
     if (threads) {
-      setExpandedThreads((prev) => (prev.has(rootId) ? prev : new Set(prev).add(rootId)));
+      setExpandedThreads((prev) =>
+        prev.has(rootId) ? prev : new Set(prev).add(rootId),
+      );
     } else {
       setPanelRootId(rootId);
     }
@@ -668,8 +716,6 @@ export function MessagePane(props: { onBack?: () => void }) {
   useEffect(() => {
     setPanelRootId(null);
   }, [openId]);
-
-
 
   // The rows the virtualizer works in: one per message for a chat and for a CONVERSATIONAL
   // channel (whose drawn messages are the thread leads), one per whole thread for a channel
@@ -695,7 +741,11 @@ export function MessagePane(props: { onBack?: () => void }) {
       });
     }
     if (agentRun && !rowOfMessage.has(agentRun.message_id)) {
-      rows.push({ kind: "agent", key: `agent:${agentRun.run_id}`, run: agentRun });
+      rows.push({
+        kind: "agent",
+        key: `agent:${agentRun.run_id}`,
+        run: agentRun,
+      });
     }
     // A call this app recorded, in its place in time. It is not a message and it reached
     // nobody — nothing was sent and only this user can see it (see lib/call-recording.ts) —
@@ -705,9 +755,15 @@ export function MessagePane(props: { onBack?: () => void }) {
     // all, appear here not at all.
     for (const recording of conversationRecordings) {
       const at = rows.findIndex(
-        (row) => row.kind === "message" && row.message.compose_time > recording.endedAtMs,
+        (row) =>
+          row.kind === "message" &&
+          row.message.compose_time > recording.endedAtMs,
       );
-      const row: HistoryRow = { kind: "recording", key: `rec:${recording.id}`, recording };
+      const row: HistoryRow = {
+        kind: "recording",
+        key: `rec:${recording.id}`,
+        recording,
+      };
       if (at === -1) rows.push(row);
       else rows.splice(at, 0, row);
     }
@@ -745,7 +801,14 @@ export function MessagePane(props: { onBack?: () => void }) {
       rowOfMessage.set(id, index);
     }
     return { rows, rowOfMessage };
-  }, [threads, channelThreads, drawnMessages, agentRun, conversationRecordings, chessGames]);
+  }, [
+    threads,
+    channelThreads,
+    drawnMessages,
+    agentRun,
+    conversationRecordings,
+    chessGames,
+  ]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -760,7 +823,8 @@ export function MessagePane(props: { onBack?: () => void }) {
       if (row?.kind === "chess") return CHESS_ROW_PX;
       const marked = row?.kind === "message" && timeMarks.has(row.message.id);
       // A row that leads a THREAD carries its foot row too, and the estimate says so.
-      const footed = row?.kind === "message" && repliesByPost.has(row.message.id);
+      const footed =
+        row?.kind === "message" && repliesByPost.has(row.message.id);
       return (
         ROW_ESTIMATE_PX +
         (marked ? TIME_MARK_ROW_PX : 0) +
@@ -807,14 +871,19 @@ export function MessagePane(props: { onBack?: () => void }) {
     // A pane that hasn't been laid out yet reports no height, which would look
     // like "the history doesn't fill the viewport" and pull a page nobody needs.
     if (!el || el.clientHeight === 0) return;
-    if (virtualizer.getTotalSize() <= el.clientHeight + 4 && hasMoreOlder && !loadingOlder) {
+    if (
+      virtualizer.getTotalSize() <= el.clientHeight + 4 &&
+      hasMoreOlder &&
+      !loadingOlder
+    ) {
       void controller.loadOlderMessages();
     }
   }, [controller, hasMoreOlder, loadingOlder, virtualizer]);
 
   // A deep-link scroll in flight for the open conversation. While one is pending
   // the effect below owns paging, and the prefetch must stay out of its way.
-  const deepLinkPending = pendingScroll !== null && pendingScroll.convId === openId;
+  const deepLinkPending =
+    pendingScroll !== null && pendingScroll.convId === openId;
 
   // Re-read the scroll geometry into `atBottom`. Called from the scroll handler
   // and from every place that moves the viewport itself, so the button answers a
@@ -822,7 +891,9 @@ export function MessagePane(props: { onBack?: () => void }) {
   const syncAtBottom = useCallback(() => {
     const el = viewportRef.current;
     if (!el) return;
-    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_PX);
+    setAtBottom(
+      el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_PX,
+    );
   }, []);
 
   // The button's job: park the reader back on the newest message. The jump is
@@ -830,7 +901,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   // backlog animates through rows whose heights are still estimates, so it lands
   // short and then corrects, which reads as a stumble.
   const jumpToLatest = useCallback(() => {
-    if (rows.length > 0) virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+    if (rows.length > 0)
+      virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
     syncAtBottom();
   }, [rows.length, virtualizer, syncAtBottom]);
 
@@ -846,7 +918,12 @@ export function MessagePane(props: { onBack?: () => void }) {
     // the top of the history with the target never reached. The deep-link effect
     // pages older itself, deliberately and with a budget, when it has to.
     if (deepLinkPending) return;
-    if (el.scrollTop < prependTriggerPx(el) && hasMoreOlder && !loadingOlder && !olderError) {
+    if (
+      el.scrollTop < prependTriggerPx(el) &&
+      hasMoreOlder &&
+      !loadingOlder &&
+      !olderError
+    ) {
       void controller.loadOlderMessages();
     }
   };
@@ -856,7 +933,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   useLayoutEffect(() => {
     if (prevOpenIdRef.current === openId) return;
     prevOpenIdRef.current = openId;
-    if (rows.length > 0) virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+    if (rows.length > 0)
+      virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
     syncAtBottom();
   }, [openId, rows.length, virtualizer, syncAtBottom]);
 
@@ -865,7 +943,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   useLayoutEffect(() => {
     if (bottomNonceRef.current === scrollToBottomNonce) return;
     bottomNonceRef.current = scrollToBottomNonce;
-    if (rows.length > 0) virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+    if (rows.length > 0)
+      virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
     syncAtBottom();
   }, [scrollToBottomNonce, rows.length, virtualizer, syncAtBottom]);
 
@@ -886,7 +965,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   useLayoutEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
-    const target = pendingScroll && pendingScroll.convId === openId ? pendingScroll : null;
+    const target =
+      pendingScroll && pendingScroll.convId === openId ? pendingScroll : null;
     if (!target) return;
 
     // Fresh target -> reset the paging budget.
@@ -964,7 +1044,8 @@ export function MessagePane(props: { onBack?: () => void }) {
     if (!streaming) return;
     const el = viewportRef.current;
     if (!el) return;
-    let following = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_PX;
+    let following =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_PX;
     let previousTop = el.scrollTop;
     let frame = requestAnimationFrame(function pin() {
       // A couple of pixels of tolerance, so momentum settling or a rounded scrollTop is
@@ -999,10 +1080,13 @@ export function MessagePane(props: { onBack?: () => void }) {
    * write it).
    */
   /** REPLY: an ordinary reply, in the bar under the conversation, exactly as it always was. */
-  const doReply = useCallback((m: ChatMessage) => {
-    controller.startReply(m);
-    setFocusToken((t) => t + 1);
-  }, [controller]);
+  const doReply = useCallback(
+    (m: ChatMessage) => {
+      controller.startReply(m);
+      setFocusToken((t) => t + 1);
+    },
+    [controller],
+  );
 
   /**
    * REPLY IN THREAD: the same answer, written in a thread of its own.
@@ -1069,7 +1153,9 @@ export function MessagePane(props: { onBack?: () => void }) {
    */
   useEffect(() => {
     if (!pendingThreadRoot || pendingThreadRoot.convId !== openId) return;
-    const thread = panelThreads?.find((t) => t.rootId === pendingThreadRoot.rootId);
+    const thread = panelThreads?.find(
+      (t) => t.rootId === pendingThreadRoot.rootId,
+    );
     // The history pages a screen at a time, so the thread may simply not be loaded yet — the
     // scroll that travels with this request is what pages toward it, and this runs again on
     // the render that lands. It is dropped once the thread is found, and by the pane going
@@ -1123,30 +1209,41 @@ export function MessagePane(props: { onBack?: () => void }) {
   // sticker, an emoji — reported itself copied while the clipboard got nothing; and the
   // write is lost outright wherever the async API is missing or refused, which is what
   // `copyText` is for (see lib/clipboard.ts).
-  const doCopy = useCallback(async (m: ChatMessage) => {
-    const text = copyableMessageText(m);
-    if (!text) {
-      controller.setStatus("Nothing to copy: this message has no text");
-      return;
-    }
-    const copied = await copyText(text);
-    controller.setStatus(
-      copied ? "Message copied to clipboard" : "Copy failed: clipboard unavailable",
-    );
-  }, [controller]);
+  const doCopy = useCallback(
+    async (m: ChatMessage) => {
+      const text = copyableMessageText(m);
+      if (!text) {
+        controller.setStatus("Nothing to copy: this message has no text");
+        return;
+      }
+      const copied = await copyText(text);
+      controller.setStatus(
+        copied
+          ? "Message copied to clipboard"
+          : "Copy failed: clipboard unavailable",
+      );
+    },
+    [controller],
+  );
 
   const doStartEdit = useCallback((m: ChatMessage) => {
     setEditingId(m.id);
   }, []);
 
-  const doSaveEdit = useCallback(async (m: ChatMessage, text: string) => {
-    setEditingId(null);
-    await controller.editMessage(m.id, text);
-  }, [controller]);
+  const doSaveEdit = useCallback(
+    async (m: ChatMessage, text: string) => {
+      setEditingId(null);
+      await controller.editMessage(m.id, text);
+    },
+    [controller],
+  );
 
-  const doReact = useCallback((m: ChatMessage, pick: ReactionPick) => {
-    void controller.reactToMessage(m.id, pick);
-  }, [controller]);
+  const doReact = useCallback(
+    (m: ChatMessage, pick: ReactionPick) => {
+      void controller.reactToMessage(m.id, pick);
+    },
+    [controller],
+  );
 
   const doCancelEdit = useCallback(() => setEditingId(null), []);
 
@@ -1166,7 +1263,10 @@ export function MessagePane(props: { onBack?: () => void }) {
     (quote: RichQuote) => {
       if (!openId || quote.time === undefined) return;
       const loaded = messages.find((m) => m.compose_time === quote.time);
-      controller.requestScrollToMessage(openId, loaded?.id ?? String(quote.time));
+      controller.requestScrollToMessage(
+        openId,
+        loaded?.id ?? String(quote.time),
+      );
     },
     [controller, openId, messages],
   );
@@ -1175,13 +1275,15 @@ export function MessagePane(props: { onBack?: () => void }) {
   // renders on its own from here (which is what it does for every reply this app never
   // watched being written).
   const doAgentSettled = useCallback(() => {
-    if (agentRun) controller.forgetAgentRun(agentRun.conversation, agentRun.run_id);
+    if (agentRun)
+      controller.forgetAgentRun(agentRun.conversation, agentRun.run_id);
   }, [controller, agentRun]);
 
   // One stable callback for every row, because the bubble is memoized on its props: a new
   // closure per message would re-render the whole history on every frame of a run.
   const doAgentTranscriptToggle = useCallback(
-    (messageId: string, open: boolean) => controller.setAgentTranscriptOpen(messageId, open),
+    (messageId: string, open: boolean) =>
+      controller.setAgentTranscriptOpen(messageId, open),
     [controller],
   );
 
@@ -1197,10 +1299,13 @@ export function MessagePane(props: { onBack?: () => void }) {
   // The bubble's menu has already taken the confirmation (deleting is irreversible),
   // so this fires the call. An edit in progress on that message is dropped: its target
   // is about to be a placeholder.
-  const doDelete = useCallback(async (m: ChatMessage) => {
-    setEditingId((current) => (current === m.id ? null : current));
-    await controller.deleteMessage(m.id);
-  }, [controller]);
+  const doDelete = useCallback(
+    async (m: ChatMessage) => {
+      setEditingId((current) => (current === m.id ? null : current));
+      await controller.deleteMessage(m.id);
+    },
+    [controller],
+  );
 
   // One rendered row: a system-event line or a message bubble, with its optional
   // "seen by" receipts underneath. `prev`/`next` drive avatar/name chaining and
@@ -1227,7 +1332,8 @@ export function MessagePane(props: { onBack?: () => void }) {
     // it drew the channel's own "Aug 17, 7:42 PM" above the root post, which says nothing at
     // all about the thread the panel is showing. A post says WHEN beside WHO instead.
     const mark = opts?.threadPost ? undefined : timeMarks.get(m.id);
-    const nextMark = next && !opts?.threadPost ? timeMarks.get(next.id) : undefined;
+    const nextMark =
+      next && !opts?.threadPost ? timeMarks.get(next.id) : undefined;
     return (
       <div key={m.id} className="contents">
         {mark && (
@@ -1294,10 +1400,16 @@ export function MessagePane(props: { onBack?: () => void }) {
     return (
       <section className="flex flex-1 flex-col items-center justify-center gap-4 bg-background">
         <div className="grid size-14 place-items-center rounded-2xl bg-primary/10 text-primary shadow-chip">
-          <HugeiconsIcon icon={MessageMultiple01Icon} className="size-6" strokeWidth={1.4} />
+          <HugeiconsIcon
+            icon={MessageMultiple01Icon}
+            className="size-6"
+            strokeWidth={1.4}
+          />
         </div>
         <div className="flex flex-col items-center gap-1 text-center">
-          <p className="text-sm font-medium text-foreground">No conversation open</p>
+          <p className="text-sm font-medium text-foreground">
+            No conversation open
+          </p>
           <p className="text-[13px] text-text-faint">
             Pick a chat on the left, or press{" "}
             <kbd className="inline-flex items-baseline rounded bg-element px-1.5 py-0.5 text-[11px] font-medium text-text-dim">
@@ -1314,7 +1426,10 @@ export function MessagePane(props: { onBack?: () => void }) {
   }
 
   return (
-    <section data-testid="message-pane" className="flex min-w-0 flex-1 flex-col bg-background">
+    <section
+      data-testid="message-pane"
+      className="flex min-w-0 flex-1 flex-col bg-background"
+    >
       <header className="flex min-h-16 shrink-0 items-center gap-2 border-b border-border-subtle px-3 pt-[env(safe-area-inset-top)] md:gap-3 md:px-5">
         {props.onBack && (
           <button
@@ -1324,7 +1439,11 @@ export function MessagePane(props: { onBack?: () => void }) {
             data-testid="back-to-list"
             className="-ml-1 grid size-9 shrink-0 place-items-center rounded-lg text-text-dim transition-colors hover:bg-accent hover:text-foreground md:hidden"
           >
-            <HugeiconsIcon icon={ChevronLeftIcon} className="size-5" strokeWidth={1.6} />
+            <HugeiconsIcon
+              icon={ChevronLeftIcon}
+              className="size-5"
+              strokeWidth={1.6}
+            />
           </button>
         )}
         {(openConv || openChannel) && (
@@ -1354,8 +1473,15 @@ export function MessagePane(props: { onBack?: () => void }) {
           {/* In a 1:1 the title IS a person, so it offers their card on hover —
               like every other name in the app. A group/channel title names no
               single human, so it stays plain text (no MRI, no trigger). */}
-          <PersonHoverCard mri={partnerMri} name={headerLabel} className="min-w-0">
-            <h2 data-testid="conversation-title" className="truncate text-sm font-medium text-foreground">
+          <PersonHoverCard
+            mri={partnerMri}
+            name={headerLabel}
+            className="min-w-0"
+          >
+            <h2
+              data-testid="conversation-title"
+              className="truncate text-sm font-medium text-foreground"
+            >
               {headerLabel}
             </h2>
           </PersonHoverCard>
@@ -1367,7 +1493,10 @@ export function MessagePane(props: { onBack?: () => void }) {
               {paneSubtitle(openConv)}
             </p>
           ) : openChannel ? (
-            <p data-testid="channel-subtitle" className="truncate text-[11px] text-text-faint">
+            <p
+              data-testid="channel-subtitle"
+              className="truncate text-[11px] text-text-faint"
+            >
               {channelSubtitle(openChannel)}
             </p>
           ) : null}
@@ -1400,11 +1529,16 @@ export function MessagePane(props: { onBack?: () => void }) {
         )}
       </header>
 
-      {/* THE HISTORY, AND THE THREADS PANEL BESIDE IT.
-          A conversational channel's replies live in that panel, so the two are columns of one
-          row — and BELOW `md` it is one column at a time, the shape the diff page's own two
-          columns already take: the panel replaces the history rather than squeezing it into
-          half a phone. The composer stays under BOTH, because there is one of it. */}
+      {/* THE CONVERSATION AND THE THREAD, AS TWO FULL-HEIGHT COLUMNS.
+          Each column ends in its own reply bar, so the two bars sit on ONE BASELINE — which is
+          the shape the reference has and the reason this row now reaches the bottom of the pane.
+          It used to hold the history alone, with the one composer BELOW it: the panel therefore
+          ended where that composer began, so the thread's own bar floated a composer's height
+          above the chat's and read as a box hanging in the middle of the screen. It was reported
+          exactly that way.
+          BELOW `md` it is one column at a time — the shape the diff page's own two columns take —
+          so a phone gets the panel and the panel's own bar, and the conversation with its bar
+          comes back when the panel closes. */}
       <div className="flex min-h-0 flex-1">
         {/* The history and the control that floats over it. The wrapper is what the
             jump-to-latest button positions against, so the button sits at the bottom
@@ -1412,184 +1546,223 @@ export function MessagePane(props: { onBack?: () => void }) {
             the messages. */}
         <div
           className={cn(
-            "relative flex min-h-0 flex-1 flex-col",
+            "flex min-h-0 flex-1 flex-col",
             panelThread && "hidden md:flex",
           )}
         >
-          {/* EVERY GAME OF CHESS RUNNING HERE, floating under the header: a board is one row in a
+          {/* THE HISTORY AND EVERYTHING THAT FLOATS OVER IT, in a box of their own.
+              It is what the jump-to-latest button, the chess strip and the companions position
+              against, so it must end where the composer BEGINS — a `relative` on the whole column
+              (which now holds the composer too) put the pet's floor 99px lower and walked the
+              creature over the box it is meant to be standing on. `e2e/pet.spec.ts` measures it. */}
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            {/* EVERY GAME OF CHESS RUNNING HERE, floating under the header: a board is one row in a
               history that may be a hundred messages long, and a conversation can hold several games
               at once. It takes no room from the conversation (see chess-games-strip.tsx) and it is
               drawn only where there is a live game to name. */}
-          <ChessGamesStrip conversationId={openId} games={chessGames} />
-          {/* THE COMPANIONS WALKING OVER THIS CONVERSATION. Like the strip above it this takes no
+            <ChessGamesStrip conversationId={openId} games={chessGames} />
+            {/* THE COMPANIONS WALKING OVER THIS CONVERSATION. Like the strip above it this takes no
               room — the history keeps its own height and its own scroll, so nothing moves under the
               reader when a creature appears — and like the strip it mounts NOTHING when there is
               nothing to draw, which here also covers the reader having turned them off and having
               asked for less motion (see pet-layer.tsx). It is deliberately gated on real pet data
               rather than on the route: the preference is read inside `start()`, which runs in an
               effect, and children render before any effect does. */}
-          {/* `petHistory` and not `messages`, for the reason the menu above takes it: an act EDITS the
+            {/* `petHistory` and not `messages`, for the reason the menu above takes it: an act EDITS the
               reader's own ledger by id, and that message may have paged out of the loaded window while
               the creature is alive — so a layer handed the loaded page alone would publish nothing and
               say nothing for every press on it. */}
-          <PetLayer conversationId={openId} pets={pets} messages={petHistory} games={chessGames} />
-          <div
-            ref={viewportRef}
-            onScroll={onScroll}
-            data-testid="message-scroll"
-            // How much history is loaded, which the rendered row count no longer
-            // reveals now that the list is virtualized (used by the E2E suite).
-            data-loaded-count={messages.length}
-            // The bottom padding clears the composer's fade overlay (`h-14`, 56px):
-            // at 40px the gradient is down to ~9% of the background, so the last
-            // message reads at full contrast instead of sitting under the fade.
-            className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-10 pt-4 md:px-5"
-          >
-            {/* A conversation with no messages can still hold a recording — a call placed in a
+            <PetLayer
+              conversationId={openId}
+              pets={pets}
+              messages={petHistory}
+              games={chessGames}
+            />
+            <div
+              ref={viewportRef}
+              onScroll={onScroll}
+              data-testid="message-scroll"
+              // How much history is loaded, which the rendered row count no longer
+              // reveals now that the list is virtualized (used by the E2E suite).
+              data-loaded-count={messages.length}
+              // The bottom padding clears the composer's fade overlay (`h-14`, 56px):
+              // at 40px the gradient is down to ~9% of the background, so the last
+              // message reads at full contrast instead of sitting under the fade.
+              className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-10 pt-4 md:px-5"
+            >
+              {/* A conversation with no messages can still hold a recording — a call placed in a
                 thread nobody has written in — and the recording is the one thing on screen
                 then, so it is drawn instead of the empty state rather than behind it. */}
-            {rows.length === 0 ? (
-              <EmptyState
-                loading={loadingMessages}
-                error={messagesError}
-                onRetry={() => void controller.openConversation(openId)}
-              />
-            ) : (
-              <div
-                // The virtualizer positions the rows itself (see `directDomUpdates`),
-                // so they carry no `transform` from React. The *height* stays here on
-                // purpose: prepending a page re-anchors the reader by writing
-                // `scrollTop`, and that write happens in the virtualizer's own layout
-                // effect — which runs before it would set this height itself. A
-                // scroller that hasn't grown yet clamps the write, and the reader ends
-                // up thrown back into the page that just loaded. Sizing this element
-                // during React's own DOM mutation keeps the growth ahead of the
-                // re-anchor; `containerRef` then keeps it in sync when a measurement
-                // changes the total without a re-render.
-                ref={virtualizer.containerRef}
-                className="relative mx-auto w-full max-w-chat"
-                style={{ height: `${virtualizer.getTotalSize()}px` }}
-              >
-                {hasMoreOlder && (
-                  <div
-                    className="absolute inset-x-0 top-0 flex items-center justify-center"
-                    style={{ height: `${HISTORY_LOADER_PX}px` }}
-                  >
-                    {loadingOlder ? (
-                      <span className="flex items-center gap-2 text-xs text-text-faint">
-                        <FadeArc className="size-3" />{" "}
-                        Loading earlier messages…
-                      </span>
-                    ) : olderError ? (
-                      <span className="text-xs text-destructive">
-                        Couldn't load earlier messages — scroll up to retry.
-                      </span>
-                    ) : null}
-                  </div>
-                )}
-                {virtualRows.map((virtualRow) => {
-                  const row = rows[virtualRow.index];
-                  if (!row) return null;
-                  // The thread under a drawn post, resolved ONCE: which one the foot row counts,
-                  // whether the panel is already showing it, and what a press opens. Only a
-                  // conversational channel has any (`repliesByPost` is empty otherwise).
-                  const postThread =
-                    row.kind === "message"
-                      ? panelThreads?.find(
-                          (t) =>
-                            t.rootId ===
-                            (chatThreadModel
-                              ? chatThreadRootOf(chatThreadModel, row.message)
-                              : threadRootOf(row.message)),
-                        )
-                      : undefined;
-                  const postReplies =
-                    row.kind === "message" ? repliesByPost.get(row.message.id) : undefined;
-                  return (
+              {rows.length === 0 ? (
+                <EmptyState
+                  loading={loadingMessages}
+                  error={messagesError}
+                  onRetry={() => void controller.openConversation(openId)}
+                />
+              ) : (
+                <div
+                  // The virtualizer positions the rows itself (see `directDomUpdates`),
+                  // so they carry no `transform` from React. The *height* stays here on
+                  // purpose: prepending a page re-anchors the reader by writing
+                  // `scrollTop`, and that write happens in the virtualizer's own layout
+                  // effect — which runs before it would set this height itself. A
+                  // scroller that hasn't grown yet clamps the write, and the reader ends
+                  // up thrown back into the page that just loaded. Sizing this element
+                  // during React's own DOM mutation keeps the growth ahead of the
+                  // re-anchor; `containerRef` then keeps it in sync when a measurement
+                  // changes the total without a re-render.
+                  ref={virtualizer.containerRef}
+                  className="relative mx-auto w-full max-w-chat"
+                  style={{ height: `${virtualizer.getTotalSize()}px` }}
+                >
+                  {hasMoreOlder && (
                     <div
-                      key={virtualRow.key}
-                      data-index={virtualRow.index}
-                      ref={virtualizer.measureElement}
-                      // `flex flex-col` is load-bearing: the rows inside carry
-                      // vertical margins, and a flex container keeps them inside its
-                      // own box (no margin collapsing) so `measureElement` reports a
-                      // height that includes the spacing.
-                      className="absolute inset-x-0 top-0 flex flex-col"
+                      className="absolute inset-x-0 top-0 flex items-center justify-center"
+                      style={{ height: `${HISTORY_LOADER_PX}px` }}
                     >
-                      {row.kind === "thread" ? (
-                        <ThreadGroup
-                          thread={row.thread}
-                          expanded={expandedThreads.has(row.thread.rootId)}
-                          onToggle={() => toggleThread(row.thread.rootId)}
-                          replyTarget={replyingTo?.threadRoot === row.thread.rootId}
-                          onReply={doReply}
-                          renderMsg={renderMsg}
-                        />
-                      ) : row.kind === "recording" ? (
-                        // Its own row and its own card: a recording is not a message, so it
-                        // takes no side, no bubble and no sender (see CallRecordingCard).
-                        <CallRecordingCard recording={row.recording} className="my-2" />
-                      ) : row.kind === "chess" ? (
-                        // The game, drawn where it was started. It is not a message either: it
-                        // takes no bubble, no side and no sender, because the row IS the game
-                        // the thread holds rather than one thing somebody said.
-                        <Suspense
-                          fallback={
-                            <div
-                              data-testid="chess-loading"
-                              aria-hidden
-                              className="mx-auto my-2 w-full max-w-80 animate-pulse rounded-xl border border-border-subtle bg-panel"
-                              // The room the board is about to take, so the history does not
-                              // shift when the chunk lands.
-                              style={{ height: `${CHESS_ROW_PX - 16}px` }}
-                            />
-                          }
-                        >
-                          <ChessGameCard
-                            game={row.game}
-                            conversationId={openId}
+                      {loadingOlder ? (
+                        <span className="flex items-center gap-2 text-xs text-text-faint">
+                          <FadeArc className="size-3" /> Loading earlier
+                          messages…
+                        </span>
+                      ) : olderError ? (
+                        <span className="text-xs text-destructive">
+                          Couldn't load earlier messages — scroll up to retry.
+                        </span>
+                      ) : null}
+                    </div>
+                  )}
+                  {virtualRows.map((virtualRow) => {
+                    const row = rows[virtualRow.index];
+                    if (!row) return null;
+                    // The thread under a drawn post, resolved ONCE: which one the foot row counts,
+                    // whether the panel is already showing it, and what a press opens. Only a
+                    // conversational channel has any (`repliesByPost` is empty otherwise).
+                    const postThread =
+                      row.kind === "message"
+                        ? panelThreads?.find(
+                            (t) =>
+                              t.rootId ===
+                              (chatThreadModel
+                                ? chatThreadRootOf(chatThreadModel, row.message)
+                                : threadRootOf(row.message)),
+                          )
+                        : undefined;
+                    const postReplies =
+                      row.kind === "message"
+                        ? repliesByPost.get(row.message.id)
+                        : undefined;
+                    return (
+                      <div
+                        key={virtualRow.key}
+                        data-index={virtualRow.index}
+                        ref={virtualizer.measureElement}
+                        // `flex flex-col` is load-bearing: the rows inside carry
+                        // vertical margins, and a flex container keeps them inside its
+                        // own box (no margin collapsing) so `measureElement` reports a
+                        // height that includes the spacing.
+                        className="absolute inset-x-0 top-0 flex flex-col"
+                      >
+                        {row.kind === "thread" ? (
+                          <ThreadGroup
+                            thread={row.thread}
+                            expanded={expandedThreads.has(row.thread.rootId)}
+                            onToggle={() => toggleThread(row.thread.rootId)}
+                            replyTarget={
+                              replyingTo?.threadRoot === row.thread.rootId
+                            }
+                            onReply={doReply}
+                            renderMsg={renderMsg}
+                          />
+                        ) : row.kind === "recording" ? (
+                          // Its own row and its own card: a recording is not a message, so it
+                          // takes no side, no bubble and no sender (see CallRecordingCard).
+                          <CallRecordingCard
+                            recording={row.recording}
                             className="my-2"
                           />
-                        </Suspense>
-                      ) : row.kind === "agent" ? (
-                        <AgentPendingBubble
-                          run={row.run}
-                          author={selfName}
-                          onSettled={doAgentSettled}
-                          // Keyed by the message the run is writing into, exactly as a real
-                          // row is: the placeholder is replaced by that message the moment
-                          // Teams echoes it back, and a fold the reader made here must
-                          // survive that swap.
-                          transcriptOpen={agentTranscriptsOpen[row.run.message_id] ?? null}
-                          onTranscriptToggle={doAgentTranscriptToggle}
-                          onStop={doAgentStop}
-                        />
-                      ) : (
-                        <>
-                          {renderMsg(row.message, row.prev, row.next)}
-                          {/* THE THREAD UNDER THIS POST, in a conversational channel: who
+                        ) : row.kind === "chess" ? (
+                          // The game, drawn where it was started. It is not a message either: it
+                          // takes no bubble, no side and no sender, because the row IS the game
+                          // the thread holds rather than one thing somebody said.
+                          <Suspense
+                            fallback={
+                              <div
+                                data-testid="chess-loading"
+                                aria-hidden
+                                className="mx-auto my-2 w-full max-w-80 animate-pulse rounded-xl border border-border-subtle bg-panel"
+                                // The room the board is about to take, so the history does not
+                                // shift when the chunk lands.
+                                style={{ height: `${CHESS_ROW_PX - 16}px` }}
+                              />
+                            }
+                          >
+                            <ChessGameCard
+                              game={row.game}
+                              conversationId={openId}
+                              className="my-2"
+                            />
+                          </Suspense>
+                        ) : row.kind === "agent" ? (
+                          <AgentPendingBubble
+                            run={row.run}
+                            author={selfName}
+                            onSettled={doAgentSettled}
+                            // Keyed by the message the run is writing into, exactly as a real
+                            // row is: the placeholder is replaced by that message the moment
+                            // Teams echoes it back, and a fold the reader made here must
+                            // survive that swap.
+                            transcriptOpen={
+                              agentTranscriptsOpen[row.run.message_id] ?? null
+                            }
+                            onTranscriptToggle={doAgentTranscriptToggle}
+                            onStop={doAgentStop}
+                          />
+                        ) : (
+                          <>
+                            {renderMsg(row.message, row.prev, row.next)}
+                            {/* THE THREAD UNDER THIS POST, in a conversational channel: who
                               answered, how many of them and when the last one landed, with the
                               press that opens the panel holding them. Drawn only where there
                               IS a thread (`threadReplies` answers null otherwise), because a
                               control that opens an empty panel is a control that changes
                               nothing. */}
-                          {postReplies && postThread && (
-                            <ThreadRepliesRow
-                              replies={postReplies}
-                              mine={row.message.is_self === true}
-                              open={panelRootId === postThread.rootId}
-                              onOpen={() => openThreadPanel(postThread)}
-                            />
-                          )}
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+                            {postReplies && postThread && (
+                              <ThreadRepliesRow
+                                replies={postReplies}
+                                mine={row.message.is_self === true}
+                                open={panelRootId === postThread.rootId}
+                                onOpen={() => openThreadPanel(postThread)}
+                              />
+                            )}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <JumpToLatest visible={!atBottom} onClick={jumpToLatest} />
           </div>
-          <JumpToLatest visible={!atBottom} onClick={jumpToLatest} />
+
+          {/* The composer's fade overlay reaches up over this row and the typing line,
+              so both stack above it (z-10) to stay fully legible. */}
+          {messagesError && messages.length > 0 && (
+            <div className="relative z-10 border-t border-border-subtle bg-destructive/10 px-5 py-2 text-center text-xs text-destructive">
+              {messagesError}
+            </div>
+          )}
+
+          <TypingIndicator />
+          {/* THE CONVERSATION'S OWN BAR, at the foot of the conversation's own column — which is
+              what puts it on the same baseline as the thread's. While a call has this thread open
+              in its own chat panel, that panel is where it lives (see `useCallOwnsComposer`):
+              nothing is hidden by the handover, since the stage is full-screen at that moment and
+              this pane is not on screen at all. */}
+          {!callOwnsComposer && (
+            <Composer focusToken={focusToken} agentAnswer={agentAnswer} />
+          )}
         </div>
         {panelThread && (
           <ChannelThreadsPanel
@@ -1603,7 +1776,8 @@ export function MessagePane(props: { onBack?: () => void }) {
             // (`threadReplyQuotes`), so there is nothing there to suppress.
             repliesToRoot={
               chatThreadModel
-                ? (reply) => replyTargetTime(reply) === panelThread.lead.compose_time
+                ? (reply) =>
+                    replyTargetTime(reply) === panelThread.lead.compose_time
                 : undefined
             }
             // WHAT THE PANEL'S OWN BAR POSTS INTO. `threadRoot` is the CHANNEL address where
@@ -1620,27 +1794,16 @@ export function MessagePane(props: { onBack?: () => void }) {
                     conversationId: openId,
                     root: panelThread.lead,
                     threadRoot: chatThreadModel ? null : panelThread.rootId,
+                    // A CHANNEL thread is always "named": its title belongs to its first post,
+                    // and a reply there is refused one — so the field is never offered.
+                    named:
+                      !chatThreadModel || panelThread.subject.trim().length > 0,
                   }
             }
             focusToken={panelFocusToken}
           />
         )}
       </div>
-
-      {/* The composer's fade overlay reaches up over this row and the typing line,
-          so both stack above it (z-10) to stay fully legible. */}
-      {messagesError && messages.length > 0 && (
-        <div className="relative z-10 border-t border-border-subtle bg-destructive/10 px-5 py-2 text-center text-xs text-destructive">
-          {messagesError}
-        </div>
-      )}
-
-      <TypingIndicator />
-      {/* There is ONE composer in this app, and while a call has this thread open in its
-          own chat panel that panel is where it lives (see `useCallOwnsComposer`). Nothing
-          is hidden by handing it over: the stage is full-screen at that moment, so this
-          pane is not on screen at all. */}
-      {!callOwnsComposer && <Composer focusToken={focusToken} agentAnswer={agentAnswer} />}
     </section>
   );
 }
@@ -1678,7 +1841,12 @@ function ThreadRepliesRow(props: {
     // 4px above and 8px below: the row belongs to the POST above it, so it sits nearer that
     // post than the next message — and the 8px is what the grown target below needs, since
     // the next message row's own `mt-2` then puts its bubble exactly at the target's edge.
-    <div className={cn("mb-2 mt-1 flex px-1", mine ? "justify-end" : "justify-start")}>
+    <div
+      className={cn(
+        "mb-2 mt-1 flex px-1",
+        mine ? "justify-end" : "justify-start",
+      )}
+    >
       <button
         type="button"
         onClick={onOpen}
@@ -1715,7 +1883,11 @@ function ThreadRepliesRow(props: {
               key={reply.id}
               seed={reply.sender_mri || reply.sender}
               label={reply.sender}
-              photo={reply.sender_mri ? { kind: "user", id: reply.sender_mri } : undefined}
+              photo={
+                reply.sender_mri
+                  ? { kind: "user", id: reply.sender_mri }
+                  : undefined
+              }
               fallback="person"
               className={cn(
                 // The ring is the page's own background, so the discs read as a stack rather
@@ -1732,7 +1904,9 @@ function ThreadRepliesRow(props: {
             />
           ))}
         </span>
-        <span className="shrink-0 font-medium text-primary">{replies.label}</span>
+        <span className="shrink-0 font-medium text-primary">
+          {replies.label}
+        </span>
         {/* WHEN, in the reader's own locale and zone — the same words a block mark uses, so
             "Yesterday 14:32" means one thing everywhere in this app. It is the first thing to
             give way on a narrow row: the faces and the count are what the press is decided
@@ -1832,7 +2006,10 @@ function ThreadGroup(props: {
           {subject}
         </h3>
       )}
-      {renderMsg(lead, undefined, undefined, { onPanel: true, threadPost: true })}
+      {renderMsg(lead, undefined, undefined, {
+        onPanel: true,
+        threadPost: true,
+      })}
       {replies.length > 0 && expanded && (
         // The replies are INDENTED to the width of the root post's own face, so the
         // thread reads as answers under an announcement rather than as a second list
@@ -1846,7 +2023,10 @@ function ThreadGroup(props: {
             // `onPanel` for the same reason the root post gets it: the thread's card is
             // the surface, so a reply that would bring one of its own — a bot answering
             // with an app card — renders flush instead of as a card inside a card.
-            renderMsg(r, replies[i - 1], replies[i + 1], { onPanel: true, threadPost: true }),
+            renderMsg(r, replies[i - 1], replies[i + 1], {
+              onPanel: true,
+              threadPost: true,
+            }),
           )}
         </div>
       )}
@@ -1866,7 +2046,10 @@ function ThreadGroup(props: {
           >
             <HugeiconsIcon
               icon={ChevronRightIcon}
-              className={cn("size-3.5 transition-transform duration-200 ease-out", expanded && "rotate-90")}
+              className={cn(
+                "size-3.5 transition-transform duration-200 ease-out",
+                expanded && "rotate-90",
+              )}
               strokeWidth={1.8}
             />
             {replyCountLabel(replies.length)}
@@ -1894,7 +2077,11 @@ function ThreadGroup(props: {
               : "text-text-dim hover:bg-accent hover:text-foreground",
           )}
         >
-          <HugeiconsIcon icon={ArrowTurnBackwardIcon} className="size-3.5 shrink-0" strokeWidth={1.8} />
+          <HugeiconsIcon
+            icon={ArrowTurnBackwardIcon}
+            className="size-3.5 shrink-0"
+            strokeWidth={1.8}
+          />
           {replyTarget ? "Writing a reply below…" : "Reply"}
         </button>
       </div>
@@ -1920,14 +2107,19 @@ function ThreadGroup(props: {
  *  against the message that summoned it, at the tight spacing of one person talking
  *  twice. It is not that: it comes from somewhere else and it renders on the other side,
  *  so it takes the gap any other author's message would take. */
-export function sameAuthor(a: ChatMessage | undefined, b: ChatMessage | undefined): boolean {
+export function sameAuthor(
+  a: ChatMessage | undefined,
+  b: ChatMessage | undefined,
+): boolean {
   return (
     !!a &&
     !!b &&
     !a.system_event &&
     !b.system_event &&
     a.is_self === b.is_self &&
-    (a.sender_mri && b.sender_mri ? a.sender_mri === b.sender_mri : a.sender === b.sender) &&
+    (a.sender_mri && b.sender_mri
+      ? a.sender_mri === b.sender_mri
+      : a.sender === b.sender) &&
     !agentAuthorship(a) &&
     !agentAuthorship(b)
   );
@@ -1935,7 +2127,10 @@ export function sameAuthor(a: ChatMessage | undefined, b: ChatMessage | undefine
 
 /** Find a rendered message bubble by id without CSS-selector escaping (message
  *  ids contain `:`, `@`, `#`), by scanning the data attribute directly. */
-function findMessageNode(viewport: HTMLElement, messageId: string): HTMLElement | null {
+function findMessageNode(
+  viewport: HTMLElement,
+  messageId: string,
+): HTMLElement | null {
   const nodes = viewport.querySelectorAll<HTMLElement>("[data-message-id]");
   for (const node of nodes) {
     if (node.dataset.messageId === messageId) return node;
@@ -1968,14 +2163,24 @@ function paneSubtitle(conv: Conversation): string {
   }
 }
 
-function EmptyState(props: { loading: boolean; error: string | null; onRetry: () => void }) {
+function EmptyState(props: {
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
   if (props.error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
         <div className="grid size-12 place-items-center rounded-2xl bg-destructive/10 text-destructive shadow-chip">
-          <HugeiconsIcon icon={WifiDisconnected01Icon} className="size-5" strokeWidth={1.4} />
+          <HugeiconsIcon
+            icon={WifiDisconnected01Icon}
+            className="size-5"
+            strokeWidth={1.4}
+          />
         </div>
-        <p className="text-sm font-medium text-foreground">Couldn't load messages</p>
+        <p className="text-sm font-medium text-foreground">
+          Couldn't load messages
+        </p>
         <p className="max-w-sm text-xs text-text-faint">{props.error}</p>
         <Button size="sm" variant="outline" onClick={props.onRetry}>
           Retry
@@ -1986,8 +2191,7 @@ function EmptyState(props: { loading: boolean; error: string | null; onRetry: ()
   if (props.loading) {
     return (
       <div className="flex h-full items-center justify-center gap-2 text-sm text-text-faint">
-        <FadeArc className="size-4" />{" "}
-        Loading messages…
+        <FadeArc className="size-4" /> Loading messages…
       </div>
     );
   }

@@ -145,14 +145,28 @@ export function chatThreads(messages: readonly ChatMessage[]): ChatThreadModel {
   const threads: Thread[] = order.flatMap((rootId) => {
     const lead = roots.get(rootId);
     if (!lead) return [];
+    const bucket = replies.get(rootId) ?? [];
     return {
       rootId,
-      // A chat message has no title — Teams offers the field in a channel and nowhere else
-      // (§ A channel post has a TITLE) — so a chat thread is named by its opening words,
-      // which is exactly what `threadPanelHeading` falls back to.
-      subject: "",
+      /**
+       * THE THREAD'S NAME, off the earliest REPLY that carries one.
+       *
+       * It is Teams' own `properties.subject` — the field a channel post is titled with, which
+       * the read path already decodes into `thread_subject` on every message — so a chat
+       * thread's name needs no property, no column and no wire field of its own
+       * (`teams_send::parse_subject`).
+       *
+       * It cannot live on the ROOT: that is an ordinary message somebody wrote before the
+       * thread existed, and this app never rewrites the record of a Teams frame. So the reply
+       * that STARTS the thread is what names it, which is where Discord asks for one too.
+       *
+       * The EARLIEST wins, so a second person naming the same thread does not rename it under
+       * everybody — and a thread nobody named keeps `""`, which is what makes
+       * `threadPanelHeading` fall back to the root's own opening words.
+       */
+      subject: bucket.find((reply) => (reply.thread_subject ?? "").trim())?.thread_subject ?? "",
       lead,
-      replies: replies.get(rootId) ?? [],
+      replies: bucket,
     };
   });
   return { threads, threadOf, folded };

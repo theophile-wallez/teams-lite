@@ -179,6 +179,18 @@ function ThreadRow(props: { row: ThreadsViewRow; label: string; onOpen: () => vo
         <span className="truncate">{label}</span>
       </span>
 
+      {/* THE THREAD'S OWN NAME, where somebody gave it one. It stands under the conversation
+          because that is what it is — a name for one conversation inside another — and it is
+          drawn nowhere when there is none rather than repeating the words below it. */}
+      {row.thread.subject.trim() && (
+        <span
+          data-testid="threads-row-name"
+          className="truncate text-[13px] font-medium text-foreground"
+        >
+          {row.thread.subject.trim()}
+        </span>
+      )}
+
       {/* WHO opened it and WHAT they said. The author is always named — this is a list of
           other people's conversations as much as the reader's own — and the words are clamped
           to two lines: a row is a way in, not the message. */}

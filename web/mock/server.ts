@@ -2553,6 +2553,11 @@ function seedChatThread(): void {
       content: replyContent(root, "It is the index rebuild — it times out at 30s."),
       is_self: false,
       thread_only: true,
+      // THE THREAD'S NAME, on the reply that started it — Teams' own `properties.subject`, read
+      // back into this field on every message (see `teams_send::parse_subject`). A named thread
+      // is what the panel's heading and the threads view's own row are drawn from, so the
+      // fixture carries one: a surface no capture can draw is one that ships broken.
+      thread_subject: "Staging migration timeout",
     },
     120_000,
   );
@@ -6718,14 +6723,26 @@ const MOCK_MAX_SUBJECT_CHARS = 250;
 /** The optional `subject` a send may carry: a channel post's TITLE. Refused exactly as
  *  `teams_send::parse_subject` refuses it — a reply carries none (the thread is already
  *  named by its first post), it is bounded, and it is one line. */
-function parseSendSubject(input: Record<string, unknown>): string | undefined {
+function parseSendSubject(
+  input: Record<string, unknown>,
+  conversation: string,
+): string | undefined {
   const value = input.subject;
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string") throw new Error("subject must be a string");
   const subject = value.trim();
   if (subject.length === 0) return undefined;
-  if (input.reply_to !== undefined && input.reply_to !== null) {
-    throw new Error("a reply carries no title — the thread's title is its first post's");
+  // ONE PROPERTY, TWO SURFACES, refused exactly as `teams_send::parse_subject` refuses it: in a
+  // CHANNEL a reply carries no title (the thread's is its first post's), and in a CHAT the
+  // OPPOSITE — only a reply may carry one, because it names the THREAD it is in and the root is
+  // an ordinary message written before that thread existed.
+  const replying = input.reply_to !== undefined && input.reply_to !== null;
+  if (conversation.endsWith("@thread.tacv2")) {
+    if (replying) {
+      throw new Error("a reply carries no title — the thread's title is its first post's");
+    }
+  } else if (!replying) {
+    throw new Error("a chat message carries no title — only a reply names the thread it is in");
   }
   if ([...subject].length > MOCK_MAX_SUBJECT_CHARS) {
     throw new Error(`a title is at most ${MOCK_MAX_SUBJECT_CHARS} characters`);
@@ -8120,7 +8137,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // backend would not hides the bug instead of failing a test.
       const scheduledTime = parseScheduledTime(input.scheduled_time);
       // A channel post's TITLE, refused exactly as the backend refuses it.
-      const subject = parseSendSubject(input);
+      const subject = parseSendSubject(input, id);
       // Which channel THREAD it is a post in, refused exactly as the backend refuses it.
       const threadRoot = parseSendThreadRoot(input, id);
       // Whether this reply is drawn in its thread alone, refused exactly as the backend
@@ -10452,12 +10469,20 @@ function scheduleSendEcho(
       // (`messageIsHeld`) and the backend's read are what keep it out of the conversation,
       // and a mock that simply never sent it would let a broken rule pass every test.
       ...(scheduledTime ? { scheduled_time: scheduledTime } : {}),
-      // A titled post comes back as the ROOT of its own thread carrying that title, which
-      // is what the tenant really answers with: the subject is a property of the message
-      // (measured — `examples/channel_subject_probe.rs`), and the read path decodes it into
-      // `thread_subject` on every inbound message. Echoing it is what makes the whole
-      // rendering half testable — the heading a thread is drawn with is this field.
-      ...(subject ? { thread_root_id: `${convId}#${seq}`, thread_subject: subject } : {}),
+      // A titled post comes back carrying that title, which is what the tenant really answers
+      // with: the subject is a property of the message (measured —
+      // `examples/channel_subject_probe.rs`), and the read path decodes it into `thread_subject`
+      // on every inbound message. Echoing it is what makes the whole rendering half testable.
+      //
+      // In a CHANNEL it also opens a thread of its own, which is what a titled POST is. In a
+      // CHAT it does not: there the subject NAMES the thread the reply is already in, and
+      // inventing a `thread_root_id` for a chat message would be the mock claiming a shape the
+      // service does not publish there (`parse_thread_root` refuses one).
+      ...(subject
+        ? convId.endsWith("@thread.tacv2")
+          ? { thread_root_id: `${convId}#${seq}`, thread_subject: subject }
+          : { thread_subject: subject }
+        : {}),
       // A reply that asked to be drawn in its thread alone comes back saying so: the real
       // service keeps the custom `properties.tlthreadonly` byte for byte and the read path
       // decodes it into this field. Echoing it is what makes the FOLD testable at all — a mock

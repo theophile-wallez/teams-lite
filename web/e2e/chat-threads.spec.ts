@@ -34,6 +34,10 @@ const ROOT_WORDS = "staging deploy is stuck";
 const FOLDED_WORDS = "index rebuild";
 /** A broadcast reply's words: in the thread AND in the running history. */
 const BROADCAST_WORDS = "Deploy is green";
+/** The NAME the fixture's thread was given, on the reply that started it. */
+const THREAD_NAME = "Staging migration timeout";
+/** A message of the fixture that is in NO thread, so starting one from it offers a name. */
+const UNNAMED_WORDS = "lunch at one";
 
 function history(page: Page) {
   return page.locator('[data-testid="message-scroll"]');
@@ -80,9 +84,8 @@ test.describe("threads in a chat", () => {
     await expect(panel(page)).toBeVisible();
     await expect(panel(page).getByText(FOLDED_WORDS)).toBeVisible();
     await expect(panel(page).getByText(BROADCAST_WORDS)).toBeVisible();
-    // The panel says WHICH thread it is showing, by the root's own words: a chat message has
-    // no title, so the heading falls back to them.
-    await expect(page.locator('[data-testid="threads-panel-heading"]')).toContainText("staging");
+    // The panel says WHICH thread it is showing — by its NAME, where somebody gave it one.
+    await expect(page.locator('[data-testid="threads-panel-heading"]')).toHaveText(THREAD_NAME);
 
     // AND NO REPLY DRAWS A QUOTE OF THE ROOT inside the root's own panel. The quote is in
     // every one of their bodies — in a chat it is HOW a reply says which thread it is in — but
@@ -202,6 +205,62 @@ test.describe("threads in a chat", () => {
     await expect(history(page).getByText(marker)).toHaveCount(0);
   });
 
+  test("THE TWO BARS SIT ON ONE BASELINE", async ({ page }) => {
+    // Each column ends in its own reply bar, so the two must line up: the row used to hold the
+    // history alone with the one composer BELOW it, which left the thread's bar floating a
+    // composer's height above the chat's and reading as a box hanging in the middle of the
+    // screen. It was reported that way, so it is measured rather than eyeballed.
+    await gotoApp(page);
+    await openConversationNamed(page, THREAD_CHAT);
+    await page.locator('[data-testid="post-replies"]').click();
+
+    const chat = await page.locator('[data-testid="composer-shell"]').boundingBox();
+    const inThread = await page.locator('[data-testid="thread-composer-shell"]').boundingBox();
+    expect(chat).not.toBeNull();
+    expect(inThread).not.toBeNull();
+    // Their FEET, which is what a reader compares. A couple of pixels of rounding is fine; a
+    // composer's height is not.
+    expect(Math.abs(chat!.y + chat!.height - (inThread!.y + inThread!.height))).toBeLessThan(4);
+  });
+
+  test("a thread can be NAMED, by the reply that starts it", async ({ page }) => {
+    await gotoApp(page);
+    await openConversationNamed(page, THREAD_CHAT);
+
+    // A thread that HAS a name offers no field: a second name would rename nothing.
+    await page.locator('[data-testid="post-replies"]').click();
+    await expect(page.locator('[data-testid="thread-composer-subject"]')).toHaveCount(0);
+    await page.locator('[data-testid="threads-panel-close"]').click();
+
+    // A message in NO thread offers one, which is where Discord asks for it too.
+    const fresh = page
+      .locator('[data-testid="message-scroll"] [data-testid="message"]')
+      .filter({ hasText: UNNAMED_WORDS })
+      .first();
+    await fresh.hover();
+    await fresh.locator('[data-testid="message-actions"]').click();
+    await page.locator('[data-testid="action-reply-in-thread"]').click();
+    const name = page.locator('[data-testid="thread-composer-subject"]');
+    await expect(name).toBeVisible();
+    // The conversation's OWN bar offers none: a chat message has no title, and the backend
+    // refuses one on anything but a reply (`parse_subject`).
+    await expect(page.locator('[data-testid="composer-subject"]')).toHaveCount(0);
+
+    const before = (await fetchCapturedSends(page)).length;
+    await name.fill("Lunch plan");
+    await sendFromThreadComposer(page, "one o'clock works");
+    await expect.poll(async () => (await fetchCapturedSends(page)).length).toBeGreaterThan(before);
+    // The name rides in the send as the message's own SUBJECT — Teams' own property, which the
+    // read path already decodes on every message.
+    const sent = (await fetchCapturedSends(page)).at(-1)!;
+    expect(sent.subject).toBe("Lunch plan");
+    expect(sent.reply_to).toBeTruthy();
+    // …and the panel it named now says so, rather than the root's opening words.
+    await expect(page.locator('[data-testid="threads-panel-heading"]')).toHaveText("Lunch plan", {
+      timeout: 10_000,
+    });
+  });
+
   test("a CHANNEL is offered neither the option nor the box", async ({ page }) => {
     await gotoApp(page);
     await page.locator('[data-testid="tab-channels"]').click();
@@ -240,9 +299,10 @@ test.describe("the threads view", () => {
     // The fixture's own thread is one of them: the reader replied in it.
     const mine = rows.filter({ hasText: ROOT_WORDS });
     await expect(mine).toHaveCount(1);
-    // A row says WHERE the thread is and WHAT has happened in it — the same three facts the
-    // foot row under the root carries.
+    // A row says WHERE the thread is, what it is CALLED where somebody named it, and WHAT has
+    // happened in it — the same three facts the foot row under the root carries.
     await expect(mine).toContainText(THREAD_CHAT);
+    await expect(mine.locator('[data-testid="threads-row-name"]')).toHaveText(THREAD_NAME);
     await expect(mine).toContainText("replies");
     expect(realErrors(consoleErrors)).toEqual([]);
   });

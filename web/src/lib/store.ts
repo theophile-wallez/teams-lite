@@ -292,6 +292,16 @@ export type ThreadTarget = {
   /** The thread's own root message: what the reply quotes, and who it answers. */
   root: ChatMessage;
   threadRoot: string | null;
+  /**
+   * Whether this thread already has a NAME.
+   *
+   * A chat thread can be named, and only by the reply that starts it: the name is Teams' own
+   * `properties.subject` and the ROOT is an ordinary message somebody wrote before the thread
+   * existed (see `teams_send::parse_subject`). So the bar offers a name field while the thread
+   * has none and stops offering one the moment it has — a second field that renames nothing
+   * would be a control that changes nothing.
+   */
+  named: boolean;
 };
 
 /** The key a thread's own draft is held under — one conversation can hold several threads. */

@@ -648,12 +648,40 @@ Fourteen rules hold it, and each is pinned by a test:
   silently become ambiguous. What a keystroke may REACH is unchanged either way — a thread's bar
   posts a reply into a thread OF THIS CONVERSATION — so both bars name the same conversation and
   the proof means what it always meant.
+- **THE TWO BARS SIT ON ONE BASELINE, and that is a layout rule rather than a nicety.** Each
+  column — the conversation and the thread — ends in its own bar, so the row that holds them
+  reaches the bottom of the pane. It used to hold the HISTORY alone with the one composer BELOW
+  it, which meant the panel ended where that composer began: the thread's bar then floated a
+  composer's height above the chat's and read as a box hanging in the middle of the screen. It was
+  reported exactly that way, so `e2e/chat-threads.spec.ts` measures the two FEET against each
+  other rather than trusting the markup.
 - **IT IS THE SAME COMPONENT DRAWN TWICE, never a second lesser box.** `Composer` takes a
   `ThreadTarget`, so the pictures, the mentions, the emoji, the custom emoji, the seal and the
   agent tag are the ones the reader already has. What differs is what it is aimed at and what it
-  holds: its own draft, its own broadcast box, no post TITLE (a thread's title belongs to its first
-  post) and no banner of any kind — the panel above it IS the banner. It says **"Reply…"** rather
-  than "Write a message…", because two bars side by side must not read as one box drawn twice.
+  holds: its own draft, its own broadcast box, its own NAME field where the thread has no name yet
+  (below), and no banner of any kind — the panel above it IS the banner. It says **"Reply…"**
+  rather than "Write a message…", because two bars side by side must not read as one box drawn
+  twice.
+- **A THREAD CAN BE NAMED, and only the reply that STARTS it can name it.** Discord asks for a
+  title as a thread is created and this asks in the same place: the thread's bar carries a name
+  field while the thread has none, and stops carrying one the moment it has — a second field that
+  renames nothing is a control that changes nothing.
+  **IT IS TEAMS' OWN `properties.subject`, ONE PROPERTY READ ON TWO SURFACES**, which is why it
+  needed no property, no column, no wire field and no schema bump: the read path already decodes
+  that field into `Message::thread_subject` on EVERY message it parses, and `Thread.subject` is
+  already what `threadPanelHeading` prefers over the root's opening words. What
+  `teams_send::parse_subject` enforces is the asymmetry between the two surfaces — in a CHANNEL a
+  reply carries none (a thread's title belongs to its first POST), and in a CHAT only a reply may,
+  because the ROOT is an ordinary message somebody wrote before the thread existed: nobody can
+  retitle it, and this app never rewrites the record of a Teams frame.
+  The EARLIEST reply carrying one wins (`chatThreads`), so a second person naming the same thread
+  does not rename it under everybody; a thread nobody named keeps `""`, which is what makes the
+  heading fall back to the root's words. An EDIT keeps it, from the store, exactly as a channel
+  post's title is kept — so fixing a typo in the naming reply does not un-name the thread. The
+  name reaches the panel's heading and the threads view's own row, because those are the two
+  places a reader is choosing which thread to open.
+  What it does NOT buy is a RENAME: there is no way to retitle a thread without editing that
+  reply, and no surface offers one. Stated rather than papered over.
 - **A THREAD'S DRAFT IS APP STATE AND NOT A BACKEND DRAFT** (`threadDrafts`, keyed by
   `threadDraftKey`). `set_draft` is keyed per CONVERSATION, so a per-thread draft would need a wire
   of its own. What this buys is that closing the panel, opening another thread and walking to
@@ -782,8 +810,9 @@ folded EVERY reply pass every test.
 `cd web && bun run preview -- --out /tmp/thr --threads --dpr 3` captures the running history with
 the thread folded out of it in both themes, the foot row cropped to itself, the OPTION in a
 message's own menu, the panel in both themes with its own reply bar at the foot, that BAR cropped to
-itself in both themes, the view in both themes, ONE ROW cropped, the row under the search field that
-leads there, and a PHONE's width where the panel REPLACES the conversation. `web/e2e/chat-threads.spec.ts` pins every rule the page owns,
+itself in both themes, the NAME field a thread nobody has named yet offers in both themes, the view
+in both themes, ONE ROW cropped, the row under the search field that leads there, and a PHONE's
+width where the panel REPLACES the conversation. `web/e2e/chat-threads.spec.ts` pins every rule the page owns,
 `web/src/lib/chat-threads.test.ts` and `threads-view.test.ts` the pure ones, and
 `teams_send::tests`, `teams_read::tests`, `store::tests` and the `edit` handler's own scan the wire.
 
@@ -4863,7 +4892,7 @@ user. Two independent mechanisms enforce that split:
   foot row cropped to itself, the OPTION in a message's own menu (Reply, and "Reply in thread"
   beside it — threading is opt-in), the panel in both themes with its OWN reply bar at the foot,
   that bar cropped to itself in both themes (its "Reply…" placeholder and the broadcast row), the
-  threads VIEW in both themes, one of its rows cropped, the row under the search field that leads
+  NAME field an unnamed thread's bar offers in both themes, the threads VIEW in both themes, one of its rows cropped, the row under the search field that leads
   there, and a PHONE's width where the panel REPLACES the conversation (pass `--dpr 3`: the foot
   row is 20px faces beside 12px type and the broadcast row is 11px):
   `bun run preview -- --out /tmp/thr --threads`.
