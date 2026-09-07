@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS messages (
     deleted         INTEGER NOT NULL DEFAULT 0,
     mentions        TEXT NOT NULL DEFAULT '[]',
     scheduled_time  INTEGER NOT NULL DEFAULT 0,
+    thread_only     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (conversation_id, id)
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -586,7 +587,7 @@ CREATE INDEX IF NOT EXISTS idx_calendar_event_range ON calendar_events(start_utc
 /// other one is sealing. The store cannot prevent that (the older process reads a table it
 /// has never heard of), and it heals on the next re-stage — the same shape § Running the
 /// released build beside the staged one already records for the presence hours.
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// Revision of the one-shot legacy cleanups the server runs at startup
 /// ([`Store::reparent_thread_link_messages`], [`Store::purge_control_frames`],
@@ -725,6 +726,18 @@ pub struct Message {
     /// on its own with nothing to clear (see [`SELECT_COLS`] and
     /// [`Store::scheduled_messages`]).
     pub scheduled_time: i64,
+    /// Whether this REPLY asked to be drawn in its THREAD ALONE — its author unticked "Also
+    /// send to the chat" (see [`crate::teams_send::THREAD_ONLY`]).
+    ///
+    /// It is a DISPLAY decision and never a claim about where the message is: a chat has no
+    /// threads on the service, so the reply really is in the conversation and every stock
+    /// client draws it inline. What this decides is whether teams-lite folds it out of the
+    /// running history into the thread it answers.
+    ///
+    /// `false` for every row stored before the column existed, every message from a stock
+    /// client, and every reply whose property the service dropped — so a flag that failed to
+    /// arrive can only ever leave a message MORE visible, never hide one.
+    pub thread_only: bool,
     /// The @mentions the message body points at, as a JSON array string:
     /// `[{"itemid":0,"mri":"8:orgid:…","kind":"person","display_name":"James"}]`.
     /// A mention span in `content` carries only its `itemid`, so this is the ONLY
@@ -1576,6 +1589,7 @@ fn row_to_msg(row: &Row) -> rusqlite::Result<Message> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "[]".to_string()),
         scheduled_time: row.get::<_, Option<i64>>(15)?.unwrap_or(0),
+        thread_only: row.get::<_, Option<i64>>(16)?.unwrap_or(0) != 0,
         // Resolved by `msg_reader`, which is the only way a body leaves this store.
         seal: MessageSeal::None,
     })
@@ -1604,7 +1618,7 @@ const NOT_STILL_HELD: &str = "scheduled_time <= (CAST(strftime('%s','now') AS IN
 const SELECT_COLS: &str = concat!(
     "id, conversation_id, seq, compose_time, ",
     nicknamed!("messages.sender_mri", "sender"),
-    ", sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions, scheduled_time"
+    ", sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions, scheduled_time, thread_only"
 );
 
 fn row_to_mail(row: &Row) -> rusqlite::Result<MailMessageRow> {
@@ -1862,6 +1876,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     // every legacy row). A held message arrives in the ordinary history, so this is what
     // keeps it out of the thread until its moment passes — see `Message::scheduled_time`.
     add_column("ALTER TABLE messages ADD COLUMN scheduled_time INTEGER NOT NULL DEFAULT 0")?;
+    // thread_only: whether a REPLY belongs in its thread alone (see `Message::thread_only`).
+    // 0 for every row already here, which draws them exactly where they were drawn before —
+    // the fold can never take a message the reader could already see.
+    add_column("ALTER TABLE messages ADD COLUMN thread_only INTEGER NOT NULL DEFAULT 0")?;
     // mentions: who the body's @mention spans point at, as a JSON array string.
     // Legacy rows and messages without mentions carry the empty-array default;
     // `backfill_mentions` heals a legacy row on the next sync that carries them.
@@ -3455,8 +3473,8 @@ impl Store {
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
         let reactions = if m.reactions.is_empty() { "[]" } else { m.reactions.as_str() };
         let n = self.exec(
-            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions, scheduled_time)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            "INSERT INTO messages (id, conversation_id, seq, compose_time, sender, sender_mri, messagetype, content, attachments, reactions, system_event, thread_root_id, thread_subject, deleted, mentions, scheduled_time, thread_only)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(conversation_id, id) DO UPDATE SET
                  -- a frame that turns out to be a SYSTEM EVENT drops the body it was
                  -- stored with: the event says it better (and in the reader's own
@@ -3481,16 +3499,23 @@ impl Store {
                  -- does that, measured), so the incoming value wins outright here rather
                  -- than the larger one: a stale hold would keep a delivered message out of
                  -- the thread for ever.
-                 scheduled_time = excluded.scheduled_time
+                 scheduled_time = excluded.scheduled_time,
+                 -- LEARNED, never unlearned: a reply's own author asked for it once, and a
+                 -- later frame that merely omits the property must not pop their reply back
+                 -- into the running history of everybody in the conversation. It can still
+                 -- never be INVENTED — a flag that never arrived stays 0, which draws the
+                 -- message where every other client draws it (see `Message::thread_only`).
+                 thread_only = MAX(messages.thread_only, excluded.thread_only)
                  WHERE (excluded.content <> '' AND messages.content <> excluded.content)
                     OR (excluded.deleted = 1 AND messages.deleted = 0)
                     OR (excluded.scheduled_time <> messages.scheduled_time)
+                    OR (excluded.thread_only = 1 AND messages.thread_only = 0)
                     OR (excluded.messagetype <> '' AND messages.messagetype = '')
                     OR (excluded.thread_root_id <> '' AND messages.thread_root_id = '')
                     OR (excluded.thread_subject <> '' AND messages.thread_subject = '')
                     OR (excluded.system_event <> '' AND messages.system_event = '')
                     OR (excluded.attachments NOT IN ('', '[]') AND messages.attachments IN ('', '[]'))",
-            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.message_type, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject, m.deleted as i64, m.mentions, m.scheduled_time],
+            params![m.id, m.conversation_id, m.seq, m.compose_time, m.sender, m.sender_mri, m.message_type, m.content, m.attachments, reactions, m.system_event, m.thread_root_id, m.thread_subject, m.deleted as i64, m.mentions, m.scheduled_time, m.thread_only as i64],
         )?;
         Ok(n == 1)
     }
@@ -5217,6 +5242,73 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every REPLY across every conversation, newest first, and the message each one
+    /// answers beside it — what the THREADS view is built from (§ A CHAT HAS THREADS TOO).
+    ///
+    /// **WHAT IT IS FOR IS A LIST THAT CROSSES CONVERSATIONS**, which is the one thing the
+    /// page cannot derive for itself. A chat's threads replay out of its own messages, so an
+    /// open conversation already has everything it needs — but the history loads a page at a
+    /// time and only for the conversation on screen, so a list of "every thread I am in"
+    /// taken off that would hold the threads of whichever chat happened to be open. This
+    /// answers the whole stored history instead, and it costs no network read at all: the
+    /// replies are already here.
+    ///
+    /// **IT DECIDES NOTHING ABOUT A THREAD.** Which reply belongs to which root, which of
+    /// them the reader is part of and what the row says are the page's ONE derivation
+    /// (`web/src/lib/chat-threads.ts`) — a second spelling here would drift from it at the
+    /// first rule anybody adds. So the answer is ordinary messages, in the ordinary shape,
+    /// and the reader that already draws a bubble draws these.
+    ///
+    /// It is the shape [`Self::scheduled_messages`] has, for its reason: both are lists
+    /// ACROSS conversations, so neither takes one.
+    ///
+    /// The SQL prefilter is the whole quote marker rather than a looser `LIKE`, and that is
+    /// correctness rather than tidiness — the `LIMIT` runs BEFORE the parse, so every row it
+    /// over-matches eats a slot ahead of a real reply (the trap
+    /// [`Self::pet_messages`] states in full).
+    pub fn thread_messages(&self, limit: i64) -> Result<Vec<Message>> {
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM messages
+             WHERE deleted = 0 AND {NOT_STILL_HELD}
+               AND content LIKE '%schema.skype.com/Reply%'
+             ORDER BY seq DESC LIMIT ?1"
+        );
+        let keyring = self.seal_keyring()?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let replies: Vec<Message> =
+            stmt.query_map(params![limit], msg_reader(&keyring))?.collect::<rusqlite::Result<_>>()?;
+        // The ROOT each reply answers, by the address its own quote carries — one id per
+        // (conversation, target) pair, so a thread of forty replies is one lookup rather than
+        // forty. A root that is not in the store is simply absent: the page then draws the
+        // thread it can see, which is what it does for a channel thread whose own root has
+        // paged out.
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for reply in &replies {
+            let Some(quoted) = crate::teams_read::quoted_message_from_html(&reply.content) else {
+                continue;
+            };
+            if quoted.target.is_empty() {
+                continue;
+            }
+            let pair = (reply.conversation_id.clone(), quoted.target);
+            if !wanted.contains(&pair) {
+                wanted.push(pair);
+            }
+        }
+        let mut out = replies;
+        let held: std::collections::HashSet<(String, String)> =
+            out.iter().map(|m| (m.conversation_id.clone(), m.id.clone())).collect();
+        for (conversation, id) in wanted {
+            if held.contains(&(conversation.clone(), id.clone())) {
+                continue;
+            }
+            if let Some(root) = self.get_message(&conversation, &id)? {
+                out.push(root);
+            }
+        }
+        Ok(out)
+    }
+
     /// Every message of one conversation that carries a game of CHESS, oldest -> newest.
     ///
     /// **WHAT IT IS FOR IS THE HEAD-TO-HEAD SCORE** (§ Chess in a conversation). A game replays out
@@ -5375,6 +5467,7 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         }
     }
@@ -5752,6 +5845,7 @@ mod tests {
             deleted: false,
             mentions: "[]".to_string(),
             scheduled_time: 0,
+            thread_only: false,
             seal: MessageSeal::None,
         }
     }
@@ -5811,6 +5905,116 @@ mod tests {
         let after = store.conversations("Me").unwrap();
         let mine = after.iter().find(|c| c.id == conversation).expect("the conversation");
         assert_eq!(mine.last_message_preview, "the merger closes on Friday");
+    }
+
+    /// EVERY REPLY ACROSS EVERY CONVERSATION, and the message each one answers — the read the
+    /// THREADS view is built from (§ A CHAT HAS THREADS TOO).
+    ///
+    /// It crosses conversations, which is the one thing the page's own derivation cannot do: a
+    /// chat's threads replay out of its own history, and the history loads a page at a time and
+    /// only for the conversation on screen — so a list of "every thread I am in" taken off that
+    /// would hold the threads of whichever chat happened to be open.
+    #[test]
+    fn the_threads_read_finds_a_reply_and_the_message_it_answers() {
+        let store = Store::open_in_memory().unwrap();
+        let chat = "19:one@thread.v2";
+        let other = "19:two@thread.v2";
+        let reply_to = |time: i64| {
+            format!(
+                "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"{time}\">\
+                 <strong itemprop=\"mri\" itemid=\"8:orgid:ada\">Ada</strong>\
+                 <span itemprop=\"time\" itemid=\"{time}\"></span>\
+                 <p itemprop=\"preview\">said earlier</p></blockquote><p>yes</p>"
+            )
+        };
+        // A Teams message ID **IS** its arrival time in epoch milliseconds (measured), which is
+        // exactly what makes the quote's own `itemid` an address: the reply names a time, and the
+        // root is the message whose id that is. The fixture is built that way rather than with
+        // convenient ids, because the whole lookup rests on it.
+        let mut push = |conversation: &str, at: i64, content: &str| {
+            let mut row = message_for_test(conversation, "8:orgid:ada", content);
+            row.id = at.to_string();
+            row.seq = at;
+            row.compose_time = at;
+            store.insert_message(&row).unwrap();
+        };
+        // A root and its reply, in one chat…
+        push(chat, 1_700_000_000_001, "<p>the deploy is stuck</p>");
+        push(chat, 1_700_000_000_002, &reply_to(1_700_000_000_001));
+        // …a reply in ANOTHER conversation, which is the whole point of the read…
+        push(other, 1_700_000_000_011, "<p>lunch?</p>");
+        push(other, 1_700_000_000_012, &reply_to(1_700_000_000_011));
+        // …a message that replies to nothing, which is not part of any thread…
+        push(chat, 1_700_000_000_003, "<p>separately</p>");
+        // …and a FORWARD, which is nobody's reply: the message it holds was said somewhere else.
+        push(
+            chat,
+            1_700_000_000_004,
+            "<blockquote itemtype=\"http://schema.skype.com/Forward\"><p>elsewhere</p>\
+             </blockquote><p>FYI</p>",
+        );
+
+        let found = store.thread_messages(100).unwrap();
+        let mut ids: Vec<&str> = found.iter().map(|m| m.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec![
+                "1700000000001",
+                "1700000000002",
+                "1700000000011",
+                "1700000000012",
+            ],
+            "both replies, and the ROOT each one answers — and nothing that replies to nothing"
+        );
+
+        // A reply somebody DELETED is out, and so is one the service is still HOLDING: neither is
+        // a message in the thread yet, which is what the history's own read already says.
+        let mut gone = message_for_test(chat, "8:orgid:ada", &reply_to(1_700_000_000_001));
+        gone.id = "deleted".to_string();
+        gone.seq = 1_700_000_000_005;
+        store.insert_message(&gone).unwrap();
+        store.mark_message_deleted(chat, "deleted").unwrap();
+        let mut later = message_for_test(chat, "8:orgid:ada", &reply_to(1_700_000_000_001));
+        later.id = "held".to_string();
+        later.seq = 1_700_000_000_006;
+        later.scheduled_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 60 * 60 * 1000;
+        store.insert_message(&later).unwrap();
+        let after = store.thread_messages(100).unwrap();
+        let ids: Vec<&str> = after.iter().map(|m| m.id.as_str()).collect();
+        assert!(!ids.contains(&"deleted") && !ids.contains(&"held"));
+    }
+
+    /// THE THREAD FLAG IS LEARNED AND NEVER UNLEARNED, and never INVENTED.
+    ///
+    /// A reply's own author asked for it once, so a later frame that merely omits the property must
+    /// not pop their reply back into the running history of everybody in the conversation. And a
+    /// flag that never arrived stays off, which draws the message where every other client draws
+    /// it: the fold can only ever be told, never guessed (see `Message::thread_only`).
+    #[test]
+    fn the_thread_flag_is_learned_and_never_unlearned() {
+        let store = Store::open_in_memory().unwrap();
+        let conversation = "19:one@thread.v2";
+        let mut row = message_for_test(conversation, "8:orgid:ada", "<p>first</p>");
+        row.id = "m1".to_string();
+        store.insert_message(&row).unwrap();
+        assert!(!store.get_message(conversation, "m1").unwrap().unwrap().thread_only);
+
+        // The property arrives, and the row learns it.
+        row.thread_only = true;
+        row.content = "<p>second</p>".to_string();
+        store.insert_message(&row).unwrap();
+        assert!(store.get_message(conversation, "m1").unwrap().unwrap().thread_only);
+
+        // A later frame that omits it changes nothing.
+        row.thread_only = false;
+        row.content = "<p>third</p>".to_string();
+        store.insert_message(&row).unwrap();
+        assert!(store.get_message(conversation, "m1").unwrap().unwrap().thread_only);
     }
 
     /// WHICH MESSAGES HOLD A GAME OF CHESS — the read a head-to-head score is counted over.
@@ -5997,7 +6201,7 @@ mod tests {
     #[test]
     fn schema_columns_are_pinned_to_the_version() {
         // Bump SCHEMA_VERSION and paste the printed fingerprint here, together.
-        const PINNED: (i64, u64) = (18, 0x24b0_4377_b5a8_06cd);
+        const PINNED: (i64, u64) = (19, 0x3d8c_34a1_6063_053e);
         let columns = declared_columns(include_str!("store.rs"));
         let actual = fingerprint(&columns);
         assert_eq!(
@@ -6336,6 +6540,7 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         };
 
@@ -6397,6 +6602,7 @@ mod tests {
             thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         };
 
@@ -6460,6 +6666,7 @@ mod tests {
             thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         };
         s.insert_message(&post(channel, "100")).unwrap(); // the root, already correct
@@ -6656,6 +6863,7 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         };
 
@@ -6711,6 +6919,7 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         };
 
@@ -7353,6 +7562,7 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         }).unwrap();
         s.insert_message(&Message {
@@ -7365,6 +7575,7 @@ mod tests {
             deleted: false,
             scheduled_time: 0,
             mentions: "[]".into(),
+            thread_only: false,
         }).unwrap();
 
         // direct derivation
@@ -7389,6 +7600,7 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         }).unwrap();
         assert_eq!(s.other_party_name("dm", me).unwrap(), None);
@@ -7406,12 +7618,12 @@ mod tests {
             seal: Default::default(),
             id: "m1".into(), conversation_id: "dm".into(), seq: 1, compose_time: 1,
             sender: me.into(), sender_mri: "8:orgid:me".into(), content: "salut".into(),
-            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0,        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0, thread_only: false,        }).unwrap();
         s.insert_message(&Message {
             seal: Default::default(),
             id: "m2".into(), conversation_id: "dm".into(), seq: 2, compose_time: 2,
             sender: "Leonor GROELL".into(), sender_mri: "8:orgid:leonor".into(), content: "hello".into(),
-            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0,        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0, thread_only: false,        }).unwrap();
 
         // A group: even though it has non-self senders, a group has no single face.
         s.upsert_conversation_full(&upd("grp", "Team chat", 400, ConversationKind::Group)).unwrap();
@@ -7419,7 +7631,7 @@ mod tests {
             seal: Default::default(),
             id: "g1".into(), conversation_id: "grp".into(), seq: 1, compose_time: 1,
             sender: "Grace HOPPER".into(), sender_mri: "8:orgid:grace".into(), content: "hi all".into(),
-            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0,        }).unwrap();
+            attachments: "[]".into(), reactions: "[]".into(), message_type: String::new(), system_event: String::new(), thread_root_id: String::new(), thread_subject: String::new(), deleted: false, mentions: "[]".into(), scheduled_time: 0, thread_only: false,        }).unwrap();
 
         let by_id = |id: &str| {
             s.conversations(me).unwrap().into_iter().find(|c| c.id == id).unwrap()
@@ -7856,6 +8068,7 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         }).unwrap();
 
@@ -7887,6 +8100,7 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         }).unwrap();
         // a message without attachments keeps the empty-array default
@@ -7901,6 +8115,7 @@ mod tests {
             deleted: false,
             scheduled_time: 0,
             mentions: "[]".into(),
+            thread_only: false,
         }).unwrap();
 
         let msgs = s.newest_messages("c1", 10).unwrap();

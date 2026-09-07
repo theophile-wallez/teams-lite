@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
         &[],
         Some(deliver_at),
         None, // no title: a probe posts no channel post
+        false, // and folds nothing out of a history
         // A probe seals nothing: it posts to the sandbox chat in the clear.
         None,
     )
@@ -107,6 +108,7 @@ async fn main() -> Result<()> {
         &[],
         Some(cancel_at),
         None, // no title: a probe posts no channel post
+        false, // and folds nothing out of a history
         // A probe seals nothing: it posts to the sandbox chat in the clear.
         None,
     )
@@ -156,6 +158,7 @@ async fn main() -> Result<()> {
         &[],
         Some(cancel_at),
         None, // no title: a probe posts no channel post
+        false, // and folds nothing out of a history
         // A probe seals nothing: it posts to the sandbox chat in the clear.
         None,
     )
@@ -174,6 +177,7 @@ async fn main() -> Result<()> {
             Some("<p>scheduled send probe — REWRITTEN while held</p>"),
             &[],
             None, // a probe's message is untitled
+            false, // and belongs to no thread it was folded into
             None, // and unsealed: a probe posts in the clear
         )
         .await

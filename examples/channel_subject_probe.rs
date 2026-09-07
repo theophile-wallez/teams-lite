@@ -119,6 +119,8 @@ async fn post_titled(
         &[],
         None,
         Some(TITLE),
+        // A probe folds nothing out of a history: it posts to the sandbox chat.
+        false,
         // A probe seals nothing: it posts to the sandbox chat in the clear.
         None,
     )
@@ -144,6 +146,7 @@ async fn edit(
         Some("<p>channel subject probe — the body was rewritten by an edit</p>"),
         &[],
         subject,
+        false,
         None, // a probe posts in the clear
     )
     .await

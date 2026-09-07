@@ -71,6 +71,7 @@ async fn main() -> Result<()> {
         &[],
         None,
         None, // no title: a probe posts no channel post
+        false, // and folds nothing out of a history
         // A probe seals nothing: it posts to the sandbox chat in the clear.
         None,
     )

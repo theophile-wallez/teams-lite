@@ -147,6 +147,17 @@ const READ_ONLY_PORT: u16 = 19430;
 /// by anything the user does.
 const MAX_SCHEDULED_LISTED: i64 = 200;
 
+/// How many REPLIES the threads digest reads before it starts leaving threads out.
+///
+/// It is the newest 400 replies across the whole store, which on this tenant's own history
+/// is several months of them — and the view they feed is "the threads I am in", a list
+/// nobody scrolls to the end of. The bound is what keeps a read that grows with every
+/// message the user has ever received from growing without limit; what it costs is that a
+/// thread nobody has answered in a long time falls off the list rather than the app
+/// pretending otherwise: the bound travels in the answer, so the view says the list is the
+/// newest threads rather than every one of them.
+const MAX_THREAD_MESSAGES: i64 = 400;
+
 /// How many chess-carrying messages one conversation's head-to-head score is counted over.
 ///
 /// A game is TWO messages — one ledger per player, edited in place — so this is some six hundred
@@ -4865,6 +4876,13 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             // narrows WHERE the message this method already posts lands, and the consent is
             // the same click on Send.
             let thread_root = teams_send::parse_thread_root(params, &conv)?;
+            // Whether this REPLY is drawn in its thread ALONE — the reader unticked "Also
+            // send to the chat" (see `teams_send::parse_thread_only`). It rides in these
+            // params for the reason the title does, and it needs no gate of its own for a
+            // sharper one: it publishes NOTHING new. The reply reaches exactly the same
+            // people either way — a chat has no threads on the service, so every stock client
+            // draws it inline — and what the flag decides is only how this app draws it.
+            let thread_only = teams_send::parse_thread_only(params)?;
 
             // Custom emoji: read the pack's art for each code in the outbound body, so
             // the `:shipit:` codes become Teams' own inline emoji markup with the bytes
@@ -4944,6 +4962,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             &mentions,
                             scheduled_ms,
                             subject.as_deref(),
+                            thread_only,
                             seal_key.as_ref(),
                         )
                         .await
@@ -5009,6 +5028,16 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .and_then(|store| store.get_message(&conv, &message_id).ok().flatten())
                 .map(|m| m.thread_subject)
                 .filter(|s| !s.is_empty());
+            // AND WHETHER IT BELONGS TO ITS THREAD ALONE, carried through the same edit and
+            // for the identical measured reason: `properties` is ASSIGNED, so an edit that
+            // did not restate this would pop a threaded reply back into the running history
+            // of every teams-lite reader in the conversation. It is the STORE's own row, so a
+            // client cannot move somebody's reply out of its thread with an edit either.
+            let thread_only = ctx
+                .store()
+                .ok()
+                .and_then(|store| store.get_message(&conv, &message_id).ok().flatten())
+                .is_some_and(|m| m.thread_only);
 
             // The key this conversation seals with. An edit is a whole new body, so it has to
             // be sealed exactly as the send was — and FAIL-CLOSED for the send's own reason: a
@@ -5068,6 +5097,7 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                             Some(&rewritten_html),
                             &[],
                             subject.as_deref(),
+                            thread_only,
                             seal_key.as_ref(),
                         )
                         .await?;
@@ -6706,6 +6736,34 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 .map(|m| message_json(m, &me.name, &me.mri, Some(&store)))
                 .collect();
             Ok(json!({ "messages": messages }))
+        }
+
+        // EVERY REPLY ACROSS EVERY CONVERSATION, and the message each one answers — what the
+        // THREADS view is built from (§ A CHAT HAS THREADS TOO).
+        //
+        // An ORDINARY READ, ungated like `scheduled_messages` and `chess_messages`, and it makes
+        // no network request: a thread IS its messages, so the store already holds every one of
+        // them. It publishes nothing a page cannot already read — these are rows of the user's own
+        // history, in the shape the history itself answers with.
+        //
+        // It decides NOTHING about a thread. Which reply belongs to which root, which threads the
+        // reader is part of and what a row says are the page's ONE derivation
+        // (web/src/lib/chat-threads.ts); this answers which rows are in a thread at all, which is
+        // the one question a page cannot answer for the conversations it has not opened.
+        "thread_digest" => {
+            let me = ctx.identity().await?;
+            let store = ctx.store()?;
+            let held = store.thread_messages(MAX_THREAD_MESSAGES)?;
+            let messages: Vec<Value> = held
+                .iter()
+                .map(|m| message_json(m, &me.name, &me.mri, Some(&store)))
+                .collect();
+            // The bound travels with the answer, so the page can say the list is the NEWEST
+            // rather than ALL of them: a list that stops without saying so reads as a
+            // complete one (the rule the update panel's own count holds). It is compared
+            // against the REPLIES the page derives, which is what the bound really counts —
+            // the roots beside them are looked up on top of it.
+            Ok(json!({ "messages": messages, "limit": MAX_THREAD_MESSAGES }))
         }
 
         // Every message of one conversation that carries a game of CHESS — what the head-to-head
@@ -10338,6 +10396,12 @@ fn message_json(m: &Message, self_name: &str, self_mri: &str, store: Option<&Sto
         // tomorrow's message in today's thread — the very thing the store's own read
         // excludes (see `Message::scheduled_time`).
         "scheduled_time": m.scheduled_time,
+        // Whether this REPLY is drawn in its THREAD ALONE — its author unticked "Also send
+        // to the chat" (see `Message::thread_only`). It rides on every message because the
+        // LIVE path needs it: a reply arrives on the feed like any other frame, and a page
+        // that merged it without this would write it into the running history the reply's own
+        // author asked to keep it out of.
+        "thread_only": m.thread_only,
         // How this body reached the reader: absent for an ordinary message, "opened" for one
         // this machine unsealed, and "locked" / "newer" / "damaged" for one it could not (see
         // `store::MessageSeal`). "opened" is deliberately said out loud: a padlock beside a
@@ -12304,6 +12368,12 @@ async fn agent_send(
                 // And no title: an answer is a REPLY, which has none — the thread it
                 // answers in is already named by its first post.
                 None,
+                // AND IT IS NEVER FOLDED OUT OF THE RUNNING HISTORY. The answer is a reply,
+                // so it joins the thread of the message that asked for it either way — and
+                // the reader asked for it in the conversation, where they are watching it
+                // being written (§ The local agent). Folding it would hide the one message
+                // this app posts on its own from the surface it was summoned on.
+                false,
                 seal_key.as_ref(),
             )
             .await
@@ -12352,6 +12422,9 @@ async fn agent_edit(
                 // never titled (see `teams_send::parse_subject`). So there is nothing for
                 // this edit — one of many, once a second as the answer streams — to carry.
                 None,
+                // And it was never folded out of the history, so there is nothing to keep
+                // (see the send above).
+                false,
                 seal_key.as_ref(),
             )
             .await
@@ -16493,6 +16566,7 @@ mod tests {
             thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         };
         let renamed = store
@@ -16840,6 +16914,7 @@ mod tests {
             thread_root_id: String::new(), thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         }
     }
@@ -17055,6 +17130,35 @@ mod tests {
         assert!(
             handler.contains("subject.as_deref()"),
             "the title has to reach `edit_message`; read from the store and dropped on the \
+             floor is the same silent loss."
+        );
+    }
+
+    /// AN EDIT CARRIES THE THREAD FLAG FROM THE STORE, exactly as it carries the title.
+    ///
+    /// The service ASSIGNS `properties` on an edit rather than merging it (measured —
+    /// `examples/channel_subject_probe.rs`), so an edit that did not restate this would pop a
+    /// threaded reply back into the running history of every teams-lite reader in the
+    /// conversation, because its author fixed a typo. It comes from THIS machine's own store
+    /// rather than from the client, so an edit cannot move somebody's reply out of its thread
+    /// either.
+    ///
+    /// Scanned rather than exercised for the reason the title's own test is: the edit needs a
+    /// tenant, and a flag read from the store and dropped on the floor is the same silent loss.
+    #[test]
+    fn editing_a_threaded_reply_carries_its_thread_flag_from_the_store() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = code.split("\"edit\" => {").nth(1).expect("the edit handler");
+        let handler = handler.split("\"react\" => {").next().expect("it ends at the next arm");
+        assert!(
+            handler.contains("m.thread_only"),
+            "the edit handler must read the message's own stored thread flag, or a rewrite \
+             un-folds every threaded reply its author ever wrote."
+        );
+        assert!(
+            handler.contains("thread_only,"),
+            "the flag has to reach `edit_message`; read from the store and dropped on the \
              floor is the same silent loss."
         );
     }
@@ -18158,6 +18262,7 @@ mod lifecycle_tests {
                     thread_subject: String::new(),
                     deleted: false,
                     scheduled_time: 0,
+            thread_only: false,
                     mentions: "[]".into(),
                 })
                 .unwrap();

@@ -1584,6 +1584,7 @@ mod tests {
             thread_subject: String::new(),
             deleted: false,
             scheduled_time: 0,
+            thread_only: false,
             mentions: "[]".into(),
         }
     }

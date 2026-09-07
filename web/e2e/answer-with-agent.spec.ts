@@ -167,6 +167,11 @@ test.describe("answer with an agent", () => {
     await openMessageMenu(page);
     await page.locator(row).click();
     await expect(page.locator(chip)).toHaveCount(1);
+    // The box is TICKED for an agent request, which is the one place the default is turned round
+    // (`PendingReply.broadcast`).
+    await expect(
+      page.locator('[data-testid="reply-broadcast"] input[type="checkbox"]'),
+    ).toBeChecked();
 
     const marker = `answer-${Date.now()}`;
     await page.keyboard.type(` ${marker}`);
@@ -178,6 +183,12 @@ test.describe("answer with an agent", () => {
     expect(sent?.content_html).toContain("@claude Answer this message.");
     expect(sent?.content_html).not.toContain("data-agent-tag");
     expect(sent?.mentions ?? []).toEqual([]);
+    // AND IT BROADCASTS. The request is a reply, so the composer's own box would fold it out of
+    // the running history — while the ANSWER is posted with no flag at all, because the reader
+    // asked for it in the conversation and watches it being written there. Folded, the question
+    // would be hidden in a thread with its answer standing in the history beside it, which reads
+    // as the app having lost the request (§ A CHAT HAS THREADS TOO).
+    expect(sent?.thread_only).toBeUndefined();
 
     // It really is a reply — the bubble quotes the message it answers…
     const mine = page.locator('[data-testid="message"]', { hasText: marker }).last();

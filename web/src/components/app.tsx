@@ -7,6 +7,7 @@ import { GitLabPane } from "./gitlab-pane";
 import { MailPane } from "./mail-pane";
 import { MessagePane } from "./message-pane";
 import { SettingsPane } from "./settings-pane";
+import { ThreadsPane } from "./threads-pane";
 import { CommandPalette } from "./command-palette";
 import { SettingsDialog } from "./settings-dialog";
 import { CallBar } from "./call-bar";
@@ -104,6 +105,11 @@ function AppInner() {
   // settings surface instead of a conversation; the sidebar stays put.
   const matchRoute = useMatchRoute();
   const onSettings = !!matchRoute({ to: "/settings" });
+  // THE THREADS view: every thread the reader is in, across every conversation. It is a detail
+  // surface like Settings — the sidebar stays put, so the reader keeps their place in the
+  // conversation list — and it is reached from the row under the search field
+  // (§ A CHAT HAS THREADS TOO).
+  const onThreads = !!matchRoute({ to: "/threads" });
   // The DIFF of a merge request is a page of its own — two columns, the changed files and one
   // of them — so it takes the whole screen rather than the detail pane: a third column of chat
   // rows beside it would leave neither of its own two enough room (see gitlab-diff-page.tsx).
@@ -143,6 +149,7 @@ function AppInner() {
     !!routeMailId ||
     onMergeRequestRoute ||
     onSettings ||
+    onThreads ||
     sidebarTab === "calendar";
 
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -191,6 +198,9 @@ function AppInner() {
   }, [navigate]);
   const goToSettings = useCallback(() => {
     void navigate({ to: "/settings" });
+  }, [navigate]);
+  const goToThreads = useCallback(() => {
+    void navigate({ to: "/threads" });
   }, [navigate]);
 
   // Reconcile the controller with the URL: open the conversation named in the
@@ -336,7 +346,13 @@ function AppInner() {
           void navigate({ to: "/c/$conversationId", params: { conversationId: routeConversationId } });
           return;
         }
-        if (routeConversationId || routeMailId || onMergeRequestRoute || onSettings) {
+        if (
+          routeConversationId ||
+          routeMailId ||
+          onMergeRequestRoute ||
+          onSettings ||
+          onThreads
+        ) {
           goToList();
           return;
         }
@@ -346,7 +362,8 @@ function AppInner() {
       // settings (otherwise the composer / settings form own the keyboard). It
       // drives whichever virtualized list the active tab shows — Chats or Mail;
       // the Channels tab is a tree and uses click/Tab focus.
-      if (routeConversationId || routeMailId || onMergeRequestRoute || onSettings) return;
+      if (routeConversationId || routeMailId || onMergeRequestRoute || onSettings || onThreads)
+        return;
       if (sidebarTab === "channels" || sidebarTab === "calendar") return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
@@ -376,6 +393,7 @@ function AppInner() {
       routeMailId,
       onMergeRequestRoute,
       onSettings,
+      onThreads,
       sidebarTab,
       keyboardList,
       selectedIndex,
@@ -479,6 +497,8 @@ function AppInner() {
             onOpenSettings={() => setSettingsOpen(true)}
             onOpenSettingsPage={goToSettings}
             settingsActive={onSettings}
+            onOpenThreads={goToThreads}
+            threadsActive={onThreads}
           />
           {/* The detail pane. On mobile it is a full-screen overlay parked off the
               right edge until `paneOpen`, then flush over the conversation list — the
@@ -508,6 +528,8 @@ function AppInner() {
                 leaving another section's empty state on the right. */}
             {onSettings ? (
               <SettingsPane onBack={goToList} />
+            ) : onThreads ? (
+              <ThreadsPane onBack={goToList} />
             ) : onMergeRequestRoute ||
               (sidebarTab === "gitlab" && !routeConversationId && !routeMailId) ? (
               <GitLabPane

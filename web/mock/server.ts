@@ -174,6 +174,10 @@ type ChatMessage = {
   mentions_me?: boolean; // whether the mention spans point at US (backend-resolved)
   thread_root_id?: string; // channel only: id of the thread's root post
   thread_subject?: string; // channel only: thread title, present on the root
+  // Whether this REPLY is drawn in its THREAD alone — its author unticked "Also send to the
+  // chat". Absent reads as false, so a reply with no flag is drawn where every client draws
+  // it (see lib/chat-threads.ts and § A CHAT HAS THREADS TOO).
+  thread_only?: boolean;
   deleted?: boolean; // sender deleted it; content (if kept) is revealable
   /** WHEN Teams is HOLDING this message for, in epoch ms — absent for one sent at once.
    *  A scheduled send really does come back in the thread's own history carrying this, so
@@ -2489,6 +2493,92 @@ function seedForwardedMessages(): void {
   );
 
   addFixtureConversation(convId, "Forwarded Messages", messages);
+}
+
+/**
+ * The conversation THREADS are drawn from: a chat whose replies are folded out of the running
+ * history and into the thread each one answers (§ A CHAT HAS THREADS TOO).
+ *
+ * It is a fixture of its own rather than a reply added to a seeded chat, for the reason the
+ * chess and pet threads are: the fold changes which messages the main column draws, and every
+ * spec that counts a seeded chat's rows counts them.
+ *
+ * Both halves of the rule are in it, which is what makes either testable:
+ *
+ *  - a thread whose replies are FOLDED (`thread_only`), so the running history holds the root
+ *    and a foot row and the replies are in the panel alone. Two colleagues answer it, so the
+ *    row really stacks two faces and says "2 replies".
+ *  - a BROADCAST reply — one whose author ticked "Also send to the chat" — which is in the
+ *    thread AND in the running history. A fixture with only folded replies would let a page
+ *    that folded EVERY reply pass every test.
+ *
+ * The reader's own reply is one of the folded ones, so the thread is one they are IN, which is
+ * what puts it in the threads view (`threadsAcross`).
+ */
+function seedChatThread(): void {
+  const convId = "19:chat-threads-demo@thread.v2";
+  const base = Date.now() - 22 * 24 * 60 * 60_000;
+  const messages: ChatMessage[] = [];
+  const push = pusher(convId, base, messages);
+  const ada = PEOPLE[0]!;
+  const grace = PEOPLE[1]!;
+
+  // The ROOT: what the thread is about, and the message the foot row hangs under.
+  push(
+    {
+      sender: ada.name,
+      sender_mri: ada.mri,
+      content: "<p>The staging deploy is stuck on the migration step again. Ideas?</p>",
+      is_self: false,
+    },
+    0,
+  );
+  const root = messages[0]!;
+  // A message BETWEEN the root and its replies, so the fold is visible as a fold: without it
+  // the root and its foot row would be the last thing in the history either way.
+  push(
+    {
+      sender: grace.name,
+      sender_mri: grace.mri,
+      content: "<p>Separately — lunch at one?</p>",
+      is_self: false,
+    },
+    60_000,
+  );
+  // TWO FOLDED REPLIES, one of them the reader's own. Neither is in the running history.
+  push(
+    {
+      sender: grace.name,
+      sender_mri: grace.mri,
+      content: replyContent(root, "It is the index rebuild — it times out at 30s."),
+      is_self: false,
+      thread_only: true,
+    },
+    120_000,
+  );
+  push(
+    {
+      sender: SELF_NAME,
+      sender_mri: SELF_MRI,
+      content: replyContent(root, "Raising the timeout to 120s now."),
+      is_self: true,
+      thread_only: true,
+    },
+    180_000,
+  );
+  // AND ONE BROADCAST reply: in the thread and in the running history both, which is what
+  // ticking "Also send to the chat" does.
+  push(
+    {
+      sender: ada.name,
+      sender_mri: ada.mri,
+      content: replyContent(root, "Deploy is green — thanks both."),
+      is_self: false,
+    },
+    240_000,
+  );
+
+  addFixtureConversation(convId, "Thread Demo", messages);
 }
 
 /** Register a "Plain Text" conversation of `messagetype: Text` bodies — which are
@@ -6659,6 +6749,28 @@ function parseSendSubject(input: Record<string, unknown>): string | undefined {
  */
 const MOCK_MAX_THREAD_ROOT_CHARS = 128;
 
+/** How many replies the mock's own threads digest reads before it leaves a thread out. It is
+ *  the backend's own `MAX_THREAD_MESSAGES`, because a spec that drives the "these are your most
+ *  recent threads" line has to be able to reach it. */
+const MOCK_THREAD_DIGEST_LIMIT = 400;
+
+/**
+ * The COMPOSE TIME of the message a reply body answers, or null when it answers none — the
+ * mock's own half of the backend's second pass (`Store::thread_messages`, over
+ * `teams_read::quoted_message_from_html`).
+ *
+ * Only a REPLY names one: Teams sends a FORWARD with no author, no time and no id, so a
+ * forward is nobody's reply — the same rule the page's own `replyTargetTime` holds.
+ */
+function mockReplyTarget(content: string): number | null {
+  const open = content.match(/<blockquote[^>]*schema\.skype\.com\/Reply[^>]*>/i);
+  if (!open) return null;
+  const onTag = open[0].match(/itemid="(\d+)"/i);
+  if (onTag) return Number(onTag[1]);
+  const onTime = content.match(/itemprop="time"[^>]*itemid="(\d+)"/i);
+  return onTime ? Number(onTime[1]) : null;
+}
+
 /**
  * The CHANNEL THREAD a send is a post in, refused exactly as
  * `teams_send::parse_thread_root` refuses it: only a channel has threads, only a message id
@@ -6689,6 +6801,25 @@ function parseSendThreadRoot(
     throw new Error("a thread root is a message id");
   }
   return root;
+}
+
+/**
+ * Whether this REPLY is drawn in its THREAD alone, refused exactly as
+ * `teams_send::parse_thread_only` refuses it: it takes a REPLY, because a top-level message
+ * belongs to no thread and a flag on one would hide it from the running history with nothing
+ * anywhere able to say where it went.
+ *
+ * A mock that accepted what the backend refuses would hide the bug instead of failing a test.
+ */
+function parseSendThreadOnly(input: Record<string, unknown>): boolean {
+  const value = input.thread_only;
+  if (value === undefined || value === null) return false;
+  if (typeof value !== "boolean") throw new Error("thread_only must be a boolean");
+  if (!value) return false;
+  if (input.reply_to === undefined || input.reply_to === null) {
+    throw new Error("only a reply belongs to a thread");
+  }
+  return true;
 }
 
 /** Build the AMS inline-image HTML Teams returns after a successful upload. */
@@ -7992,6 +8123,9 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const subject = parseSendSubject(input);
       // Which channel THREAD it is a post in, refused exactly as the backend refuses it.
       const threadRoot = parseSendThreadRoot(input, id);
+      // Whether this reply is drawn in its thread alone, refused exactly as the backend
+      // refuses it.
+      const threadOnly = parseSendThreadOnly(input);
       if (TEST_HOOKS) {
         capturedSends.push({
           conversation: id,
@@ -8003,12 +8137,13 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
           ...(scheduledTime !== undefined ? { scheduled_time: scheduledTime } : {}),
           ...(subject !== undefined ? { subject } : {}),
           ...(threadRoot !== undefined ? { thread_root: threadRoot } : {}),
+          ...(threadOnly ? { thread_only: true } : {}),
         });
         if (testSendError) throw new Error(testSendError);
         if (testSendDelayMs > 0) {
           return new Promise((resolve) => {
             setTimeout(() => {
-              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject, threadRoot);
+              scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject, threadRoot, threadOnly);
               resolve({ sent: true });
             }, testSendDelayMs);
           });
@@ -8018,7 +8153,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // the tenant really answers with (measured). What keeps it out of the conversation is
       // the page's own rule and the backend's read, so echoing it is what makes those two
       // testable at all.
-      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject, threadRoot);
+      scheduleSendEcho(id, text, replyTo, contentHtml, images, mentions, scheduledTime, subject, threadRoot, threadOnly);
       return { sent: true };
     }
 
@@ -8037,6 +8172,50 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         .sort((a, b) => (a.scheduled_time ?? 0) - (b.scheduled_time ?? 0))
         .map((m) => nicknamed(m));
       return { messages: held };
+    }
+
+    // EVERY REPLY ACROSS EVERY CONVERSATION, and the message each one answers — what the THREADS
+    // view is built from. An ordinary read on the real backend too (`Store::thread_messages`): a
+    // thread IS its messages, so the store already holds them.
+    //
+    // It answers the WHOLE store rather than the page the app has loaded, which is the one thing
+    // this read exists for: a list of "every thread I am in" taken off the loaded page would hold
+    // the threads of whichever conversation happened to be open.
+    //
+    // It DECIDES NOTHING about a thread — which reply belongs to which root is the page's own
+    // derivation (`chatThreads`) — so, exactly like the backend, it answers ordinary messages plus
+    // the bound it read them under.
+    case "thread_digest": {
+      const everywhere: ChatMessage[] = [
+        ...[...store.values()].flatMap((c) => c.messages),
+        ...[...channelStore.values()].flatMap((c) => c.messages),
+      ];
+      const now = Date.now();
+      const delivered = everywhere.filter((m) => !m.deleted && (m.scheduled_time ?? 0) <= now);
+      // A REPLY is one whose body carries Teams' own reply blockquote, which is the very
+      // marker the backend's SQL prefilters on.
+      const replies = delivered.filter((m) => m.content.includes("schema.skype.com/Reply"));
+      const held = new Set(replies.map((m) => `${m.conversation_id}\u0000${m.id}`));
+      // …and the ROOT each one answers, looked up by the address its own quote carries. It is
+      // the backend's own second pass, and without it the view has a reply with nothing to
+      // draw above it.
+      const roots: ChatMessage[] = [];
+      for (const reply of replies) {
+        const target = mockReplyTarget(reply.content);
+        if (target === null) continue;
+        const root = delivered.find(
+          (m) => m.conversation_id === reply.conversation_id && m.compose_time === target,
+        );
+        if (!root) continue;
+        const key = `${root.conversation_id}\u0000${root.id}`;
+        if (held.has(key)) continue;
+        held.add(key);
+        roots.push(root);
+      }
+      return {
+        messages: [...replies, ...roots].map((m) => nicknamed(m)),
+        limit: MOCK_THREAD_DIGEST_LIMIT,
+      };
     }
 
     // Every message of one conversation that carries a game of CHESS — what the head-to-head score
@@ -10250,6 +10429,7 @@ function scheduleSendEcho(
   scheduledTime?: number,
   subject?: string,
   threadRoot?: string,
+  threadOnly?: boolean,
 ): void {
   setTimeout(() => {
     const t = threadFor(convId);
@@ -10278,6 +10458,11 @@ function scheduleSendEcho(
       // `thread_subject` on every inbound message. Echoing it is what makes the whole
       // rendering half testable — the heading a thread is drawn with is this field.
       ...(subject ? { thread_root_id: `${convId}#${seq}`, thread_subject: subject } : {}),
+      // A reply that asked to be drawn in its thread alone comes back saying so: the real
+      // service keeps the custom `properties.tlthreadonly` byte for byte and the read path
+      // decodes it into this field. Echoing it is what makes the FOLD testable at all — a mock
+      // that withheld it would draw the reply inline and let a broken fold pass every test.
+      ...(threadOnly ? { thread_only: true } : {}),
       // A post in a THREAD comes back inside that thread: the real backend POSTs it to the
       // thread's own address (`;messageid=<root>`) and the service then tags the message with
       // that `rootMessageId`, which the read path decodes into this field. Echoing it is what
@@ -13441,6 +13626,7 @@ seedAppCards();
 seedThreadActivity();
 seedForwardedMessages();
 seedPlainTextSamples();
+seedChatThread();
 seedStopAgentThread();
 seedChessThread();
 seedPetThread();

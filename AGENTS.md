@@ -532,6 +532,243 @@ measured on the read path, and healed for rows an older build filed under it
 (`Store::reparent_thread_link_messages`) — and the failure mode if it is wrong is a refused send
 with the words still in the composer rather than a reply posted somewhere nobody can see.
 
+## A CHAT HAS THREADS TOO (the reply folds into one, and Slack's own broadcast beside it)
+
+A CHANNEL's threads are Teams' own: the service files a reply under the root post's id and hands
+that id back on every one of them, which is what § A CHANNEL THREAD is a THREAD rests on. A CHAT
+has none of that — its history is flat on the service, and `teams_send::parse_thread_root` refuses
+a thread address there because the service publishes none. So a chat's reply used to be one more
+message in the running conversation, and a thread of eight answers was eight messages between
+whatever else was being said.
+
+It is a thread now: pressing Reply starts one, the replies are drawn in the panel beside the
+conversation, and the root carries the foot row that says who answered, how many of them and when
+the last one landed. `web/src/lib/chat-threads.ts` is the derivation, `threads-view.ts` and
+`web/src/components/threads-pane.tsx` are the view that lists every thread the reader is in,
+`teams_send::parse_thread_only` is the wire's trust boundary and `Store::thread_messages` is the
+one read a page cannot make for itself.
+
+**THE QUOTE GRAPH IS THE THREAD GRAPH, and nothing about that is invented here.** Teams composes a
+reply with the quoted message's id in the blockquote's own `itemid` and again in its
+`itemprop="time"` span, and that id IS the quoted message's arrival time in epoch milliseconds —
+which is also its id. Measured on this tenant's own history and already relied on by § A quote is
+a POINTER to a message: `itemid` equals the `itemprop="time"` id in **1174 of 1174** replies, and
+no stored message has an id differing from its compose time. So the address a reply answers is
+already in every reply ever sent, and the whole feature is a fold over messages this app already
+holds. `teams_read::QuotedMessage::target` is the Rust half and `replyTargetTime` the page's, and
+both refuse a FORWARD: Teams sends one with no author, no time and no id, because the message it
+holds was said somewhere else — read as a reply it would file a stranger's words under a thread
+they were never part of.
+
+**THE FOLD IS A DISPLAY DECISION AND NEVER A CLAIM ABOUT WHERE THE MESSAGE IS.** The reply really
+is in the conversation: a chat has no threads on the service, so every stock Teams client draws it
+inline, and nothing here changes who receives it. What the fold decides is whether teams-lite
+draws it in the running history as well as in its thread — which is exactly the kind of decision
+§ A CHANNEL IS DRAWN THE WAY TEAMS DRAWS IT already makes when a conversational channel draws its
+thread LEADS and puts the replies one press away.
+
+**SLACK'S BROADCAST IS WHY THE FEATURE IS ACCEPTABLE AT ALL**, and it is the half their own design
+history says settled the model: replies no longer appearing in the channel is the one thing readers
+feared about threads, so the reply may be sent to the thread AND to the conversation. Here it is
+one checkbox in the reply banner — **Also send to the chat**, unticked, which is Slack's default and
+the whole point (a box that started ticked would make every reply a broadcast and the fold a thing
+nobody ever saw).
+
+**IT IS A CUSTOM `properties` FIELD, and this is the one place that is acceptable.**
+`teams_send::THREAD_ONLY` (`tlthreadonly`, a quoted `"1"` — the shape `SCHEDULED_SEND_TIME` is
+measured to survive as) rides in the send, `teams_read::thread_only` reads it back, and
+`Message::thread_only` (schema v19) keeps it. § A SEALED chat refuses a custom property for a
+ciphertext on the ground that the day the service drops one the message is lost with nothing to
+report; here what is lost is a DISPLAY preference, and losing it draws the reply where every other
+client already draws it. **ABSENT IS FALSE on every side** — a row from before the column, a stock
+client's reply, a property the service dropped — so a flag that failed to arrive can only ever
+leave a message MORE visible and can never hide one. It is the reading `parse_send_mentions` takes
+for an absent mention kind: the narrowest claim.
+
+Fourteen rules hold it, and each is pinned by a test:
+
+- **IT NEEDS NO GATE OF ITS OWN, and the reason is sharper than the title's.** `send` is already an
+  `OUTWARD_METHODS` entry and the flag rides in its params exactly as a picture, a title and a
+  thread address do — but this one *publishes nothing new at all*: the reply reaches the same
+  people either way, and the property only decides how this app draws it. The read behind the view
+  (`thread_digest`) is OPEN for the reason `chess_messages` and `pet_messages` are: a thread IS its
+  messages, so the store already holds every one of them and it makes no network request.
+- **ONLY A REPLY MAY CARRY IT** (`parse_thread_only`, mirrored by the mock's own
+  `parseSendThreadOnly`). A top-level message belongs to no thread, so the flag on one would hide
+  it from the running history of every teams-lite reader with nothing anywhere able to say where it
+  went.
+- **AN EDIT CARRIES IT, FROM THE STORE.** The service ASSIGNS `properties` rather than merging it
+  (measured — `examples/channel_subject_probe.rs`), so an edit that did not restate this would pop
+  a threaded reply back into everybody's running history because its author fixed a typo. The
+  value is the `edit` handler's own store read, exactly as the TITLE is, so a client can no more
+  move somebody's reply out of its thread with an edit than it can retitle their post.
+- **THE FLAG IS LEARNED AND NEVER UNLEARNED, and never INVENTED** (`thread_only = MAX(…)` in
+  `Store::insert_message`). A reply's author asked for it once, so a later frame that merely omits
+  the property must not un-fold their reply for everybody; and a flag that never arrived stays off,
+  which is what makes "nothing can be hidden by a field that went missing" true.
+- **A REPLY WHOSE PARENT IS NOT LOADED IS NOT FOLDED.** The history pages a screen at a time, so
+  the message a reply answers is very often not here yet — folding against a parent that is nowhere
+  would take the reply out of the running history and put it in no thread, which is a message the
+  reader can no longer reach from anywhere (the defect `withPetArchive` exists to close one feature
+  over). It stays where it was and joins its thread by itself when the older page lands.
+- **A REPLY TO A REPLY JOINS THE ROOT'S THREAD.** One level deep, which is Slack's shape and a
+  channel's already (`thread_root_id` is the root's id however deep the answer). A tree would draw
+  a column of nested quotes nobody can follow on a 390px screen. A cycle in ids somebody else's
+  client wrote costs a bounded walk (`MAX_CHAIN`) rather than the tab.
+- **THE PANEL IS THE CHANNEL'S OWN PANEL, unchanged.** `ChannelThreadsPanel` draws a chat thread
+  and a conversational channel's alike, because both are the same `Thread` shape by construction —
+  so the foot row, the heading, the reply divider, the scroller and the below-`md` rule that
+  REPLACES the history all come for free, and a thread is one thing in this app rather than two.
+  A chat thread has no TITLE (Teams offers the field in a channel and nowhere else), so the heading
+  falls back to the root's opening words, which is what `threadPanelHeading` was already written to
+  do.
+- **OPENING THE PANEL AIMS THE APP'S ONE COMPOSER**, and closing it takes the aim back. There is
+  ONE composer here — its `data-conversation-id` is what a sanctioned live driver proves its target
+  with — so this is the channel panel's own rule inherited whole, and the banner stays the one
+  authority on where the next Enter lands.
+- **AND PRESSING REPLY OPENS THAT PANEL, which is what stops the sharpest surprise the fold can
+  cause.** A reply is folded by default, so a reader who pressed Reply on a bubble, typed and
+  pressed Enter watched their message VANISH — into a thread they had never been shown, behind a
+  foot row under a message that may be a screen up. `doReply` therefore opens the panel of the
+  thread the reply will really be in, which for an answer to another reply is the ROOT's: the same
+  resolution the send makes, so what the reader is shown and what their message joins cannot
+  disagree. It is Slack's own flow in as many words — *click on reply, the thread is opened in the
+  right sidebar* — and it is the change that made `messaging.spec.ts`'s own "replies to a message
+  via the actions menu" mean something different: the reply is in the panel, and in the running
+  history it is not.
+  A CHANNEL opens nothing, because both of its layouts already show the reader where their answer
+  goes: the card it lands in, or the panel they opened to write it in.
+- **A THREAD NOBODY HAS ANSWERED IS STILL A PANEL.** A chat's threads are derived from its quotes,
+  so a message nobody has answered is in none of them — and the panel that Reply opens would be
+  nothing at all. It is synthesized for exactly that root, with no replies, and the panel already
+  draws that state: it says what the next Enter does instead of being empty, which is the same
+  sentence a channel's own unanswered thread gets.
+- **NO REPLY DRAWS A QUOTE OF THE ROOT INSIDE THE ROOT'S OWN PANEL** (`showQuote`). In a channel
+  the quote is never POSTED (`threadReplyQuotes`); in a chat it has to be in the body, because it
+  is how the reply says which thread it is in — so what is dropped here is the DRAWING. Without it
+  the panel repeated the root's words above every answer, two centimetres under the post itself. A
+  reply that answers another REPLY keeps its quote on both surfaces, for the reason a channel does:
+  a long thread holds several conversations, and the quote is the only thing that says which one is
+  being answered. The history BEHIND the panel still draws a broadcast reply's quote, because there
+  the root may be a screen away.
+- **THE FOOT ROW IS SIZED FOR ITS OWN FACES**, which was wrong on both surfaces before this:
+  `Avatar` sets 13px ink for its 36px default, and two letters at 13px are wider than the 20px disc
+  this row draws — so a colleague with no photo showed clipped initials spilling out of a tint
+  nobody could see (measured on the first capture: "LI", with its disc gone). It is one edit in the
+  shared row, so the conversational channel's own foot row is mended with it.
+- **THE ROW'S HEIGHT IS A CONSTANT THE ESTIMATE KNOWS** (`THREAD_FOOT_ROW_PX`, added by
+  `estimateSize` for exactly the rows that carry one). It is the rule `TIME_MARK_ROW_PX` holds and
+  for its reason: a row taller than its estimate is corrected by writing `scrollTop`, and a
+  correction the reader watches is the twitch `e2e/history.spec.ts` exists to catch.
+- **A FOLDED REPLY'S ID POINTS AT THE POST THAT HOLDS IT** (`rowOfMessage`), so a notification
+  about one scrolls to its root rather than to nothing — the rule a conversational channel's reply
+  already follows, generalized to both. A deep link then opens the panel beside it, and a link to a
+  ROOT does NOT: that press asked to see THAT message, and opening the thread under it would answer
+  a question nobody asked.
+- **"OPEN THIS THREAD" IS ITS OWN ASK** (`openThread` / `pendingThreadRoot`), beside the deep-link
+  scroll rather than inside it. A deep link SHOWS a message and deliberately does not aim the
+  composer at it; a press in the threads view says "open this thread", so it aims exactly as a
+  press on the foot row does.
+- **THE TICK BELONGS TO THE REPLY, AND ITS DEFAULT TRAVELS WITH IT** (`PendingReply.broadcast`,
+  read once by the composer where the reply starts). An ordinary Reply is UNTICKED; an
+  "Answer with <agent>" and a "Review <ref> with <agent>" are TICKED, because the ANSWER is
+  posted with no flag at all — the reader asked for it in the conversation and watches it being
+  written there, so a folded question would be hidden in a thread with its own answer standing in
+  the history beside it. It is a DEFAULT and not a rule: the reader may untick it.
+  It is a field on the pending reply rather than a second effect in the composer, and that is a
+  correctness matter rather than tidiness: the version with two effects raced, and every agent
+  request went out FOLDED whatever the box showed.
+- **WHAT THE SEND CARRIES IS READ FROM A REF, because `send` cannot read the state.** The rich
+  editor holds this composer's `onSubmit` from the render it was mounted in (`submitRef`), so a
+  send closes over the FIRST render's values — which is why the pending pictures and the
+  scheduled moment are already refs here. Read from the state, every reply went out folded
+  whatever the reader had ticked; it is the defect § AND THE READER CAN ASK ABOUT IT records for
+  its own `ask`, in another file.
+- **A CHANNEL IS OFFERED NO BROADCAST BOX** (`broadcastOffered`). A channel reply is filed by
+  ADDRESS, so it is out of the channel's own column whatever this app does — broadcasting one would
+  mean posting a SECOND message to the channel root, which is a different act with a different cost
+  and this app does not offer it. That limit is stated rather than papered over.
+
+### THE THREADS VIEW (`/threads`, the row under the search field)
+
+Every thread the reader is in, across every conversation, newest activity first — Slack's own All
+Threads, reached from a row under the search field where they put it. It is a WAY IN and never a
+second place to read a thread: a row answers the three questions a reader has before opening one
+(who answered, how many, when the last one landed) and then takes them to the thread in its own
+conversation. Drawing the messages again would be a second message renderer, a second composer and
+a second answer to "where does the next Enter land", which is what the panel's own header refuses.
+
+- **A ROUTE, never a piece of state** — the rule all five merge-request pages hold, for the three
+  things a URL gives that a `useState` cannot: it survives a reload, it can be sent to whoever is
+  being asked to look, and the browser's own Back leaves it.
+- **A ROW rather than a sixth TAB.** The strip is five icons of one weight, and a thread belongs to
+  no section of the list because it is in a chat AND in a channel. It clears the 44px floor every
+  target this app draws for a thumb clears.
+- **"IN" MEANS THE READER WROTE IN IT**, root or reply (`threadsAcross`). That is Slack's own rule
+  for the list — it holds the threads you are following, which is the ones you took part in — and
+  it is the only version this app can answer honestly: a thread between two colleagues in a group
+  chat is not the reader's to be handed a list of, and `is_self` is a fact the backend already
+  resolves on every message.
+- **BOTH DERIVATIONS ARE USED, per conversation, and the conversation's own id picks.** A channel
+  is TOLD the shape of its threads, a chat's are read out of its quotes — so reading a chat as a
+  channel would list a thread per message, and reading a channel as a chat would find no quote on a
+  reply into a thread and list nothing at all.
+- **THE DIGEST IS PUT BACK IN SEQ ORDER FIRST.** `Store::thread_messages` answers newest first
+  (`ORDER BY seq DESC`) and both derivations walk a history in the order it was written: taken as
+  it arrives, a thread's replies are listed backwards and its "last reply" is its first.
+- **THE READ IS ASKED BY THE VIEW**, on every open, and never on connect — the split
+  `loadChessArchive` already makes: a reader who never opens it never pays for it, and a thread
+  they were in a minute ago has moved. A read that FAILS is said rather than drawn as an empty
+  list: "you are in no threads" is a claim about the reader's own conversations, and a failed read
+  is not one.
+- **WHAT THE LIST LEFT OUT IS COUNTED** (`MAX_THREAD_MESSAGES` = 400 replies, and the bound travels
+  in the answer so the page can say the list is the NEWEST rather than all of them). A list that
+  stops without saying so reads as a complete one — the rule the update panel's own count holds —
+  and a backend that named no bound claims nothing.
+- **THE SQL PREFILTER IS THE WHOLE QUOTE MARKER**, and that is correctness rather than tidiness:
+  the `LIMIT` runs BEFORE the parse, so every row a looser `LIKE` over-matched would eat a slot
+  ahead of a real reply. It is the trap `Store::pet_messages` states in full.
+- **THE ROOT EACH REPLY ANSWERS IS LOOKED UP ONCE PER PAIR**, by the address the reply's own quote
+  carries, through `teams_read::quoted_message_from_html` — the parser that already existed, EXTENDED
+  rather than copied, so there is one Rust answer to "what does this reply answer". A root the store
+  does not hold is simply absent, and the view draws the thread it can see.
+- **A ROW NAMES ITS CONVERSATION THROUGH THE APP'S OWN TWO NAMERS** (`channelLabel` /
+  `convLabel`), which is where the self-chat's name, a group with no title and the nickname the user
+  gave a colleague are already decided. A conversation neither list holds is named "Conversation"
+  rather than by its id: a row reading `19:…@thread.v2` is a row nobody can read.
+- **AND THE WIRE NEVER REACHES IT.** A row shows the root's words with any machine-readable line
+  taken off them (`withoutWireLine`) — a colleague running teams-lite can post a game or a
+  companion into a conversation, and § THE SIX SURFACES THE WIRE MUST NEVER REACH gains one more,
+  taking the same one function.
+
+`web/mock/server.ts` reproduces the whole feature with no tenant: it refuses the flag exactly as
+the backend does (`parseSendThreadOnly`), ECHOES it on the reply — which is what makes the fold
+testable at all, since a mock that withheld it would draw the reply inline and let a broken fold
+pass every test — and answers `thread_digest` over the WHOLE store rather than the page the app
+loaded, which is the one thing that read exists for. Its fixture is `Thread Demo`, and both halves
+of the rule are in it on purpose: two FOLDED replies (one of them the reader's own, so the thread is
+one they are IN) and one BROADCAST, because a fixture with only folded replies would let a page that
+folded EVERY reply pass every test.
+
+`cd web && bun run preview -- --out /tmp/thr --threads --dpr 3` captures the running history with
+the thread folded out of it in both themes, the foot row cropped to itself, the panel in both
+themes, the broadcast box cropped to the banner it sits in in both themes, the view in both themes,
+ONE ROW cropped, the row under the search field that leads there, and a PHONE's width where the
+panel REPLACES the conversation. `web/e2e/chat-threads.spec.ts` pins every rule the page owns,
+`web/src/lib/chat-threads.test.ts` and `threads-view.test.ts` the pure ones, and
+`teams_send::tests`, `teams_read::tests`, `store::tests` and the `edit` handler's own scan the wire.
+
+**What is UNVERIFIED against the tenant is the PROPERTY.** No probe has posted a reply carrying
+`properties.tlthreadonly` and read it back: the sandbox target is a chat, so one could be — this is
+the one gap here that a probe really could close, and it was not run. What it rests on instead is
+that a custom `properties` field IS measured to survive on this tenant — `tlsealed` came back byte
+for byte, on a budget of 28 672 bytes (`examples/sealed_message_probe.rs`), which is four orders of
+magnitude more than the one character this writes — and that the failure mode if the service drops
+it is the one the whole design is built around: the reply is drawn
+inline, which is where every other client draws it and where this app drew every reply before this.
+The quote addresses the fold rests on are measured (1174 of 1174), the reads are pinned in Rust, and
+the surface is pinned against the mock.
+
 ## A channel post has a TITLE (its own field in the composer, a heading above the body)
 
 A post in a CHANNEL carries a title — the line an announcement draws above its words — and a
@@ -4593,6 +4830,12 @@ user. Two independent mechanisms enforce that split:
   For one JOB's LOG — the card that opens it, the page in both themes, every section folded, the
   filter, a cut log, a job that has not run, a live one and a refused read:
   `bun run preview -- --out /tmp/log --job-log`, or `openJobLog` from the same file.
+  For THREADS IN A CHAT — the running history with a thread folded out of it in both themes, the
+  foot row cropped to itself, the panel in both themes, the broadcast box cropped to the banner it
+  sits in, the threads VIEW in both themes, one of its rows cropped, the row under the search field
+  that leads there, and a PHONE's width where the panel REPLACES the conversation (pass `--dpr 3`:
+  the foot row is 20px faces beside 12px type and the broadcast box is 11px):
+  `bun run preview -- --out /tmp/thr --threads`.
   For the chat list's sections and the "…"
   menu on a row: `bun run preview -- --out /tmp/chat --chat-menu`, or `openChatMenu` /
   `toggleChatSection` from the same file. For a message's actions as a PHONE draws them —
@@ -4721,6 +4964,15 @@ user. Two independent mechanisms enforce that split:
   live in `global-setup.ts` either, because the suite starts its own server first, so the
   check cannot tell ours from a squatter. Pass explicit free ports whenever another
   session may be running one: `E2E_MOCK_PORT=19467 E2E_WEB_PORT=19468`.
+  **AND THE WEB SERVER IS ADOPTED THE SAME WAY, which is the sharper half in a working
+  session.** That server is a production BUILD (`vite build`, then `bun run server.ts`), so a
+  port left listening from an earlier run keeps serving the bundle it was built from and a
+  rebuild reaches it never. Measured while this note was written: several consecutive runs
+  tested a bundle that predated the change under test, and what they reported was a feature
+  that "did not work" plus four unrelated specs failing — which is an hour spent debugging the
+  code that was never running. Reusing your OWN ports between runs is exactly when it bites, so
+  free them before a run meant to prove a change:
+  `lsof -ti tcp:<port> | while read p; do kill -9 "$p"; done`.
 - **Screenshots are not proof of the target.** Before trusting a captured UI, look
   at *what it shows*: the mock's fixtures are in English with names like "Lucas
   Silva". Real conversations mean you were live all along.
@@ -8833,7 +9085,12 @@ user's. What changes is only what is asked.
   always decoded) — see § A channel post has a TITLE. And a REPLY in a channel is addressed at
   the THREAD it answers rather than carrying a quote of it (`teams_send::parse_thread_root`, which
   is the one value in a `send` that becomes part of the request path) — see § A CHANNEL THREAD is
-  a THREAD.
+  a THREAD. A CHAT has threads too, and they are read out of the QUOTES its own history carries
+  rather than out of an address the service does not publish: `teams_read::QuotedMessage::target`
+  is what a reply answers, `teams_send::parse_thread_only` is whether it is drawn in its thread
+  alone (`Message::thread_only`, schema v19), and `Store::thread_messages` is the one read a page
+  cannot make for itself — every thread the store holds, across every conversation — see
+  § A CHAT HAS THREADS TOO.
   Exposed over a local WebSocket (`ws://127.0.0.1:19420`).
 - One front-end, talking to the backend only through that WebSocket. Local-first is
   enforced server-side; the front-end touches neither the network nor SQLite directly.

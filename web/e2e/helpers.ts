@@ -247,6 +247,11 @@ export type CapturedSend = {
    *  by ADDRESS, so this is the only proof the answer lands under the announcement instead
    *  of opening a second thread beside it. */
   thread_root?: string;
+  /** Whether this REPLY is drawn in its THREAD alone — the reader left "Also send to the
+   *  chat" unticked. Present only when it is set, so its ABSENCE is what proves a broadcast:
+   *  a reply with no flag is drawn where every other client draws it (see
+   *  lib/chat-threads.ts). */
+  thread_only?: boolean;
 };
 
 /** Configure the mock's next sends. Always reset the control after a failure test,

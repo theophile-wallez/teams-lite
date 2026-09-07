@@ -35,6 +35,7 @@ import {
 } from "~/lib/seal";
 import { copyableMessageText } from "~/lib/protocol";
 import { replyHeading } from "~/lib/threads";
+import { BROADCAST_HINT, BROADCAST_LABEL, broadcastOffered } from "~/lib/chat-threads";
 import { cn } from "~/lib/utils";
 import { FadeArc } from "./loading-ui/fade-arc";
 import { ScheduleSendMenu } from "./schedule-send-menu";
@@ -133,11 +134,52 @@ export function Composer(props: {
   // …and HOW that channel is drawn, which decides it too: a channel Teams draws as a running
   // conversation has a chat's own composer, with no title in it (see lib/post-subject.ts).
   const channelLayout = useAppState((s) => (openId ? s.channelLayouts[openId] : undefined));
+  const isChannel = channels.some((channel) => channel.id === openId);
   const subjectOffered = postSubjectOffered({
-    isChannel: channels.some((channel) => channel.id === openId),
+    isChannel,
     replying: replyingTo !== null,
     layout: channelLayout,
   });
+  // Whether this reply is offered "Also send to the chat" — a CHAT reply only (see
+  // `broadcastOffered`).
+  const broadcast = broadcastOffered({ isChannel, replying: replyingTo !== null });
+  /** Whether the reader ticked it. Local to the composer like the pending pictures and the
+   *  title, and for the same reason: the choice belongs to the reply being written, so it is
+   *  dropped when the reply is cancelled or the reader walks away rather than following them
+   *  into somebody else's thread.
+   *
+   *  It starts UNTICKED, which is Slack's own default and the whole point of the feature: the
+   *  noise a thread keeps out of the running history is what it is for, and a box that started
+   *  ticked would make every reply a broadcast and the fold a thing nobody ever saw. */
+  const [alsoToChat, setAlsoToChat] = useState(false);
+  /**
+   * …and the SAME ANSWER in a ref, because `send` cannot read the state.
+   *
+   * The rich editor holds this composer's `onSubmit` from the render it was mounted in
+   * (`submitRef`), so a send closes over the FIRST render's values — which is why the pictures
+   * and the scheduled moment are already refs here rather than state. Read from the state, every
+   * reply went out folded whatever the reader had ticked: measured, and it is the defect
+   * `gitlab-review-chat.tsx` records for its own `ask`.
+   */
+  const threadOnlyRef = useRef(false);
+  const replyTargetId = replyingTo?.message.id ?? null;
+  /**
+   * The tick belongs to the reply being written: a new reply starts at ITS OWN default, and
+   * cancelling one or walking away throws it away.
+   *
+   * That default is UNTICKED for an ordinary Reply — Slack's own default, and the whole point of
+   * the feature, since the noise a thread keeps out of the running history is what it is for —
+   * and TICKED where the reply's own reason says so (`PendingReply.broadcast`, which is what an
+   * "Answer with <agent>" sets). It is read from the reply rather than from a second effect for
+   * the reason that field states: two effects writing one tick is a race, and the version that
+   * had one sent every agent request folded whatever the box showed.
+   */
+  useEffect(() => {
+    setAlsoToChat(replyingTo?.broadcast === true);
+    // `replyingTo` itself is deliberately not a dependency: it is a fresh object on every
+    // change of anything in it, and the tick is the reader's from the moment the reply starts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replyTargetId, openId]);
   // The title being written. Local to the composer, like the pending pictures and for the
   // same reason: a title belongs to the post it is being written for, so it is dropped when
   // the reader walks to another conversation rather than following them into one.
@@ -346,6 +388,11 @@ export function Composer(props: {
       mentions,
       scheduledAt ?? undefined,
       submittedSubject,
+      // Whether this reply is drawn in its thread alone — from the REF, which is the only
+      // thing this closure can read (see `threadOnlyRef`). It is already narrowed to a reply
+      // where the box is really offered, so a stale tick from a channel reply can never reach
+      // the wire, where the backend refuses it (`parse_thread_only`).
+      threadOnlyRef.current,
     );
     if (sendVersion.current !== version) return sent;
     sendingRef.current = false;
@@ -372,6 +419,13 @@ export function Composer(props: {
   // passphrase this machine would seal them under. Both are read from what the app already
   // holds — the backend's own seal status, and the messages on screen — so neither costs a
   // request and neither can go stale behind a reader who is already typing.
+  // What the next send would carry, kept where `send` can read it (see `threadOnlyRef`). It is
+  // the WHOLE decision rather than the tick alone, so a reply in a channel — where the box is
+  // not offered at all — can never send a flag the backend refuses.
+  useEffect(() => {
+    threadOnlyRef.current = broadcast && !alsoToChat;
+  }, [broadcast, alsoToChat]);
+
   const sealed = sealIsOn(sealStatus, openId);
   const sealMismatch = sealKeyDisagrees(sealStatus, openId, openMessages);
 
@@ -431,6 +485,32 @@ export function Composer(props: {
               <div className="truncate text-xs text-text-faint">
                 {copyableMessageText(replyingTo.message)}
               </div>
+              {/* AND WHETHER IT ALSO LANDS IN THE RUNNING HISTORY — the one thing Slack
+                  added after shipping threads, because replies disappearing from the
+                  channel is what readers feared about them (§ A CHAT HAS THREADS TOO).
+                  It sits INSIDE the banner because the banner is the one authority on
+                  where the next Enter lands, and this is the other half of that sentence.
+                  A CHANNEL is offered none: a reply there is filed by address, so
+                  broadcasting it would mean posting a second message (`broadcastOffered`). */}
+              {broadcast && (
+                <label
+                  data-testid="reply-broadcast"
+                  title={BROADCAST_HINT}
+                  // The 44px target is GROWN rather than drawn, the technique the thread
+                  // foot row and the dialog's close already use: this row sits under two
+                  // lines of a banner above the field, so a box a thumb tall would push the
+                  // composer down by half a centimetre on every reply.
+                  className="relative mt-1.5 inline-flex h-6 cursor-pointer items-center gap-2 text-[11px] text-text-dim after:absolute after:inset-x-0 after:-bottom-2.5 after:-top-2.5 after:content-['']"
+                >
+                  <input
+                    type="checkbox"
+                    checked={alsoToChat}
+                    onChange={(event) => setAlsoToChat(event.currentTarget.checked)}
+                    className="size-3.5 shrink-0 accent-primary"
+                  />
+                  <span>{BROADCAST_LABEL}</span>
+                </label>
+              )}
             </div>
             <button
               type="button"

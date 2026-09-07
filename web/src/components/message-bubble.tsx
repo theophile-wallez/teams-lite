@@ -307,6 +307,21 @@ function MessageBubbleImpl(props: {
    *  and Delete are offered, because that is a fact about the message rather than about
    *  where it is drawn. */
   threadPost?: boolean;
+  /**
+   * Whether to draw the quote this reply carries. FALSE inside the thread the quote names.
+   *
+   * A chat has no thread address on the service, so the quote IS how a reply says which thread
+   * it is in (see lib/chat-threads.ts) — it has to be in the body, and every other client draws
+   * it. What it must not do is be drawn INSIDE that thread's own panel: the root post is two
+   * centimetres above, so a quote of it above every answer states one thing as many times as
+   * there are replies. It is the rule `threadReplyQuotes` already holds for a channel, where the
+   * quote is simply never posted because the thread travels as an address instead.
+   *
+   * A reply that quotes ANOTHER REPLY keeps its quote, on both surfaces and for the same
+   * reason: a long thread holds several conversations, and the quote is the only thing that
+   * says which one is being answered.
+   */
+  showQuote?: boolean;
   /** The agents that could really answer in this thread, in the backend's own order
    *  (`agentCandidatesFor`). Empty — which is every thread nobody opted in — draws no
    *  "Answer with …" row at all. */
@@ -812,7 +827,7 @@ function MessageBubbleImpl(props: {
   // summoned it, and a quote that only appeared once the run finished would make the
   // bubble jump at the moment the reader is watching it most closely.
   const quotedBlock =
-    parsed.quote ? (
+    parsed.quote && props.showQuote !== false ? (
       <div
         data-testid="message-quote"
         data-quote-jumpable={quoteJumpable ? "true" : undefined}

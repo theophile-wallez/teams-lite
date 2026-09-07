@@ -196,6 +196,47 @@ pub fn parse_subject(params: &Value) -> Result<Option<String>> {
     Ok(Some(subject))
 }
 
+/// The `properties` field that says a REPLY belongs in its thread and nowhere else — the
+/// reader unticked "Also send to the chat" (AGENTS.md § A CHAT HAS THREADS TOO).
+///
+/// It is a field of this app's own invention, and it is the one place that is acceptable:
+/// what it carries is a DISPLAY decision, so the day the service drops it the reply is drawn
+/// where every other client already draws it — inline, which is what this app did before
+/// threads existed. That is the opposite of the reason § A SEALED chat refuses a custom
+/// property for a ciphertext: there, losing the field loses the MESSAGE.
+///
+/// It is a quoted `"1"` rather than a boolean, because that is the shape the one other
+/// property this app writes into a send is measured to survive as
+/// ([`SCHEDULED_SEND_TIME`]) — a top-level or differently-typed spelling of that one was
+/// silently ignored, so nothing here invents a second convention.
+pub const THREAD_ONLY: &str = "tlthreadonly";
+
+/// Read the optional `thread_only` a `send` may carry: whether this REPLY is drawn in its
+/// thread alone.
+///
+/// This is the trust boundary — a client supplies it — so the one rule that makes it mean
+/// anything is enforced here rather than in the composer that also states it: **it takes a
+/// REPLY**. Without a quote there is no thread to belong to, so the flag would hide a
+/// top-level message from the running history of every teams-lite reader in the
+/// conversation, with nothing anywhere able to say where it went.
+///
+/// `false` writes NOTHING, which is what keeps an ordinary reply byte-identical to what this
+/// app sent before the field existed.
+pub fn parse_thread_only(params: &Value) -> Result<bool> {
+    let Some(value) = params.get("thread_only").filter(|v| !v.is_null()) else {
+        return Ok(false);
+    };
+    let thread_only = value.as_bool().context("thread_only must be a boolean")?;
+    if !thread_only {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        params.get("reply_to").is_some_and(|v| !v.is_null()),
+        "only a reply belongs to a thread"
+    );
+    Ok(true)
+}
+
 /// How long a thread root's message id may get. A Teams message id IS its arrival time in
 /// epoch milliseconds (measured — see [`Sent::id`]), so 13 digits is the real shape and this
 /// is the sanity bound above it: what it catches is a client sending something that is not
@@ -601,6 +642,10 @@ pub async fn send_message(
     mentions: &[Mention],
     scheduled_ms: Option<i64>,
     subject: Option<&str>,
+    // Whether this REPLY belongs in its thread alone (see `parse_thread_only`). It decides
+    // one property on the body and nothing about where the message is POSTed: the reply is
+    // in the conversation either way, which is exactly why the flag is only a display one.
+    thread_only: bool,
     seal_key: Option<&crate::seal::SealKey>,
 ) -> Result<Sent> {
     let chat = session
@@ -637,6 +682,7 @@ pub async fn send_message(
         mentions,
         scheduled_ms,
         subject,
+        thread_only,
         // The conversation and the sender come from what THIS call already holds, never from a
         // caller: they are what the envelope's AAD binds, so a mismatch between them and the
         // POST would make the message unreadable to everybody including this machine.
@@ -897,6 +943,12 @@ pub async fn edit_message(
     // `properties` rather than merging it (measured — see `build_edit_body`), so this is
     // not an option a caller may skip on a titled post.
     subject: Option<&str>,
+    // Whether the message ALREADY belongs to its thread alone, so the edit keeps it. Same
+    // hazard as the title above and for the same measured reason — the service ASSIGNS
+    // `properties` rather than merging it — and here what a dropped flag costs is a reply
+    // popping back into the running history of every teams-lite reader in the conversation
+    // because its author fixed a typo.
+    thread_only: bool,
     // The key this conversation seals with, or None where it is not sealed. An edit is a
     // whole new body, so it has to be sealed exactly as the send was — an agent's answer is
     // re-sealed here about once a second while it is written.
@@ -913,8 +965,8 @@ pub async fn edit_message(
         &session.self_name,
         mentions,
         subject,
-        seal_key.map(|key| SealWith { key, conversation_id, sender_mri: &session.self_mri }),
-    )?;
+        thread_only,
+        seal_key.map(|key| SealWith { key, conversation_id, sender_mri: &session.self_mri }))?;
 
     let resp = http
         .put(&url)
@@ -1206,8 +1258,8 @@ fn build_body(
     mentions: &[Mention],
     scheduled_ms: Option<i64>,
     subject: Option<&str>,
-    seal: Option<SealWith<'_>>,
-) -> Result<serde_json::Value> {
+    thread_only: bool,
+    seal: Option<SealWith<'_>>) -> Result<serde_json::Value> {
     let content = message_content(text, reply_to, content_html, images);
     let mut body = json!({
         "clientmessageid": client_message_id,
@@ -1236,6 +1288,12 @@ fn build_body(
         // MERGED into `properties` like every other field this app writes there, so a
         // titled post that also mentions somebody notifies them.
         set_property(&mut body, SUBJECT, json!(subject));
+    }
+    if thread_only {
+        // MERGED like every other property this app writes, so a threaded reply that also
+        // mentions somebody still notifies them (see `set_property`). `false` writes nothing
+        // at all: an ordinary reply stays byte-identical to what this app sent before.
+        set_property(&mut body, THREAD_ONLY, json!("1"));
     }
     // LAST: everything above reads or describes the plaintext body, and the mention check
     // above requires a span the ciphertext does not have (see `seal_body`).
@@ -1351,8 +1409,8 @@ fn build_edit_body(
     self_name: &str,
     mentions: &[Mention],
     subject: Option<&str>,
-    seal: Option<SealWith<'_>>,
-) -> Result<serde_json::Value> {
+    thread_only: bool,
+    seal: Option<SealWith<'_>>) -> Result<serde_json::Value> {
     let content = match content_html.map(trim_message_html).filter(|html| !html.is_empty()) {
         Some(html) => html.to_string(),
         None => escape_html(text.trim()),
@@ -1372,6 +1430,14 @@ fn build_edit_body(
     // client's, so an edit cannot retitle a post either.
     if let Some(subject) = subject.filter(|s| !s.is_empty()) {
         set_property(&mut body, SUBJECT, json!(subject));
+    }
+    // AND THE THREAD FLAG WITH IT, for exactly the same measured reason: `properties` is
+    // ASSIGNED on an edit, so an edit that did not restate this one would pop a threaded
+    // reply back into the running history of every teams-lite reader in the conversation —
+    // because its author fixed a typo. The value is the STORE's own row (see the `edit`
+    // handler), never a client's, so an edit cannot move a reply out of its thread either.
+    if thread_only {
+        set_property(&mut body, THREAD_ONLY, json!("1"));
     }
     // LAST, for the reason `build_body` states: the mention check above reads the plaintext.
     // An agent's answer is re-sealed on every streaming frame through exactly this path.
@@ -1577,8 +1643,8 @@ mod tests {
             &[],
             None,
             None,
-            None,
-        )
+            false,
+            None)
         .unwrap();
         assert_eq!(body["amsreferences"], json!(["0-weu-d1-image"]));
         assert_eq!(body["messagetype"], "RichText/Html");
@@ -1606,7 +1672,7 @@ mod tests {
             height: None,
         };
         let images = [image(1), image(2), image(3)];
-        let body = build_body("9", "", "Me", None, Some("<p>three shots</p>"), &images, &[], &[], None, None, None).unwrap();
+        let body = build_body("9", "", "Me", None, Some("<p>three shots</p>"), &images, &[], &[], None, None, false, None).unwrap();
         assert_eq!(body["amsreferences"], json!(["id-1", "id-2", "id-3"]));
         let content = body["content"].as_str().unwrap();
         assert!(content.starts_with("<p>three shots</p>"));
@@ -1754,7 +1820,7 @@ mod tests {
 
     #[test]
     fn body_has_required_fields() {
-        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, &[], &[], &[], None, None, None).unwrap();
+        let b = build_body("12345", "hi <there>", "Théophile WALLEZ", None, None, &[], &[], &[], None, None, false, None).unwrap();
         assert_eq!(b["clientmessageid"], "12345");
         assert_eq!(b["content"], "hi &lt;there&gt;");
         assert_eq!(b["messagetype"], "RichText/Html");
@@ -1765,13 +1831,13 @@ mod tests {
     #[test]
     fn rich_content_html_is_forwarded_as_content() {
         let html = "<p>hi <strong>bold</strong> <a href=\"https://x\">link</a></p>";
-        let b = build_body("9", "", "Me", None, Some(html), &[], &[], &[], None, None, None).unwrap();
+        let b = build_body("9", "", "Me", None, Some(html), &[], &[], &[], None, None, false, None).unwrap();
         assert_eq!(b["content"], html);
     }
 
     #[test]
     fn empty_rich_content_html_falls_back_to_plain() {
-        let b = build_body("9", "plain", "Me", None, Some(""), &[], &[], &[], None, None, None).unwrap();
+        let b = build_body("9", "plain", "Me", None, Some(""), &[], &[], &[], None, None, false, None).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1801,7 +1867,7 @@ mod tests {
             after: "new <reply>".into(),
         };
 
-        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, &[], &[], &[], None, None, None).unwrap();
+        let b = build_body("12345", "new <reply>", "Me", Some(&reply), None, &[], &[], &[], None, None, false, None).unwrap();
 
         assert_eq!(
             b["content"],
@@ -1835,7 +1901,7 @@ mod tests {
 
     #[test]
     fn edit_body_has_no_client_message_id_and_escapes_content() {
-        let b = build_edit_body("updated <text> & more", None, "Théophile WALLEZ", &[], None, None).unwrap();
+        let b = build_edit_body("updated <text> & more", None, "Théophile WALLEZ", &[], None, false, None).unwrap();
         assert!(b.get("clientmessageid").is_none());
         assert_eq!(b["content"], "updated &lt;text&gt; &amp; more");
         assert_eq!(b["messagetype"], "RichText/Html");
@@ -1846,22 +1912,22 @@ mod tests {
     #[test]
     fn edit_body_forwards_rich_content_html_verbatim() {
         // What the streamed agent reply rides on: an edit that keeps its markup.
-        let b = build_edit_body("ignored", Some("<p>an <code>answer</code></p>"), "Me", &[], None, None).unwrap();
+        let b = build_edit_body("ignored", Some("<p>an <code>answer</code></p>"), "Me", &[], None, false, None).unwrap();
         assert_eq!(b["content"], "<p>an <code>answer</code></p>");
         // An empty html falls back to the escaped text, like a send does.
-        let b = build_edit_body("plain", Some(""), "Me", &[], None, None).unwrap();
+        let b = build_edit_body("plain", Some(""), "Me", &[], None, false, None).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
     #[test]
     fn plain_text_is_trimmed_before_it_goes_out() {
-        let b = build_body("1", "  hi there\n\n", "Me", None, None, &[], &[], &[], None, None, None).unwrap();
+        let b = build_body("1", "  hi there\n\n", "Me", None, None, &[], &[], &[], None, None, false, None).unwrap();
         assert_eq!(b["content"], "hi there");
         // A body of whitespace only becomes empty rather than a blank message.
-        let b = build_body("1", " \n\t ", "Me", None, None, &[], &[], &[], None, None, None).unwrap();
+        let b = build_body("1", " \n\t ", "Me", None, None, &[], &[], &[], None, None, false, None).unwrap();
         assert_eq!(b["content"], "");
         // An edit trims the same way.
-        let b = build_edit_body("\n updated \n", None, "Me", &[], None, None).unwrap();
+        let b = build_edit_body("\n updated \n", None, "Me", &[], None, false, None).unwrap();
         assert_eq!(b["content"], "updated");
     }
 
@@ -1886,13 +1952,13 @@ mod tests {
 
     #[test]
     fn html_body_is_trimmed_on_send_and_on_edit() {
-        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), &[], &[], &[], None, None, None).unwrap();
+        let b = build_body("9", "", "Me", None, Some("<p>hi</p><p><br></p>"), &[], &[], &[], None, None, false, None).unwrap();
         assert_eq!(b["content"], "<p>hi</p>");
-        let b = build_edit_body("", Some(" <p>answer</p><p></p>"), "Me", &[], None, None).unwrap();
+        let b = build_edit_body("", Some(" <p>answer</p><p></p>"), "Me", &[], None, false, None).unwrap();
         assert_eq!(b["content"], "<p>answer</p>");
         // An html body of spacers only falls back to the plain text, as an empty
         // one already did.
-        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), &[], &[], &[], None, None, None).unwrap();
+        let b = build_body("9", "plain", "Me", None, Some("<p><br></p>"), &[], &[], &[], None, None, false, None).unwrap();
         assert_eq!(b["content"], "plain");
     }
 
@@ -1929,7 +1995,7 @@ mod tests {
             kind: MentionKind::Person,
         }];
         let html = mention_html(0, "John");
-        let body = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None, None, None).unwrap();
+        let body = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None, None, false, None).unwrap();
         assert_eq!(body["content"], html, "the span stays in the body verbatim");
         // `properties.mentions` is a JSON-encoded STRING — the shape the read path
         // decodes and the shape the tenant accepted.
@@ -1949,7 +2015,7 @@ mod tests {
 
     #[test]
     fn a_message_with_no_mention_carries_no_properties() {
-        let body = build_body("9", "hi", "Me", None, None, &[], &[], &[], None, None, None).unwrap();
+        let body = build_body("9", "hi", "Me", None, None, &[], &[], &[], None, None, false, None).unwrap();
         assert!(body.get("properties").is_none());
     }
 
@@ -1965,11 +2031,11 @@ mod tests {
         }];
         let html = mention_html(0, "John");
         assert!(
-            build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None, None, None)
+            build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None, None, false, None)
                 .is_err()
         );
         assert!(
-            build_body("9", "plain text", "Me", None, None, &[], &[], &mentions, None, None, None)
+            build_body("9", "plain text", "Me", None, None, &[], &[], &mentions, None, None, false, None)
                 .is_err()
         );
     }
@@ -1985,15 +2051,15 @@ mod tests {
             kind: MentionKind::Person,
         }];
         let html = mention_html(0, "John");
-        let sent = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None, None, None).unwrap();
-        let edited = build_edit_body("", Some(&html), "Me", &mentions, None, None).unwrap();
+        let sent = build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, None, None, false, None).unwrap();
+        let edited = build_edit_body("", Some(&html), "Me", &mentions, None, false, None).unwrap();
         assert_eq!(edited["properties"], sent["properties"]);
         assert_eq!(edited["content"], html);
         // And the same rail holds: an edit cannot notify somebody its body never names.
         let invisible = vec![Mention { itemid: 7, ..mentions[0].clone() }];
-        assert!(build_edit_body("", Some(&html), "Me", &invisible, None, None).is_err());
+        assert!(build_edit_body("", Some(&html), "Me", &invisible, None, false, None).is_err());
         // An edit with no mention carries no `properties`, as before.
-        assert!(build_edit_body("hi", None, "Me", &[], None, None).unwrap().get("properties").is_none());
+        assert!(build_edit_body("hi", None, "Me", &[], None, false, None).unwrap().get("properties").is_none());
     }
 
     #[test]
@@ -2002,12 +2068,12 @@ mod tests {
         // string. A number, or the same name at the top level, is ignored by the service
         // and the message posts at once — which is the one outcome this must never have.
         let at = 1_800_000_000_000_i64;
-        let body = build_body("9", "later", "Me", None, None, &[], &[], &[], Some(at), None, None).unwrap();
+        let body = build_body("9", "later", "Me", None, None, &[], &[], &[], Some(at), None, false, None).unwrap();
         assert_eq!(body["properties"][SCHEDULED_SEND_TIME], json!(at.to_string()));
         assert!(body["properties"][SCHEDULED_SEND_TIME].is_string());
         assert!(body.get(SCHEDULED_SEND_TIME).is_none());
         // And an ordinary send carries no trace of it, so nothing is ever held by accident.
-        let now = build_body("9", "now", "Me", None, None, &[], &[], &[], None, None, None).unwrap();
+        let now = build_body("9", "now", "Me", None, None, &[], &[], &[], None, None, false, None).unwrap();
         assert!(now.get("properties").is_none());
     }
 
@@ -2025,7 +2091,7 @@ mod tests {
         let html = mention_html(0, "John");
         let at = 1_800_000_000_000_i64;
         let body =
-            build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, Some(at), None, None).unwrap();
+            build_body("9", "", "Me", None, Some(&html), &[], &[], &mentions, Some(at), None, false, None).unwrap();
         assert_eq!(body["properties"][SCHEDULED_SEND_TIME], json!(at.to_string()));
         let named: Value =
             serde_json::from_str(body["properties"]["mentions"].as_str().unwrap()).unwrap();
@@ -2039,16 +2105,16 @@ mod tests {
     #[test]
     fn a_titled_post_carries_the_one_property_the_read_path_decodes() {
         let body =
-            build_body("9", "body", "Me", None, None, &[], &[], &[], None, Some("Ship it"), None).unwrap();
+            build_body("9", "body", "Me", None, None, &[], &[], &[], None, Some("Ship it"), false, None).unwrap();
         assert_eq!(body["properties"][SUBJECT], json!("Ship it"));
         // The title is never words in the message: it is a property, so the body a
         // colleague's own client renders holds exactly what was written under it.
         assert_eq!(body["content"], "body");
         assert!(body.get(SUBJECT).is_none(), "the top-level spelling names nothing");
         // An untitled post is byte-identical to what this app sent before the field existed.
-        let untitled = build_body("9", "body", "Me", None, None, &[], &[], &[], None, None, None).unwrap();
+        let untitled = build_body("9", "body", "Me", None, None, &[], &[], &[], None, None, false, None).unwrap();
         assert!(untitled.get("properties").is_none());
-        let blank = build_body("9", "body", "Me", None, None, &[], &[], &[], None, Some(""), None).unwrap();
+        let blank = build_body("9", "body", "Me", None, None, &[], &[], &[], None, Some(""), false, None).unwrap();
         assert!(blank.get("properties").is_none());
     }
 
@@ -2077,8 +2143,8 @@ mod tests {
             &mentions,
             Some(at),
             Some("Ship it"),
-            None,
-        )
+            false,
+            None)
         .unwrap();
         assert_eq!(body["properties"][SUBJECT], json!("Ship it"));
         assert_eq!(body["properties"][SCHEDULED_SEND_TIME], json!(at.to_string()));
@@ -2092,11 +2158,11 @@ mod tests {
     /// this, rewriting one word of an announcement deletes its title for everybody.
     #[test]
     fn an_edit_carries_the_title_the_post_already_had() {
-        let body = build_edit_body("new body", None, "Me", &[], Some("Ship it"), None).unwrap();
+        let body = build_edit_body("new body", None, "Me", &[], Some("Ship it"), false, None).unwrap();
         assert_eq!(body["properties"][SUBJECT], json!("Ship it"));
         // And an untitled message's edit is unchanged: no `properties` at all.
         assert!(
-            build_edit_body("new body", None, "Me", &[], None, None)
+            build_edit_body("new body", None, "Me", &[], None, false, None)
                 .unwrap()
                 .get("properties")
                 .is_none()
@@ -2193,6 +2259,53 @@ mod tests {
             parse_thread_root(&json!({ "thread_root": "17812", "subject": null }), CHANNEL).unwrap(),
             Some("17812".to_string())
         );
+    }
+
+    /// A REPLY MAY ASK TO BE DRAWN IN ITS THREAD ALONE, and only a reply may.
+    #[test]
+    fn a_reply_can_ask_to_be_drawn_in_its_thread_alone() {
+        // It takes a REPLY: a top-level message belongs to no thread, so a flag on one would
+        // hide it from the running history of every teams-lite reader with nothing anywhere able
+        // to say where it went.
+        let reply = json!({ "reply_to": { "sender": "Ada" }, "thread_only": true });
+        assert!(parse_thread_only(&reply).unwrap());
+        assert!(parse_thread_only(&json!({ "thread_only": true })).is_err());
+        // `false`, absent and null are all the ordinary reply this app has always sent.
+        assert!(!parse_thread_only(&json!({ "thread_only": false })).unwrap());
+        assert!(!parse_thread_only(&json!({})).unwrap());
+        assert!(!parse_thread_only(&json!({ "thread_only": Value::Null })).unwrap());
+        // And it is a boolean: a client that sent the string "1" is a client this refuses
+        // rather than guesses at.
+        assert!(parse_thread_only(&json!({ "reply_to": {}, "thread_only": "1" })).is_err());
+    }
+
+    /// THE FLAG IS A PROPERTY, and `false` writes NOTHING.
+    ///
+    /// The property is this app's own invention, which is acceptable here for one reason: what it
+    /// carries is a DISPLAY decision, so the day the service drops it the reply is drawn where
+    /// every other client already draws it. An ordinary reply stays byte-identical to what this
+    /// app sent before the field existed.
+    #[test]
+    fn the_thread_flag_rides_in_the_properties_and_only_when_it_is_set() {
+        let folded =
+            build_body("9", "yes", "Me", None, None, &[], &[], &[], None, None, true, None).unwrap();
+        assert_eq!(folded["properties"][THREAD_ONLY], json!("1"));
+        // A quoted string, which is the shape the one other property this app writes into a send
+        // is MEASURED to survive as (`SCHEDULED_SEND_TIME`) — and never a top-level field.
+        assert!(folded["properties"][THREAD_ONLY].is_string());
+        assert!(folded.get(THREAD_ONLY).is_none());
+
+        let plain =
+            build_body("9", "yes", "Me", None, None, &[], &[], &[], None, None, false, None).unwrap();
+        assert!(plain.get("properties").is_none());
+
+        // AND AN EDIT CARRIES IT, for the measured reason it carries the title: the service
+        // ASSIGNS `properties`, so an edit that did not restate this would un-fold the reply for
+        // everybody in the conversation because its author fixed a typo.
+        let edited = build_edit_body("yes", None, "Me", &[], None, true, None).unwrap();
+        assert_eq!(edited["properties"][THREAD_ONLY], json!("1"));
+        let untouched = build_edit_body("yes", None, "Me", &[], None, false, None).unwrap();
+        assert!(untouched.get("properties").is_none());
     }
 
     /// The thread's own address is the one the SERVICE publishes, and it changes nothing
@@ -2422,7 +2535,7 @@ mod tests {
     }
 
     fn build_body_for_test_with_refs(refs: &[String]) -> Value {
-        build_body("1", "", "Me", None, None, &[], refs, &[], None, None, None).unwrap()
+        build_body("1", "", "Me", None, None, &[], refs, &[], None, None, false, None).unwrap()
     }
 
     #[tokio::test]
@@ -2474,8 +2587,8 @@ mod tests {
             &[],
             None,
             None,
-            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }),
-        )
+            false,
+            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }))
         .unwrap();
         let content = body["content"].as_str().unwrap();
         assert!(!content.contains("merger"), "the words must not be in the POST: {content}");
@@ -2514,8 +2627,8 @@ mod tests {
             &[],
             None,
             None,
-            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }),
-        )
+            false,
+            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }))
         .unwrap();
         let content = body["content"].as_str().unwrap();
         assert!(!content.contains("merger"), "a quote must be sealed with the reply: {content}");
@@ -2550,8 +2663,8 @@ mod tests {
             &mentions,
             None,
             None,
-            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }),
-        )
+            false,
+            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }))
         .unwrap();
         let content = body["content"].as_str().unwrap();
         assert!(!content.contains("Ada"), "the span is sealed with the body: {content}");
@@ -2581,8 +2694,8 @@ mod tests {
             &[],
             Some(1_800_000_000_000),
             None,
-            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }),
-        )
+            false,
+            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }))
         .unwrap();
         assert_eq!(body["properties"][SCHEDULED_SEND_TIME], json!("1800000000000"));
         assert!(crate::seal::is_sealed(body["content"].as_str().unwrap()));
@@ -2599,8 +2712,8 @@ mod tests {
             "Me",
             &[],
             None,
-            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }),
-        )
+            false,
+            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }))
         .unwrap();
         let content = body["content"].as_str().unwrap();
         assert!(!content.contains("rewritten"));
@@ -2627,8 +2740,8 @@ mod tests {
             &[],
             None,
             None,
-            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }),
-        );
+            false,
+            Some(SealWith { key: &key, conversation_id: CHAT, sender_mri: ME }));
         assert!(refused.is_err(), "a body over the ceiling must be refused here");
         let said = format!("{:#}", refused.unwrap_err());
         assert!(said.contains("too long to seal"), "the refusal must say why: {said}");
@@ -2639,7 +2752,7 @@ mod tests {
     #[test]
     fn a_chat_that_is_not_sealed_is_untouched() {
         let body =
-            build_body("1", "", "Me", None, Some("<p>hello</p>"), &[], &[], &[], None, None, None)
+            build_body("1", "", "Me", None, Some("<p>hello</p>"), &[], &[], &[], None, None, false, None)
                 .unwrap();
         assert_eq!(body["content"], "<p>hello</p>");
         assert!(!crate::seal::is_sealed(body["content"].as_str().unwrap()));

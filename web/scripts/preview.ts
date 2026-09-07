@@ -4726,6 +4726,84 @@ if (import.meta.main) {
   //
   // Nothing here leaves the machine — pin, mute and hide are local overrides, and the
   // mock answers `mark_read` itself.
+  // THREADS IN A CHAT: the fold, the foot row it leaves behind, the panel that holds the
+  // replies, the broadcast box, and the view that lists every thread the reader is in
+  // (§ A CHAT HAS THREADS TOO).
+  if (args.includes("--threads")) {
+    await withPreview(async ({ page, shot, setTheme }) => {
+      await openConversation(page, "Thread Demo");
+      const foot = page.locator('[data-testid="post-replies"]');
+      await foot.waitFor();
+      await page.waitForTimeout(300);
+      // The running history with the thread FOLDED out of it: the root, its foot row, and the
+      // one reply whose author ticked "Also send to the chat".
+      await shot(`${out}-folded-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-folded-dark.png`);
+      await setTheme("light");
+      // The foot row cropped to itself — it is 20px faces beside 12px type, so a 1200px page
+      // says nothing about whether either can be read (pass `--dpr 3`).
+      await shot(`${out}-foot-light.png`, '[data-testid="post-replies"]');
+
+      // The PANEL, with every reply in it — and the composer's banner beside it naming the
+      // thread the next Enter lands in.
+      await foot.click();
+      await page.locator('[data-testid="threads-panel"]').waitFor();
+      await page.waitForTimeout(400);
+      await shot(`${out}-panel-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-panel-dark.png`);
+      await setTheme("light");
+      // THE BROADCAST BOX, cropped to the banner it sits in: this is the one control the
+      // feature adds to the composer, and it is 11px type beside a 14px checkbox.
+      await shot(`${out}-broadcast-light.png`, '[data-testid="reply-banner"]');
+      await setTheme("dark");
+      await shot(`${out}-broadcast-dark.png`, '[data-testid="reply-banner"]');
+      await setTheme("light");
+
+      // THE VIEW: every thread the reader is in, across every conversation.
+      await page.locator('[data-testid="open-threads"]').click();
+      await page.locator('[data-testid="threads-row"]').first().waitFor();
+      await page.waitForTimeout(400);
+      await shot(`${out}-view-light.png`);
+      await setTheme("dark");
+      await shot(`${out}-view-dark.png`);
+      await setTheme("light");
+      // ONE ROW cropped to itself: where the thread is, who opened it, and the three facts
+      // about what has happened since — all of it under 13px.
+      await shot(`${out}-row-light.png`, '[data-testid="threads-row"]');
+      // …and the row under the search field that leads here, which is how the whole feature
+      // is found at all.
+      await shot(`${out}-entry-light.png`, '[data-testid="open-threads"]');
+      console.log(
+        `[preview] wrote ${out}-folded-{light,dark}.png, ${out}-foot-light.png, ` +
+          `${out}-panel-{light,dark}.png, ${out}-broadcast-{light,dark}.png, ` +
+          `${out}-view-{light,dark}.png, ${out}-row-light.png and ${out}-entry-light.png`,
+      );
+    });
+    // A PHONE, where the panel REPLACES the conversation rather than standing beside it —
+    // the shape the diff page's own two columns take, and the width every defect this
+    // surface could ship is only visible at.
+    await withPreview(
+      async ({ page, shot }) => {
+        await openConversation(page, "Thread Demo");
+        const foot = page.locator('[data-testid="post-replies"]');
+        await foot.waitFor();
+        await page.waitForTimeout(300);
+        await shot(`${out}-mobile-folded-light.png`);
+        await foot.click();
+        await page.locator('[data-testid="threads-panel"]').waitFor();
+        await page.waitForTimeout(400);
+        await shot(`${out}-mobile-panel-light.png`);
+        console.log(
+          `[preview] wrote ${out}-mobile-folded-light.png and ${out}-mobile-panel-light.png`,
+        );
+      },
+      { phone: true, deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
   if (args.includes("--chat-menu")) {
     await withPreview(async ({ page, shot, setTheme }) => {
       // The list as it arrives: a Pinned section (the mock pins two chats) and Recent.

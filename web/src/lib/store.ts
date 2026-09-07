@@ -273,6 +273,18 @@ export type PendingReply = {
    *  the thread's own card lights up while it is the one being answered, and the composer's
    *  banner says the reader is posting IN a thread rather than quoting a message. */
   threadRoot: string | null;
+  /**
+   * Whether this reply's default is to be sent to the CHAT as well as to its thread — the
+   * composer's "Also send to the chat" box, ticked (see lib/chat-threads.ts).
+   *
+   * It rides on the pending reply rather than being decided by the composer, because it is a
+   * property of WHY the reply was started: an ordinary Reply folds (which is the feature), while
+   * an "Answer with <agent>" broadcasts — the answer is posted with no flag at all, so a folded
+   * question would be hidden in a thread with its own answer standing in the history beside it.
+   * Reading it here is also what keeps it free of ordering: the composer initialises the tick
+   * from the reply it is showing, in one place, rather than from an effect racing another.
+   */
+  broadcast?: boolean;
 };
 
 /** The recording in flight, as the UI reads it.
@@ -596,6 +608,23 @@ export type AppState = {
    *  scheduled messages" lists. Loaded on demand and after anything that changes it;
    *  empty until then, because a list nobody has opened is a read nobody asked for. */
   scheduledMessages: ChatMessage[];
+  /** Every REPLY the store holds across every conversation, plus the message each one
+   *  answers — what the THREADS view lists (see lib/chat-threads.ts). Read once, on demand,
+   *  by the view itself: a reader who never opens it never pays for it. */
+  threadDigest: ChatMessage[];
+  /** The bound the digest was read under, so the view can say the list is the NEWEST threads
+   *  rather than all of them. Absent until it has been read, and from a backend too old to
+   *  say — the view then claims nothing. */
+  threadDigestLimit: number | null;
+  threadDigestLoading: boolean;
+  /** Why the digest could not be read, in the backend's own words. The view says it rather
+   *  than drawing an empty list, which reads as "you are in no threads". */
+  threadDigestError: string | null;
+  /** The thread a reader asked to OPEN from somewhere other than the conversation — the
+   *  threads view. It travels beside `pendingScroll` rather than inside it because the two
+   *  are different asks: a deep link SHOWS a message (and must not answer it for them), while
+   *  this one says "open this thread's panel". Consumed by the pane and cleared there. */
+  pendingThreadRoot: { convId: string; rootId: string; nonce: number } | null;
   /** Words handed BACK to a composer that is already open — today only from the scheduled
    *  list, whose Edit cancels a queued message and returns it to be written again.
    *
@@ -1192,6 +1221,11 @@ function initialState(): AppState {
     chessEngine: NO_CHESS_ENGINE,
     chessSounds: NO_CHESS_SOUNDS,
     scheduledMessages: [],
+    threadDigest: [],
+    threadDigestLimit: null,
+    threadDigestLoading: false,
+    threadDigestError: null,
+    pendingThreadRoot: null,
     composerRestore: null,
     replyingTo: null,
     notifications: { activity: [], mentions: [], following: [] },
@@ -5391,6 +5425,49 @@ export class TeamsController {
     this.set({ pendingScroll: { convId, messageId, nonce: this.scrollNonce } });
   }
 
+  /**
+   * Read every thread this machine holds, across every conversation — what the THREADS view
+   * lists (§ A CHAT HAS THREADS TOO).
+   *
+   * It is asked BY THE VIEW rather than on connect, the split `loadChessArchive` already
+   * makes: a reader who never opens the threads view never pays for it. It re-reads on every
+   * open, because a thread the reader was in a minute ago has moved.
+   */
+  async loadThreadDigest(): Promise<void> {
+    this.set({ threadDigestLoading: true, threadDigestError: null });
+    try {
+      const { messages, limit } = await this.backend.threadDigest();
+      this.set({
+        threadDigest: messages,
+        threadDigestLimit: typeof limit === "number" ? limit : null,
+        threadDigestLoading: false,
+      });
+    } catch (e) {
+      // Said rather than drawn as an empty list: "you are in no threads" is a claim about the
+      // reader's own conversations, and a failed read is not one.
+      this.set({ threadDigestLoading: false, threadDigestError: errText(e) });
+    }
+  }
+
+  /** Ask a conversation to OPEN one of its threads, and to scroll to its root on the way.
+   *
+   *  Two asks rather than one: the scroll is what puts the root on screen (the machine a
+   *  notification already uses), and the thread root is what opens the panel beside it. A deep
+   *  link deliberately does NOT do the second — a panel opened to SHOW a message must not aim
+   *  the composer at it — so this is its own field. */
+  openThread(convId: string, rootId: string): void {
+    this.scrollNonce += 1;
+    this.set({
+      pendingScroll: { convId, messageId: rootId, nonce: this.scrollNonce },
+      pendingThreadRoot: { convId, rootId, nonce: this.scrollNonce },
+    });
+  }
+
+  /** Clear a consumed thread request, guarded by nonce so a newer one is never dropped. */
+  clearThreadTarget(nonce: number): void {
+    if (this.get().pendingThreadRoot?.nonce === nonce) this.set({ pendingThreadRoot: null });
+  }
+
   /** Clear a consumed (or abandoned) scroll request, guarded by nonce so a newer
    *  request set in the meantime is never dropped. */
   clearScrollTarget(nonce: number): void {
@@ -5663,13 +5740,18 @@ export class TeamsController {
     this.persistDraft(id, this.draftCache.get(id) ?? "");
   }
 
-  startReply(message: ChatMessage): void {
+  startReply(message: ChatMessage, opts?: { broadcast?: boolean }): void {
     // A CHANNEL is threaded and a chat is not, so a reply means two different things and the
     // difference is settled here rather than at each of the three surfaces that read it (see
     // `PendingReply.threadRoot`).
     const inChannel = this.get().channels.some((c) => c.id === message.conversation_id);
     this.set({
-      replyingTo: { message, marker: null, threadRoot: inChannel ? threadRootOf(message) : null },
+      replyingTo: {
+        message,
+        marker: null,
+        threadRoot: inChannel ? threadRootOf(message) : null,
+        broadcast: opts?.broadcast,
+      },
     });
   }
 
@@ -7228,6 +7310,10 @@ export class TeamsController {
      *  message and never a reply (see lib/post-subject.ts). It rides in the send that
      *  posts the words it titles, exactly as the pictures and the mentions do. */
     subject?: string,
+    /** Whether this REPLY is drawn in its THREAD alone — the reader unticked "Also send to
+     *  the chat" (see lib/chat-threads.ts). It rides in the send that posts the reply, exactly
+     *  as the title and the pictures do, because it is part of that one message. */
+    threadOnly?: boolean,
   ): Promise<boolean> {
     const id = this.get().openId;
     if (!id) return false;
@@ -7258,6 +7344,10 @@ export class TeamsController {
         scheduledAt,
         subject,
         threadRoot,
+        // Only where this really IS a reply: the flag says which thread a message belongs to
+        // and a top-level message belongs to none, so the backend refuses one there
+        // (`parse_thread_only`) and nothing here sends it.
+        replyTo ? threadOnly : undefined,
       );
     } catch (e) {
       // Both surfaces, and each has its reader. The status line keeps the RAW failure,

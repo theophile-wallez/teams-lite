@@ -1668,6 +1668,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             attachments: "[]".to_string(),
             reactions: String::new(),
             seal: crate::store::MessageSeal::None,
+            // A system line is nobody's reply.
+            thread_only: false,
             system_event: event.to_string(),
             thread_root_id: String::new(),
             thread_subject: String::new(),
@@ -1703,6 +1705,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
             thread_subject,
             deleted,
             scheduled_time: scheduled_send_time(m),
+            // A meeting activity is nobody's reply.
+            thread_only: false,
             mentions: "[]".to_string(),
         });
     }
@@ -1731,6 +1735,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 thread_subject: String::new(),
                 deleted: false,
                 scheduled_time: 0,
+                // A system line is nobody's reply.
+                thread_only: false,
                 mentions: "[]".to_string(),
             });
         }
@@ -1766,6 +1772,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 thread_subject,
                 deleted: false,
                 scheduled_time: 0,
+                // A recording card is nobody's reply.
+                thread_only: false,
                 mentions: "[]".to_string(),
             });
         }
@@ -1801,6 +1809,8 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
                 thread_subject,
                 deleted,
                 scheduled_time: scheduled_send_time(m),
+                // A card carries no quote, so it is nobody's reply.
+                thread_only: false,
                 // Mention spans live in the body we just dropped, so nothing is
                 // addressable anymore.
                 mentions: "[]".to_string(),
@@ -1851,6 +1861,7 @@ pub(crate) fn parse_message(m: &Value, conversation_id: &str) -> Option<Message>
         thread_subject,
         deleted,
         scheduled_time: scheduled_send_time(m),
+        thread_only: thread_only(m),
         mentions: parse_mentions(m),
     })
 }
@@ -1938,6 +1949,24 @@ fn scheduled_send_time(m: &Value) -> i64 {
         _ => 0,
     }
     .max(0)
+}
+
+/// Whether this reply asked to be drawn in its THREAD ALONE — the reader unticked "Also
+/// send to the chat" (see [`crate::teams_send::THREAD_ONLY`] and AGENTS.md § A CHAT HAS
+/// THREADS TOO).
+///
+/// **ABSENT IS FALSE, and that direction is the whole safety of the feature.** The reply is
+/// really in the conversation whatever this says — Teams has no threads in a chat, so every
+/// other client draws it inline — and what the flag decides is only whether THIS app folds
+/// it out of the running history. So a message from before the field existed, one from a
+/// stock client, and one whose property the service dropped are all drawn where every other
+/// client shows them: nothing can ever be hidden by a field that failed to arrive. It is the
+/// reading `parse_send_mentions` takes for an absent mention kind — the narrowest claim.
+fn thread_only(m: &Value) -> bool {
+    matches!(
+        message_properties(m).get(crate::teams_send::THREAD_ONLY),
+        Some(Value::String(s)) if s == "1" || s.eq_ignore_ascii_case("true")
+    )
 }
 
 /// Extract the channel-thread linkage from a message resource: the thread ROOT's
@@ -2395,6 +2424,21 @@ pub struct QuotedMessage {
     pub sender: String,
     /// The quoted body, as Teams previewed it inside the quote.
     pub text: String,
+    /// The id of the message this quote NAMES, or empty when the quote names none.
+    ///
+    /// A Teams REPLY carries it twice — on the blockquote's own `itemid` and again on the
+    /// `<span itemprop="time" itemid>` inside it — and that id IS the quoted message's
+    /// arrival time in epoch milliseconds, which is also its id (measured: over this
+    /// tenant's own history the two agree on all 1174 replies, and no stored message has an
+    /// id differing from its compose time). So this is the ADDRESS of the message a reply
+    /// answers, which is what makes a chat's flat history foldable into threads at all
+    /// (see [`crate::store::Store::thread_messages`]).
+    ///
+    /// Empty on a FORWARD: Teams sends one with no author, no time and no id, because the
+    /// message it holds was said somewhere else — so a forward is never a reply to
+    /// anything, and reading one as a thread member would file somebody else's words under
+    /// a thread they were never part of.
+    pub target: String,
 }
 
 /// The message a reply (or a forward) quotes, or `None` when the body quotes nothing.
@@ -2421,8 +2465,42 @@ pub fn quoted_message_from_html(html: &str) -> Option<QuotedMessage> {
         // The quote's own close, or the end of the body: an unterminated quote is
         // everything that follows it, which is what it visually is.
         let close = lower[tag_end..].find("</blockquote").map_or(html.len(), |at| tag_end + at);
-        return Some(quoted_message_of(&html[tag_end..close]));
+        let mut quoted = quoted_message_of(&html[tag_end..close]);
+        // WHICH message this quote names, and only for a REPLY: a forward carries no id at
+        // all (see [`QuotedMessage::target`]). The blockquote's own `itemid` is read first
+        // and the `itemprop="time"` span inside it stands in — they agree on every reply
+        // measured, and either alone is enough to address the message.
+        if lower[open..tag_end].contains("schema.skype.com/reply") {
+            quoted.target = attr_itemid(&html[open..tag_end])
+                .or_else(|| time_itemid(&html[tag_end..close]))
+                .unwrap_or_default();
+        }
+        return Some(quoted);
     }
+}
+
+/// The `itemid="…"` of one tag, when it carries one.
+fn attr_itemid(tag: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let at = lower.find("itemid=")? + "itemid=".len();
+    let rest = tag[at..].trim_start();
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let value = &rest[1..];
+    let end = value.find(quote)?;
+    let id = value[..end].trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// The `itemid` of the `<span itemprop="time">` a reply quote opens with, when the
+/// blockquote itself carried none.
+fn time_itemid(inner: &str) -> Option<String> {
+    let lower = inner.to_ascii_lowercase();
+    let at = lower.find("itemprop=\"time\"").or_else(|| lower.find("itemprop='time'"))?;
+    // The attribute may stand before or after `itemid` inside the same tag, so the tag is
+    // taken whole and read by name rather than scanned forward from the match.
+    let open = inner[..at].rfind('<')?;
+    let end = at + inner[at..].find('>')?;
+    attr_itemid(&inner[open..=end])
 }
 
 /// Split the inside of a reply quote into its author and its text.
@@ -2436,7 +2514,7 @@ fn quoted_message_of(inner: &str) -> QuotedMessage {
         Some(at) => (&inner[..at], &inner[at + AUTHOR_END.len()..]),
         None => ("", inner),
     };
-    QuotedMessage { sender: one_line(head), text: one_line(body) }
+    QuotedMessage { sender: one_line(head), text: one_line(body), target: String::new() }
 }
 
 /// A body's text on one line: tags gone, every run of whitespace a single space.
@@ -3318,6 +3396,63 @@ mod tests {
         assert!(quoted_message_from_html("<blockquote><p>by hand</p></blockquote>").is_none());
     }
 
+    /// A REPLY'S QUOTE NAMES THE MESSAGE IT ANSWERS, and a FORWARD names none.
+    ///
+    /// That id is what makes a chat's flat history foldable into threads at all: a chat has no
+    /// thread address on the service, so the quote graph IS the thread graph (see
+    /// web/src/lib/chat-threads.ts and § A CHAT HAS THREADS TOO).
+    #[test]
+    fn a_replys_quote_names_the_message_it_answers() {
+        // Teams carries it TWICE — on the blockquote's own `itemid` and on the `itemprop="time"`
+        // span inside it — and the two agree on all 1174 replies of this tenant's history.
+        let both = "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"1784\">\
+                    <strong itemprop=\"mri\" itemid=\"8:orgid:abc\">Ada</strong>\
+                    <span itemprop=\"time\" itemid=\"1784\"></span>\
+                    <p itemprop=\"preview\">said earlier</p></blockquote><p>yes</p>";
+        assert_eq!(quoted_message_from_html(both).unwrap().target, "1784");
+
+        // Either alone is enough to address the message.
+        let span_only = "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\">\
+                         <strong itemprop=\"mri\">Ada</strong>\
+                         <span itemid=\"99\" itemprop=\"time\"></span>\
+                         <p itemprop=\"preview\">said earlier</p></blockquote><p>yes</p>";
+        assert_eq!(quoted_message_from_html(span_only).unwrap().target, "99");
+
+        // A FORWARD names nothing: the message it holds was said somewhere else, so reading one
+        // as a reply would file a stranger's words under a thread they were never part of.
+        let forward = "<blockquote itemtype=\"http://schema.skype.com/Forward\" itemid=\"1784\">\
+                       <p>original</p></blockquote><p>FYI</p>";
+        assert_eq!(quoted_message_from_html(forward).unwrap().target, "");
+    }
+
+    /// A REPLY THAT ASKED TO BE DRAWN IN ITS THREAD ALONE says so, and ABSENT IS FALSE.
+    ///
+    /// That direction is the whole safety of the fold: the reply is really in the conversation
+    /// whatever the property says, so a flag that failed to arrive draws the message where every
+    /// other client already draws it. Nothing can be hidden by a field that went missing.
+    #[test]
+    fn a_thread_only_reply_says_so_and_an_absent_flag_is_visible() {
+        let frame = |props: Value| {
+            json!({
+                "id": "1", "originalarrivaltime": "2026-01-01T00:00:00Z",
+                "messagetype": "RichText/Html", "content": "<p>hi</p>",
+                "from": "https://x/v1/users/ME/8:orgid:ada",
+                "imdisplayname": "Ada",
+                "properties": props,
+            })
+        };
+        assert!(thread_only(&frame(json!({ crate::teams_send::THREAD_ONLY: "1" }))));
+        // The same field double-encoded, which is how `properties` sometimes arrives.
+        assert!(thread_only(&frame(json!(
+            format!("{{\"{}\":\"1\"}}", crate::teams_send::THREAD_ONLY)
+        ))));
+        // Everything else is a message drawn where it always was: no property at all, a
+        // property that says no, and a shape this build does not recognise.
+        assert!(!thread_only(&frame(json!({}))));
+        assert!(!thread_only(&frame(json!({ crate::teams_send::THREAD_ONLY: "0" }))));
+        assert!(!thread_only(&frame(json!({ crate::teams_send::THREAD_ONLY: 1 }))));
+    }
+
     #[test]
     fn preview_falls_back_to_a_typed_label_for_a_textless_body() {
         // Emoji-only: the emoji itself (its `alt`), which is what the sender sent.
@@ -3358,6 +3493,8 @@ mod tests {
             attachments: attachments.into(),
             reactions: "[]".into(),
             seal: crate::store::MessageSeal::None,
+            // A system line is nobody's reply.
+            thread_only: false,
             system_event: system_event.into(),
             thread_root_id: String::new(),
             thread_subject: String::new(),
@@ -3399,6 +3536,8 @@ mod tests {
             attachments: "[]".into(),
             reactions: "[]".into(),
             seal: crate::store::MessageSeal::None,
+            // A system line is nobody's reply.
+            thread_only: false,
             system_event: String::new(),
             thread_root_id: String::new(),
             thread_subject: String::new(),
@@ -4315,6 +4454,7 @@ mod tests {
                 thread_root_id: String::new(), thread_subject: String::new(),
                 deleted: false,
                 scheduled_time: 0,
+            thread_only: false,
                 mentions: "[]".into(),
             })
             .collect();

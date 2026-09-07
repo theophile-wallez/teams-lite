@@ -26,6 +26,10 @@ export function ChannelThreadsPanel(props: {
    *  where nobody has answered yet — a thread the reader opened to START. */
   replies: ThreadReplies | null;
   onClose: () => void;
+  /** Whether a reply answers THIS thread's ROOT rather than another reply — which is what
+   *  decides that its quote is not drawn (see the call site below). Absent on a CHANNEL, where
+   *  a reply to the root carries no quote at all because the thread travels as an address. */
+  repliesToRoot?: (reply: ChatMessage) => boolean;
   /** The pane's own row renderer, exactly as `ThreadGroup` takes it: one message drawn with
    *  this app's bubble, its receipts and its whole "…" menu. The panel renders nothing about
    *  a message itself, so a reaction, an edit and a deletion work here as they do anywhere. */
@@ -33,10 +37,10 @@ export function ChannelThreadsPanel(props: {
     m: ChatMessage,
     prev?: ChatMessage,
     next?: ChatMessage,
-    opts?: { onPanel?: boolean; threadPost?: boolean },
+    opts?: { onPanel?: boolean; threadPost?: boolean; showQuote?: boolean },
   ) => ReactNode;
 }) {
-  const { thread, replies, onClose, renderMsg } = props;
+  const { thread, replies, onClose, renderMsg, repliesToRoot } = props;
   // The post's own words for the heading, with any WIRE line taken off them: a colleague
   // running teams-lite can post a game or a companion into a channel, and the machine-readable
   // line those carry must never be what a header shows (§ THE SIX SURFACES THE WIRE MUST NEVER
@@ -125,6 +129,16 @@ export function ChannelThreadsPanel(props: {
             renderMsg(reply, thread.replies[i - 1], thread.replies[i + 1], {
               onPanel: true,
               threadPost: true,
+              // A reply that answers THE ROOT draws no quote of it in the root's own panel: the
+              // post is right there, so a quote above every answer states one thing as many
+              // times as there are replies. In a CHANNEL the quote was never posted at all
+              // (`threadReplyQuotes`); in a CHAT it has to be in the body, because it is how the
+              // reply says which thread it is in — so it is the DRAWING that is dropped here.
+              //
+              // A reply to another REPLY keeps its quote: a long thread holds several
+              // conversations, and the quote is the only thing that says which is being
+              // answered.
+              showQuote: repliesToRoot ? !repliesToRoot(reply) : undefined,
             }),
           )
         )}

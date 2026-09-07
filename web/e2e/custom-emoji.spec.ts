@@ -48,7 +48,10 @@ function packArt(page: Page, name: string): Locator {
 }
 
 function messages(page: Page): Locator {
-  return page.locator('[data-testid="message"]');
+  // The HISTORY's own messages. A reply is also drawn in its thread's panel — and pressing
+  // Reply opens that panel (§ A CHAT HAS THREADS TOO) — so an unscoped locator resolves to
+  // the same message twice and "the newest bubble" stops meaning one thing.
+  return page.locator('[data-testid="message-scroll"] [data-testid="message"]');
 }
 
 /** Put the pack back to the three emoji a fresh mock seeds, through its gated test hook. */
@@ -97,7 +100,12 @@ async function sendAndAwaitEcho(page: Page): Promise<Locator> {
   await page.keyboard.press("Enter");
   await expect.poll(() => newestId(page), { timeout: 10_000 }).not.toBe(before);
   const id = await newestId(page);
-  return page.locator(`[data-testid="message"][data-message-id="${id}"]`);
+  // Scoped to the HISTORY, because a message can be drawn in two places: a reply is drawn in
+  // its thread's panel as well, and pressing Reply opens that panel (§ A CHAT HAS THREADS
+  // TOO) — so an unscoped locator resolves to two elements and every count assertion doubles.
+  return page.locator(
+    `[data-testid="message-scroll"] [data-testid="message"][data-message-id="${id}"]`,
+  );
 }
 
 /** Open Settings and wait for the custom emoji section. */
@@ -249,6 +257,12 @@ test.describe("custom emoji", () => {
     await coded.locator('[data-testid="message-actions"]').click();
     await page.locator('[data-testid="action-reply"]').click();
     await expect(page.locator('[data-testid="reply-banner"]')).toBeVisible();
+    // ALSO SEND IT TO THE CHAT, because what this test is about is the quote a reply DRAWS —
+    // and a chat reply is folded into its thread by default now, where the quote is
+    // deliberately not drawn at all (the root is two centimetres above it; see § A CHAT HAS
+    // THREADS TOO). Ticking the box is what puts the reply in the running history with its
+    // quote, which is the message this test needs to look at.
+    await page.locator('[data-testid="reply-broadcast"]').click();
     // Reply hands focus to the composer itself; the click is what makes that a fact rather
     // than a race with the menu's own closing animation.
     await field.click();

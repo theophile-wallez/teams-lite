@@ -70,6 +70,7 @@ import {
   type Thread,
   type ThreadReplies,
 } from "~/lib/threads";
+import { chatThreadRootOf, chatThreads, replyTargetTime } from "~/lib/chat-threads";
 import { ChannelThreadsPanel } from "./channel-threads-panel";
 import { Composer } from "./composer";
 import { JumpToLatest } from "./jump-to-latest";
@@ -109,6 +110,11 @@ const OVERSCAN_ROWS = 8;
 // measured, and a correction the reader has to watch is the twitch
 // `e2e/history.spec.ts` exists to catch.
 const TIME_MARK_ROW_PX = 36;
+// The room the FOOT ROW under a thread's root takes: a 24px pill plus the 12px that puts it
+// nearer the post above it than the message below. A CONSTANT for the reason TIME_MARK_ROW_PX
+// is one — a row measured taller than its estimate is corrected by writing `scrollTop`, and a
+// correction the reader has to watch is the twitch `e2e/history.spec.ts` exists to catch.
+const THREAD_FOOT_ROW_PX = 36;
 // The room a chess board takes: a square board as wide as its card (max-w-80 = 320px), the two
 // names above and below it, the status line and the score sheet. A CONSTANT for the reason
 // TIME_MARK_ROW_PX is one — a row measured taller than its estimate is a `scrollTop` the reader
@@ -272,6 +278,8 @@ export function MessagePane(props: { onBack?: () => void }) {
   const messagesError = useAppState((s) => s.messagesError);
   const olderError = useAppState((s) => s.olderError);
   const pendingScroll = useAppState((s) => s.pendingScroll);
+  // A thread the reader asked to OPEN from the threads view (see `openThread`).
+  const pendingThreadRoot = useAppState((s) => s.pendingThreadRoot);
   const scrollToBottomNonce = useAppState((s) => s.scrollToBottomNonce);
   const readReceipts = useAppState((s) => s.readReceipts);
   // Which thread the composer is aimed at, if any. There is ONE composer and it stands a
@@ -469,10 +477,51 @@ export function MessagePane(props: { onBack?: () => void }) {
    * with each thread's answers one press away. The POSTS layout draws no flat list at all
    * (its rows are the cards), so this is the chat's own history there and unused.
    */
-  const drawnMessages = useMemo(
-    () => (threads ? messages : (channelThreads?.map((thread) => thread.lead) ?? messages)),
-    [threads, channelThreads, messages],
+  /**
+   * THE THREADS A CHAT HOLDS, read out of the quotes its own history carries.
+   *
+   * A channel is TOLD the shape of its threads (`thread_root_id` on every post); a chat is
+   * not, so this derives them from the quote graph — one pass over the history for the reason
+   * `timeMarks` and `chessGames` are one: the pane re-renders on every scroll that mounts a
+   * row and on every streamed agent frame, while what a thread holds changes only when the
+   * messages do (see lib/chat-threads.ts).
+   */
+  const chatThreadModel = useMemo(
+    () => (isChannel ? null : chatThreads(messages)),
+    [isChannel, messages],
   );
+
+  /**
+   * EVERY THREAD THE PANEL CAN SHOW, whichever surface this is — a conversational channel's
+   * or a chat's. They are the same {@link Thread} shape by construction, so the foot row, the
+   * panel and the deep link below are one piece of code rather than two.
+   *
+   * A channel drawn as POSTS has none: its replies are already under their post, inside its
+   * own card, so there is no panel to open and nothing to fold.
+   */
+  const panelThreads = useMemo(
+    () => (threads ? null : (channelThreads ?? chatThreadModel?.threads ?? null)),
+    [threads, channelThreads, chatThreadModel],
+  );
+
+  /**
+   * The messages the main column really draws.
+   *
+   * A CONVERSATIONAL channel draws the thread LEADS and nothing else — a reply there lives in
+   * the threads panel, which is the whole point of the layout. A CHAT draws everything except
+   * the replies whose own author asked for them to be drawn in their thread alone: the reply
+   * is really in the conversation, so folding it is this app's own display decision and the
+   * flag is what says the author made it (see lib/chat-threads.ts). The POSTS layout draws no
+   * flat list at all (its rows are the cards), so this is the chat's own history there and
+   * unused.
+   */
+  const drawnMessages = useMemo(() => {
+    if (threads) return messages;
+    if (channelThreads) return channelThreads.map((thread) => thread.lead);
+    const folded = chatThreadModel?.folded;
+    if (!folded || folded.size === 0) return messages;
+    return messages.filter((m) => !folded.has(m.id));
+  }, [threads, channelThreads, chatThreadModel, messages]);
 
   // Which messages open a block of time, and what each one says (see lib/message-time.ts).
   // Taken over the history AS DRAWN, once per change of it rather than per rendered bubble.
@@ -551,13 +600,20 @@ export function MessagePane(props: { onBack?: () => void }) {
    * already under it, in its own card — so a stale id from a channel that was drawn one way
    * can never open a surface the other one does not have.
    */
-  const panelThread = useMemo(
-    () =>
-      threads || !panelRootId
-        ? null
-        : (channelThreads?.find((thread) => thread.rootId === panelRootId) ?? null),
-    [threads, channelThreads, panelRootId],
-  );
+  const panelThread = useMemo(() => {
+    if (!panelRootId) return null;
+    const found = panelThreads?.find((t) => t.rootId === panelRootId);
+    if (found) return found;
+    // A CHAT THREAD THE READER IS STARTING. A chat's threads are derived from its quotes, so a
+    // message nobody has answered is in none of them — and pressing Reply on one has to open
+    // the thread it will BE, or the reader types into a panel that is not there and then
+    // watches the folded reply vanish (which is the whole reason `doReply` opens it at all).
+    // The panel already draws this state: it says what the next Enter does instead of being
+    // empty, which is the same sentence a channel's own unanswered thread gets.
+    if (!chatThreadModel) return null;
+    const lead = messages.find((m) => m.id === panelRootId);
+    return lead ? { rootId: panelRootId, subject: "", lead, replies: [] } : null;
+  }, [panelThreads, panelRootId, chatThreadModel, messages]);
   /**
    * The foot row each drawn post earns, by the post's own id — a pass over the threads for
    * the reason `timeMarks` is one: the pane re-renders on every scroll that mounts a row,
@@ -567,13 +623,13 @@ export function MessagePane(props: { onBack?: () => void }) {
    */
   const repliesByPost = useMemo(() => {
     const rows = new Map<string, ThreadReplies>();
-    if (threads || !channelThreads) return rows;
-    for (const thread of channelThreads) {
+    if (!panelThreads) return rows;
+    for (const thread of panelThreads) {
       const replies = threadReplies(thread);
       if (replies) rows.set(thread.lead.id, replies);
     }
     return rows;
-  }, [threads, channelThreads]);
+  }, [panelThreads]);
 
   const closeThreadPanel = useCallback(() => {
     setPanelRootId(null);
@@ -588,15 +644,22 @@ export function MessagePane(props: { onBack?: () => void }) {
   // find and centre the target node; in the CONVERSATION layout the reply is not in the main
   // column at all, so the panel that holds it is opened instead.
   useEffect(() => {
-    if (!replyRootOf || !pendingScroll || pendingScroll.convId !== openId) return;
-    const rootId = replyRootOf.get(pendingScroll.messageId);
-    if (!rootId) return;
+    if (!pendingScroll || pendingScroll.convId !== openId) return;
+    // A channel is TOLD which thread a reply is in; a chat's is derived. Either way this is
+    // the map from a reply's id to the root that holds it.
+    const rootId = threads
+      ? replyRootOf?.get(pendingScroll.messageId)
+      : (replyRootOf ?? chatThreadModel?.threadOf)?.get(pendingScroll.messageId);
+    // A ROOT is not a reply: a deep link to a top-level message asked to see THAT message,
+    // and opening the thread under it would answer a question nobody asked. (A channel's own
+    // map holds only replies, so this only ever bites the derived one.)
+    if (!rootId || rootId === pendingScroll.messageId) return;
     if (threads) {
       setExpandedThreads((prev) => (prev.has(rootId) ? prev : new Set(prev).add(rootId)));
     } else {
       setPanelRootId(rootId);
     }
-  }, [replyRootOf, pendingScroll, openId, threads]);
+  }, [replyRootOf, chatThreadModel, pendingScroll, openId, threads]);
 
   // A panel belongs to the conversation it was opened in. Walking away closes it — the rule a
   // pasted picture and a typed title already follow — rather than leaving it to resolve against
@@ -604,6 +667,7 @@ export function MessagePane(props: { onBack?: () => void }) {
   useEffect(() => {
     setPanelRootId(null);
   }, [openId]);
+
 
 
   // The rows the virtualizer works in: one per message for a chat and for a CONVERSATIONAL
@@ -666,8 +730,8 @@ export function MessagePane(props: { onBack?: () => void }) {
     // its id points at the post that holds it — and the splice and the rebuild above both
     // move the indices this resolves against. A deep link into such a reply therefore scrolls
     // to its post, and the effect above opens the panel beside it.
-    if (!threads && channelThreads) {
-      for (const thread of channelThreads) {
+    if (panelThreads) {
+      for (const thread of panelThreads) {
         const row = rowOfMessage.get(thread.lead.id);
         if (row === undefined) continue;
         for (const reply of thread.replies) rowOfMessage.set(reply.id, row);
@@ -694,7 +758,13 @@ export function MessagePane(props: { onBack?: () => void }) {
       // before it is measured — so the estimate is its own constant rather than a bubble's.
       if (row?.kind === "chess") return CHESS_ROW_PX;
       const marked = row?.kind === "message" && timeMarks.has(row.message.id);
-      return ROW_ESTIMATE_PX + (marked ? TIME_MARK_ROW_PX : 0);
+      // A row that leads a THREAD carries its foot row too, and the estimate says so.
+      const footed = row?.kind === "message" && repliesByPost.has(row.message.id);
+      return (
+        ROW_ESTIMATE_PX +
+        (marked ? TIME_MARK_ROW_PX : 0) +
+        (footed ? THREAD_FOOT_ROW_PX : 0)
+      );
     },
     getItemKey: (index) => rows[index]?.key ?? index,
     overscan: OVERSCAN_ROWS,
@@ -909,10 +979,32 @@ export function MessagePane(props: { onBack?: () => void }) {
   // Every path that starts a draft on a message asks for the caret, because the next thing
   // the reader does is type: the banner says which message they answer, and the composer
   // is where the answer goes.
-  const doReply = useCallback((m: ChatMessage) => {
-    controller.startReply(m);
-    setFocusToken((t) => t + 1);
-  }, [controller]);
+  /**
+   * REPLY to a message — and in a CHAT, OPEN THE THREAD THAT REPLY LANDS IN.
+   *
+   * The panel is not decoration here, it is what stops the sharpest surprise this feature can
+   * cause: a chat reply is folded out of the running history by default (§ A CHAT HAS THREADS
+   * TOO), so a reader who pressed Reply, typed and pressed Enter watched their message vanish
+   * — into a thread they had never been shown, behind a foot row under a message that may be a
+   * screen up. It is also Slack's own flow, in as many words: *click on reply, the thread is
+   * opened in the right sidebar*.
+   *
+   * It is the panel of the thread the reply will really be IN, which for an answer to another
+   * reply is the ROOT's — the same resolution the send makes, so what the reader is shown and
+   * what the message joins cannot disagree.
+   *
+   * A CHANNEL opens nothing: a reply there is filed by address and both of its layouts already
+   * show the reader where their answer goes (the card it lands in, or the panel they opened to
+   * write it).
+   */
+  const doReply = useCallback(
+    (m: ChatMessage) => {
+      controller.startReply(m);
+      if (chatThreadModel) setPanelRootId(chatThreadRootOf(chatThreadModel, m));
+      setFocusToken((t) => t + 1);
+    },
+    [controller, chatThreadModel],
+  );
 
   /**
    * Open the threads panel on one post, and AIM THE COMPOSER AT THAT THREAD.
@@ -943,6 +1035,30 @@ export function MessagePane(props: { onBack?: () => void }) {
     [controller],
   );
 
+  /**
+   * OPEN THE THREAD THE READER ASKED FOR FROM SOMEWHERE ELSE — the threads view.
+   *
+   * It is its own ask rather than a deep link, because the two mean different things: a deep
+   * link SHOWS a message and deliberately does not answer it for the reader, while a press in
+   * the threads view says "open this thread". So this one aims the composer at it exactly as a
+   * press on the foot row does (`openThreadPanel`), and it is cleared the moment it is
+   * consumed so a later navigation back cannot re-open a panel the reader closed.
+   *
+   * Declared AFTER the reset above so a navigation into the conversation cannot clear it in
+   * the same commit: effects run in declaration order.
+   */
+  useEffect(() => {
+    if (!pendingThreadRoot || pendingThreadRoot.convId !== openId) return;
+    const thread = panelThreads?.find((t) => t.rootId === pendingThreadRoot.rootId);
+    // The history pages a screen at a time, so the thread may simply not be loaded yet — the
+    // scroll that travels with this request is what pages toward it, and this runs again on
+    // the render that lands. It is dropped once the thread is found, and by the pane going
+    // away with it.
+    if (!thread) return;
+    openThreadPanel(thread);
+    controller.clearThreadTarget(pendingThreadRoot.nonce);
+  }, [pendingThreadRoot, openId, panelThreads, openThreadPanel, controller]);
+
   // "Answer with <agent>": reply to that message, with that agent's tag already leading
   // the draft. Nothing is sent — the reply banner shows which message the answer is
   // about, and the user presses Enter (or says more first). The two halves are why it
@@ -951,7 +1067,12 @@ export function MessagePane(props: { onBack?: () => void }) {
   const doAnswerWith = useCallback(
     (m: ChatMessage, agent: AgentCandidate) => {
       if (!openId) return;
-      controller.startReply(m);
+      // AND IT BROADCASTS. The request is a reply, so the composer would fold it out of the
+      // running history — while the ANSWER is posted with no flag at all (the reader asked for it
+      // in the conversation and watches it being written there). Folded, the question would be
+      // hidden in a thread with its answer standing in the history beside it, which reads as the
+      // app having lost the request. It is a DEFAULT: the reader may still untick it.
+      controller.startReply(m, { broadcast: true });
       setFocusToken((t) => t + 1);
       setAgentAnswer((prev) => ({
         token: (prev?.token ?? 0) + 1,
@@ -969,7 +1090,9 @@ export function MessagePane(props: { onBack?: () => void }) {
   const doReviewWith = useCallback(
     (m: ChatMessage, agent: AgentCandidate, mergeRequest: MergeRequestLink) => {
       if (!openId) return;
-      controller.startReply(m);
+      // Broadcast for the reason "Answer with" is: the answer this asks for is posted into the
+      // conversation, so the question must not be folded out of it.
+      controller.startReply(m, { broadcast: true });
       setFocusToken((t) => t + 1);
       setAgentAnswer((prev) => ({
         token: (prev?.token ?? 0) + 1,
@@ -1075,7 +1198,7 @@ export function MessagePane(props: { onBack?: () => void }) {
     m: ChatMessage,
     prev?: ChatMessage,
     next?: ChatMessage,
-    opts?: { onPanel?: boolean; threadPost?: boolean },
+    opts?: { onPanel?: boolean; threadPost?: boolean; showQuote?: boolean },
   ) => {
     const seenBy = readAnchors.get(m.id);
     // When this message was sent, said once above the block it opens rather than on
@@ -1120,6 +1243,7 @@ export function MessagePane(props: { onBack?: () => void }) {
             message={m}
             showSenderName={isGroup}
             threadPost={opts?.threadPost}
+            showQuote={opts?.showQuote}
             continuesAbove={sameAuthor(prev, m) && !mark}
             continuesBelow={sameAuthor(m, next) && !nextMark}
             onPanel={opts?.onPanel}
@@ -1355,7 +1479,13 @@ export function MessagePane(props: { onBack?: () => void }) {
                   // conversational channel has any (`repliesByPost` is empty otherwise).
                   const postThread =
                     row.kind === "message"
-                      ? channelThreads?.find((t) => t.rootId === threadRootOf(row.message))
+                      ? panelThreads?.find(
+                          (t) =>
+                            t.rootId ===
+                            (chatThreadModel
+                              ? chatThreadRootOf(chatThreadModel, row.message)
+                              : threadRootOf(row.message)),
+                        )
                       : undefined;
                   const postReplies =
                     row.kind === "message" ? repliesByPost.get(row.message.id) : undefined;
@@ -1451,6 +1581,15 @@ export function MessagePane(props: { onBack?: () => void }) {
             replies={repliesByPost.get(panelThread.lead.id) ?? null}
             onClose={closeThreadPanel}
             renderMsg={renderMsg}
+            // Only a CHAT passes this: there the quote is how a reply says which thread it is
+            // in, so it is in every reply's body and must not also be drawn inside that
+            // thread's own panel. A channel reply to the root carries no quote at all
+            // (`threadReplyQuotes`), so there is nothing there to suppress.
+            repliesToRoot={
+              chatThreadModel
+                ? (reply) => replyTargetTime(reply) === panelThread.lead.compose_time
+                : undefined
+            }
           />
         )}
       </div>
@@ -1549,6 +1688,12 @@ function ThreadRepliesRow(props: {
                 // The ring is the page's own background, so the discs read as a stack rather
                 // than as one wide smudge on either theme.
                 "size-5 shrink-0 ring-2 ring-background",
+                // AND THE INITIALS ARE SIZED FOR THE DISC. `Avatar` sets 13px for its own 36px
+                // face, and two letters at 13px are wider than a 20px circle — so a colleague
+                // with no photo showed clipped letters spilling out of a tint nobody could see
+                // (measured on the capture: "LI" with its disc gone). The face has to shrink,
+                // so the ink has to shrink with it.
+                "text-[9px]",
                 i > 0 && "-ml-1.5",
               )}
             />

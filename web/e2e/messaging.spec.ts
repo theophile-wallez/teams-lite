@@ -205,10 +205,21 @@ test.describe("messaging", () => {
     await target.locator('[data-testid="message-actions"]').click();
     await page.locator('[data-testid="action-reply"]').click();
     await expect(page.locator('[data-testid="reply-banner"]')).toBeVisible();
+    // AND THE THREAD IT LANDS IN OPENS BESIDE THE CONVERSATION. A chat reply is folded out of
+    // the running history by default (§ A CHAT HAS THREADS TOO), so pressing Reply has to show
+    // the reader where their answer is going — otherwise they type, press Enter and watch the
+    // message vanish. It is Slack's own flow, and the panel says what the next Enter does even
+    // though nobody has answered this message yet.
+    const panel = page.locator('[data-testid="threads-panel"]');
+    await expect(panel).toBeVisible();
 
     const marker = `reply-${Date.now()}`;
     await sendFromComposer(page, marker);
-    await expect(page.locator('[data-testid="message"]', { hasText: marker })).toBeVisible();
+    // The reply is in the THREAD, and in the running history it is not: that is the fold.
+    await expect(panel.locator('[data-testid="message"]', { hasText: marker })).toBeVisible();
+    await expect(
+      page.locator('[data-testid="message-scroll"] [data-testid="message"]', { hasText: marker }),
+    ).toHaveCount(0);
     // The banner clears once the reply is sent.
     await expect(page.locator('[data-testid="reply-banner"]')).toHaveCount(0);
   });

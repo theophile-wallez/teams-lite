@@ -623,6 +623,17 @@ export class Backend {
   backfill(conversation: string, beforeSeq: number): Promise<MessagePage> {
     return this.request<MessagePage>("backfill", { conversation, before_seq: beforeSeq });
   }
+  /** Every REPLY across every conversation, and the message each one answers — what the
+   *  THREADS view is built from (§ A CHAT HAS THREADS TOO).
+   *
+   *  An ordinary OPEN read: a thread IS its messages, so the store already holds every one of
+   *  them and this makes no network request. It decides nothing about a thread — which reply
+   *  belongs to which root is `chatThreads`' one derivation — so it answers ordinary messages
+   *  in the ordinary shape, plus the bound it read them under, which is what lets the view say
+   *  the list is the NEWEST threads rather than all of them. */
+  threadDigest(): Promise<{ messages: ChatMessage[]; limit?: number }> {
+    return this.request<{ messages: ChatMessage[]; limit?: number }>("thread_digest");
+  }
   setDraft(conversation: string, text: string): Promise<{ saved: boolean }> {
     return this.request<{ saved: boolean }>("set_draft", { conversation, text });
   }
@@ -639,6 +650,10 @@ export class Backend {
      *  Absent means a new thread, which is every chat message and every post this app
      *  sent before a thread could be answered. */
     threadRoot?: string,
+    /** Whether this REPLY is drawn in its THREAD alone — the reader unticked "Also send to
+     *  the chat". It publishes nothing new: the reply reaches the same people either way
+     *  (see lib/chat-threads.ts). */
+    threadOnly?: boolean,
   ): Promise<{ sent: boolean }> {
     return this.writeRequest<{ sent: boolean }>(
       "send",
@@ -662,6 +677,10 @@ export class Backend {
         // Who the message @mentions. The body's mention spans carry only an index; this
         // list is what tells Teams whom each index names, so they are notified.
         mentions: mentions && mentions.length > 0 ? mentions : undefined,
+        // Whether this reply belongs in its thread alone. `false` is sent as ABSENT rather
+        // than as a boolean, so an ordinary reply's params stay byte-identical to what this
+        // app sent before the field existed.
+        thread_only: threadOnly ? true : undefined,
         // The pictures the message carries, in the order the composer holds them: that is
         // the order the backend uploads them in, and the order they appear in the body.
         images:

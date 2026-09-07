@@ -380,6 +380,15 @@ export type ChatMessage = {
    *  other message (measured against the tenant), so this is what tells a page that a
    *  frame is tomorrow's message rather than today's — see {@link messageIsHeld}. */
   scheduled_time?: number;
+  /** Whether this REPLY is drawn in its THREAD ALONE — its author unticked "Also send to the
+   *  chat" (see lib/chat-threads.ts and § A CHAT HAS THREADS TOO).
+   *
+   *  It is a DISPLAY decision and never a claim about where the message is: a chat has no
+   *  threads on the service, so the reply really is in the conversation and every stock client
+   *  draws it inline. Absent — a backend older than the field, a stock client, a property the
+   *  service dropped — reads as `false`, so a flag that failed to arrive can only ever leave a
+   *  message MORE visible and never hide one. */
+  thread_only?: boolean;
   /** How this message's body reached the reader, or absent for an ordinary one.
    *
    *  A SEALED chat encrypts every body this app posts to it before it reaches Teams
