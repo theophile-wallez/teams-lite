@@ -4811,7 +4811,10 @@ user. Two independent mechanisms enforce that split:
   § The trackers), dev servers with no declared backend, a production web server with no
   declared backend, a send-capable backend started by tooling — including `systemctl
   --user start` on the always-on service's units, and including the `teams` command
-  itself, which is that backend plus the real app on 19440 in one word — and
+  itself, which is that backend plus the real app on 19440 in one word, and including
+  teams-lite's CONTAINER IMAGE brought up (`docker compose … up`, `start`, or a `docker run`
+  of it whose container is not told `-e TEAMS_LITE_READ_ONLY=1` — see § Running teams-lite in
+  a container image) — and
   `teams-lite-service.sh update --now`, the switch that skips the wait for a live
   `@claude` run and so freezes a half-written reply in the thread — and `restart_backend`,
   which is that same failure from inside the app (see § Settings › This app) — and cycling the
@@ -9314,28 +9317,31 @@ can never lose a race to it.
 | **19420** | Backend, send-capable — the always-on service      | `src/bin/server.rs` `DEFAULT_PORT` |
 | **19421** | Backend, send-capable — the user's hands-on dev one | `bin/teams-dev-server.sh` |
 | **19422** | Backend, send-capable — the RELEASED build beside it | `bin/teams-lite-service.sh` `APP_BACKEND_PORT` |
+| **19423** | Backend, send-capable — the CONTAINER IMAGE      | `packaging/docker/entrypoint.sh` |
 | **19430** | Backend, read-only (`TEAMS_LITE_READ_ONLY=1`)      | `src/bin/server.rs` `READ_ONLY_PORT` |
 | **19440** | Web app, production — the always-on service, and `teams` | `web/server.ts`, `launcher/src/launch.ts` |
 | **19441** | Web UI, `vite dev`                                 | `web/vite.config.ts` `DEV_PORT` |
 | **19442** | Web app — the RELEASED build's own front            | `bin/teams-lite-service.sh` `APP_WEB_PORT` |
+| **19443** | Web app — the CONTAINER IMAGE's own front           | `packaging/docker/entrypoint.sh` |
 | 19455 / 19445 | `bun run dev:mock` — mock backend / app        | `web/package.json` |
 | 19456 / 19446 | `bun run preview` — mock backend / app         | `web/scripts/preview.ts` |
 | 19457 / 19447 | E2E — mock backend / app                       | `web/playwright.config.ts` |
 | 8443      | Tailnet HTTPS front for the web UI (`tailscale serve`) | `bin/teams-lite-service.sh` |
 
 **The x420/x440 pair is the service; x421/x441 is the user's dev pair; x422/x442 is the
-RELEASED build.** All three are send-capable backends on one SQLite store, so they must
-never share a port: the service holds 19420 for weeks, `bin/teams-dev-server.sh` plus
-`bun run dev` step aside to 19421/19441, and `teams-lite-app.service` takes 19422/19442
-(see § Running the released build beside the staged one). Read-only is the exception that
-keeps its own 19430 — and `teams-dev-server.sh` deliberately does not pin
-`TEAMS_LITE_PORT` when `TEAMS_LITE_READ_ONLY=1`, because an explicit port would drag it
-off 19430.
+RELEASED build; x423/x443 is the CONTAINER IMAGE.** All four are send-capable backends that may
+share one SQLite store, so they must never share a port: the service holds 19420 for weeks,
+`bin/teams-dev-server.sh` plus `bun run dev` step aside to 19421/19441, `teams-lite-app.service`
+takes 19422/19442 (see § Running the released build beside the staged one), and the image runs
+in the host's network namespace, so its pair is this machine's loopback like the others (see
+§ Running teams-lite in a container image). Read-only is the exception that keeps its own 19430
+— and `teams-dev-server.sh` and the image's entrypoint deliberately do not pin `TEAMS_LITE_PORT`
+when `TEAMS_LITE_READ_ONLY=1`, because an explicit port would drag it off 19430.
 
 `TEAMS_LITE_PORT` overrides a backend's, `PORT` a web server's,
 `E2E_MOCK_PORT` / `E2E_WEB_PORT` the suite's. Change a default in code and this table
 in the same commit — and check both hooks: `guard-live-automation.sh` and
-`guard-prod-chat-target.sh` match 1942[0-2] and 1944[0-2] by number, so a new
+`guard-prod-chat-target.sh` match 1942[0-3] and 1944[0-3] by number, so a new
 send-capable port they do not know is a hole in the guard.
 
 ## Updating the app from inside it (two clicks, and one install shape)
@@ -10286,6 +10292,119 @@ install says "this is being written" instead of looking like a message that fail
 answer itself still arrives, because the backend EDITS the Teams message and both backends see
 that. **Narrating a run to both installs would mean publishing the transcript through the shared
 store** — a deliberate feature with a real cost, never a quiet addition.
+
+## Running teams-lite in a container image (packaging, never isolation)
+
+`packaging/docker/` builds the single `teams` binary CI publishes — from THIS checkout, in a
+Debian build stage — and runs it with no browser to open: `docker compose -f
+packaging/docker/compose.yaml build`, then the user's own `up -d`, then
+`http://127.0.0.1:19443`. The Dockerfile's header carries the whole argument in short; the
+facts it rests on, and each is pinned by
+`intune::tests::the_image_is_built_to_reach_the_broker_and_to_stay_its_own_install`:
+
+- **THE BROKER IS REACHED THROUGH THE HOST'S PROCESS TABLE, and nothing about that changed
+  for the image.** `intune::broker_bus` reads intune-container's runtime state and opens
+  `/proc/<leader>/root/run/user/0/bus` on every connection (§ The Intune container is a
+  LIBRARY), so the image needs three things to run that unchanged code: the host's PID
+  namespace (`pid: host` — without it there is no such `/proc` entry), a READ-ONLY view of
+  `~/.local/share/intune-container` (the DIRECTORY, never the one file: the state is rewritten
+  and removed as the container comes and goes, and a file bind mount keeps showing the inode
+  it was mounted from), and the HOST USER's uid. That last one is not hygiene: `/proc/<pid>/root`
+  is opened under the same-uid rule, and the container's dbus-daemon authenticates the uid the
+  kernel reports — so root in the image is refused twice. Measured 2026-11-02 from a stock image
+  with `--pid=host --user 1000:1000`: the socket opened and `AUTH EXTERNAL` as uid 0 answered
+  `OK`, the handshake `auth::connect_bus` makes. So UID and GID are BUILD arguments, and the
+  image is built for one person — it is a local build, never a published one.
+- **THE HOST'S NETWORK NAMESPACE, for two reasons that are both safety.** The web front stays
+  on 127.0.0.1, the launcher's own default — in a bridge network it would have to bind
+  `0.0.0.0` inside the container, and the only thing keeping the write token it serves off the
+  LAN would be the `127.0.0.1:` prefix on a published port, one typo from gone. And the broker's
+  sign-in window is drawn on an Xvfb whose socket is ABSTRACT (§ Signing in again), which a
+  bridge network cannot see. The cost is the next rule.
+- **PORTS OF ITS OWN: 19423 and 19443** (`packaging/docker/entrypoint.sh`). In the host's
+  network namespace the launcher would otherwise ATTACH to whatever listens on 19420
+  (`ensureBackend`) — the always-on service, whose token the image cannot see, so every send
+  would be refused while reads worked. And a store shared with a host install keeps its live
+  feed: the trouter endpoint id is keyed by the store AND the port (`endpoint_id_path`), and a
+  second registration of one id takes the feed from the first. A READ-ONLY run keeps 19430,
+  which is why the entrypoint fills in a port only when the caller left it unset and never when
+  `TEAMS_LITE_READ_ONLY=1`.
+- **THE REPAIR IS NOT THE IMAGE'S TO MAKE, and it says so** (`intune::CONTAINER_IMAGE_ENV`,
+  set by the Dockerfile — DECLARED, the shape `TEAMS_LITE_LAUNCHER` already has). The repair is
+  the host's systemd running THIS binary by path, and that path exists only inside the image,
+  so the unit would fail at exec or run whatever the host keeps under that name.
+  `repair_available` therefore answers no in the image although it sees the intune-container
+  state (that is exactly why "is it set up" alone would offer the button), and
+  `broker_status.repair_blocker` carries the sentence the banner shows in place of its fallback
+  — which says a restart will NOT fix the failure, and is false here. What repairs it is the
+  host: the user's own `intune-container stop && intune-container start`, or a teams-lite
+  installed on the host, whose health check repairs a locked keyring with nobody asking — the
+  keyring is the container's, so one repair on the machine mends every install on it. **An
+  image alone does not repair the ~18-hourly lock**, and that is the real cost of this shape.
+- **THE IN-APP UPDATE IS NOT EITHER, with no code saying so.** The binary is installed where
+  the runtime user cannot write, so `update::self_install` answers no on its own and the
+  button stays the link every install updated where it came from shows. An image is updated
+  by building a new one; `TEAMS_BUILD_REV` is a build argument for whoever wants the app to say
+  when `latest` moved on, and empty — which build.rs reads as a build from source — otherwise.
+- **tini is a SUBREAPER, not PID 1** (`tini -s`). The launcher spawns the backend and the
+  backend spawns agent CLIs, so something has to reap them, and `docker stop` has to reach the
+  launcher, whose exit takes its backend down with it (`killChildOnExit`). In the host's pid
+  namespace PID 1 is the host's init, so plain `tini` warned on the first run that no zombie
+  would ever be re-parented to it.
+- **The backend's output goes to `docker logs`** (`TEAMS_LITE_BACKEND_LOG=-`, set by the
+  entrypoint, read by `backendLogsInherited` in launcher/src/backend.ts). The launcher's own
+  rule — one appended FILE per port in `/tmp` — is right on a host and wrong in an image: the
+  first run's `docker logs` held three launcher lines and none of the backend's, so which bus it
+  found and why sign-in failed were inside a container's `/tmp` that nobody reads.
+
+**THE LOCAL AGENT HAS NO CLI IN THE IMAGE.** `claude` and `opencode` are the user's own
+installs, signed in to the user's own providers, and baking either into a local image would
+copy credentials into it — so the backend says each is "on no PATH entry" at startup and
+Settings › AI providers states it, as on any machine that lacks one. A user who wants `@claude`
+answered from the image extends it with their CLI; the release poll, push, calling and every
+read are unchanged.
+
+**IT IS NOT A SANDBOX, and nothing here pretends it is.** The host's PID and network
+namespaces and the host user's uid are what reaching the broker takes, so a process in the
+image can do what any process of that user can — read another one's `/proc/<pid>/environ`
+included. What the image buys is the build and the runtime in one artifact: no Rust, Bun or
+units on the host. The store is a volume of its own by default; the compose file shows the
+bind that brings an existing install's history along, and sharing one store with a running
+host install is a shape this app already has (above, and every push and `@claude` answer is
+claimed once per machine).
+
+**A CLASSIC Intune host** (the broker on the session bus, no intune-container) swaps the
+state mount for the session bus and `TEAMS_LITE_BROKER_BUS` — commented in the compose file,
+because that bus is the user's whole desktop session and the default must not hand it over.
+That shape is UNVERIFIED: this machine has no classic broker to dial.
+
+**STARTING IT IS THE USER'S**, like every send-capable backend here, and rule 3d of the
+automation guard refuses it — compose `up`/`start`/`restart`/`create`, a `docker|podman
+run|create` of the image, a `start|restart|unpause` of the container — however the project is
+named: by its file, by a `cd` into `packaging/docker`, or by a shell already standing there,
+where a bare `up` finds the file on its own. Building, `logs`, `ps`, `exec` and every stop
+stay open, and so do TWO runs that state their proof in the command: `-e
+TEAMS_LITE_READ_ONLY=1`, which reaches the CONTAINER (the same variable in front of `docker`
+sets it for the CLI alone — rule 3's systemd-run lesson again), and `--entrypoint
+teams-lite-intune-status`, the read-only diagnostic the image ships (`examples/intune_status.rs`,
+which now also names the broker's display and whether this is the image).
+
+**What is VERIFIED, and what is not.** Verified on this workstation on 2026-11-02, through
+the image itself and READ-ONLY. The diagnostic inside it found the Intune container (leader
+6415) from the mounted state, read its keyring over D-Bus as unlocked, named the broker's `:99`
+as served with the host's network namespace and as NOT served in a bridge network (which is
+the rule above, measured), and said the repair is the host's. A read-only run (`-e
+TEAMS_LITE_READ_ONLY=1`, a throwaway store, removed afterwards) resolved the broker's bus
+through the host's `/proc`, reached the broker and got AAD's own answer back through it, and
+served the app on 127.0.0.1:19443 (HTTP 200), with tini silent and the backend's own lines in
+`docker logs` once the two rules above were added. That answer was a REFUSAL —
+`interaction_required` / `token_expired` for the Teams scope — and the host's own broker gave
+the identical one the same minute: the account's state, which a read-only backend deliberately
+does not try to mend (it never runs the interactive rescue). So nothing has SIGNED IN from the
+image yet. UNVERIFIED: a token minted through it, a send-capable run — the user's own `up` —
+and therefore a send, a call and a push from the image; the served sign-in window from inside
+it (the display check is measured, no window was opened); and podman, whose rootless mode maps
+the container's root to the host user and would need `--userns=keep-id` rather than `--user`.
 
 ## A broken sign-in costs the LIVE feed, never the history
 

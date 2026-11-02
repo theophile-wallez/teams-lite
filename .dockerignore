@@ -1,0 +1,19 @@
+# What the container image build never reads (packaging/docker/Dockerfile builds from this
+# checkout). Build OUTPUT is excluded rather than reused: the image compiles its own, against
+# its own glibc, and a host `target/` is tens of gigabytes the daemon would copy first.
+.git
+target
+**/node_modules
+web/dist
+web/.output
+web/.tanstack
+web/public/emoji
+launcher/dist
+launcher/server.embed
+launcher/web.tar.gz
+**/test-results
+web/playwright-report
+captures
+.playwright-mcp
+.worktrees
+.atl

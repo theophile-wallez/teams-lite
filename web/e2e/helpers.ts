@@ -641,6 +641,9 @@ export async function emitBrokerStatus(
      *  for the failure a container restart cannot fix (see e2e/signin.spec.ts). */
     can_sign_in?: boolean;
     signin_blocker?: string;
+    /** Why a restart that would cure this failure is not offered here — the sentence the
+     *  container image's backend sends (`intune::repair_blocker` in src/intune.rs). */
+    repair_blocker?: string;
     /** What the NEXT press of Repair sign-in does: `refuse` answers the real backend's
      *  refusal of a keyring that is not locked, `refuse_late` answers it only after the NEXT
      *  call of this helper has broadcast its status (a press crossed by newer news), `hold`

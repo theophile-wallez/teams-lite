@@ -35,6 +35,7 @@ export type BrokerRemedy =
   | { kind: "repair" }
   | { kind: "signin" }
   | { kind: "blocked"; message: string }
+  | { kind: "repair_blocked"; message: string }
   | { kind: "none" };
 
 export function brokerRemedy(broker: BrokerStatus | null | undefined): BrokerRemedy {
@@ -53,6 +54,10 @@ export function brokerRemedy(broker: BrokerStatus | null | undefined): BrokerRem
   // The repair comes first where it applies: it is the failure whose cause is a keyring that
   // re-locked, it needs nobody, and a sign-in window could not even be drawn for it.
   if (broker.can_repair) return { kind: "repair" };
+  // A restart IS the cure, and this backend may not make one: teams-lite's container image
+  // cannot restart the host's Intune container. Said in the backend's own words, because the
+  // fallback below would tell the reader a restart will not help — the one thing that would.
+  if (broker.repair_blocker) return { kind: "repair_blocked", message: broker.repair_blocker };
   if (broker.can_sign_in) return { kind: "signin" };
   // A failure that WOULD call for a sign-in, on a machine where one cannot be served: the
   // broker's display is gone, or there is none. Say which, rather than showing a dead button

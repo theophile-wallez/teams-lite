@@ -6981,6 +6981,7 @@ let mockBrokerStatus: {
   repairing: boolean;
   can_sign_in?: boolean;
   signin_blocker?: string;
+  repair_blocker?: string;
 } | null = null;
 
 /** What the NEXT press of Repair sign-in does, armed by the `{kind:"broker"}` hook's `repair`
@@ -12592,6 +12593,10 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         can_sign_in: Boolean(body.can_sign_in),
         signin_blocker:
           typeof body.signin_blocker === "string" ? body.signin_blocker : undefined,
+        // What a machine that may not restart the container says instead — the container
+        // image's own sentence (`intune::repair_blocker`). Off unless a spec asks.
+        repair_blocker:
+          typeof body.repair_blocker === "string" ? body.repair_blocker : undefined,
       };
       broadcast("broker_status", mockBrokerStatus);
       // After the broadcast, never before it: the press waiting on this is the one whose

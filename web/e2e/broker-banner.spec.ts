@@ -307,6 +307,29 @@ test.describe("broker banner", () => {
     await expect(hint).toContainText("sign in to Intune again");
   });
 
+  test("names who can restart the container when this backend may not", async ({ page }) => {
+    // teams-lite's container image: a locked keyring IS cured by a restart, and only the host
+    // can make one. The fallback sentence — that a restart will not fix this — would be false
+    // here, and it was what the image showed before the backend said why.
+    await gotoApp(page);
+    const blocker =
+      "teams-lite is running in its container image, which cannot restart the Intune container on the host.";
+    await emitBrokerStatus(page, {
+      ok: false,
+      signature: "keyring_locked",
+      message: "The identity broker's keyring is locked.",
+      can_repair: false,
+      repair_blocker: blocker,
+    });
+
+    const banner = page.locator('[data-testid="broker-banner"]');
+    await expect(banner.getByTestId("broker-repair")).toBeDisabled();
+    const hint = banner.getByTestId("broker-repair-hint");
+    await expect(hint).toBeVisible();
+    await expect(hint).toHaveText(blocker);
+    await expect(hint).not.toContainText("won't fix this one");
+  });
+
   test("says something when the chat list is empty", async ({ page }) => {
     // The other half of the same bug: a blank scroll box was the whole of the app's
     // answer to "where did my chats go".

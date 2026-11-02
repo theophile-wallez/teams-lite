@@ -1,0 +1,91 @@
+# teams-lite in a container image — the user's own install, packaged.
+#
+#     docker compose -f packaging/docker/compose.yaml build
+#     docker compose -f packaging/docker/compose.yaml up -d
+#
+# Then open http://127.0.0.1:19443. STARTING it is the user's act, never tooling's: the backend
+# in here is send-capable and signs in as them, exactly like the always-on service — so the
+# automation guard refuses `up`, `start`, `restart` and a `run` without TEAMS_LITE_READ_ONLY=1
+# (rule 3d in .claude/hooks/guard-live-automation.sh). Building and reading stay open:
+#
+#     docker compose -f packaging/docker/compose.yaml logs -f
+#     docker compose -f packaging/docker/compose.yaml exec teams-lite teams-lite-intune-status
+#
+# THIS IS NOT A SANDBOX, and every setting below that says so is load-bearing. It shares the
+# host's pid and network namespaces and runs as the host user, because that is what reaching the
+# identity broker takes (see the Dockerfile's header for the measurement). What the image buys is
+# the build and the runtime in one artifact — no Rust, Bun or systemd units on the host — and
+# not a boundary between teams-lite and the rest of the user's session.
+
+name: teams-lite
+
+services:
+  teams-lite:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+      args:
+        # The image is built FOR one host user: the broker answers only that uid. Export these
+        # when yours are not 1000 (`export TEAMS_LITE_UID=$(id -u) TEAMS_LITE_GID=$(id -g)`) —
+        # a shell's own UID is not exported, so it cannot be read here.
+        UID: ${TEAMS_LITE_UID:-1000}
+        GID: ${TEAMS_LITE_GID:-1000}
+        # Optional. Set it (`TEAMS_BUILD_REV=$(git rev-parse HEAD)`) and the app says when the
+        # rolling `latest` release has moved past this build; unset, the check skips itself.
+        TEAMS_BUILD_REV: ${TEAMS_BUILD_REV:-}
+    image: teams-lite:local
+    container_name: teams-lite
+
+    # The broker's bus is /proc/<Intune container leader>/root/run/user/0/bus, read live from
+    # the intune-container state mounted below. Without the host's pid namespace there is no
+    # such /proc entry to open.
+    pid: host
+    # The host's network namespace, for two reasons. The web front stays on 127.0.0.1 — the
+    # launcher's own default — so the write token it serves never leaves loopback; in a bridge
+    # network it would have to bind 0.0.0.0 inside the container, and the one thing keeping it
+    # off the LAN would be the `127.0.0.1:` prefix on a published port. And the broker's sign-in
+    # window is drawn on an Xvfb whose socket is ABSTRACT (`@/tmp/.X11-unix/X99`), which only a
+    # process in the host's network namespace can reach (src/xwindow.rs).
+    network_mode: host
+
+    # Always on, like the systemd service — and brought back by the daemon at boot.
+    restart: unless-stopped
+
+    volumes:
+      # The store: messages, settings, the custom emoji pack, sealed chats' keys. A volume of its
+      # own by default, so nothing on the host is touched. To bring an existing install's history
+      # and settings along, bind the host's store instead:
+      #   - ${HOME}/.local/share/teams-lite:/home/teams/.local/share/teams-lite
+      # Sharing one store with a host install that is also running is a shape this app already
+      # has (§ Running the released build BESIDE the staged one): the image's own ports keep its
+      # live feed its own, and every push and @claude answer is claimed once per machine.
+      - type: volume
+        source: data
+        target: /home/teams/.local/share/teams-lite
+
+      # Where the broker is: intune-container's runtime state, READ-ONLY. The directory, never
+      # the one file: the state is rewritten and removed as the container comes and goes, and a
+      # file bind mount would keep showing the inode it was mounted from — a leader that died.
+      # `create_host_path: false` — a missing source is an error rather than a root-owned empty
+      # directory left in the user's ~/.local/share.
+      #
+      # On a CLASSIC Intune host (the broker on the session bus, no intune-container), delete
+      # this mount and hand the image the session bus instead. That bus is the user's whole
+      # desktop session, which is why it is not here by default:
+      #   - ${XDG_RUNTIME_DIR}/bus:/run/teams-lite/session-bus
+      # with, under `environment:`, TEAMS_LITE_BROKER_BUS: unix:path=/run/teams-lite/session-bus
+      - type: bind
+        source: ${TEAMS_LITE_INTUNE_STATE:-${HOME}/.local/share/intune-container}
+        target: /home/teams/.local/share/intune-container
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # The machine's own zone, which is what an unset presence zone means.
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+        read_only: true
+
+volumes:
+  data:

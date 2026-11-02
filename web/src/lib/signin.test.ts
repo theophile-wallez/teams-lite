@@ -61,6 +61,21 @@ describe("brokerRemedy", () => {
     expect(remedy).toEqual({ kind: "blocked", message: "no display for the window" });
   });
 
+  it("says WHO can restart the container when this backend may not", () => {
+    // teams-lite's container image: a restart is the cure for a locked keyring, and only the
+    // host can make it. The fallback "a restart won't fix this one" would be false there.
+    const image = broken({
+      signature: "keyring_locked",
+      can_repair: false,
+      repair_blocker: "run it on the host",
+    });
+    expect(brokerRemedy(image)).toEqual({ kind: "repair_blocked", message: "run it on the host" });
+    // A repair running on the machine still wins: the host's own install started it.
+    expect(brokerRemedy({ ...image, repairing: true }).kind).toBe("repair");
+    // And a backend that may repair never shows the blocker, whatever else it carries.
+    expect(brokerRemedy({ ...image, can_repair: true }).kind).toBe("repair");
+  });
+
   it("reads a backend too old to answer as offering nothing", () => {
     // `can_sign_in` absent must never be hopeful: the panel would open on nothing.
     const old = broken();

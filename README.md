@@ -338,6 +338,31 @@ is locked and 2 when it cannot tell.
 A bare `intune-container start` does **not** fix it: on a running container it
 short-circuits and never re-runs the session setup that unlocks the keyring.
 
+### In a container (Docker)
+
+The same app, built from this checkout into one image — no Rust, Bun or systemd units on the
+host:
+
+```bash
+export TEAMS_LITE_UID=$(id -u) TEAMS_LITE_GID=$(id -g)   # the image is built for you
+docker compose -f packaging/docker/compose.yaml build
+docker compose -f packaging/docker/compose.yaml up -d
+```
+
+Then open <http://127.0.0.1:19443>. It runs beside any other install on its own ports
+(backend 19423, web 19443), keeps its store in a volume of its own, and is always on until you
+`docker compose … down` it. Read where it stands with
+`docker compose -f packaging/docker/compose.yaml exec teams-lite teams-lite-intune-status`.
+
+It is **packaging, not a sandbox**: to reach the identity broker it shares the host's PID and
+network namespaces, runs as your uid, and mounts `~/.local/share/intune-container` read-only.
+Two things it cannot do from inside an image, and says so: **repair a locked Intune keyring**
+(run `intune-container stop && intune-container start` on the host, or keep a teams-lite
+installed on the host, which repairs it on its own), and **update itself** (rebuild the image).
+The `@claude` agent's CLIs are not in it either: extend the image with yours if you want one.
+On a classic Intune host, swap the intune-container mount for your session bus as the compose
+file's comments show. See AGENTS.md § Running teams-lite in a container image.
+
 ### Dev mode (`teams --dev`)
 
 Working on the app? Use:

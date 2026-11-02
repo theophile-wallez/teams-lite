@@ -630,6 +630,12 @@ export type BrokerStatus = {
   /** Why a sign-in cannot be served, when a failure would otherwise call for one: the
    *  broker's display is gone, or it has none at all. Empty when there is nothing to say. */
   signin_blocker?: string;
+  /** Why the container restart that WOULD cure this failure is not offered HERE, or empty:
+   *  teams-lite's container image cannot restart the host's Intune container
+   *  (`intune::repair_blocker` in src/intune.rs). Without it the banner's fallback sentence —
+   *  that a restart will not fix this — is what an image showed, and it is false there. Absent
+   *  on a backend too old to say, which reads as empty. */
+  repair_blocker?: string;
 };
 
 /** Where an interactive sign-in has got to (see `Phase` in src/signin.rs).

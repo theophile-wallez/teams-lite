@@ -138,7 +138,9 @@ It appeared **within 2 s** of the call. Four facts follow, and each is a rule in
   container's `/tmp/.X11-unix` held `X99`, the host's held only `X0` and `X1` — and
   `/proc/net/unix` listed a listening `@/tmp/.X11-unix/X99`, because the container, its broker
   and the host all report one `net:[…]` namespace. So the abstract socket is the one both sides
-  reach whatever the container's mount layout is this week.
+  reach whatever the container's mount layout is this week, and it is also why teams-lite's
+  container image runs in the host's network namespace (packaging/docker/compose.yaml): in a
+  bridge network an abstract socket of the host's does not exist.
 
 ### The pending call, and how to end it
 

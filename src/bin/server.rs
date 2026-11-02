@@ -1184,7 +1184,11 @@ fn broker_status_payload(repairing: bool) -> Value {
     // which is false read-only and on a classic-Intune host). Whether the keyring really is
     // locked is asked when the button is pressed, not here: this payload is built in every
     // greeting, and a D-Bus round trip per connection is not what a banner is worth.
-    let can_repair = state.failure.is_some_and(|f| f.is_repairable()) && intune::repair_available();
+    let repairable = state.failure.is_some_and(|f| f.is_repairable());
+    let can_repair = repairable && intune::repair_available();
+    // Why a restart that WOULD cure this failure is not offered — said only where it is the
+    // cure, so a failure no restart fixes keeps the sentence that tells the reader so.
+    let repair_blocker = if repairable && !can_repair { intune::repair_blocker() } else { None };
     let repairing = repairing || BROKER_REPAIRS_FOLLOWED.load(Ordering::SeqCst) > 0;
     json!({
         "ok": state.is_ok(),
@@ -1205,6 +1209,10 @@ fn broker_status_payload(repairing: bool) -> Value {
         "detail": state.detail,
         "consecutive_failures": state.consecutive_failures,
         "can_repair": can_repair,
+        // What a restart cannot be asked for HERE, in the words the reader needs, or empty:
+        // teams-lite's container image cannot restart the host's Intune container, and the
+        // banner's fallback sentence — that a restart will not fix this — would be false.
+        "repair_blocker": repair_blocker.unwrap_or(""),
         "repairing": repairing,
     })
 }
@@ -1982,10 +1990,17 @@ impl Ctx {
              Intune container"
         );
         if !intune::repair_available() {
+            // The container image sees the container and may not restart it: its sentence is
+            // the remedy, so a press gets it rather than "there is no container".
+            let blocker = intune::repair_blocker();
             // Quiet for an automatic trigger: on a classic-Intune host the observer would
             // otherwise log this every time the broker's state changed.
             if automatic {
-                return Ok(json!({ "started": false, "reason": "no_container" }));
+                let reason = if blocker.is_some() { "container_image" } else { "no_container" };
+                return Ok(json!({ "started": false, "reason": reason }));
+            }
+            if let Some(blocker) = blocker {
+                anyhow::bail!("{blocker}");
             }
             anyhow::bail!(
                 "this machine runs no Intune container (intune-container is not set up here), so \
@@ -3451,6 +3466,14 @@ async fn serve() -> Result<()> {
             ),
             Err(e) => eprintln!("[write-lock] armed: token published nowhere ({e})"),
         },
+    }
+    // One line, because the journal of an image looks like any other backend's and the one
+    // behaviour that differs — no repair — would otherwise read as a repair that never fires.
+    if intune::in_container_image() {
+        eprintln!(
+            "[startup] running from teams-lite's container image: the broker is followed through \
+             the host's /proc, and restarting the Intune container is the host's to do"
+        );
     }
 
     let http = reqwest::Client::builder().user_agent(UA).http1_only().build()?;

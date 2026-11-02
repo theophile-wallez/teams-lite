@@ -19,15 +19,18 @@
 #      that from the app's own state before every key;
 #   2. a script that calls send/edit/delete/react against the live backend — on its own
 #      port (19420 for the always-on service, 19421 for the dev one, 19422 for the
-#      released build the app unit runs) or through an
-#      app server that relays to it (19440 / 19441 / 19442, and whatever tailnet name it is
-#      served under: see the relay in web/server.ts);
+#      released build the app unit runs, 19423 for the container image) or through an
+#      app server that relays to it (19440 / 19441 / 19442 / 19443, and whatever tailnet name
+#      it is served under: see the relay in web/server.ts);
 #   2b. fetching the backend's write token, from the file it publishes or from the
 #      endpoint the app's own server exposes it on. It is a capability: holding it
 #      is what makes a write possible at all;
 #   3. `vite dev` without an explicit VITE_TEAMS_WS_URL, and the production web
 #      server without an explicit TEAMS_LITE_WS_URL (a server with no declared
 #      backend is exactly how the incident started);
+#   3d. bringing teams-lite's CONTAINER IMAGE up (packaging/docker): `docker|podman run`,
+#      `start`, a compose `up` — the whole live stack of rule 3c inside a container. Building it
+#      and running it with `-e TEAMS_LITE_READ_ONLY=1` stay open;
 #   4. starting the Rust backend without TEAMS_LITE_READ_ONLY=1 — an agent has no
 #      reason to run a send-capable backend; the user starts that one. The spellings it
 #      knows: the binary in target/, the staged copy the always-on service runs, the
@@ -821,9 +824,12 @@ if ! sanctioned_automation; then
     # any host it is reachable on, such as a tailnet name — is a second address for
     # the user's live account, not merely a static-file server.
     #
-    # SIX ports, not two. 19420/19440 are the always-on service; 19421/19441 are the
+    # EIGHT ports, not two. 19420/19440 are the always-on service; 19421/19441 are the
     # user's hands-on dev pair (bin/teams-dev-server.sh and `bun run dev`), which is
-    # just as send-capable. Only 19430 — read-only — is absent, by design.
+    # just as send-capable; 19422/19442 are the released build beside them; 19423/19443 are
+    # the container image (packaging/docker), which shares the host's network namespace, so
+    # its ports are this machine's loopback like the others. Only 19430 — read-only — is
+    # absent, by design.
     #
     # The `agent_set_*` methods are in that list for the same reason: they arm the local
     # agent that answers `@claude` in a Teams thread AS the user, decide what it may run
@@ -917,7 +923,7 @@ if ! sanctioned_automation; then
     # the thread, and what instruction leads the prompt — so a script that could write one
     # could put words in the mouth of a program that answers as the user. Reading the list
     # back is not a write and is not listed.
-    if grep -qE '(127\.0\.0\.1|localhost):(1942[0-2]|1944[0-2])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
+    if grep -qE '(127\.0\.0\.1|localhost):(1942[0-3]|1944[0-3])|[A-Za-z0-9-]+\.ts\.net' "$script" &&
       grep -qE '"(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|seal_set|seal_off|seal_forget|seal_reveal|signin_start|signin_frame|signin_input|signin_cancel|update_download|update_apply|chess_engine_download|chess_engine_forget|chess_sound_forget|restart_backend|repair_broker|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_answer_media|call_subscribe|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_edit_comment|gitlab_mr_resolve_thread|gitlab_mr_set_state|gitlab_mr_review_run|gitlab_mr_review_ask)"|'\''(send|edit|delete|react|mark_read|mail_mark_read|set_always_available|set_chat_pinned|set_chat_muted|set_chat_hidden|push_subscribe|push_unsubscribe|push_test|set_settings|agent_set_mode|agent_set_tools|agent_set_provider|agent_set_unrestricted|agent_stop|set_person_name|set_person_avatar|custom_emoji_add|custom_emoji_remove|custom_emoji_import|agent_persona_save|agent_persona_remove|seal_set|seal_off|seal_forget|seal_reveal|signin_start|signin_frame|signin_input|signin_cancel|update_download|update_apply|chess_engine_download|chess_engine_forget|chess_sound_forget|restart_backend|repair_broker|set_calling|call_prepare|call_place|call_join|call_accept|call_offer_media|call_answer_media|call_subscribe|call_start_sharing|call_stop_sharing|call_hangup|call_mute|gitlab_set_approval|gitlab_mr_merge|gitlab_mr_comment|gitlab_mr_delete_comment|gitlab_mr_edit_comment|gitlab_mr_resolve_thread|gitlab_mr_set_state|gitlab_mr_review_run|gitlab_mr_review_ask)'\''|write_token' "$script"; then
       scripts_writing_to_the_backend="$scripts_writing_to_the_backend $script"
     fi
@@ -932,9 +938,8 @@ fi
 # --- 1. no writes to the live backend, and no ad-hoc browser drivers ----------
 if [ -n "$scripts_writing_to_the_backend" ]; then
   block "This command runs a script that calls a WRITE method on the REAL backend — its own
-port (19420 service / 19421 dev / 19422 released) or an app server that relays to it
-(19440 / 19441 / 19442 /
-a tailnet name):
+port (19420 service / 19421 dev / 19422 released / 19423 image) or an app server that relays
+to it (19440 / 19441 / 19442 / 19443 / a tailnet name):
    ${scripts_writing_to_the_backend# }
 
 Reading the live backend is fine — inspect all the real data you need. Writing is
@@ -1689,6 +1694,120 @@ To exercise or screenshot the UI, drive the mock:
 
 The user's always-on instance already serves the real app; see AGENTS.md
 § The always-on service."
+fi
+
+# --- 3d. teams-lite's container image is the user's to start ---------------------
+# The image (packaging/docker/) runs `teams` — rule 3c's whole live stack — so starting it is
+# the same act in a fourth spelling, and one rules 3 to 3c cannot see: no binary path on the
+# line, no `teams`, no unit. The program is inside the image, and so is its environment.
+#
+# WHAT IS REFUSED. Bringing a teams-lite container up: `docker|podman|nerdctl run|create` of
+# the image, `start|restart|unpause` of the container, and a compose `up|start|restart|run|
+# create` of its project. What it is is named three ways and any one counts — the image or the
+# container by its own name as a whole word (`teams-lite`, `teams-lite:local`, `--name
+# teams-lite`; never a path such as `…/worktrees/teams-lite/x`, which is what `-v` mounts
+# carry), the compose file's directory (`packaging/docker`), or a shell already standing in it
+# (`$PWD`), where a bare `docker compose up` finds the file on its own.
+#
+# WHAT STAYS OPEN, because it is how the image is made and diagnosed: `build`, `logs`, `ps`,
+# `images`, `inspect`, `config`, `exec` into a running one, and every stop and removal. And TWO
+# ways to RUN it for reading, each of which states its proof in the command itself:
+#   • `-e TEAMS_LITE_READ_ONLY=1` (or `--env`) on a `run`, which reaches the CONTAINER — the
+#     backend then refuses every write and keeps the read-only 19430 (packaging/docker/
+#     entrypoint.sh). The same variable in front of `docker` sets it for the CLI alone, which
+#     is rule 3's systemd-run lesson again, so it proves nothing;
+#   • `--entrypoint teams-lite-intune-status`, the read-only diagnostic the image ships.
+# A compose `up`/`start`/`restart` has no proof to offer: its environment is the file's, and
+# the file's is send-capable.
+container_cli='(docker|podman|nerdctl)([[:space:]]+container)?'
+compose_cli='((docker|podman|nerdctl)[[:space:]]+([^;&|]*[[:space:]])?compose|docker-compose|podman-compose)'
+names_the_image="(^|[[:space:]=\"'])teams-lite(:[^[:space:]\"';&|]*)?([[:space:]\"';&|]|\$)"
+names_the_project="${names_the_image}|packaging/docker([/[:space:]\"';&|]|\$)"
+runs_a_container="${at_a_program}${container_cli}([[:space:]][^;&|]*)?[[:space:]](run|create)${ends_a_word}"
+starts_a_container="${at_a_program}${container_cli}([[:space:]][^;&|]*)?[[:space:]](start|restart|unpause)${ends_a_word}"
+compose_starts="${at_a_program}${compose_cli}([[:space:]][^;&|]*)?[[:space:]](up|start|restart|create)${ends_a_word}"
+compose_runs="${at_a_program}${compose_cli}([[:space:]][^;&|]*)?[[:space:]]run${ends_a_word}"
+container_read_only="(-e|--env)([[:space:]]+|=)[\"']?TEAMS_LITE_READ_ONLY=1[\"']?([[:space:]]|\$)|--entrypoint([[:space:]]+|=)[\"']?(/usr/local/bin/)?teams-lite-intune-status[\"']?([[:space:]]|\$)"
+# Where the shell RUNS the command: the harness says so in the payload, and a hook run by hand
+# inherits it as $PWD. Read only when a compose command is on the line, because this hook runs
+# before every command and the parse is a process of its own.
+shell_directory() {
+  local cwd
+  cwd="$(printf '%s' "$payload" | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("cwd", "") or "")
+except Exception:
+    pass
+' 2>/dev/null || true)"
+  printf '%s' "${cwd:-$PWD}"
+}
+# A COMPOSE command needs to name nothing: standing in the file's directory, or `cd`-ing into it
+# earlier on the line, is how a bare `docker compose up` finds the file. So compose is judged by
+# the whole line and the directory, and a container command — whose image or name is one of its
+# own words — by itself.
+compose_project_named() {
+  printf '%s' "$command_line" | grep -qE "$names_the_project" && return 0
+  case "$(shell_directory)" in */packaging/docker | */packaging/docker/) return 0 ;; esac
+  return 1
+}
+# The commands on this line, one per line, kills and probes taken out, that match ERE $1.
+commands_matching() {
+  printf '%s\n' "$command_line_outside_kills" | tr ';&|' '\n\n\n' | grep -E "$(raw_form "$1")"
+}
+a_teams_lite_container_starts() {
+  local one
+  if commands_matching "$compose_starts" >/dev/null && compose_project_named; then
+    return 0
+  fi
+  while IFS= read -r one; do
+    [ -n "$one" ] && printf '%s' "$one" | grep -qE "$names_the_image" && return 0
+  done <<<"$(commands_matching "$starts_a_container")"
+  return 1
+}
+# Per COMMAND, like rule 3's units: one container told it is read-only says nothing about a
+# second one on the same line.
+a_teams_lite_container_runs_unproven() {
+  local one
+  while IFS= read -r one; do
+    [ -n "$one" ] || continue
+    if printf '%s' "$one" | grep -qE "$names_the_image" &&
+      ! printf '%s' "$one" | grep -qE "$container_read_only"; then
+      return 0
+    fi
+  done <<<"$(commands_matching "$runs_a_container")"
+  local compose_runs_here
+  compose_runs_here="$(commands_matching "$compose_runs")" || return 1
+  compose_project_named || return 1
+  while IFS= read -r one; do
+    [ -n "$one" ] || continue
+    printf '%s' "$one" | grep -qE "$container_read_only" || return 0
+  done <<<"$compose_runs_here"
+  return 1
+}
+# Nothing to decide on a line that names no container CLI at all — which is nearly every line.
+if printf '%s' "$command_line" | grep -qE '(docker|podman|nerdctl|compose)' &&
+  ! inspecting_a_file && ! searching_text && ! printing_usage &&
+  { a_teams_lite_container_starts || a_teams_lite_container_runs_unproven; }; then
+  block "teams-lite's container image runs \`teams\` — a send-capable backend signed in as the
+user, and the real app on 127.0.0.1:19443 — so bringing it up is the same act rule 3c
+refuses, in a container. Starting it is theirs:
+
+  docker compose -f packaging/docker/compose.yaml up -d
+
+Building and reading it stay open:
+
+  docker compose -f packaging/docker/compose.yaml build
+  docker compose -f packaging/docker/compose.yaml logs -f
+  docker run --rm --pid=host --entrypoint teams-lite-intune-status \\
+    -v ~/.local/share/intune-container:/home/teams/.local/share/intune-container:ro teams-lite:local
+
+To read real data through the image, tell the CONTAINER it is read-only — the backend then
+refuses every write and listens on 19430:
+
+  docker run --rm -e TEAMS_LITE_READ_ONLY=1 --pid=host --network=host … teams-lite:local
+
+(TEAMS_LITE_READ_ONLY=1 in front of \`docker\` sets it for the CLI, never for the container.)"
 fi
 
 exit 0

@@ -150,6 +150,19 @@ function ShownBrokerBanner({ broker }: { broker: BrokerStatus }) {
             {remedy.message}
           </p>
         </div>
+      ) : remedy.kind === "repair_blocked" ? (
+        // A container restart IS what this failure needs, and this backend may not make one —
+        // teams-lite's container image cannot restart the host's Intune container. The button
+        // stays visible and inert for the reason the last branch gives, and the backend's own
+        // sentence names who can: the host's CLI, or a host install's health check.
+        <div className="flex flex-col gap-1.5">
+          <Button size="sm" disabled data-testid="broker-repair" className="pointer-events-none">
+            Repair sign-in
+          </Button>
+          <p data-testid="broker-repair-hint" className="text-[11px] leading-snug text-text-dim">
+            {remedy.message}
+          </p>
+        </div>
       ) : remedy.kind === "repair" ? (
         <div className="flex flex-col gap-1.5">
           <Button

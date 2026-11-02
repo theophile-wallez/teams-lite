@@ -280,6 +280,18 @@ FIXTURES = {
         "const ws = new WebSocket('ws://127.0.0.1:19442');\n"
         "ws.send(JSON.stringify({ method: 'delete' }));\n"
     ),
+    # The container image's pair (19423 / 19443, packaging/docker). It runs in the host's
+    # network namespace, so a script on this machine reaches it on loopback like the others.
+    "image-backend-writer.ts": (
+        "// Writes to the container image's backend, which is also the real account.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19423');\n"
+        "ws.send(JSON.stringify({ method: 'send' }));\n"
+    ),
+    "image-relay-writer.ts": (
+        "// Writes through the container image's own web server.\n"
+        "const ws = new WebSocket('ws://127.0.0.1:19443');\n"
+        "ws.send(JSON.stringify({ method: 'react' }));\n"
+    ),
     "released-backend-reader.ts": (
         "// Reads the RELEASED build's backend, which is allowed.\n"
         "const ws = new WebSocket('ws://127.0.0.1:19422');\n"
@@ -1217,6 +1229,40 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "pkill -f __teams-lite-repair-broker"),
         ("BLOCK", PROJECT, "kill $(pgrep -f __teams-lite-repair-broker)"),
         ("BLOCK", PROJECT, "pkill -f __rootless-supervise"),
+        # The container image's pair (19423 / 19443) is the same account on this loopback.
+        ("BLOCK", PROJECT, f"bun run {tmp}/image-backend-writer.ts"),
+        ("BLOCK", PROJECT, f"bun run {tmp}/image-relay-writer.ts"),
+        # Rule 3d: bringing teams-lite's container image up is the `teams` command in a
+        # container — through compose, named by its file, by a `cd` into its directory, or by
+        # a shell already standing there, where a bare `up` finds the file on its own.
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml up -d"),
+        ("BLOCK", PROJECT, "cd packaging/docker && docker compose up -d"),
+        ("BLOCK", PROJECT / "packaging" / "docker", "docker compose up -d"),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml up --build"),
+        ("BLOCK", PROJECT, "docker-compose -f packaging/docker/compose.yaml restart"),
+        ("BLOCK", PROJECT, "sudo docker compose -p teams-lite start"),
+        ("BLOCK", PROJECT, "podman compose -f packaging/docker/compose.yaml up"),
+        # …or the image run straight, or the container started again.
+        ("BLOCK", PROJECT, "docker run --rm --pid=host --network=host teams-lite:local"),
+        ("BLOCK", PROJECT, "podman run --pid=host --network=host teams-lite:local"),
+        ("BLOCK", PROJECT, "docker container create --name teams-lite teams-lite:local"),
+        ("BLOCK", PROJECT, "docker start teams-lite"),
+        ("BLOCK", PROJECT, "docker restart teams-lite"),
+        ("BLOCK", PROJECT, "timeout 60 docker run --rm teams-lite:local"),
+        ("BLOCK", PROJECT, "docker stop teams-lite; docker start teams-lite"),
+        # The proof has to reach the CONTAINER: a variable in front of `docker` sets it for the
+        # CLI alone, a compose run with no `-e` runs the file's send-capable environment, and
+        # a wrong value or a shell entrypoint proves nothing.
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 docker run --rm teams-lite:local"),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml run --rm teams-lite"),
+        ("BLOCK", PROJECT, "docker run --rm -e TEAMS_LITE_READ_ONLY=0 teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm --entrypoint sh teams-lite:local -c teams"),
+        # One read-only container says nothing about a second on the same line.
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm -e TEAMS_LITE_READ_ONLY=1 teams-lite:local; docker run -d teams-lite:local",
+        ),
         # --- must allow ------------------------------------------------------
         # Reading the live backend is deliberately fine, through either address.
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
@@ -1499,6 +1545,44 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, 'python3 -c "print(\'(intune-container stop)\')"'),
         # A production web server that names a read-only backend is fine.
         ("ALLOW", WEB, "TEAMS_LITE_WS_URL=ws://127.0.0.1:19430 bun run start"),
+        # Rule 3d's open half: making the image, reading it, and running it told read-only.
+        ("ALLOW", PROJECT, "docker compose -f packaging/docker/compose.yaml build"),
+        ("ALLOW", PROJECT, "docker build -f packaging/docker/Dockerfile -t teams-lite:local ."),
+        ("ALLOW", PROJECT, "docker compose -f packaging/docker/compose.yaml config"),
+        ("ALLOW", PROJECT, "docker compose -f packaging/docker/compose.yaml logs -f"),
+        ("ALLOW", PROJECT, "docker compose -f packaging/docker/compose.yaml ps"),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker compose -f packaging/docker/compose.yaml exec teams-lite teams-lite-intune-status",
+        ),
+        ("ALLOW", PROJECT, "docker images teams-lite:local"),
+        ("ALLOW", PROJECT, "docker logs teams-lite"),
+        ("ALLOW", PROJECT, "docker stop teams-lite"),
+        ("ALLOW", PROJECT, "docker rm -f teams-lite"),
+        ("ALLOW", PROJECT / "packaging" / "docker", "docker compose down"),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm -e TEAMS_LITE_READ_ONLY=1 --pid=host --network=host teams-lite:local",
+        ),
+        ("ALLOW", PROJECT, "docker run --rm --env=TEAMS_LITE_READ_ONLY=1 teams-lite:local"),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker compose -f packaging/docker/compose.yaml run --rm -e TEAMS_LITE_READ_ONLY=1 teams-lite",
+        ),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm --pid=host --entrypoint teams-lite-intune-status teams-lite:local",
+        ),
+        # Another image, or a mount from a path that merely CONTAINS the name, is not this one.
+        ("ALLOW", PROJECT, "docker run --rm --pid=host python:3.13-alpine ls /proc"),
+        ("ALLOW", PROJECT, "docker run --rm -v /home/u/.t3/worktrees/teams-lite/x:/x alpine ls /x"),
+        ("ALLOW", PROJECT, "docker compose up -d"),
+        # And prose about it runs nothing.
+        ("ALLOW", PROJECT, 'git commit -m "docs: start it with docker compose up teams-lite"'),
     ]
 
 

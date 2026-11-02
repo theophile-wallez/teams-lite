@@ -38,6 +38,13 @@
 //!   device registration across one, so a repair through it would unenroll the machine. The
 //!   dependency is pinned to the commit that fixed both (see Cargo.toml).
 //!
+//! IN TEAMS-LITE'S OWN CONTAINER IMAGE the first two answers hold unchanged and the third does
+//! not ([`CONTAINER_IMAGE_ENV`]). With the host's pid namespace and a read-only view of the
+//! intune-container state (packaging/docker/compose.yaml), [`broker_bus`] reads the same file
+//! and opens the same `/proc/<leader>/root/…` socket — measured from an image: `AUTH EXTERNAL`
+//! as uid 0 answered OK. The repair is the host systemd running THIS binary, and its path is
+//! the image's, so the image offers none and says why ([`repair_blocker`]).
+//!
 //! WHY THIS BINARY MUST ROUTE THE CRATE'S OWN SUBCOMMANDS. `backend::start` boots the
 //! container from a detached supervisor it spawns by re-executing `exe::stable_exe()` with a
 //! hidden `__rootless-supervise` argument — the crate's own binary routes that in its `main`.
@@ -100,6 +107,29 @@ pub const REPAIR_SUBCOMMAND: &str = "__teams-lite-repair-broker";
 /// choose — only to route.
 pub const SUPERVISE_SUBCOMMAND: &str = "__rootless-supervise";
 pub const EXEC_SUBCOMMAND: &str = "__rootless-exec";
+
+/// Set by teams-lite's own container image (`ENV` in packaging/docker/Dockerfile), and by
+/// nothing a person is meant to type. DECLARED rather than detected — the shape
+/// `TEAMS_LITE_LAUNCHER` and `TEAMS_LITE_RESTART_ON_EXIT` already have — because what it
+/// decides is a fact about the PACKAGING that no file inside the process can prove: whether
+/// the path of this binary exists on the host whose systemd a repair would ask to run it.
+///
+/// In the image it does not. [`start_repair_unit`] hands the user's manager `own_executable()`,
+/// which inside the image is the backend the launcher extracted into the IMAGE's own cache — a
+/// path the host has never held — so the unit would fail at exec, or run whatever else the host
+/// keeps under that name.
+/// The image therefore offers no repair and SAYS so ([`repair_blocker`]); the host's own
+/// intune-container, or a teams-lite installed on the host, is what restarts the container.
+pub const CONTAINER_IMAGE_ENV: &str = "TEAMS_LITE_CONTAINER_IMAGE";
+
+/// What a reader is told when a restart WOULD repair sign-in and this backend may not make one
+/// because it runs in the image. Two remedies, because both are real: the user's own CLI on the
+/// host, and a host install's health check, which repairs a locked keyring with nobody asking —
+/// the keyring is the container's, so one repair on the machine mends every install on it.
+pub const IMAGE_REPAIR_BLOCKER: &str = "teams-lite is running in its container image, which \
+     cannot restart the Intune container on the host. Restart it there (`intune-container stop \
+     && intune-container start`), or keep a teams-lite installed on the host: it repairs a locked \
+     keyring on its own.";
 
 /// The store setting holding when this MACHINE last started a repair (epoch ms). Shared by
 /// every backend on one store, so the automatic floor counts every trigger on the machine —
@@ -348,8 +378,34 @@ pub async fn container_keyring() -> KeyringCheck {
 /// restart, and offering the button there would report a failure the reader can do nothing
 /// about. The installed unit answered the second half with `ConditionFileIsExecutable=` on the
 /// binary; the crate's own "is it initialized" is the same question asked of the real thing.
+///
+/// And never from teams-lite's container image ([`CONTAINER_IMAGE_ENV`]): the repair is THIS
+/// binary run by the host's systemd, and this binary's path exists only inside the image. The
+/// image still sees the intune-container state — it is mounted there so the broker's bus can be
+/// followed live — which is exactly why "is it initialized" alone would offer the button.
 pub fn repair_available() -> bool {
-    !crate::read_only() && intune_container::ops::is_initialized()
+    repair_may_run(crate::read_only(), in_container_image(), intune_container::ops::is_initialized())
+}
+
+/// Why a repair is not offered where one WOULD be the cure, or `None` when there is nothing
+/// worth saying. Only the image has a sentence: a read-only backend refuses by design and says
+/// so where it is pressed, and a host with no intune-container has no container to restart.
+pub fn repair_blocker() -> Option<&'static str> {
+    let blocked = !crate::read_only()
+        && in_container_image()
+        && intune_container::ops::is_initialized();
+    blocked.then_some(IMAGE_REPAIR_BLOCKER)
+}
+
+/// Is this process running from teams-lite's own container image?
+pub fn in_container_image() -> bool {
+    std::env::var_os(CONTAINER_IMAGE_ENV).is_some_and(|v| v == "1")
+}
+
+/// The decision of [`repair_available`], with its three inputs handed in so it is tested
+/// without a container, an image or a read-only process.
+fn repair_may_run(read_only: bool, in_image: bool, initialized: bool) -> bool {
+    !read_only && !in_image && initialized
 }
 
 // ---- asking systemd for the repair ---------------------------------------------------------
@@ -1098,4 +1154,71 @@ mod tests {
         assert!(!body.contains("boot.save("), "the copy with updates off is never saved");
     }
 
+    // The image sees the intune-container state (it follows the bus from it) and still must not
+    // offer a repair: the repair is the host's systemd running a path only the image holds.
+    #[test]
+    fn the_image_offers_no_repair_and_says_what_to_do_instead() {
+        assert!(repair_may_run(false, false, true), "a host install that may repair, does");
+        assert!(!repair_may_run(false, true, true), "the image never does, though it sees the state");
+        assert!(!repair_may_run(true, false, true), "nor does a read-only backend");
+        assert!(!repair_may_run(false, false, false), "nor a host with nothing to restart");
+        // The sentence is the remedy, so it has to name both of the real ones.
+        assert!(IMAGE_REPAIR_BLOCKER.contains("intune-container stop && intune-container start"));
+        assert!(IMAGE_REPAIR_BLOCKER.contains("installed on the host"));
+    }
+
+    // Everything the image needs to reach the broker is a line in a file nothing else reads, and
+    // each one fails SILENTLY when it goes: no pid namespace and the bus is not there, root and
+    // the handshake is refused, a file mount and the leader goes stale — the app then shows no
+    // chats with nothing to say why. So the files are held to the rules here, beside the code
+    // they serve.
+    #[test]
+    fn the_image_is_built_to_reach_the_broker_and_to_stay_its_own_install() {
+        let dockerfile = include_str!("../packaging/docker/Dockerfile");
+        let compose = include_str!("../packaging/docker/compose.yaml");
+        let entrypoint = include_str!("../packaging/docker/entrypoint.sh");
+        let live = |text: &'static str| -> Vec<&'static str> {
+            text.lines().map(str::trim).filter(|l| !l.starts_with('#')).collect()
+        };
+
+        // The image declares itself under the name this module reads.
+        assert!(
+            live(dockerfile).iter().any(|l| l.contains(&format!("{CONTAINER_IMAGE_ENV}=1"))),
+            "the Dockerfile must set {CONTAINER_IMAGE_ENV}=1"
+        );
+        // It runs as the host user it was built for, never as root.
+        let user = live(dockerfile).into_iter().rfind(|l| l.starts_with("USER ")).expect("a USER");
+        assert_ne!(user, "USER root");
+        assert!(dockerfile.contains("ARG UID=") && dockerfile.contains("useradd -o -u \"${UID}\""));
+
+        // The host pid namespace (the bus is a /proc path) and network namespace (the web front
+        // stays on loopback, and the broker's display is an abstract socket).
+        let compose_lines = live(compose);
+        assert!(compose_lines.contains(&"pid: host"));
+        assert!(compose_lines.contains(&"network_mode: host"));
+        assert!(
+            !compose_lines.iter().any(|l| l.contains("TEAMS_WEB_HOST") || l.starts_with("ports:")),
+            "the web front serves the write token, so it stays on 127.0.0.1 and is never published"
+        );
+        // The intune-container state is a READ-ONLY DIRECTORY that must already exist.
+        let mount = compose
+            .split("target: /home/teams/.local/share/intune-container")
+            .nth(1)
+            .expect("the intune-container state is mounted")
+            .split("- type:")
+            .next()
+            .unwrap();
+        assert!(mount.contains("read_only: true"));
+        assert!(mount.contains("create_host_path: false"));
+
+        // Ports of its own: in the host's network namespace the launcher would otherwise ATTACH
+        // to the always-on service on 19420, and share its live feed's endpoint id on one store.
+        assert!(entrypoint.contains("TEAMS_LITE_PORT=\"${TEAMS_LITE_PORT:-19423}\""));
+        assert!(entrypoint.contains("TEAMS_WEB_PORT=\"${TEAMS_WEB_PORT:-19443}\""));
+        for taken in ["19420", "19421", "19422", "19430", "19440", "19441", "19442"] {
+            assert!(!entrypoint.contains(&format!(":-{taken}}}")), "{taken} belongs to another install");
+        }
+        // A read-only run keeps the read-only backend's own port.
+        assert!(entrypoint.contains("if [ \"${TEAMS_LITE_READ_ONLY:-}\" != 1 ]; then"));
+    }
 }

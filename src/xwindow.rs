@@ -216,7 +216,8 @@ pub fn broker_display() -> DisplayState {
 /// `/tmp/.X11-unix/X99` on the host, `@/tmp/.X11-unix/X99` in `/proc/net/unix` — and the served
 /// sign-in was refused on the very machine it was built for. The connection itself never had
 /// this problem: x11rb tries the abstract name first and the file second, which is the order
-/// asked in here too.
+/// asked in here too. A teams-lite inside its container image sees the same abstract socket
+/// because it runs in the host's network namespace (packaging/docker/compose.yaml).
 fn display_is_served(display: &str) -> bool {
     let Some(path) = display_socket(display) else { return false };
     let abstract_socket = || {
