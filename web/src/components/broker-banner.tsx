@@ -13,40 +13,86 @@
 // a full-screen overlay: `FatalOverlay` already owns "the app cannot work at all", and
 // an outage that leaves cached reads working does not deserve the same treatment.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { SecurityIcon } from "@hugeicons/core-free-icons";
 import { Button } from "./ui/button";
 import { useAppState, useController } from "./controller-context";
 import { FadeArc } from "./loading-ui/fade-arc";
-import { brokerNeedsAttention } from "~/lib/protocol";
+import { brokerNeedsAttention, type BrokerStatus } from "~/lib/protocol";
 import { brokerRemedy } from "~/lib/signin";
 
-type RepairState = { kind: "idle" | "asking" } | { kind: "error"; message: string };
+/** What the reader's own press of "Repair sign-in" left on this banner. A refusal carries
+ *  `about`, the backend's view at the moment the press was MADE (see `brokerView`). */
+type RepairState =
+  | { kind: "idle" | "asking" }
+  | { kind: "error"; message: string; about: string };
+
+/** The part of the backend's view a refusal is about: which failure, whether a restart could
+ *  fix it, and whether a repair is running. A refusal answers a press made against exactly this,
+ *  so it is shown while this still holds and DROPPED the moment it moves — not merely hidden,
+ *  or it came back with the button: a refusal under the `disconnected` the reader pressed on,
+ *  then a `refused` that takes the button away, then `disconnected` again, put the old sentence
+ *  back under a button nobody had pressed since. The `message` and the failure count are left
+ *  out on purpose: neither changes what a press would do. */
+function brokerView(broker: BrokerStatus): string {
+  return `${broker.signature}|${broker.can_repair}|${broker.repairing}`;
+}
 
 export function BrokerBanner() {
   const broker = useAppState((s) => s.brokerStatus);
-  const controller = useController();
-  const [repair, setRepair] = useState<RepairState>({ kind: "idle" });
-
   // A null status is silence, on purpose: the mock and any older backend never send
   // one, and a banner that showed up by default would be worse than the bug.
   if (!brokerNeedsAttention(broker) || !broker) return null;
+  return <ShownBrokerBanner broker={broker} />;
+}
 
+/** The banner itself, mounted only while sign-in is broken.
+ *
+ *  A component of its own so the PRESS's state dies with the banner. This sidebar is never
+ *  unmounted, and the keyring re-locks roughly every eighteen hours — so a "Repairing…" or a
+ *  refusal held by the outer component outlived the outage it was about and greeted the NEXT
+ *  one, a day later, with a disabled button over a repair nobody had asked for. */
+function ShownBrokerBanner({ broker }: { broker: BrokerStatus }) {
+  const controller = useController();
+  const [repair, setRepair] = useState<RepairState>({ kind: "idle" });
+
+  // `asking` covers the round trip and nothing more. Once the backend has taken the press, its
+  // own `repairing` is the truth: it stays up through the repair and says when the unit ends,
+  // and a repair that ended WITHOUT fixing sign-in has to hand the button back — held here
+  // until the banner went away, it would stay "Repairing…" for as long as the outage lasted.
   const busy = repair.kind === "asking" || broker.repairing;
   // Exactly one remedy, ever, and the choice is a pure function so it can be tested: a banner
   // offering both "restart the container" and "sign in here" would ask the reader to know
   // which failure they have, which is the thing they opened the app to be told.
   const remedy = brokerRemedy(broker);
 
+  // A refusal goes when the backend's view moves away from the one it answered: a repair that
+  // something else started (the health check, the other backend, another page), a failure that
+  // changed. Keyed on the view at the PRESS rather than on "the view changed", for two reasons.
+  // A refusal that lands after the view has ALREADY moved is about a state the reader is no
+  // longer looking at — "its login keyring is unlocked" under a `keyring_locked` banner — and a
+  // reset that only fires on a change never sees it, so it is dropped on arrival here, which is
+  // why `repair` is a dependency too. And this page's own optimistic flag goes up and comes back
+  // down around every press, the rollback landing in the same breath as the refusal: a reset
+  // on any change was measured to keep the sentence, but only because the rollback reaches
+  // React before this component's own `catch` does — an order nothing here controls.
+  const view = brokerView(broker);
+  useEffect(() => {
+    if (repair.kind === "error" && repair.about !== view) setRepair({ kind: "idle" });
+  }, [repair, view]);
+
   const onRepair = async () => {
+    const about = view;
     setRepair({ kind: "asking" });
     try {
       await controller.repairBroker();
-      // Stay in "asking": the repair takes about a minute, drops this socket on the
-      // way, and clears itself when the backend reports a healthy broker again.
+      setRepair({ kind: "idle" });
     } catch (e) {
-      setRepair({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+      // The backend's own sentence, shown under the button: a keyring that is not locked is
+      // REFUSED in words, because a restart would take sign-in down for a minute and fix
+      // nothing — and a press that silently did nothing would look like one that worked.
+      setRepair({ kind: "error", message: e instanceof Error ? e.message : String(e), about });
     }
   };
 
@@ -121,11 +167,26 @@ export function BrokerBanner() {
               "Repair sign-in"
             )}
           </Button>
+          {/* The busy sentence used to promise the app would go quiet and reconnect: the
+              repair restarted the backend too, so it did. It no longer does — the repair is a
+              unit of the user's own systemd manager and the backend stays up through it — so
+              what the reader waits for is sign-in itself, which comes back without them. */}
           <p data-testid="broker-repair-hint" className="text-[11px] leading-snug text-text-faint">
             {busy
-              ? "Restarting the Intune container. The app goes quiet for about a minute, then reconnects on its own."
-              : "This restarts the Intune container, which holds the sign-in keyring."}
+              ? "Restarting the Intune container. Sign-in comes back on its own once it is up again, in about a minute."
+              : "This restarts the Intune container, which holds the sign-in keyring — only when that keyring is locked, the one thing a restart fixes."}
           </p>
+          {/* Inside this branch rather than under the whole banner: the refusal is about the
+              button above it, and a failure that moves to another remedy (a sign-in, or none)
+              takes that button away — a sentence left behind would explain a press the reader
+              can no longer make. Never under a running repair, which is the opposite of what it
+              says; and only while the view it answered still holds, which is the commit before
+              the effect above drops it for good. */}
+          {repair.kind === "error" && !busy && repair.about === view && (
+            <p data-testid="broker-repair-error" className="text-[11px] leading-snug text-destructive">
+              {repair.message}
+            </p>
+          )}
         </div>
       ) : (
         // Keep the button visible but inert, and say why IN FLOW, in the same sentence
@@ -148,12 +209,6 @@ export function BrokerBanner() {
             again.
           </p>
         </div>
-      )}
-
-      {repair.kind === "error" && (
-        <p data-testid="broker-repair-error" className="text-[11px] leading-snug text-destructive">
-          {repair.message}
-        </p>
       )}
     </div>
   );

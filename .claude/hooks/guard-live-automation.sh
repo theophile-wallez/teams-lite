@@ -11,7 +11,7 @@
 #
 # So this hook says no, mechanically, before the command runs. READING the real
 # backend is deliberately allowed — inspecting real data is useful and harmless.
-# WRITING is what gets blocked, in every shape it can take:
+# WRITING is what gets blocked, in the shapes below (and what it cannot see is listed after them):
 #   1. browser automation (playwright / puppeteer / chromium) that does not go
 #      through web/scripts/preview.ts — the helper that proves it is on the mock
 #      before it types. Its live twin, web/scripts/sandbox-live.ts, is the one path
@@ -29,9 +29,11 @@
 #      server without an explicit TEAMS_LITE_WS_URL (a server with no declared
 #      backend is exactly how the incident started);
 #   4. starting the Rust backend without TEAMS_LITE_READ_ONLY=1 — an agent has no
-#      reason to run a send-capable backend; the user starts that one. This covers
-#      every spelling: the binary in target/, the staged copy the always-on service
-#      runs, the launcher scripts, and `systemctl --user start` on its units;
+#      reason to run a send-capable backend; the user starts that one. The spellings it
+#      knows: the binary in target/, the staged copy the always-on service runs, the
+#      released build's extraction, `cargo run --bin server`, the launcher scripts, any of
+#      them handed to `systemd-run` (where only `-E TEAMS_LITE_READ_ONLY=1` reaches the
+#      unit), and `systemctl --user start` on its units, or the same over raw D-Bus;
 #   2c. a cargo EXAMPLE that posts to Teams without pinning the sandbox channel. An
 #      example holds a broker token and talks to Teams directly, so no port and no
 #      write token stands between it and a colleague's chat;
@@ -61,7 +63,42 @@
 #      sandbox equivalent (see AGENTS.md § Mail is READ-ONLY): the broker token
 #      already carries `Mail.Send`, so the only thing standing between this
 #      environment and a mail leaving the user's personal address is that nothing
-#      names the endpoint. This hook refuses to be the first thing that does.
+#      names the endpoint. This hook refuses to be the first thing that does;
+#   6. cycling the Intune CONTAINER, which holds the user's sign-in, in the spellings rule
+#      3b lists: its own CLI's lifecycle verbs (behind any wrapper below, and as a transient
+#      unit through `systemd-run`), its systemd unit and the repair's — every verb that
+#      starts, stops, kills or freezes one, over `systemctl` or raw D-Bus — a kill naming one
+#      of teams-lite's three hidden arguments, those arguments themselves (which make its own
+#      binary boot the container, enter it or repair it), any `StartTransientUnit`, and the
+#      crate's lifecycle and in-container calls inside a cargo example. Reading it stays
+#      open (`intune-container status|doctor`, `cargo run --example intune_status`).
+#
+# WHERE A COMMAND IS. The rules that refuse a PROGRAM anchor it to a command position
+# (`at_command_start`), so prose naming the same words runs nothing: the start of a line or
+# of a segment after `;`, `&` or `|`; behind what a shell or a wrapper puts in front of a
+# program — assignments, `env` and its options, `nohup`, `exec`, `sudo` and its bare flags,
+# `timeout`, `nice`, `ionice`, `time`, `command`, `stdbuf`, `setsid`, `if`/`then`/`else`/`do`/
+# `while`/`until`, `!`, and a shell (`bash -x x`, `sh -c '…'`) — and inside a subshell, a brace
+# group, a command substitution or backticks. That last kind is read off a quote-aware
+# EXECUTABLE VIEW of the line (`command_view`), because a `(` or a backtick in a commit message
+# is text and the same character in a command is a boundary, and only the quoting can tell
+# them apart. Three phrases are matched anywhere on purpose, and say why where they are
+# spelled: rule 2's dev servers, rule 2a's `bun run start` and rule 3's `cargo run … --bin
+# server`.
+#
+# WHAT IT CANNOT SEE, said rather than left to be found. It reads a command line, so a command
+# assembled while the line runs is beyond it — `eval`, a variable holding the command,
+# `bash -c "$CMD"`, the contents of a shell script it is handed (rule 1 scans an ad-hoc
+# TS/JS/Python script for a browser driver and a backend write, and for nothing else here) —
+# and so is most of a quoted `bash -c '…'` string: its first program is seen when nothing
+# wraps it, and so is a command after a separator inside it, but not a wrapper in front of the
+# first one, nor a subshell or a substitution in there. Neither does it know every program that
+# runs another: `xargs`, `flock`, `watch`, `strace`, a `sudo` or `exec` option that takes a
+# value. A kill by pid (`kill 6410`) is invisible — rule 3b refuses a kill whose pattern NAMES
+# a hidden argument — and so is one whose pattern merely matches the repair (`pkill -f
+# server`), or a glob stop that takes the repair unit with it. Rule 3 accepts
+# TEAMS_LITE_READ_ONLY=1 anywhere on the line for a binary it runs directly, so a second
+# command, `env -i` or `sudo` between the variable and the binary still passes.
 #
 # The backend enforces the same boundary independently: writes require a capability
 # token it publishes only for the user's own frontends (see `write_token` in
@@ -99,16 +136,17 @@ block() {
 
 project_dir="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
-# Is this command STOPPING something rather than starting it? `kill`, `pkill` and
-# `pgrep` name the same binaries and ports the rules below match, but cannot send,
-# serve or type anything — and a guard that blocks cleanup only teaches the next
-# agent to phrase its commands around the guard, which is the habit that caused the
-# incident. Used by rules 2 and 3.
-stopping_a_process() {
-  printf '%s' "$command_line" | grep -qE '(^|[;&|[:space:]])(p?kill|pgrep|killall)([[:space:]]|$)'
-}
-
-# The same idea, tightened, for rule 1 — which guards browser automation, where a
+# STOPPING something is not starting it. `kill`, `pkill` and `pgrep` name the same binaries
+# and ports the rules below match, but cannot send, serve or type anything — and a guard that
+# blocks cleanup only teaches the next agent to phrase its commands around the guard, which is
+# the habit that caused the incident. Rules 2, 2a, 3 and 3c therefore read the line with every
+# kill or probe COMMAND taken out of it (`command_line_outside_kills`, below) — and only that
+# command. They used to skip the whole LINE when a kill word appeared anywhere in it, which
+# made the ordinary restart one-liner `pkill -f target/release/server; target/release/server`
+# start a send-capable backend with nothing in the way: a probe is not a licence for whatever
+# follows it.
+#
+# The same idea, for the whole line, for rule 1 — which guards browser automation, where a
 # chained second command would be the whole risk. `pgrep -af playwright` and
 # `pkill -f chromium` name a browser driver and can drive nothing at all; blocking
 # them only teaches the next reader to phrase commands around the guard.
@@ -187,14 +225,244 @@ printing_usage() {
 }
 
 # A COMMAND POSITION: the start of the line, or just after a separator, plus the
-# prefixes a shell allows in front of a program — `nohup`, `exec`, `env`, `sudo`, and
-# any number of `FOO=bar` assignments. Rules anchor their patterns to it so that PROSE
-# naming the same words runs nothing: a commit message ("chore: systemctl --user start
-# teams-lite at boot") must stay allowed, for the same reason `ls target/debug/server`
-# does. The assignments belong in it because the very variable rule 3 asks for is
-# written that way, and a rule a leading `FOO=1` can defeat is a rule with a spelling
-# that walks straight through it.
-at_command_start='(^|[;&|])[[:space:]]*(([A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*|nohup|exec|env|sudo)[[:space:]]+)*'
+# prefixes a shell allows in front of a program — any number of `FOO=bar` assignments, the
+# reserved words a command follows (`if`, `then`, `else`, `elif`, `do`, `while`, `until`,
+# `!`) and the WRAPPERS that run the program after them. Rules anchor their patterns to it
+# so that PROSE naming the same words runs nothing: a commit message ("chore: systemctl
+# --user start teams-lite at boot") must stay allowed, for the same reason `ls
+# target/debug/server` does. The assignments belong in it because the very variable rule 3
+# asks for is written that way, and a rule a leading `FOO=1` can defeat is a rule with a
+# spelling that walks straight through it.
+#
+# The wrappers are the same argument. `timeout 20 target/release/server` is the ordinary way
+# to watch a server start for twenty seconds, and it started a send-capable backend past
+# rule 3 because only `nohup`, `exec`, `env` and `sudo` were known; `timeout 300 … server
+# __teams-lite-repair-broker` ran the repair by hand past rule 3b the same way. Each wrapper
+# is spelled with the options that take a value (`timeout -s KILL 20`, `nice -n 10`,
+# `ionice -c 2`, `stdbuf -oL`, `env -u NAME`), because an option the prefix does not know
+# reads as the program and the match fails. `command -v` and `command -V` are deliberately
+# NOT a prefix: they print where a program is and run nothing, so `command -v teams` is a
+# question, while `command teams` runs it. `systemd-run` is not one either, because what
+# it hands a program is a different environment — rules 3, 3b and 3c each spell it.
+command_wrapper='([A-Za-z0-9_./~-]*/)?(nohup|exec|sudo([[:space:]]+-[A-Za-z]+)*|time([[:space:]]+-p)?|command([[:space:]]+-p)?|setsid([[:space:]]+(-[cfw]+|--(ctty|fork|wait)))*|nice([[:space:]]+(-n[[:space:]]*-?[0-9]+|-[0-9]+|--adjustment(=|[[:space:]]+)-?[0-9]+))*|ionice([[:space:]]+(-[cn][[:space:]]*[0-9]+|-t|--ignore|--(class|classdata)(=|[[:space:]]+)[^[:space:];&|]+))*|stdbuf([[:space:]]+(-[ioe][[:space:]]*[^[:space:];&|]+|--(input|output|error)(=|[[:space:]]+)[^[:space:];&|]+))*|timeout([[:space:]]+(--(signal|kill-after)(=|[[:space:]]+)[^[:space:];&|]+|-[sk][[:space:]]*[^[:space:];&|]+|--[a-z-]+|-[A-Za-z]+))*[[:space:]]+[0-9.]+[smhd]?|env([[:space:]]+(-[iv0]+|-|--(ignore-environment|null|debug)|-u[[:space:]]*[^[:space:];&|]+|--unset(=|[[:space:]]+)[^[:space:];&|]+|-C[[:space:]]*[^[:space:];&|]+|--chdir(=|[[:space:]]+)[^[:space:];&|]+))*)'
+at_command_start="(^|[;&|])[[:space:]]*(([A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*|if|then|else|elif|do|while|until|!|${command_wrapper})[[:space:]]+)*"
+
+# A program handed to a SHELL — `bash x`, `sh -c 'x'`, `bash -x x` — is run as surely as one
+# named on its own, so every program pattern accepts one in front, with its flags and the
+# quote a `-c` string opens. The flags matter: `bash -x bin/teams-dev-server.sh` traces the
+# launcher while it starts a send-capable backend, and it walked past rule 3 while only a bare
+# `bash` was known. (`bash -n` is a syntax check; rules 3 and 3c exempt it as an inspection.)
+by_a_shell="((bash|sh|zsh|dash)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*)*[\"']?"
+# The leading path of a program, which may be spelled with a variable or a tilde —
+# `$HOME/.local/...`, `~/.local/...`, `"$PWD"/target/...`.
+a_program_path='[A-Za-z0-9_./~${}-]*'
+# Where a PROGRAM starts: a command position, an optional shell, and the program's own path.
+at_a_program="${at_command_start}${by_a_shell}${a_program_path}"
+# Where a WORD ends — a program's name, a verb, a hidden argument. Whitespace and the end of the
+# line, and also the characters that end a command or a quoted string: `intune-container
+# restart; echo ok`, `intune-container stop|cat` and `… __rootless-supervise;true` each walked
+# past a rule that only knew whitespace. A `)` and a backtick end one only in the executable
+# view below, where they are boundaries the shell really sees: on the raw line they are as often
+# the end of a backticked or parenthesized NAME in a quoted message — a commit body saying that
+# "`pkill -f x; target/release/server` is refused now" — so the raw reading keeps the narrower
+# form (`ends_a_raw_word`, swapped in by the matchers below; every pattern is written once).
+ends_a_word="([\"'[:space:];&|)\`]|\$)"
+ends_a_raw_word="([\"'[:space:];&|]|\$)"
+
+# THE EXECUTABLE VIEW of the line: the same characters, with the shell's own reading of them
+# made explicit. Every character that is TEXT — inside single quotes, a double-quoted string,
+# an escape, a comment or a here-document body — loses its power to separate commands (a `;`,
+# `&`, `|`, `(`, `)`, backtick or newline there becomes a space, so a commit body's second line
+# is no line start either), and every place a command really begins or ends that no separator
+# marks — a subshell's `(` and `)`, a brace group's `{`, a `$(` or a backtick in any context,
+# a `)` closing one — becomes a `;`. So `(intune-container
+# stop)`, `{ intune-container stop; }`, `x=$(intune-container stop)` and `` `intune-container
+# stop` `` all put the program at a command position, while `git commit -m 'docs:
+# `intune-container stop` (…)'` and the heredoc a commit body is written with put it nowhere.
+# The view has the same length as the line, character for character, which is what lets one
+# pass also hand rules 2, 2a, 3 and 3c the line with every kill or probe command blanked out:
+# a COMMAND is the stretch between two real boundaries, and one that begins with `kill`,
+# `pkill`, `pgrep` or `killall` is cleanup, blanked in both the line and the view. A pgrep
+# whose pattern holds a quoted `|` is one command in the view, so it is blanked whole.
+#
+# Every rule reads the RAW line, as the rules here always have (rules 2, 2a, 3 and 3c with its
+# kill commands blanked), and the view besides, so the view can only add a match, never take
+# one away from the raw reading — which is also why a line of a here-document
+# or of a multi-line quoted string that BEGINS with a refused command still reads as one: grep
+# reads the raw line line by line, which is what catches the second line of a multi-line
+# `bash -c`. It is a parser for the shapes commands really take, not a shell: an expansion
+# inside an unquoted here-document body is read as text, and anything it gets wrong falls back
+# to what the raw line says.
+command_view="" command_line_outside_kills="" command_view_outside_kills=""
+{
+  IFS= read -r -d '' command_view
+  IFS= read -r -d '' command_line_outside_kills
+  IFS= read -r -d '' command_view_outside_kills
+} < <(printf '%s' "$command_line" | python3 -c '
+import re, sys
+
+line = sys.stdin.read()
+n = len(line)
+SQ, DQ, BQ = "\x27", "\x22", "\x60"
+SEPARATORS = ";&|()" + BQ
+view, cut = list(line), [False] * n
+
+def literal(i):
+    if view[i] in SEPARATORS or view[i] == "\n":
+        view[i] = " "
+
+def boundary(i):
+    view[i], cut[i] = ";", True
+
+def word_start(i):
+    return i == 0 or line[i - 1] in " \t\n;&|(" + BQ
+
+stack, heredocs, i = ["command"], [], 0
+while i < n:
+    c, context = line[i], stack[-1]
+    if c == "\\":
+        if i + 1 < n:
+            literal(i + 1)
+        i += 2
+        continue
+    if context == "double":
+        if c == DQ:
+            stack.pop()
+        elif c == BQ:
+            boundary(i)
+            stack.append("backtick")
+        elif c == "(" and line[i - 1] == "$":
+            boundary(i)
+            stack.append("paren")
+        else:
+            literal(i)
+        i += 1
+        continue
+    if c == SQ:
+        j, ansi = i + 1, line[i - 1 : i] == "$"
+        while j < n and line[j] != SQ:
+            j += 2 if ansi and line[j] == "\\" else 1
+        for k in range(i + 1, min(j, n)):
+            literal(k)
+        i = j + 1
+        continue
+    if c == "\n":
+        cut[i] = True
+        i += 1
+        for delimiter, strip in heredocs:
+            while i < n:
+                end = line.find("\n", i)
+                end = n if end < 0 else end
+                text = line[i:end]
+                closed = (text.lstrip("\t") if strip else text) == delimiter
+                if not closed:
+                    for k in range(i, min(end + 1, n)):
+                        literal(k)
+                elif end < n:
+                    cut[end] = True
+                i = end + 1
+                if closed:
+                    break
+        heredocs = []
+        continue
+    if c in ";&|":
+        cut[i] = True
+    elif c == DQ:
+        stack.append("double")
+    elif c == BQ:
+        boundary(i)
+        if context == "backtick":
+            stack.pop()
+        else:
+            stack.append("backtick")
+    elif c == "(":
+        boundary(i)
+        stack.append("paren")
+    elif c == ")":
+        boundary(i)
+        if context == "paren":
+            stack.pop()
+    elif c == "{" and word_start(i) and line[i + 1 : i + 2] in (" ", "\t", "\n"):
+        boundary(i)
+    elif c == "#" and word_start(i):
+        end = line.find("\n", i)
+        end = n if end < 0 else end
+        for k in range(i, end):
+            literal(k)
+        i = end
+        continue
+    elif line.startswith("<<", i) and not line.startswith("<<<", i):
+        j = i + 2
+        strip = line[j : j + 1] == "-"
+        j += 1 if strip else 0
+        while j < n and line[j] in " \t":
+            j += 1
+        k = j
+        while k < n and line[k] not in " \t\n;&|()<>":
+            k += 1
+        delimiter = line[j:k].replace(SQ, "").replace(DQ, "").replace("\\", "")
+        if delimiter:
+            heredocs.append((delimiter, strip))
+        i = k
+        continue
+    i += 1
+
+KILL = re.compile(r"\s*(?:(?:[A-Za-z_]\w*=\S*|if|then|else|elif|do|while|until|!|sudo|nohup|exec|time|command|setsid|nice|timeout(?:\s+-\S+)*\s+[\d.]+[smhd]?)\s+)*"
+                  r"(?:[^\s;&|]*/)?(?:p?kill|pgrep|killall)(?:\s|$)")
+raw_left, view_left, start = list(line), list(view), 0
+for end in [k for k in range(n) if cut[k]] + [n]:
+    if KILL.match("".join(view[start:end])):
+        for k in range(start, end):
+            if line[k] != "\n":
+                raw_left[k] = view_left[k] = " "
+    start = end + 1
+sys.stdout.write("".join(view) + "\0" + "".join(raw_left) + "\0" + "".join(view_left) + "\0")
+' 2>/dev/null)
+# Without the view — no python3, or a parse that failed — every rule reads the raw line alone,
+# which is what it read before the view existed; a line that is nothing but a probe keeps its
+# exemption.
+if [ -z "$command_view" ]; then
+  command_view="$command_line"
+  if probing_processes; then
+    command_line_outside_kills="" command_view_outside_kills=""
+  else
+    command_line_outside_kills="$command_line" command_view_outside_kills="$command_line"
+  fi
+fi
+
+# A pattern as the RAW line is read with it: the same ERE, a word ending at `ends_a_raw_word`.
+raw_form() {
+  printf '%s' "${1//"$ends_a_word"/"$ends_a_raw_word"}"
+}
+
+# Does a command on this line match the ERE in $1 — on the raw line, or on its executable view?
+# A view identical to the line holds no `(`, `)`, backtick or brace group and no separator
+# inside a quote — every one of those changes a character of the view — so it can only repeat
+# the raw answer (`)` and a backtick are the two characters the forms differ on), and the
+# second grep is skipped: this hook runs before every command.
+a_command_matches() {
+  printf '%s\n' "$command_line" | grep -qE "${1//"$ends_a_word"/"$ends_a_raw_word"}" && return 0
+  [ "$command_view" = "$command_line" ] && return 1
+  printf '%s\n' "$command_view" | grep -qE "$1"
+}
+
+# The same, with every kill and probe command blanked out first: what rules 2, 2a, 3 and 3c
+# read, so cleanup stays allowed and is no licence for what follows it.
+a_command_outside_a_kill_matches() {
+  printf '%s\n' "$command_line_outside_kills" |
+    grep -qE "${1//"$ends_a_word"/"$ends_a_raw_word"}" && return 0
+  [ "$command_view_outside_kills" = "$command_line_outside_kills" ] && return 1
+  printf '%s\n' "$command_view_outside_kills" | grep -qE "$1"
+}
+
+# A RAW D-BUS CALL, at a command position: `busctl`, `gdbus` or `dbus-send`, with the rest of
+# its segment after it. systemd answers the same methods `systemctl` wraps, so every rule that
+# refuses a `systemctl` verb has a second spelling here that no `systemctl` pattern can see —
+# `busctl --user call org.freedesktop.systemd1 … StartUnit ss teams-lite-backend.service
+# replace` starts the send-capable backend as surely as `systemctl --user start` does. Rules
+# 3a and 3b append the method and the unit name; reading a property or introspecting an
+# object names neither and stays allowed.
+raw_dbus_call="${at_a_program}(busctl|gdbus|dbus-send)[[:space:]][^;&|]*"
 
 # Commands that ARE the sanctioned automation paths (or plain browser installs).
 # The drivers that are allowed to touch a browser, named one at a time.
@@ -310,6 +578,58 @@ drives_the_signin_window() {
   grep -qE '\.(type_key|click|focus|close)\(|close_open_signin_window|signin::Signin::start|interactive_token' "$1"
 }
 
+# Does this source CYCLE the Intune container — stop it, start it, rebuild it, restore over it,
+# power its init off, or boot it through the crate's own supervisor — or ask for the repair
+# that does? teams-lite links the `intune-container` crate now (src/intune.rs), so every one of
+# those is a function call away from any example in this repo, with no port, no RPC, no write
+# token and no `intune-container` on the command line for rule 3b to see.
+#
+# The names are the crate's own, read off its source at the pinned commit: `ops` is what its CLI
+# runs (`backup` is there because it stops the container for a consistent archive and boots it
+# again; `update` because it swaps the rootfs under a stopped container; `portal_*` and `edge`
+# because a display is attached by a restart; `shell` because it enters the container, starting
+# it first), `backend` is the half under it — `supervise_main` and `exec_main` ARE the boot and
+# the in-container exec, and `exec`, `exec_foreground` and `shell` reach the same exec without
+# the re-exec — `runtime` is the raw namespace layer (`poweroff_pid`, and `exec_pid`,
+# `exec_pid_env`, `run_in_container`, `run_in_rootfs` and `open_shell_pty`, which run a program
+# inside the container or its rootfs, as root unless a uid is passed: `exec_pid(leader,
+# &["/bin/systemctl", "poweroff"], None)` is a poweroff by another name), and
+# `autostart::enable|disable` start and stop the container's own unit, the library twin of the
+# CLI verbs rule 3b refuses. What is left alone, on purpose and by name, is what
+# examples/intune_status.rs (through teams_lite::intune) and any recon are built on:
+# `runtime::load_runtime_state`, `runtime::is_running`, `ops::status`, `ops::is_initialized`,
+# `ops::account`, `autostart::status`, `doctor::collect` — and `backend::probe`, which is NOT a
+# read: it runs a caller-supplied `/bin/sh -c` script inside the running container, as the
+# container's user, and answers its exit code. It is left open because the crate's own health
+# checks (`doctor`) are probes of fixed scripts, and a recon asking the same questions is
+# reading; an example that hands it anything else is running a command inside the user's
+# sign-in container, which this scan cannot tell from a read, and should not do it.
+#
+# Three spellings, because Rust has three ways to reach a function: the full path
+# (`intune_container::ops::stop(` or a `use` of it), the module imported and called through
+# (`use intune_container::{backend, …}; backend::stop(…)`, matched only in a file that names the
+# crate, so `tokio::runtime::…` elsewhere is nobody's business), and a grouped import of the
+# function itself (`use intune_container::ops::{start, status};`). A glob import is not
+# followed: it is not how this code is written, and the scan is a tripwire for the shapes code
+# really takes rather than a proof — like every other source scan in this file.
+#
+# teams-lite's own half is the repair: `intune::start_repair_unit` asks systemd for the
+# transient unit that restarts the container, and `intune::dispatch_reexec` runs whichever
+# hidden subcommand its argv names — the repair among them — in the calling process. The
+# private functions under them are named too, so a later `pub` does not open a hole; and so are
+# the three hidden arguments, as literals and as the constants that hold them, which is what an
+# example would hand `Command::new` to reach the same act through a binary.
+cycles_the_container_in_source() {
+  local lifecycle='(ops::(start|stop|init|enroll|destroy|update|restore|backup|edge|portal_start|portal_stop|portal_finish|detach_display|shell)|backend::(start|stop|attach_display|detach_display|initialize|update_rootfs|remove_rootfs|purge|backup|restore|supervise_main|exec_main|exec|exec_foreground|shell)|runtime::(poweroff_pid|start_systemd|boot_systemd|exec_pid|exec_pid_env|run_in_container|run_in_rootfs|open_shell_pty)|autostart::(enable|disable))'
+  local names='(start|stop|init|enroll|destroy|update|restore|backup|edge|portal_start|portal_stop|portal_finish|detach_display|attach_display|initialize|update_rootfs|remove_rootfs|purge|supervise_main|exec_main|exec|exec_foreground|shell|poweroff_pid|start_systemd|boot_systemd|exec_pid|exec_pid_env|run_in_container|run_in_rootfs|open_shell_pty|enable|disable)'
+  grep -qE "intune_container::${lifecycle}([^A-Za-z0-9_]|\$)" "$1" && return 0
+  if grep -q 'intune_container' "$1"; then
+    grep -qE "(^|[^A-Za-z0-9_])${lifecycle}([^A-Za-z0-9_]|\$)" "$1" && return 0
+    grep -qE "intune_container::(ops|backend|runtime|autostart)::\{([^}]*[[:space:],])?${names}([[:space:],}]|\$)" "$1" && return 0
+  fi
+  grep -qE '(^|[^A-Za-z0-9_])intune::(start_repair_unit|start_transient_oneshot|dispatch_reexec|restart_container|repair_main)([^A-Za-z0-9_]|$)|intune::\{([^}]*[[:space:],])?(start_repair_unit|dispatch_reexec)([[:space:],}]|$)|__teams-lite-repair-broker|__rootless-supervise|__rootless-exec|(REPAIR|SUPERVISE|EXEC)_SUBCOMMAND' "$1"
+}
+
 # The Rust sources a `cargo run --example NAME` is about to execute.
 #
 # Rule 1 scans INTERPRETED scripts, which left a hole this feature opened: a cargo
@@ -318,8 +638,10 @@ drives_the_signin_window() {
 # (it posts to the sandbox channel and nowhere else); the rule below is what keeps
 # the next one honest.
 #
-# `--bin` is deliberately NOT matched: the only binary here is the backend, rule 3
-# already governs it, and it names `send_message` by definition.
+# `--bin` is deliberately NOT matched: the only binary here is the backend, and it names
+# `send_message` and the crate's lifecycle by definition. The command line is what governs
+# it instead — rule 3 for starting it at all, and rule 3b for the hidden arguments that turn
+# it into the container's supervisor, its in-container exec or the broker repair.
 example_sources_the_command_runs() {
   printf '%s' "$command_line" | python3 -c '
 import shlex, sys
@@ -385,6 +707,7 @@ examples_that_send=""
 examples_publishing_presence=""
 examples_writing_to_a_tracker=""
 examples_driving_the_signin_window=""
+examples_cycling_the_container=""
 while IFS= read -r source; do
   [ -z "$source" ] && continue
   path="$project_dir/$source"
@@ -408,6 +731,11 @@ while IFS= read -r source; do
   # into it or closing it is the act the four `signin_*` methods are gated for.
   if drives_the_signin_window "$path"; then
     examples_driving_the_signin_window="$examples_driving_the_signin_window $source"
+  fi
+  # The container is a FOURTH shape with no sandbox: there is one, it holds the user's sign-in,
+  # and since the crate is linked an example reaches its lifecycle with a function call.
+  if cycles_the_container_in_source "$path"; then
+    examples_cycling_the_container="$examples_cycling_the_container $source"
   fi
   # Does it act outward at all? Through this crate's send path, by naming the
   # chatService messages endpoint itself, by publishing our read position — a
@@ -826,6 +1154,39 @@ signin_window_recon reports the display, the window and one frame's size, and is
 this rule. To exercise the driving half, use the mock: cd web && bun run preview -- --signin."
 fi
 
+# --- 1d-ter. an example may not cycle the Intune container ------------------------
+# The command-line half of this is rule 3b. This is the half a command line cannot show: since
+# teams-lite links the `intune-container` crate, the container's whole lifecycle is a function
+# call from any example — `cargo run --example x` names no `intune-container`, no hidden
+# argument and no unit, so nothing else in this file would see it. See
+# `cycles_the_container_in_source` for what is matched and why the reads are not.
+if [ -n "$examples_cycling_the_container" ]; then
+  printf 'note: the Intune container is cycled inside%s\n' "$examples_cycling_the_container" >&2
+  block "This command runs a cargo example that would CYCLE the Intune container — stop it, start
+it, rebuild or restore it, power its init off, boot it through the crate's own supervisor,
+install or remove its unit, or run a program inside it — or ask for the broker repair that
+restarts it:
+   ${examples_cycling_the_container# }
+
+That container holds the user's sign-in. While it is down the identity broker answers
+nothing: every token call fails and teams-lite goes empty for whoever is reading it, a phone
+on the tailnet included, for about a minute. An example reaches it through the crate with no
+port, no RPC and no write token in the way, so what the file calls is the only thing that
+can be checked — and there is one container, so no target can be pinned to make it safe.
+
+READING the container is fine, and it is what the diagnostic is for:
+
+  cargo run --example intune_status     # the broker's bus, whether a repair is available,
+                                        # and whether the login keyring is locked
+  intune-container status
+  intune-container doctor
+
+A restart IS the remedy when that keyring re-locked, but it is not yours to run: the app's own
+Repair sign-in button asks for it, and the backend asks on its own when it finds the keyring
+locked — at most three automatic repairs an hour across every backend on the machine. Ask the
+user to press the button."
+fi
+
 # --- 1e. our own presence is published by the gated RPC, or not at all ----------
 # `set_always_available` is guarded as a backend write by rule 1, but the presence
 # service can be addressed straight with the broker token, which bypasses the backend
@@ -899,8 +1260,12 @@ fi
 # anything to anyone — and a guard that blocks cleanup only teaches its next reader
 # to phrase commands around it, which is the habit that caused the incident. A search
 # that NAMES a dev server (`grep -rn "bun run dev" README.md`) starts nothing either.
-if ! stopping_a_process && ! searching_text &&
-  printf '%s' "$command_line" | grep -qE '(vite dev|vite build --watch|bun run dev)([^:]|$)'; then
+#
+# What is exempt is the kill COMMAND, never the line it is on: the incident itself was a
+# dev server RESTARTED without its variable, and `pkill -f vite; cd web && bun run dev` is
+# exactly that restart in one line.
+if ! searching_text &&
+  a_command_outside_a_kill_matches '(vite dev|vite build --watch|bun run dev)([^:]|$)'; then
   if ! printf '%s' "$command_line" | grep -q 'VITE_TEAMS_WS_URL'; then
     block "A dev server must state which backend it targets. Without VITE_TEAMS_WS_URL the app
 has no default in dev, and \`bun run dev\` is the user's own live-account shortcut —
@@ -925,9 +1290,8 @@ fi
 # three letters matched inside another WORD — `web/scripts/stage-bundle.ts
 # web/server.ts` in a plain `grep` argument read as an interpreter about to serve the
 # app. A search is exempted for the same reason.
-if ! stopping_a_process && ! searching_text &&
-  printf '%s' "$command_line" |
-  grep -qE "(bun run start|${at_command_start}bun[^;&|]*web/server\.ts)([^:]|\$)"; then
+if ! searching_text &&
+  a_command_outside_a_kill_matches "(bun run start|${at_command_start}${by_a_shell}(${a_program_path}/)?bun[^;&|]*web/server\.ts)([^:]|\$)"; then
   if ! printf '%s' "$command_line" | grep -q 'TEAMS_LITE_WS_URL'; then
     block "The production web server must state which backend it relays to. TEAMS_LITE_WS_URL
 defaults to the LIVE backend (see web/server.ts), so starting it bare puts a bridge
@@ -941,13 +1305,178 @@ bin/teams-lite-service.sh and AGENTS.md § The always-on service."
   fi
 fi
 
+# --- 3b. the Intune container is the user's sign-in, not a toy ------------------
+# `intune-container stop` takes the identity broker down, and with it every token the
+# backend holds: the app goes empty for whoever is using it, on a phone included. A restart
+# is also how the login keyring gets unlocked, so it is a real remedy — which is exactly why
+# it belongs to the user, or to the repair the app's own Repair sign-in button asks for (and
+# the backend asks for on its own when it finds the keyring locked), behind a machine-wide
+# floor of three automatic repairs an hour (`start_broker_repair` in src/bin/server.rs).
+#
+# It sits ABOVE rule 3 on purpose. `target/release/server __teams-lite-repair-broker` is also
+# a backend binary started without TEAMS_LITE_READ_ONLY=1, and the first rule that matches is
+# the one whose sentence the reader gets: rule 3's would tell them to add the variable, which
+# changes nothing about a repair — this one says what the command really does.
+#
+# SIX SPELLINGS, because the repair stopped being a host command and the container stopped
+# being something only its own CLI could reach (src/intune.rs links the crate). Each is matched
+# at a command position (see the header), so behind a wrapper, a shell, a subshell or a
+# substitution too, and each verb or argument ends at whitespace or at anything that ends a
+# command (`ends_a_word`) — `intune-container restart; echo ok` is the same restart.
+#
+# - THE CLI'S OWN VERBS. Every one that stops, starts or rebuilds the container, read off the
+#   crate's `main.rs` at the pinned commit: `update` swaps the rootfs under a stopped
+#   container and `restore` writes enrollment state over one; `backup` stops the container for
+#   a consistent archive and boots it again; `detach-display`, `login`, `screen` and `edge`
+#   attach or drop a display, which is a restart; `autostart enable|disable` starts or stops
+#   it as it installs or removes its unit. `update --check` downloads nothing, and is refused
+#   with the rest all the same: telling it apart takes a per-segment parse this rule does not
+#   do, and the question it answers is not one this app asks. The same verbs handed to
+#   `systemd-run` are the same acts with a unit name around them — an agent that has just read
+#   that the repair runs as a transient unit reaches for exactly that spelling.
+# - THE CONTAINER'S SYSTEMD UNIT, AND THE REPAIR'S. `intune-container autostart enable`
+#   installs `intune-container.service`, and a `systemctl --user restart` of it is that same
+#   restart spelled through systemd — rule 3a's argument, about a unit rule 3a does not name
+#   (`enable` and `disable` are `autostart` spelled the same way). STOP, KILL and FREEZE are in
+#   the list here, unlike in 3a: stopping teams-lite is cleanup, stopping the container is
+#   taking the sign-in down. The repair's own unit — the transient `teams-lite-intune-repair`,
+#   and the retired installed `teams-lite-broker-repair` a machine not yet migrated still has —
+#   is refused with the same verbs, stop and kill included, for the reason src/intune.rs gives
+#   about its own timeout: a repair cut between its stop and its start leaves no container at
+#   all, the keyring then reads as not running rather than locked, and nothing automatic
+#   brings it back — the Repair button refuses too, and says to run `intune-container start`.
+# - A KILL NAMING A HIDDEN ARGUMENT. A process carrying one IS the container's supervisor, a
+#   process inside it, or a repair half-way through, so `pkill -f __teams-lite-repair-broker`
+#   is the same cut as stopping the repair's unit, and killing the supervisor takes the
+#   container down and the crate's guard against booting a second one with it. Unlike every
+#   other kill, it is not cleanup; `pgrep` naming the same words still only looks.
+# - THE HIDDEN ARGUMENTS. `server`'s `main` routes three before it does anything else
+#   (`intune::dispatch_reexec`): `__teams-lite-repair-broker` RESTARTS the container, and
+#   `__rootless-supervise` / `__rootless-exec` are the crate's own re-exec targets, which BOOT
+#   it and run a script INSIDE it. They are refused whatever TEAMS_LITE_READ_ONLY says — the
+#   variable is what rule 3 asks for, and none of the three is a backend it would make
+#   read-only: the repair refuses under it, but the other two never look. Every program that
+#   routes them is matched — a `server` at any path (the build output, the staged copy, the
+#   released extraction, a bare `./server`), `/proc/<pid>/exe` of a running backend, the
+#   crate's own CLI — and `cargo run`, which hands `server` whatever follows it.
+# - A TRANSIENT UNIT. The repair runs as a transient unit of the user's manager
+#   (`intune::start_repair_unit`), so `systemd-run … server __teams-lite-repair-broker` is the
+#   same repair without the app, and a raw `StartTransientUnit` is the call the backend itself
+#   makes. That one is refused for ANY unit: a transient unit is a program the user's manager
+#   runs with the manager's environment, its command is a property blob no pattern here can
+#   read, and nothing an agent does needs one.
+# - RAW D-BUS on the container's unit or the repair's: the `busctl`/`gdbus`/`dbus-send`
+#   spelling of the systemctl verbs above (see `raw_dbus_call`), by name or by escaped path.
+#
+# Looking is free: `status`, `doctor`, `--help`, `autostart status` and `backup-inspect`
+# answer the questions an agent actually has, and so do `cargo run --example intune_status`,
+# `systemctl --user status` on either unit and `pgrep`. A search, a commit message or a doc
+# line that NAMES a verb, an argument or a method puts it at no command position and stays
+# allowed — a backticked or parenthesized one in a quoted message included, because the
+# executable view reads quoted text as text.
+container_verb='(stop|start|restart|enroll|init|destroy|edge|update|restore|backup|detach-display|login|screen|autostart[[:space:]]+(enable|disable))'
+unit_verb='(start|stop|restart|try-restart|reload-or-restart|try-reload-or-restart|condrestart|force-reload|kill|freeze)'
+the_container="intune-container[\"']?([[:space:]]+[^;&|]*)?[[:space:]]${container_verb}${ends_a_word}"
+cycles_the_container="${at_a_program}${the_container}"
+cycles_the_container_in_a_unit="${at_a_program}systemd-run([[:space:]][^;&|]*)?[[:space:]][\"']?${a_program_path}${the_container}"
+cycles_the_container_unit="${at_a_program}systemctl[^;&|]*[[:space:]](${unit_verb}|enable|disable)([[:space:]][^;&|]*)?intune-container"
+cycles_the_repair_unit="${at_a_program}systemctl[^;&|]*[[:space:]]${unit_verb}([[:space:]][^;&|]*)?teams-lite-(intune|broker)-repair"
+hidden_subcommand='(__teams-lite-repair-broker|__rootless-supervise|__rootless-exec)'
+hidden_argument="[[:space:]][\"']?${hidden_subcommand}${ends_a_word}"
+runs_a_hidden_subcommand="${at_command_start}${by_a_shell}([A-Za-z0-9_./~\${}\"'-]*/)?(server|exe|intune-container)[\"']?([[:space:]][^;&|]*)?${hidden_argument}"
+cargo_runs_a_hidden_subcommand="${at_a_program}cargo([[:space:]][^;&|]*)?[[:space:]](run|r)[[:space:]]([^;&|]*)?${hidden_argument}"
+a_unit_runs_a_hidden_subcommand="${at_a_program}systemd-run([[:space:]][^;&|]*)?${hidden_argument}"
+kills_a_hidden_subcommand="${at_a_program}(p?kill|killall)([[:space:]][^;&|]*)?(teams-lite-repair-broker|rootless-(supervise|exec))"
+starts_a_transient_unit="${raw_dbus_call}StartTransientUnit"
+dbus_cycles_a_unit='(StartUnit|RestartUnit|StopUnit|KillUnit|FreezeUnit|EnqueueUnitJob|systemd1\.Unit[.[:space:]]+(Start|Restart|TryRestart|ReloadOrRestart|ReloadOrTryRestart|Stop|Kill|Freeze)([[:space:]]|$))'
+container_or_repair_unit='(intune|broker(-|_2d)repair)'
+cycles_the_container_over_dbus="${raw_dbus_call}(${dbus_cycles_a_unit}[^;&|]*${container_or_repair_unit}|${container_or_repair_unit}[^;&|]*${dbus_cycles_a_unit})"
+if ! searching_text &&
+  a_command_matches "$cycles_the_container|$cycles_the_container_in_a_unit|$cycles_the_container_unit|$cycles_the_repair_unit|$kills_a_hidden_subcommand|$runs_a_hidden_subcommand|$cargo_runs_a_hidden_subcommand|$a_unit_runs_a_hidden_subcommand|$starts_a_transient_unit|$cycles_the_container_over_dbus"; then
+  block "The Intune container is the user's sign-in. Stopping, restarting, rebuilding or booting
+it takes the identity broker down, so teams-lite goes empty for whoever is looking at it —
+including a phone on the tailnet — for about a minute.
+
+This rule refuses it in the spellings it knows, not only its own CLI's verbs (directly, behind
+a wrapper such as timeout or setsid, or through systemd-run): the container's systemd unit and
+the broker repair's (start, stop, kill or freeze, over systemctl or raw D-Bus); a kill that
+names one of the hidden arguments; the hidden arguments themselves, which turn teams-lite's own
+binary into the container's supervisor (__rootless-supervise), a process inside it
+(__rootless-exec) or the broker repair (__teams-lite-repair-broker) — whatever
+TEAMS_LITE_READ_ONLY says; and any transient unit asked for over raw D-Bus
+(StartTransientUnit), which is how the repair runs. Stopping a repair half-way through is the
+worst of them: it can leave no container at all, and nothing automatic restarts one.
+
+Diagnose it freely — these only read:
+
+  cargo run --example intune_status     # the broker's bus, whether a repair is available,
+                                        # and whether the login keyring is locked
+  intune-container status
+  intune-container doctor
+
+A restart IS the remedy when that keyring re-locked, but it is not yours to run. The app's own
+Repair sign-in button asks for it, and the backend asks on its own when it finds the keyring
+locked — at most three automatic repairs an hour across every backend on the machine. Ask the
+user to press the button, or to run:
+
+  intune-container stop && intune-container start"
+fi
+
+# --- 3b-ii. the RETIRED repair scripts still act where a staged copy remains -----
+# `teams-lite-broker-check.sh` and `teams-lite-broker-bus-check.sh` are gone from bin/: the
+# backend now finds the broker's bus and reads the keyring itself (src/intune.rs, and
+# `cargo run --example intune_status` for a person). But a machine staged before that change
+# keeps its copies beside the binary — and the units their `--repair` starts — until
+# bin/teams-lite-service.sh retires them on its next `install`, `update`, `units` or
+# `uninstall`. That is a real window rather than a theoretical one: the automatic update runs
+# only from a clean master and only while a unit is active, so a machine whose service is
+# stopped keeps both for as long as nobody stages it.
+#
+# Inside that window `--repair` still does what it always did, and neither act is one this
+# hook lets tooling take: the keyring check starts the retired teams-lite-broker-repair.service,
+# which stops and starts the container; the bus check starts teams-lite-backend-restart.service,
+# which try-restarts both send-capable backends — the socket drops under whoever is reading the
+# app, every open page's write token dies with the process, and a live @claude run is cut off.
+#
+# So one narrow rule is kept for those two names, and it costs a regex. Without the flag either
+# script only reads and is left alone, and so is prose that names it: the pattern is anchored to
+# a command position like the other program rules here. It can be deleted once no machine
+# holds a staged copy — a day this hook cannot see, which is why it is not tied to one.
+runs_a_retired_repair="${at_a_program}teams-lite-broker-(bus-)?check\.sh[^;&|]*--repair"
+if ! searching_text && a_command_matches "$runs_a_retired_repair"; then
+  block "That script is RETIRED — the backend finds the broker's bus and checks the keyring itself
+now (src/intune.rs) — but a copy staged before that change still acts on --repair:
+
+  teams-lite-broker-check.sh --repair       starts the retired teams-lite-broker-repair.service,
+                                            which restarts the Intune container
+  teams-lite-broker-bus-check.sh --repair   starts teams-lite-backend-restart.service, which
+                                            restarts both send-capable backends, drops every
+                                            open page's socket and cuts off a live @claude run
+
+bin/teams-lite-service.sh removes both, and their units, on its next install or update.
+
+Read the state instead — this only looks:
+
+  cargo run --example intune_status
+
+The repair itself is the app's own Repair sign-in button; ask the user to press it."
+fi
+
 # --- 3. the backend an agent starts must be read-only ------------------------
-# The binary and the launcher scripts are matched only where a shell would RUN them —
-# at the start of a command, after a separator, or behind `nohup`/`exec`/`env`/a shell.
-# Text that merely names one (a commit message, a doc line, `chmod +x` on it, a
-# `--bin server` in prose) starts nothing, and a guard that fires on prose is one
-# whose next reader learns to write around it. `cargo run --bin server` stays matched
-# anywhere: that spelling does not appear by accident.
+# The binary and the launcher scripts are matched only where a shell would RUN them — at a
+# command position (see the header: after a separator, behind an assignment or a wrapper such
+# as `timeout 20`, handed to a shell, or inside a subshell or a substitution). Text that merely
+# names one (a commit message, a doc line, `chmod +x` on it, a `--bin server` in prose) starts
+# nothing, and a guard that fires on prose is one whose next reader learns to write around it.
+# `cargo run --bin server` stays matched anywhere: that spelling does not appear by accident,
+# and it is how `watchexec -r -- cargo run --bin server` and the like are caught — the program
+# that starts the backend there is not one this file knows.
+#
+# A KILL OR A PROBE is read out of the line first (`command_line_outside_kills`), so cleanup
+# stays allowed — `pkill -f target/release/server`, `kill -9 $(pgrep -f …)`, a chain of them —
+# and is never a licence for what follows it: `pkill -f target/release/server;
+# target/release/server` is the ordinary restart one-liner, and it started a send-capable
+# backend while any kill word anywhere on the line skipped this rule.
 #
 # THREE PATHS, not one. `target/(debug|release)/server` is the build output; the
 # always-on service runs a STAGED copy outside the checkout
@@ -958,24 +1487,78 @@ fi
 # launcher/src/backend.ts). It needs no build, which is exactly why an agent on a
 # machine with nothing compiled reaches for it — and it binds the port the user's own
 # app owns.
-# The leading path may be spelled with a variable or a tilde — `$HOME/.local/...`,
-# `~/.local/...`, `"$PWD"/target/...` — so the prefix class accepts those characters
-# too. Without `$` and `~` in it, the staged path only matched when written relative.
+# The leading path may be spelled with a variable or a tilde (`a_program_path`). Without `$`
+# and `~` in it, the staged path only matched when written relative.
 #
-# It is `at_command_start` plus an interpreter and the path itself, so the environment
-# assignments a shell accepts are described in ONE place. That matters: the path class
-# holds no `=`, so before the shared prefix covered them
-# `TEAMS_NO_IDLE_EXIT=1 target/release/server` matched nothing at all and walked
-# straight through the rule it is the clearest example of.
-at_backend_command_start="${at_command_start}((bash|sh|zsh)[[:space:]]+)*[\"']?[A-Za-z0-9_./~\${}-]*"
-runs_the_backend_binary="${at_backend_command_start}(target/(debug|release)|teams-lite/service|cache/teams-lite)/server([[:space:]]|\$)"
-# Every way of EXECUTING a launcher still matches, including through an interpreter
-# (`bash bin/teams-dev-server.sh`) — which is why the prefix list above names the
-# shells. `bash -n` is a syntax check and is exempted by `inspecting_a_file`.
-runs_a_backend_launcher="${at_backend_command_start}teams-(dev-server|lite-backend)\.sh([[:space:]]|\$)"
-if ! stopping_a_process && ! inspecting_a_file && ! searching_text &&
-  printf '%s' "$command_line" |
-  grep -qE "cargo run.*--bin server|$runs_a_backend_launcher|$runs_the_backend_binary"; then
+# It is `at_command_start` plus a shell and the path itself (`at_a_program`), so the prefixes a
+# shell accepts are described in ONE place. That matters: the path class holds no `=`, so
+# before the shared prefix covered them `TEAMS_NO_IDLE_EXIT=1 target/release/server` matched
+# nothing at all and walked straight through the rule it is the clearest example of — and
+# `timeout 20 target/release/server` did the same until the wrappers joined it.
+backend_binary_path='(target/(debug|release)|teams-lite/service|cache/teams-lite)/server'
+runs_the_backend_binary="${at_a_program}${backend_binary_path}${ends_a_word}"
+# The ways of EXECUTING a launcher it knows all match, including through an interpreter
+# (`bash bin/teams-dev-server.sh`, `bash -x …`). `bash -n` is a syntax check and is exempted
+# by `inspecting_a_file`.
+#
+# `teams-lite-backend.sh` is RETIRED — the backend unit execs the binary with no wrapper now,
+# because the backend finds the broker's bus itself (src/intune.rs) — and it stays in the list
+# for the reason rule 3b-ii keeps its two scripts: a machine staged before that change still
+# has the copy beside the binary until bin/teams-lite-service.sh retires it, and running it
+# starts the same send-capable backend it always did.
+runs_a_backend_launcher="${at_a_program}teams-(dev-server|lite-backend)\.sh${ends_a_word}"
+#
+# THE SAME PROGRAMS HANDED TO `systemd-run` are a transient unit of the user's manager: a
+# backend that outlives this shell, under a unit name nothing else here knows — and one whose
+# environment is NOT this shell's. A transient SERVICE runs in a clean environment with the
+# manager as its parent (systemd-run(1)): `TEAMS_LITE_READ_ONLY=1 systemd-run --user
+# target/release/server` sets the variable for systemd-run alone, and the unit starts
+# send-capable on 19420. So the variable anywhere on the line proves nothing here. The unit is
+# read-only only when systemd-run is TOLD so, in the same command and before the program:
+# `-E TEAMS_LITE_READ_ONLY=1` (or `--setenv=`), `-E TEAMS_LITE_READ_ONLY` with the variable set
+# in front (`-E NAME` copies it from systemd-run's own environment), or `--scope` with the
+# variable in front — a scope is the one shape that does inherit the caller's environment.
+backend_in_a_unit="([\"']?${a_program_path}(${backend_binary_path}|teams-(dev-server|lite-backend)\.sh)|${a_program_path}cargo[[:space:]][^;&|]*--bin([[:space:]]+|=)server)${ends_a_word}"
+systemd_run_options="systemd-run([[:space:]][^;&|]*)?[[:space:]]"
+read_only_setenv="(-E[[:space:]]*|--setenv([[:space:]]+|=))[\"']?TEAMS_LITE_READ_ONLY"
+before_the_program="[[:space:]]([^;&|]*[[:space:]])?${backend_in_a_unit}"
+runs_the_backend_in_a_unit="${at_a_program}${systemd_run_options}${backend_in_a_unit}"
+unit_states_read_only="${systemd_run_options}${read_only_setenv}=1[\"']?${before_the_program}"
+unit_copies_read_only="TEAMS_LITE_READ_ONLY=1[[:space:]][^;&|]*${systemd_run_options}${read_only_setenv}[\"']?${before_the_program}"
+scope_inherits_read_only="TEAMS_LITE_READ_ONLY=1[[:space:]][^;&|]*${systemd_run_options}--scope${before_the_program}"
+# Per COMMAND, because the proof has to sit in the very systemd-run it is about: one unit
+# told it is read-only says nothing about a second one on the same line. $1 is the text, $2 the
+# unit pattern and $3 the proof, each already in the form that text is read with.
+a_unit_lacks_its_proof() {
+  local units
+  units="$(printf '%s\n' "$1" | tr ';&|' '\n\n\n' | grep -E "$2")" || return 1
+  printf '%s\n' "$units" | grep -vE "$3" >/dev/null
+}
+starts_a_send_capable_unit() {
+  local proof="$unit_states_read_only|$unit_copies_read_only|$scope_inherits_read_only"
+  a_unit_lacks_its_proof "$command_line_outside_kills" "$(raw_form "$runs_the_backend_in_a_unit")" \
+    "$(raw_form "$proof")" ||
+    a_unit_lacks_its_proof "$command_view_outside_kills" "$runs_the_backend_in_a_unit" "$proof"
+}
+if ! inspecting_a_file && ! searching_text && starts_a_send_capable_unit; then
+  block "This hands the backend to systemd-run without making the UNIT read-only. A transient
+service does not inherit this shell's environment — systemd starts it clean, with the user's
+manager as its parent — so TEAMS_LITE_READ_ONLY=1 written in front of systemd-run sets it for
+systemd-run alone, and the unit comes up send-capable on 19420, outliving this shell under a
+unit name nothing else watches.
+
+Tell systemd-run, before the program:
+
+  systemd-run --user -E TEAMS_LITE_READ_ONLY=1 target/release/server
+
+or start it from this shell, where the variable does reach it:
+
+  TEAMS_LITE_READ_ONLY=1 cargo run --bin server     # ws on 19430
+
+If you genuinely need a send-capable backend, ask the user to start it themselves."
+fi
+if ! inspecting_a_file && ! searching_text &&
+  a_command_outside_a_kill_matches "cargo run.*--bin server|$runs_a_backend_launcher|$runs_the_backend_binary"; then
   if ! printf '%s' "$command_line" | grep -q 'TEAMS_LITE_READ_ONLY=1'; then
     block "Start the backend read-only, or let the user start it. A send-capable backend
 launched by tooling is how an accidental message reaches a colleague:
@@ -1006,10 +1589,17 @@ fi
 # after a separator — so that PROSE naming the same words runs nothing: a commit
 # message ("chore: systemctl --user start teams-lite at boot") must stay allowed,
 # for the same reason `ls target/debug/server` does.
-starts_a_teams_lite_unit="${at_command_start}systemctl[^;&|]*[[:space:]](start|restart|try-restart|reload-or-restart|enable)([[:space:]][^;&|]*)?teams-lite"
-runs_service_script_start="${at_command_start}[A-Za-z0-9_./-]*teams-lite-service\.sh[[:space:]]+[^;&|]*(start|restart|enable)"
+starts_a_teams_lite_unit="${at_a_program}systemctl[^;&|]*[[:space:]](start|restart|try-restart|reload-or-restart|try-reload-or-restart|condrestart|force-reload|enable)([[:space:]][^;&|]*)?teams-lite"
+runs_service_script_start="${at_a_program}teams-lite-service\.sh[[:space:]]+[^;&|]*(start|restart|enable)"
+# The same verbs as raw D-Bus calls to the user's manager (see `raw_dbus_call`): the Manager's
+# `StartUnit`/`RestartUnit` family and `EnqueueUnitJob`, or the unit object's own `Start`.
+# A unit's object path spells its name escaped (`teams_2dlite_2dbackend_2eservice`), so both
+# spellings of the name are matched, in either order against the method. `StopUnit` is left
+# out for the reason `stop` is above.
+dbus_starts_a_unit='(StartUnit|RestartUnit|EnqueueUnitJob|systemd1\.Unit[.[:space:]]+(Start|Restart|TryRestart|ReloadOrRestart|ReloadOrTryRestart)([[:space:]]|$))'
+starts_a_teams_lite_unit_over_dbus="${raw_dbus_call}(${dbus_starts_a_unit}[^;&|]*teams(-|_2d)lite|teams(-|_2d)lite[^;&|]*${dbus_starts_a_unit})"
 if ! searching_text &&
-  printf '%s' "$command_line" | grep -qE "$starts_a_teams_lite_unit|$runs_service_script_start"; then
+  a_command_matches "$starts_a_teams_lite_unit|$runs_service_script_start|$starts_a_teams_lite_unit_over_dbus"; then
   block "The always-on teams-lite service is the user's to start. Its backend unit is
 send-capable by design — it is their real Teams client, running 24/7 — so a
 \`systemctl --user start\` on it is the same act rule 3 refuses, just spelled with
@@ -1018,7 +1608,7 @@ systemd instead of a binary path.
 Install and inspect it freely; starting it is the user's call:
 
   bin/teams-lite-service.sh install     # stage artifacts + write the units (starts nothing)
-  bin/teams-lite-service.sh status      # unit state, ports, broker, tailscale
+  bin/teams-lite-service.sh status      # unit state, ports, Intune, tailscale
   journalctl --user -u teams-lite-backend -n 200 --no-pager
 
 Then ask the user to run:
@@ -1038,9 +1628,8 @@ fi
 #
 # Plain `update` stays allowed: it is how a staged artifact reaches the user's phone, and
 # it now waits on its own.
-skips_the_agent_wait="${at_command_start}[A-Za-z0-9_./~\${}-]*teams-lite-service\.sh[^;&|]*[[:space:]]--now([[:space:]]|\$)"
-if ! searching_text &&
-  printf '%s' "$command_line" | grep -qE "$skips_the_agent_wait"; then
+skips_the_agent_wait="${at_a_program}teams-lite-service\.sh[^;&|]*[[:space:]]--now${ends_a_word}"
+if ! searching_text && a_command_matches "$skips_the_agent_wait"; then
   block "\`update --now\` skips the wait for a live @claude run. A restart kills the CLI child, so
 the reply being written stops mid-sentence and the thread is left with a message that
 says the agent is thinking — read by everybody in it.
@@ -1053,72 +1642,6 @@ Only the user may decide a half-written reply is worth losing. If an update must
 now, say why and let them run it."
 fi
 
-# --- 3b. the Intune container is the user's sign-in, not a toy ------------------
-# `intune-container stop` takes the identity broker down, and with it every token the
-# backend holds: the app goes empty for whoever is using it, on a phone included. A
-# restart is also how the login keyring gets unlocked, so it is a real remedy — which is
-# exactly why it belongs to the user, or to the rate-limited repair unit that the app's
-# own button drives (see bin/teams-lite-broker-check.sh).
-#
-# Looking is free: `status`, `doctor` and `--help` answer the questions an agent
-# actually has, and blocking those would only teach the next reader to phrase around
-# the guard.
-cycles_the_container="${at_command_start}[A-Za-z0-9_./~\${}-]*intune-container([[:space:]]+[^;&|]*)?[[:space:]](stop|start|restart|enroll|init|destroy|edge|autostart)([[:space:]]|\$)"
-# The check script is read-only WITHOUT arguments and a trigger WITH `--repair`: it asks
-# systemd for the repair unit, which restarts the container. So the flag is what decides.
-# Anchored at a command position like every other rule here, so a commit message or a
-# doc line that names the flag runs nothing and stays allowed.
-asks_for_a_repair="${at_command_start}[A-Za-z0-9_./~\${}-]*teams-lite-broker-check\.sh[^;&|]*--repair"
-if ! searching_text &&
-  printf '%s' "$command_line" | grep -qE "$cycles_the_container|$asks_for_a_repair"; then
-  block "The Intune container is the user's sign-in. Stopping or restarting it takes the identity
-broker down, so teams-lite goes empty for whoever is looking at it — including a phone
-on the tailnet — for about a minute.
-
-Diagnose it freely:
-
-  intune-container status
-  intune-container doctor
-  bin/teams-lite-broker-check.sh        # is the login keyring locked?
-  bin/teams-lite-broker-bus-check.sh    # is a backend on a stale broker bus?
-
-A restart IS the remedy when that keyring re-locked, but it is not yours to run: the
-app has a Repair sign-in button, and teams-lite-broker-repair.service does it at most
-three times an hour. Ask the user to press the button, or to run:
-
-  intune-container stop && intune-container start"
-fi
-
-# --- 3b-ii. the broker-BUS repair restarts the BACKENDS, not the container ------
-# A different fault with a different remedy, and it needs its own rule because the
-# container is healthy in this one: a backend that started before the container was ready
-# froze a bus with no broker on it, and the fix is to restart that backend. `--repair`
-# therefore starts teams-lite-backend-restart.service, which try-restarts BOTH
-# send-capable backends — the same "not yours to start" line every other backend rule
-# draws (§ 3a), and the same reason: a restart drops the socket under whoever is reading
-# the app, invalidates every page's write token, and kills a live `@claude` run.
-#
-# Without the flag the script only looks, and looking is exactly how an agent should
-# answer "why is this front empty when the other one is fine" — so the flag is what
-# decides, as it does for the keyring check above.
-asks_for_a_bus_repair="${at_command_start}[A-Za-z0-9_./~\${}-]*teams-lite-broker-bus-check\.sh[^;&|]*--repair"
-if ! searching_text &&
-  printf '%s' "$command_line" | grep -qE "$asks_for_a_bus_repair"; then
-  block "That flag restarts the send-capable backends. It asks systemd for
-teams-lite-backend-restart.service, which try-restarts teams-lite-backend.service and
-teams-lite-app.service — so the socket drops under whoever is reading the app, every open
-page's write token dies with the process, and a live @claude run is cut off mid-answer.
-
-Read the state freely — that is the whole point of the script:
-
-  bin/teams-lite-broker-bus-check.sh    # 0 = fine, 1 = a backend is stale, 2 = cannot tell
-
-The repair is not yours to run. teams-lite-broker-health.timer does it every 15 minutes,
-and the user can do it now with:
-
-  systemctl --user restart teams-lite-app.service"
-fi
-
 # --- 3c. the `teams` command is the whole live stack in one word ----------------
 # The third of the "not yours to start" rules, and the widest: `teams` spawns the
 # send-capable backend (rule 3) AND serves the real app on the production web port
@@ -1126,27 +1649,32 @@ fi
 # read-only spelling of it — an agent that needs real data reads a read-only backend,
 # and an agent that needs the UI drives the mock. So this one blocks unconditionally.
 #
-# Every spelling that RUNS it: the compiled binary wherever it was installed
-# (launcher/dist/teams, ~/.teams-lite/bin/teams, a `teams` on the PATH), the repo
-# wrapper that resolves the broker bus for it, and the source entrypoint. `teams-bin`
+# The spellings that RUN it, as far as this rule knows: the compiled binary wherever it was
+# installed (launcher/dist/teams, ~/.teams-lite/bin/teams, a `teams` on the PATH), the repo
+# wrapper that runs it from its own directory, and the source entrypoint. `teams-bin`
 # is that binary and `teams` is only the wrapper install.sh writes beside it (:57 and
 # :85), so `teams-bin` is the name `ps` and TEAMS_LITE_LAUNCHER_BIN give — the spelling
 # an agent copies while diagnosing the live app, which is the one place a command line
 # is read rather than composed. Anchored to a
 # command position like rules 3 and 3a, so prose, `git add launcher/dist/teams` and
 # `chmod +x` still run nothing. `teams-lite-service.sh` and friends do not match:
-# the name must be followed by a space or the end of the segment. The entrypoint is
+# the name must END there (`ends_a_word`), and a `-lite` does not end one. The entrypoint is
 # matched only behind the interpreter that would RUN it — the same shape rule 2a uses
 # for web/server.ts — because `git add launcher/src/index.ts` starts nothing. `bun` is
 # anchored there for the same reason it is in rule 2a: unanchored, those three letters
 # matched inside `stage-bundle.ts`, so a `sed` over a list of files that happened to
 # name both was read as a launch.
-runs_the_teams_command="${at_backend_command_start}teams(-bin)?([[:space:]]|\$)"
-runs_the_teams_launcher="${at_backend_command_start}teams-launcher\.sh([[:space:]]|\$)"
-runs_the_teams_entrypoint="${at_command_start}bun[^;&|]*(launcher/)?src/index\.ts"
-if ! stopping_a_process && ! inspecting_a_file && ! searching_text && ! printing_usage &&
-  printf '%s' "$command_line" |
-  grep -qE "$runs_the_teams_command|$runs_the_teams_launcher|$runs_the_teams_entrypoint"; then
+#
+# Like rule 3 it reads the line with every kill and probe taken out, so `pgrep -af teams-bin`
+# looks and `pkill -f teams-bin; ~/.teams-lite/bin/teams --no-open` — the restart — does not
+# walk past it; and handed to `systemd-run`, `teams` is the same whole stack in a unit that
+# outlives this shell, so that spelling is refused too.
+runs_the_teams_command="${at_a_program}teams(-bin)?${ends_a_word}"
+runs_the_teams_launcher="${at_a_program}teams-launcher\.sh${ends_a_word}"
+runs_the_teams_entrypoint="${at_command_start}${by_a_shell}(${a_program_path}/)?bun[^;&|]*(launcher/)?src/index\.ts"
+runs_the_teams_command_in_a_unit="${at_a_program}${systemd_run_options}[\"']?${a_program_path}teams(-bin|-launcher\.sh)?${ends_a_word}"
+if ! inspecting_a_file && ! searching_text && ! printing_usage &&
+  a_command_outside_a_kill_matches "$runs_the_teams_command|$runs_the_teams_launcher|$runs_the_teams_entrypoint|$runs_the_teams_command_in_a_unit"; then
   block "\`teams\` is the user's whole live stack in one command: it starts a send-capable
 backend, serves the real app on 19440 and opens a browser on it. That is rule 3 and
 rule 2a at once, so it is theirs to run, not tooling's.

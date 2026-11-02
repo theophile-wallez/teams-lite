@@ -9,8 +9,7 @@
 //   2. whether a CHANNEL carries a mute/notification key at all (the parser reads
 //      none today, so a per-channel mute would be invisible to the app).
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example csa_mute_recon
+//   cargo run --example csa_mute_recon
 use anyhow::Result;
 use serde_json::Value;
 

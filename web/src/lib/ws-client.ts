@@ -765,16 +765,33 @@ export class Backend {
   setChatMuted(conversation: string, muted: boolean): Promise<{ muted: boolean }> {
     return this.writeRequest<{ muted: boolean }>("set_chat_muted", { conversation, muted });
   }
-  /** Ask the backend to repair sign-in: it starts a systemd unit that restarts the
-   *  Intune container, because the container's login keyring re-locks and the broker
-   *  then answers no token call at all.
+  /** Ask the backend to repair sign-in: it asks the user's systemd manager for a transient
+   *  unit that restarts the Intune container through the `intune-container` crate, because
+   *  the container's login keyring re-locks and the broker then answers no token call at all
+   *  (see src/intune.rs).
    *
-   *  A WRITE request, though it posts nothing to Teams: it restarts a service on the
-   *  user's machine, so the backend gates it on the same capability token and refuses
-   *  it outright when read-only (see `MACHINE_METHODS` in src/bin/server.rs).
+   *  A WRITE request, though it posts nothing to Teams: it takes the user's sign-in down for
+   *  a minute on their own machine, so the backend gates it on the same capability token and
+   *  refuses it outright when read-only (see `MACHINE_METHODS` in src/bin/server.rs).
    *
-   *  Resolves as soon as the unit is ENQUEUED. The repair itself takes about a minute
-   *  and drops this socket on the way; recovery is the page's own reconnect. */
+   *  A PRESS is answered `{started: true}` or REJECTED with a sentence, never
+   *  `{started: false}`. A repair already running on this machine is FOLLOWED, which is what
+   *  the press asked for, and answered `started: true`; otherwise the backend asks the keyring,
+   *  and anything but a locked one is a press it refuses in words ("Not restarting the Intune
+   *  container: …"), one sentence per state — unlocked, a container that is not running right
+   *  now, one that could not be read — because a restart would take sign-in down for nothing
+   *  and a press that silently did nothing would look like one that worked. `started: false`
+   *  with a `reason` is the answer its AUTOMATIC triggers get, and `reason` is a `string` on
+   *  purpose: the set has already grown once (`not_locked`, `rate_limited`, `no_container`,
+   *  `already_running`), so nothing on this side may read it as closed. A machine with no
+   *  Intune container is refused too, though `can_repair` already keeps the button from being
+   *  offered there.
+   *
+   *  Resolves as soon as systemd has TAKEN the job (or answered that one is already running),
+   *  not when the repair is done. The backend stays up through the whole minute — the unit is
+   *  the manager's, not its child — so this socket stays open: the end of the repair arrives
+   *  as a `broker_status` with `repairing: false`, and sign-in coming back as the broker's own
+   *  `broker_status` once a token call succeeds. */
   repairBroker(): Promise<{ started: boolean; reason?: string }> {
     return this.writeRequest<{ started: boolean; reason?: string }>("repair_broker", {});
   }

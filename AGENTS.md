@@ -22,8 +22,7 @@
   that server-side shape against the real tenant — it posts to the sandbox channel and
   removes what it posted, and it is the only sanctioned way to try the call live:
 
-      . bin/broker-env.sh && teams_lite_export_broker_bus && \
-        cargo run --example message_delete_probe
+      cargo run --example message_delete_probe
 - **Marking a conversation read counts.** `mark_read` publishes the user's own
   consumption horizon (`PUT …/properties?name=consumptionhorizon`, in
   `src/teams_readstate.rs`): the unread marker clears on every device they are signed
@@ -880,8 +879,7 @@ would have no name at all: nothing in the body is ever read as one.
 **EVERY FACT BELOW IS MEASURED**, by `examples/channel_subject_probe.rs` — the sanctioned way
 to try it live, pinned to the sandbox chat, and it removes both messages it posts:
 
-    . bin/broker-env.sh && teams_lite_export_broker_bus && \
-      cargo run --example channel_subject_probe
+    cargo run --example channel_subject_probe
 
 Measured 2026-08-23 on the real tenant, plus one count off this machine's own store:
 
@@ -983,8 +981,7 @@ Three things follow, and they are the whole architecture:
 **EVERY FACT ABOUT THE CARRIER IS MEASURED**, by `examples/sealed_message_probe.rs` — the sanctioned
 way to try it live, pinned to the sandbox chat, and it removes every message it posts:
 
-    . bin/broker-env.sh && teams_lite_export_broker_bus && \
-      cargo run --example sealed_message_probe
+    cargo run --example sealed_message_probe
 
 Measured 2026-08-24 on the real tenant, and each number decides something:
 
@@ -1184,8 +1181,7 @@ is `delete` + `set_draft` — each already an `OUTWARD_METHODS` entry or a local
 **EVERY FACT BELOW IS MEASURED**, by `examples/scheduled_send_probe.rs` — the sanctioned way
 to try it live, pinned to the sandbox channel, and it cancels or removes everything it posts:
 
-    . bin/broker-env.sh && teams_lite_export_broker_bus && \
-      cargo run --example scheduled_send_probe
+    cargo run --example scheduled_send_probe
 
 Measured 2026-08-17 and again END TO END on 2026-08-18, on the real tenant:
 
@@ -1320,8 +1316,7 @@ The view a Teams client writes on the `<img>` is not the picture: measured on th
 `examples/inline_image_recon.rs` — READ-ONLY, over the store's own 857 inline pictures, and
 it prints byte counts and pixel shapes rather than anybody's screenshot:
 
-    . bin/broker-env.sh && teams_lite_export_broker_bus && \
-      cargo run --example inline_image_recon
+    cargo run --example inline_image_recon
 
 Measured 2026-08-07 in region `fr`: `views/imgo` is a **JPEG whose long side is capped at
 800 px**, and `views/imgpsh_fullsize_anim` carries the pixels the sender uploaded, in the
@@ -2194,8 +2189,7 @@ Five more things worth knowing before touching it:
 pinned to the sandbox channel, and the only sanctioned way to try it live:
 
 ```
-. bin/broker-env.sh && teams_lite_export_broker_bus && \
-  cargo run --example agent_stream_probe -- "your prompt" [claude|opencode] [model]
+cargo run --example agent_stream_probe -- "your prompt" [claude|opencode] [model]
 ```
 
 It also pins the fact the streaming rests on: a send returns no `id`, only
@@ -4759,7 +4753,7 @@ user. Two independent mechanisms enforce that split:
   weaken the lock to get a write through.** Fetching a secret you were not handed
   is precisely the line this draws.
   - **A token is per PROCESS, so a restart invalidates every page's copy** — and this
-    backend restarts many times a day (a re-stage, an update, the broker path unit). The
+    backend restarts many times a day (a re-stage, an update, a restart from Settings). The
     page cannot see it happen: reads keep answering, the socket is up, and the only
     symptom is that every send comes back refused until somebody reloads. On a phone left
     open for days that was the normal outcome of a restart, and it read as a Send button
@@ -4820,13 +4814,33 @@ user. Two independent mechanisms enforce that split:
   itself, which is that backend plus the real app on 19440 in one word — and
   `teams-lite-service.sh update --now`, the switch that skips the wait for a live
   `@claude` run and so freezes a half-written reply in the thread — and `restart_backend`,
-  which is that same failure from inside the app (see § Settings › This app). Asking whether a
-  release is newer (`update_check`) stays allowed: it is a read, and the backend already makes
-  that request every two minutes. It reads the
-  *contents* of what a command runs, including an untracked `examples/*.rs` a `cargo
-  run --example` names. Searching, stopping and inspecting stay allowed on purpose: a
-  `grep` whose pattern names a launcher runs nothing, and a guard that fired on it
-  would only teach its next reader to phrase around the guard.
+  which is that same failure from inside the app (see § Settings › This app) — and cycling the
+  user's Intune container in the spellings its rule 3b lists: the CLI's own lifecycle verbs
+  (directly, behind a wrapper such as `timeout` or `setsid`, inside a subshell or a
+  substitution, or handed to `systemd-run`), the container's unit and the repair's (over
+  `systemctl` or raw D-Bus), the three hidden arguments and a kill that names one, any
+  `StartTransientUnit`, and an example that calls the crate's lifecycle (see § The always-on
+  service). Asking whether a release is newer (`update_check`) stays allowed: it is a read, and
+  the backend already makes that request every two minutes. It reads the *contents* of what a
+  command runs, including an untracked `examples/*.rs` a `cargo run --example` names.
+  Searching, stopping and inspecting stay allowed on purpose: a `grep` whose pattern names a
+  launcher runs nothing, and a guard that fired on it would only teach its next reader to
+  phrase around the guard. **The one stop that is not cleanup is refused**: stopping or killing
+  the CONTAINER, a repair in progress, or a process carrying a hidden argument takes the
+  sign-in down rather than tidying anything up. Two more edges are worth knowing before
+  writing a command the hook will read. A kill or a probe exempts ONLY ITSELF —
+  `pkill -f target/release/server; target/release/server` still starts what its second
+  command names, and it used to walk past because the whole line was exempted. And
+  `systemd-run` counts as read-only only when the UNIT is told so, before the program
+  (`-E TEAMS_LITE_READ_ONLY=1`): a variable written in front of `systemd-run` sets it for
+  `systemd-run` alone, and the unit comes up send-capable under the manager.
+  **"The spellings it knows" is the whole claim, and the hook's own header lists what it
+  cannot see**: a command assembled while the line runs (`eval`, a variable, `bash -c
+  "$CMD"`), a wrapper in front of the first program of a quoted `bash -c '…'`, a program that
+  runs another (`xargs`, `flock`, `watch`), a kill by pid or by a pattern that merely matches,
+  and `TEAMS_LITE_READ_ONLY=1` written anywhere on the line for a binary run directly. It is a
+  tripwire for the shapes an agent really types rather than a proof; for a write to Teams the
+  backend's own token is what holds when it misses, and for the container nothing does.
 
 - **THE GUARD'S OWN LIST OF WRITE RPCs IS PINNED AGAINST THE AUTHORITATIVE ONE, and it had FIVE
   holes in it.** That list is a shell alternation spelled by hand, on the other side of a process
@@ -6828,8 +6842,7 @@ feature worth having: a local-only decoration would be a different, smaller feat
   `value: 0`, and a 289-character key is accepted too. The probes are pinned to the sandbox
   channel const, and the run commands are verbatim:
 
-      . bin/broker-env.sh && teams_lite_export_broker_bus && \
-        cargo run --example custom_emoji_send_probe
+      cargo run --example custom_emoji_send_probe
 
   and the same shape for `custom_emoji_reaction_probe`. Both are reversible writes to the
   sandbox chat only, which § Sending messages pre-authorizes.
@@ -9133,8 +9146,11 @@ user's. What changes is only what is asked.
 ## Project shape
 
 - Backend: Rust (`src/`, binary `server` in `src/bin/server.rs`) — auth broker over
-  D-Bus, real-time trouter client, local-first SQLite store, send, name resolution,
-  Web Push to the user's own devices (`src/push.rs` + `src/push_policy.rs`), the
+  D-Bus, whose bus, keyring and repair on a containerized-Intune host are asked of the
+  `intune-container` crate in one module and never of a host command (`src/intune.rs`, see
+  § The Intune container is a LIBRARY), real-time trouter client, local-first SQLite store,
+  send, name resolution, Web Push to the user's own devices (`src/push.rs` +
+  `src/push_policy.rs`), the
   READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`), the
   READ-ONLY Teams/Outlook calendar (`src/calendar.rs`), presence — reading everybody's
   and, only when the user asks for it and only during the hours they set in the zone they
@@ -9770,7 +9786,13 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   § Running the released build beside the staged one for what keeps the two apart.
 - **What is yours:** `install`, `update`, `units`, `status`, `logs`, `stop`,
   `uninstall`, and every `systemctl --user status|cat|show` /
-  `journalctl --user -u …`. Diagnosing the service is normal work.
+  `journalctl --user -u …`. Diagnosing the service is normal work. Two of them refuse or hold
+  back on a machine staged before the backend found the broker itself, and both say so:
+  `units` stages nothing, so it writes nothing at all in front of a staged backend older than
+  the units it would write — `update` is the run that mends that, and `status` names it — and
+  `install` and `units` restart nothing, so while that older build is still the one RUNNING
+  they keep the three retired units it lives by (§ The Intune container is a LIBRARY, under
+  WHAT THE MIGRATION COSTS).
 - **What is the user's:** `systemctl --user enable --now teams-lite.target`. That
   backend is send-capable, so the hook blocks every start/restart/enable spelling —
   including the service script's own `start` subcommand.
@@ -9779,71 +9801,373 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   frontend), and `HOST=127.0.0.1` on the web unit (it serves the write token and
   relays WebSockets to the send-capable backend, so a public bind would hand the
   account to anything that can reach the port).
-- **The broker bus moves.** It lives at `/proc/<container-leader>/root/run/user/0/bus`
-  and that PID changes on every Intune container boot, so `bin/broker-env.sh` resolves
-  it at each start and `teams-lite-broker-bus.path` restarts the backend when
-  `rootless.json` changes. Without that the backend stays up, unauthenticated, and
-  silent.
-- **A backend can also freeze the WRONG bus at BOOT, and that one is permanent.** The
-  address is resolved once and frozen at exec, so a backend that started before the
-  container was ready holds the HOST session bus — which carries no broker at all — for
-  as long as it lives. It never exits over it either: a broken sign-in is deliberately
-  not fatal (see § A broken sign-in costs the LIVE feed), so the process stays
-  `active (running)`, answers every read out of the store, and signs in to nothing.
-  It happened to `teams-lite-app.service` on this host: four start attempts lost the
-  race, the survivor froze `/run/user/1000/bus`, and the app on 19442 could not reach
-  Teams while the staged pair on 19420 worked perfectly. Nothing noticed, because every
-  existing self-heal watches the CONTAINER and the container was healthy — the `.path`
-  unit fires on a WRITE to `rootless.json` and on a boot that write lands before
-  anything is watching, `PartOf=` never fires because the container unit is a
-  `Type=oneshot` that stays "active (exited)", and the keyring check answers about the
-  keyring. Two halves fix it, and neither replaces the other:
-  - **The wrappers WAIT, so the first start is the right one.**
-    `teams_lite_wait_for_broker_bus` (`bin/broker-env.sh`) polls the existing detection
-    for `TEAMS_LITE_BROKER_WAIT_SECONDS` (30), and the wrapper install.sh writes carries
-    its own copy of that loop because it is self-contained by design. It waits only while
-    a container is KNOWN — `rootless.json` exists, a stale one from the last boot
-    included — so a classic-Intune host and a machine with no Intune launch at once
-    rather than hanging. For the staged backend this also replaces a start that exited 69
-    and handed the retry to `Restart=always`, whose backoff walks to 300 s: losing the
-    first race cost minutes of silence for a container that was up two seconds later.
-  - **The health timer compares the two answers, and restarts what disagrees.**
-    `bin/teams-lite-broker-bus-check.sh` reads where the broker IS
-    (`teams_lite_broker_bus`) against where each running backend is still dialling
-    (`teams_lite_frozen_bus_of_pid`, over `/proc/<pid>/environ`) and asks
-    `teams-lite-backend-restart.service` for the repair — the same unit the `.path` uses,
-    so a restart is spelled once. It tests the CAUSE rather than a symptom, exactly as
-    the keyring check does, because a failed token call is equally what a locked keyring,
-    a stopping container and a slow reply look like and each has a different repair. It
-    never touches the container: the container is healthy in this failure. And it
-    **never repairs on ignorance** — no resolvable container bus, an unreadable
-    `/proc` entry or a stopped unit all answer "cannot tell" (exit 2) and restart
-    nothing, since a restart with the container down would only fail the backend's own
-    start and take the history offline while it walked up the backoff.
-  Both halves are pinned by
-  `update::tests::a_backend_that_froze_the_wrong_broker_bus_is_found_and_restarted`,
-  which scans the units and both wrappers — every one of those files is on the other side
-  of a process boundary, so a change there is invisible to every other test. **The bare
-  check is yours; `--repair` is not**: it restarts two send-capable backends, so the
-  automation hook blocks that flag for the reason it blocks every other backend start.
-- **The keyring re-locks, and that is repaired automatically.** The container's login
-  keyring locks itself every ~18 hours; the broker then answers every token call with
-  `NoReply`, and the app shows nothing. `bin/teams-lite-broker-check.sh` reads the
-  keyring's own `Locked` property — the cause, not a symptom — and three triggers share
-  one rate-limited `teams-lite-broker-repair.service` (3/hour): the backend on that
-  signature, `teams-lite-broker-health.timer` every 15 min, and the app's own
-  **Repair sign-in** button (`repair_broker`, a `MACHINE_METHODS` entry). **Restarting
-  the container is not yours to do** — it takes the user's sign-in down for a minute,
-  so the hook blocks `intune-container stop|start|restart` and
-  `teams-lite-broker-check.sh --repair`. `intune-container status|doctor` and the bare
-  check stay open, because diagnosing is the normal way to answer "why is it empty".
-  That timer runs the BUS check beside this one (see the bullet above), ordered after it:
-  the keyring is the older and commoner fault, and its own "cannot tell" then skips the
-  second — the right direction, since a host where the keyring cannot be read is one
-  where the bus answer would be no better.
+- **The broker bus moves, and a backend FOLLOWS it — on every connection, with no restart.**
+  It lives at `/proc/<container-leader>/root/run/user/0/bus`, and that pid changes on every
+  Intune container boot. `intune::broker_bus` reads where it is NOW, from the container's own
+  runtime state through the `intune-container` crate, on every token call and every
+  interactive call — so a backend that started before the container, or that stays up across
+  a repair or the user's own `intune-container stop && intune-container start`, dials the new
+  socket on its next call. That one property is what retired a whole tier of machinery
+  (§ The Intune container is a LIBRARY): the address used to be resolved once by a shell
+  wrapper and frozen into `DBUS_SESSION_BUS_ADDRESS` at exec, and a backend that froze the
+  wrong one stayed `active (running)`, answered every read out of the store and signed in to
+  nothing, for as long as it lived. It happened to `teams-lite-app.service` on this host: four
+  start attempts lost the race against a booting container, the survivor froze the HOST
+  session bus (`/run/user/1000/bus`, which carries no broker at all), and the app on 19442
+  could not reach Teams while the staged pair on 19420 worked perfectly. Three rules hold the
+  replacement, and each is pinned by a test in `src/intune.rs`, named beside it:
+  - **An operator override, then a RUNNING container, then the inherited bus**
+    (`an_override_wins_then_the_container_then_the_session`). The override keeps the name it
+    always had (`TEAMS_LITE_BROKER_BUS`), so a setup that relied on it keeps working. The
+    container wins over the inherited address on purpose: an install.sh wrapper written before
+    this still exports a frozen container address, and that is exactly the address that goes
+    stale. A classic-Intune host has no container state and falls through to the session bus
+    it always used.
+  - **The state is READ, never cleaned, and a live pid is not proof of a container.**
+    `runtime::load_runtime_state`, never `running_leader`, which deletes a stale `rootless.json`
+    as a side effect — this runs from read-only backends too, and a read that writes another
+    tool's state is not a read
+    (`the_crate_is_read_without_side_effects_and_never_rewires_browser_sso` scans for the
+    call). The crate's own `is_running` checks only that `/proc/<pid>/ns/pid`
+    exists, which every live process satisfies, so a recycled pid would pass it: the leader
+    must also live in a pid namespace of its own (`a_process_of_our_own_is_not_a_container_init`),
+    and the path must be a SOCKET (`only_a_socket_is_a_bus`), because a booting container has a
+    leader before it has a bus — and is read as not running until it has one, rather than
+    dialled into a confusing error.
+  - **It says where, once per CHANGE** (`[broker] identity broker bus: …`;
+    `the_bus_is_announced_once_per_change`, over the comparison `note_choice` makes). A line
+    per token call would be thousands a day; a line per move — the container coming up, or
+    coming back under a new leader — is the one fact a reader of the journal needs when sign-in
+    breaks.
+- **The keyring re-locks, and that is repaired automatically — by this binary, through the
+  crate.** The container's login keyring locks itself every ~18 hours; the broker then answers
+  every token call with `NoReply`, and the app shows nothing. THREE TRIGGERS reach one entry
+  point, `Ctx::start_broker_repair`: the broker observer, on the two signatures whose known
+  cause is a locked keyring (`Disconnected`, `KeyringLocked`); a keyring health check inside
+  every backend (`spawn_broker_health` — a first look five minutes after boot, so a container
+  still coming up is not read as a broken one, then every fifteen, the cadence the timer it
+  replaced kept); and the app's own **Repair sign-in** button (`repair_broker`, a
+  `MACHINE_METHODS` entry). The health check is the one that matters most: with nobody in
+  Mail or the Calendar a backend makes no broker call at all, so an outage at 03:00 would
+  otherwise wait for somebody to notice. Past the read-only refusal, FOUR GATES stand between
+  a trigger and the container, in the order that costs least to be wrong about — and
+  `the_broker_repair_runs_no_host_command_and_checks_its_gates_first` pins that order:
+  - **a container this backend may restart** (`intune::repair_available` — never read-only,
+    and only where `intune-container` is set up). A classic-Intune host answers no, and its
+    button stays inert rather than reporting a failure nobody can act on.
+  - **no repair ALREADY RUNNING on the machine** (`intune::repair_running` — `GetUnit` and
+    `ActiveState` on the user's manager, for the transient `teams-lite-intune-repair.service`
+    AND the installed `teams-lite-broker-repair.service` a machine not yet migrated may still
+    be running; `activating`, `deactivating`, `reloading` and `refreshing` count as running
+    beside `active`, which `a_unit_on_its_way_up_or_down_is_a_repair_still_running` pins). It
+    comes BEFORE the keyring because everything after it reads wrong while a repair runs: the
+    container is stopped or booting, so the keyring cannot be asked, and the floor was claimed
+    by whichever backend started it. A repair found running is FOLLOWED rather than refused — a
+    press answers `{started: true}`, an automatic trigger `{started: false, reason:
+    "already_running"}` — which is also how a backend's pages learn of a repair ANOTHER backend
+    started. Before this, a press mid-repair was told "this machine runs no Intune container".
+    A manager that cannot be asked is not fatal here: the start below asks the same manager,
+    and says why it cannot.
+  - **a LOCKED keyring, asked NOW** (`intune::container_keyring`, one D-Bus get-property of
+    `Locked` on the login collection, over the bus `broker_bus` resolves). It asks the CAUSE,
+    because a failed token call is equally what a killed broker or a slow reply looks like, and
+    it has FIVE answers rather than two: `Locked`, `Unlocked`, `NotRunning` (intune-container is
+    set up, but no running container was found — stopped, booting, or in the middle of a
+    repair, which is exactly what a check landing during one reads), `NoContainer`
+    (intune-container is not set up here at all) and `Unknown` (the bus or the secret service
+    did not answer) — never "locked", because a repair must never fire on a guess. An automatic
+    trigger on anything but `Locked` stands down with one journal line (`reason: "not_locked"`);
+    a PRESS is answered with a sentence PER STATE (`repair_refusal`), because an unlocked
+    keyring, a container that is not running and one that is not set up are three situations
+    with three next moves — the second names `intune-container start`, which is what is left
+    when a container does not come back on its own — and an outward action that did nothing
+    must not look like one that worked. The banner drops that sentence for good the moment the
+    state it was about moves (`broker-banner.tsx`), so it never sits under a repair something
+    else started, and a refused press puts back the status from before it only if nothing
+    newer has arrived meanwhile.
+  - **the machine-wide floor** (`Store::claim_broker_repair`, the moving timestamp under
+    `broker_repair_started_ms`): at most one AUTOMATIC repair every twenty minutes on the
+    whole machine — three an hour, the budget the installed unit carried. It lives in the
+    store every backend shares, so three backends running three health checks spend one
+    budget, and it survives the backend restarts an in-process floor was reset by. A press
+    always claims — the person pressing is who the floor exists to hand the problem to — and
+    moves the floor for the automatic triggers behind it.
+
+  Past the gates, `intune::start_repair_unit` asks the user's systemd manager, over D-Bus, for
+  a TRANSIENT unit — `teams-lite-intune-repair.service`, running this same binary as
+  `server __teams-lite-repair-broker`. That process asks the keyring AGAIN — the installed
+  unit's `ExecCondition=`, and the one check no trigger can skip — and once more after it holds
+  the crate's lifecycle lock, and restarts nothing unless it is still locked; then it stops the
+  container and boots it again through the crate, and never updates the image while it does
+  (§ The Intune container is a LIBRARY says why it is a unit, why it is never a bare start and
+  why the boot runs with `auto_update` off). It logs to `journalctl --user -t
+  teams-lite-broker-repair`, the identifier the installed unit used, and its exit code is the
+  job's result: **0** when the keyring is unlocked at the end — repaired, found unlocked, or
+  unlocked by somebody else's restart while this one waited for the lock; **1** when a restart
+  ran and the keyring is not unlocked after it; **2** when nothing was restarted because
+  nothing could be told (not running, not set up, no answer from the keyring, or a read-only
+  process), so systemd reports a repair that did nothing as `failed` rather than as success.
+  **The backend stays up through it**, which is new: it follows the new bus on its next call,
+  and since nothing reconnects the page any more, `Ctx::follow_repair` carries the banner —
+  `repairing: true` to every page, the repair followed to its end (its own `JobRemoved`
+  signal for one this process started, a poll of `repair_running` for one it did not), ONE
+  broker call for the scope that failed, and only then `repairing: false`. That call is what
+  lets a repair that WORKED announce the new state rather than the old failure, and it is
+  BOUNDED (`REPAIR_SETTLE_PROBE`, 30 s), because a broker call has no deadline of its own and
+  one that never answered would hold "Repairing…" for the life of the process. `repairing` is
+  a COUNT (`BROKER_REPAIRS_FOLLOWED`), because a press can overlap the health check's own
+  follower and the first to finish must not clear it for the other; and a backend that COMES
+  UP while a repair runs — a launcher re-spawning one, a re-stage — follows it from the start
+  of `spawn_broker_health` rather than greeting its pages with `repairing: false` while the
+  container is down. On the page a running repair WINS over whatever the failure reads
+  (`brokerRemedy` in `web/src/lib/signin.ts`, pinned by `signin.test.ts` and
+  `web/e2e/broker-banner.spec.ts`): mid-repair the backend records what a container that is
+  down looks like — no broker on the bus, or one not answering yet — which no restart fixes,
+  and read from `can_repair` alone the banner dropped "Repairing…" halfway through and told
+  the reader to sign in to Intune again. **Restarting the container is not
+  yours to do** — it takes the user's sign-in down for a minute — so the automation hook
+  refuses it in the spellings its rule 3b knows: the CLI's own lifecycle verbs
+  (`intune-container stop|start|restart` and the rest, behind a wrapper or handed to
+  `systemd-run` too), the container's systemd unit and the repair's (start, stop, kill or
+  freeze, over `systemctl` or raw D-Bus), the hidden arguments that make `server` boot, enter
+  or repair it (`__rootless-supervise`, `__rootless-exec`, `__teams-lite-repair-broker`) and a
+  kill that names one, any `StartTransientUnit`, and an example that calls the crate's
+  lifecycle — because with the crate linked, a container restart is a function call any
+  example can make. STOPPING a repair is refused with the rest, and is the worst of them: cut
+  between its stop and its start it leaves no container, the keyring then reads `NotRunning`
+  rather than locked, and nothing automatic brings one back. It is a tripwire for the shapes an
+  agent really types rather than a proof (§ Automation safety names what it cannot see). The
+  DIAGNOSIS stays open, because it is the normal way to answer "why is it empty":
+  `cargo run --example intune_status` (READ-ONLY — where the broker's bus is, whether a repair
+  is available here, and what the keyring says; exit 0 unlocked, 1 locked, 2 cannot tell, the
+  shape the shell check it replaced had) and `intune-container status|doctor`.
 - **Tailscale, never Funnel.** `tailscale serve` is tailnet-only, behind Tailscale's
   own authenticated HTTPS. `tailscale funnel` would publish the user's Teams account
   to the internet, send included.
+
+### The Intune container is a LIBRARY, not a host command
+
+On a containerized-Intune host the identity broker runs inside a rootless container that the
+user's own `intune-container` project manages, and teams-lite talks to it in ONE module
+(`src/intune.rs`), through that project's crate — never by running `busctl`, `pgrep`,
+`systemctl` or the `intune-container` binary. Three questions, each answered in process:
+where the broker's bus is (`broker_bus`), whether the container's login keyring is locked
+(`container_keyring`), and the repair (`restart_container`, inside its transient unit). The
+one process teams-lite's own code still spawns is the local agent's CLI.
+
+**WHAT THE CRATE IS ASKED, AND WHAT IT IS DELIBERATELY NOT.** It is asked for its runtime state
+(`runtime::load_runtime_state`, a pure read), whether that leader is alive
+(`runtime::is_running`), whether it is set up at all (`ops::is_initialized`) — and, inside the
+repair unit only, for its configuration (`config::Config::load`, and `save` for one field),
+`backend::is_running`, `backend::stop` and `backend::start`, under `lock::LifecycleLock`.
+Three things it offers are refused on purpose, and each would break something real;
+`the_crate_is_read_without_side_effects_and_never_rewires_browser_sso` scans the module for
+the first two:
+
+- **`runtime::running_leader()` DELETES a stale `rootless.json`** as a side effect. This module
+  reads on every token call, from read-only backends included, and a read that writes another
+  tool's state is not a read.
+- **`ops::start()` rewires browser SSO to the calling binary.** It rewrites the browser's
+  native-messaging wrapper to run `exe::stable_exe()` — which, called from here, is THIS
+  binary — so every browser SSO request would start a teams-lite backend under the browser's
+  pipes. `backend::start` is the boot without that half, and the wrapper
+  `intune-container start` wrote stays as it was.
+- **crates.io 0.2.3 would unenroll the machine.** It stamps the platform digest where it
+  compares the index digest, so every start re-pulls the whole rootfs, and it does not persist
+  `/etc/microsoft/identity-broker` across a pull — so that re-pull erases the device
+  registration ("Device is not registered"), and a repair through it would take the machine
+  out of Intune. Cargo.toml pins the git commit `7605004` (master, on top of `2917d92`, which
+  fixed both), and the version number cannot tell the two apart: both say 0.2.3. The pin ends
+  the re-pull on EVERY start, not every re-pull: at `7605004` a start with `auto_update` on
+  still replaces the rootfs whenever the registry tag has moved, which is why the repair boots
+  with updates off (below).
+
+**WHY `server` ROUTES `__rootless-supervise` AND `__rootless-exec` BEFORE ITS RUNTIME**
+(`intune::dispatch_reexec`, the first thing `main` does). `backend::start` boots the container
+from a detached supervisor it spawns by re-executing `exe::stable_exe()` with
+`__rootless-supervise [--display]`, and enters a running one with `__rootless-exec`; inside
+teams-lite that executable is the `server` binary. Unrouted, the supervisor would start a
+second teams-lite backend, which dies on the port, and no container boots. And it has to happen
+before any tokio runtime exists: the crate forks and unshares a user namespace, which a
+multithreaded process cannot do safely, and it builds runtimes of its own that would panic
+inside ours. An argument shape it does not expect is refused with exit 2 rather than ignored,
+and `tracing-subscriber` is installed in those processes alone — the crate logs through
+`tracing`, and without a subscriber a failed boot would leave nothing to read.
+
+**WHY THE REPAIR IS A TRANSIENT UNIT, and never a child of the backend.** Four reasons, and
+each is about what it survives or what it can reach:
+
+- **It survives the backend's own restarts.** It stops the container this backend talks
+  through, and a child in our cgroup dies with us (`KillMode=control-group`) — a repair cut
+  between its stop and its start leaves the user with no container at all.
+- **Its environment is the MANAGER's, not ours**, so neither the write token nor an inherited
+  container address reaches the container's supervisor, whose environment its PID 1 inherits
+  for the container's whole life. The one variable it is handed is
+  `DBUS_SESSION_BUS_ADDRESS=<the user's own bus>`: the crate registers the container's cgroup
+  scope over `Connection::session()`, and the container's bus ALSO owns
+  `org.freedesktop.systemd1`, so an inherited container address would reach the container's
+  inner systemd and fail in a way that reads like something else. The manager itself is dialled
+  at `$XDG_RUNTIME_DIR/bus` and never at `Address::session()`, for the same reason.
+- **Every install shape gets it.** The `teams` command installs no unit files, and an installed
+  unit was a second thing to keep in step with this code.
+- **It is single-flight by NAME.** A second `StartTransientUnit` while one runs is refused by
+  systemd itself (`UnitExists`), which every backend reads as "a repair is already running" and
+  follows to its end. The name is deliberately NOT `teams-lite-broker-repair.service`: a machine
+  that has not re-staged since still has that unit loaded, a transient unit cannot take a loaded
+  unit's name, and the start would read as "already running" for ever. The name cannot make the
+  two units single-flight WITH EACH OTHER, so `repair_running` asks for the installed name as
+  well (`intune::LEGACY_REPAIR_UNIT`): the migration never stops a repair in progress, and a
+  second one started beside it would wait on the lifecycle lock and then restart a container
+  the first had just repaired. `TimeoutStartUSec` is 300 s, because a oneshot has no start
+  timeout by default and a hung boot would hold the name — and every later repair with it —
+  for good. The stop waits up to 20 s and the start up to 20 s, and with the session setup that
+  unlocks the keyring behind them a repair takes about two and a half minutes at worst — an
+  arithmetic that holds only because a repair never pulls an image (below).
+  `CollectMode=inactive-or-failed` unloads a failed repair too, so the result is read off the
+  job's `JobRemoved` signal rather than off a unit kept around to be asked, and the
+  subscription is taken BEFORE the start, so a repair that ends quickly cannot end unheard.
+
+**INSIDE THE UNIT: THE KEYRING ASKED TWICE, THEN A STOP AND A START — never a bare start, and
+never an image update.** Three rules, and
+`a_repair_boots_without_an_image_update_and_never_saves_that` pins the order of the first and
+the whole of the third:
+
+- **The second question is asked once the lifecycle lock is HELD.** Under that lock the repair
+  WAITS for the user's own CLI or GUI rather than racing it — the lock a browser's SSO request
+  takes too, when it boots a container somebody stopped — and waiting for it is waiting for
+  somebody else's stop or start: the user's own `stop && start`, the GUI, an older build's
+  installed repair. A start is exactly what unlocks the keyring, so a repair that did not look
+  again would take sign-in down a second time for a container somebody had just repaired. Found
+  unlocked by then, it exits 0 and touches nothing.
+- **Stop, then start.** On a running container `backend::start` returns at once ("container
+  already running") and never re-runs the session setup that unlocks the keyring — which is the
+  whole repair, and exactly why a bare `intune-container start` never fixed it.
+- **The boot runs from a CLONE of the configuration with `auto_update = false`, and the clone
+  is never saved.** With updates on — the crate's default, and this machine's setting — a start
+  whose registry tag has moved DELETES the rootfs and pulls the whole image again, over a
+  registry call with no timeout, after the stop and inside the 300 s bound: a repair killed in
+  the middle of that leaves no container at all, or a half-extracted tree the next start adopts
+  as current. The installed unit had the same exposure under a comment saying a repair never
+  pulls the rootfs; this is the first version of which that is true. The user's own next
+  `intune-container start` updates as it always did. The boot is headless, as `ops::start`
+  boots, so `display_forwarding` is cleared the same way — on the ORIGINAL configuration, so the
+  clone's `auto_update` never reaches the disk.
+
+**WHAT WAS RETIRED, and why each piece existed.** Every one of them existed because the broker's
+bus address was frozen into the backend's environment at exec, or because the repair was an
+installed unit running the `intune-container` binary:
+
+- `bin/broker-env.sh` — the shared shell detection (`busctl`, `pgrep`, a `grep` over
+  `rootless.json`, the wait loop and the reader of a backend's frozen `/proc/<pid>/environ`),
+  sourced by every wrapper and every check; plus the self-contained copy of it inside the wrapper
+  install.sh writes, and the `. bin/broker-env.sh && teams_lite_export_broker_bus &&` line every
+  probe command in this file used to open with. An example now finds the bus itself, through
+  the library.
+- `bin/teams-lite-backend.sh` — the staged backend's `ExecStart=` wrapper, whose only jobs were
+  resolving and exporting the bus and a keyring check before the start. The unit execs the
+  staged `server` directly now.
+- `teams-lite-broker-bus.path` and `teams-lite-backend-restart.service` — a container restart
+  rewrote `rootless.json`, and the only way a frozen address could follow it was a restart of
+  every backend (a `.path` can only START a unit, hence the second one).
+- `bin/teams-lite-broker-wait.sh` and the wait loops behind `TEAMS_LITE_BROKER_WAIT_SECONDS` —
+  a backend that started before the container froze the host bus for good, so the FIRST start
+  had to be the right one.
+- `bin/teams-lite-broker-bus-check.sh` — the health check comparing each running backend's
+  frozen address with the live one, for the boot race the `.path` could never see.
+- `bin/teams-lite-broker-check.sh`, `teams-lite-broker-health.service`,
+  `teams-lite-broker-health.timer` and `teams-lite-broker-repair.service` — the `busctl` keyring
+  read, its fifteen-minute timer, and the installed unit that ran `intune-container stop` and
+  `start` behind `ExecCondition=`, `ConditionFileIsExecutable=` and a `StartLimit*` budget. Each
+  of those three gates moved into code with it (above).
+- `PartOf=`/`Wants=`/`After=intune-container.service` on the backend and app units, the
+  `@CONTAINER_STATE@` and `@INTUNE_CONTAINER@` placeholders, and `TEAMS_LITE_CONTAINER_STATE`.
+  A backend follows the container live, and stopping the container must not stop teams-lite —
+  the store keeps serving the history (§ A broken sign-in costs the LIVE feed). On this
+  workstation that unit is a legacy one pointing at a binary that does not exist, which is the
+  other reason not to lean on it.
+
+**WHAT THE MIGRATION COSTS, stated rather than left to be found:**
+
+- **A machine staged before this still has the retired units INSTALLED and ENABLED** —
+  `teams-lite.target` pulled the `.path` and the timer in — while `install_units` and
+  `uninstall` act only on `UNITS`, and `stage_artifacts` never deletes a script it staged
+  before. So `bin/teams-lite-service.sh` RETIRES them explicitly on `install`, `update` and
+  `units`, and on `uninstall`: it disables and stops the `.path` and the timer, never stops a
+  repair that is running, removes the five unit files, reloads the manager, and only then the
+  staged retired scripts. A retired oneshot that is still RUNNING keeps its file until the next
+  run, because deleting it and reloading makes systemd drop every command after the current
+  one — which for the old repair is the `start` after its `stop`; and a script stays while a
+  unit still on disk names it, for the same reason one command later. A retired unit whose
+  file is GONE has its `failed` mark reset, or the user manager reports `degraded` until a
+  reboot over a unit nothing on the machine can name; one still on disk is never reset, since
+  that would clear the old repair's three-an-hour start limit too. The auto-update hook runs
+  `update` on its own, so this reaches the user's always-on machine with nobody running a
+  command — which is why it is idempotent, and why a retired unit that is already gone can
+  never fail an update.
+- **THE RETIREMENT IS HALF OF ONE CHANGE, and the BINARY is the other half**, so it happens
+  only in front of a backend that no longer needs what it removes — told apart from the bytes
+  alone by `__teams-lite-repair-broker` (`intune::REPAIR_SUBCOMMAND`), a literal in every build
+  that finds the broker itself and in none before it. Two gates in the script, each pinned in
+  `update::tests`:
+  - **`units` refuses before it writes anything** in front of a staged backend that lacks it
+    (`require_a_staged_backend_that_finds_the_broker`). It stages nothing, and it used to write
+    the wrapper-less backend unit in front of an OLD binary and retire every watcher that binary
+    lived by — so the next restart of it exec'd a build that reads the broker's bus from its
+    environment straight onto the user manager's bus, where there is no broker, and the
+    always-on app was signed out with nothing left on the machine to bring it back. `status`
+    therefore names `update` for a machine with retired units still installed, never `units`.
+  - **`install` and `units` restart nothing**, so while the staged backend's RUNNING process is
+    still such a build (`stale_backend_pid`, judged off `/proc/<pid>/exe`, which still opens the
+    inode a re-stage renamed over), they KEEP the three units it lives by — the `.path` and the
+    restart unit that follow a container restart, and the installed repair its button and its
+    observer start — and say so, naming `systemctl --user try-restart teams-lite-backend.service`
+    as the user's step. The HEALTH TIMER is deliberately not kept: it compares every running
+    backend's frozen address with the container's, a backend started from the new unit carries
+    none, and kept it would restart both backends every fifteen minutes. `update` restarts what
+    is running onto the staged build, so it retires everything.
+- **THE SAME PAIRING IS REFUSED WHERE THE WRAPPERS MAKE IT.** A wrapper that no longer resolves
+  the bus, in front of a binary from before the backend did, is signed out from its first start.
+  `bin/teams-launcher.sh` refuses a compiled `launcher/dist/teams` without the marker — a
+  `git pull` brings the wrapper and leaves that untracked build as old as it was — and install.sh
+  refuses a download without it before installing anything, because it is served from master the
+  moment it merges while `latest` is republished only once CI has built that commit.
+  `neither_wrapper_runs_a_binary_older_than_itself` pins both, and
+  `every_shell_gate_reads_the_backends_own_hidden_argument` pins all three spellings of the
+  marker to the constant, so renaming the argument cannot quietly turn every current build into
+  an "old" one.
+- **An install.sh wrapper written before this still exports a frozen container address.**
+  Harmless: `intune::broker_bus` prefers the live container over anything this process
+  inherited.
+- **An OLDER released binary still freezes its bus at exec, and has lost the `.path` that used
+  to restart it.** The `teams-lite-app.service` build lags until the user presses its in-app
+  update, so after a container restart it stays signed out until the unit is restarted (which
+  re-runs its own older wrapper's detection) or updated, and its Repair sign-in reports a
+  refusal whatever is restarted, because the installed repair unit it starts is retired. The
+  update heals both for good; a restart holds only until the container's next one.
+
+**WHAT IS VERIFIED, AND WHAT IS NOT.** Verified live on this workstation, through the code that
+ships: `cargo run --example intune_status` found the running container (leader 6415) from the
+crate's own state and read its keyring as unlocked, and `cargo run --example broker_token`
+reached the real broker the same way — both with nothing exported into the environment. So
+were the two IGNORED tests in `src/intune.rs`, which need a systemd user session and passed
+when run with `--ignored` against the user's real manager:
+`the_user_manager_accepts_the_repair_units_shape` made the exact `StartTransientUnit` call the
+repair makes — the same property types, the job signal subscribed to first — for a unit that
+ran `/bin/true` under a name of its own (`teams-lite-intune-selftest-<pid>`) and unloaded
+itself, and read `done` off its `JobRemoved`; and `the_user_manager_answers_whether_a_repair_runs`
+asked `GetUnit` and `ActiveState` for both repair names, read-only. So systemd accepts the
+unit's shape and the job signal arrives; what neither reaches is a unit that touches a
+container. Pinned by ordinary tests besides: the bus rules,
+the routed argv shapes, the unit's properties, the running states, the gate order and the
+clone without updates. Pinned by NOTHING: the follower — its count, its bounded settle probe and
+the follow at boot — and the per-state refusal sentences, of which the mock copies the unlocked
+one by hand. **The REPAIR BODY has never been run** — the stop and the start through the crate,
+and the crate's supervisor booting from `server` through `dispatch_reexec` — because it runs
+only against a LOCKED keyring, and restarting the user's container takes their sign-in down for
+a minute: that is their own click — Repair sign-in on a real outage, or
+`intune-container stop && intune-container start` by hand — rather than a test. What it rests on
+is the crate's own lifecycle: the same `backend::stop` and `backend::start` those two commands
+run, under the same lock.
 
 ## Running the released build BESIDE the staged one
 
@@ -9976,7 +10300,12 @@ and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
 - **Nothing polls the broker to recover.** `trouter::run` asks for credentials before
   every connection attempt and backs off to 30 s, so the first attempt that succeeds
   fills the session in (`Ctx::adopt_session`) and the app catches up with no restart.
-  A `sign_in` retry loop beside it would be a second thing hammering the same bus.
+  A `sign_in` retry loop beside it would be a second thing hammering the same bus. And
+  every call that reaches the broker resolves its bus AGAIN (`intune::broker_bus`), so a
+  container that restarted underneath — a repair, or the user's own stop and start — is
+  followed on the next attempt with no restart of the backend either. Before that, the
+  address was frozen at exec and a container restart cost every backend a restart of its own
+  (§ The Intune container is a LIBRARY).
 - **AND THE AUTOMATIC REPAIR SAYS WHEN IT STANDS DOWN, which it did not** (`say_standing_down`
   in src/auth.rs). `auth::rescue` is the thing that ends most sign-in outages with nobody being
   told there was one (§ Signing in again), and it had THREE silent early returns: a read-only
@@ -10023,19 +10352,24 @@ and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
   therefore says the history on screen is what this machine stored, and that nothing
   arrives or leaves until sign-in works — it used to claim the app could read nothing,
   which was the sentence that made a stale app read as a broken one.
-- **What a restart cannot fix says so IN FLOW, never behind a hover.** Only
-  `Disconnected` is repairable here (`BrokerFailure::is_repairable`); `Refused` is now
-  answered by the app itself — the banner offers a sign-in in the browser instead (see
-  § Signing in again) — and `NoAccount` still needs the user to sign in to Intune again,
-  which is the one remedy on this banner that is theirs to carry out. The button stays
-  visible and inert — a missing one
-  would read as "nothing can be done" without saying so — and the sentence beside it sits
-  in the same slot the repairable branch puts its own footnote in
-  (`broker-repair-hint`), because it was a Radix TOOLTIP once and this app is read from a
-  PHONE: no hover there, so the state whose whole answer is "go and sign in" showed a dead
-  button and no words at all. In flow it also lands inside the banner's `aria-live` region
-  rather than waiting for a focus. `web/e2e/broker-banner.spec.ts` pins that the words are
-  visible with no pointer anywhere near them.
+- **What a restart cannot fix says so IN FLOW, never behind a hover.** Only `Disconnected` and
+  `KeyringLocked` are repairable here (`BrokerFailure::is_repairable` — the two signatures
+  whose known cause is a locked container keyring), and only where `intune::repair_available`
+  says there is a container this backend may restart, which a classic-Intune host and a
+  read-only backend never have; `Refused` is now answered by the app itself — the banner
+  offers a sign-in in the browser instead (see § Signing in again) — and `NoAccount` still
+  needs the user to sign in to Intune again, which is the one remedy on this banner that is
+  theirs to carry out. None of that is read while a repair RUNS: the failure recorded then is
+  the container being down, which no restart fixes, so the banner keeps `Repairing…` until the
+  backend says the repair has ended (§ The always-on service). The button stays visible and
+  inert — a missing one would read as "nothing can be done" without saying so — and the
+  sentence beside it sits in the same slot
+  the repairable branch puts its own footnote in (`broker-repair-hint`), because it was a
+  Radix TOOLTIP once and this app is read from a PHONE: no hover there, so the state whose
+  whole answer is "go and sign in" showed a dead button and no words at all. In flow it also
+  lands inside the banner's `aria-live` region rather than waiting for a focus.
+  `web/e2e/broker-banner.spec.ts` pins that the words are visible with no pointer anywhere
+  near them.
 
 ## Signing in again, from the app (the broker's own window, in the browser)
 
@@ -10095,8 +10429,9 @@ Nine rules hold it, and each is pinned by a test:
   left standing somewhere else.
 - **A flow is ended by CLOSING ITS WINDOW, never by `cancelInteractiveFlow`.** Measured: that
   D-Bus call with an empty body took the broker OFF THE BUS — which is `BrokerFailure::Disconnected`,
-  the one signature whose automatic remedy is restarting the user's whole Intune container. A
-  closed window ends the pending call as a named cancellation (`status: 7`) and the broker stays
+  a signature whose automatic remedy is restarting the user's whole Intune container (refused
+  now unless the keyring really reads locked, but the broker is gone either way). A closed
+  window ends the pending call as a named cancellation (`status: 7`) and the broker stays
   up. **Cancel also STOPS THE RUN**, because during `starting` there is no window yet: closing
   alone made Cancel a silent no-op in the phase most sign-ins live in, and left the session live,
   so no new sign-in could be started for ten minutes.

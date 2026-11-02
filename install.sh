@@ -33,7 +33,9 @@ esac
 
 url="https://github.com/$REPO/releases/download/latest/$asset"
 
-mkdir -p "$BIN_DIR"
+# Nothing under $INSTALL_DIR is created or touched until the download has passed every check
+# below: a refused install leaves the machine exactly as it was — an earlier install still
+# whole, or nothing at all.
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
@@ -54,100 +56,64 @@ if ! head -c 4 "$tmp" | od -An -tx1 | tr -d ' \n' | grep -qi '^7f454c46'; then
   exit 1
 fi
 
+# And one as new as THIS installer. The wrapper written below no longer makes the identity
+# broker reachable, because a current backend finds the broker itself; a release built before
+# that reads the broker's bus from its environment alone, so behind this wrapper it would dial
+# the desktop session bus — where a containerized-Intune host has no broker — and stay signed
+# out from its first start. That pairing is real in the minutes after the change that made
+# the wrapper this small: this file is served from master the moment it merges, while `latest`
+# is republished only once CI has built that same commit (and never, if that build fails).
+#
+# The tell is the hidden argument the in-process repair re-executes the backend with
+# (`intune::REPAIR_SUBCOMMAND` in src/intune.rs, in the repository): a literal in every backend
+# that finds the broker itself and in none before it, and the release embeds the backend's
+# bytes as they are, so `grep -a` finds it inside the download with nothing run. The check sits
+# BEFORE anything is installed, so a refusal keeps the binary and the wrapper an earlier run
+# put here — a pair that works together — rather than half of each.
+if ! grep -qaF __teams-lite-repair-broker "$tmp"; then
+  echo "error: the release for this installer is not published yet — retry in a few minutes." >&2
+  echo "  The 'latest' build predates the backend finding the identity broker by itself, which" >&2
+  echo "  the launcher this installer writes relies on. Nothing was installed or changed." >&2
+  echo "  If it persists, the release build failed: https://github.com/$REPO/actions" >&2
+  exit 1
+fi
+
+mkdir -p "$BIN_DIR"
 install -m 0755 "$tmp" "$BIN_DIR/teams-bin"
 
-# Launcher wrapper. It does two jobs:
+# Launcher wrapper. One job: bunfig isolation — a compiled Bun binary reads bunfig.toml
+# from the CURRENT directory at startup, so running `teams` inside another Bun project
+# (whose bunfig has a `preload`) would crash. We sidestep that by running from a directory
+# we control (teams-lite doesn't care about the working directory: its logs go to /tmp and
+# its database to the XDG data dir, both absolute). It execs, so the binary keeps the
+# wrapper's pid — under teams-lite-app.service, the unit's MainPID — and it is the one file
+# here the in-app update never replaces, which is a reason to keep it this small: whatever
+# it does, a machine keeps doing until somebody re-runs this installer.
 #
-#   1. bunfig isolation — a compiled Bun binary reads bunfig.toml from the CURRENT
-#      directory at startup, so running `teams` inside another Bun project (whose
-#      bunfig has a `preload`) would crash. We sidestep that by running from a
-#      directory we control (teams-lite doesn't care about the working directory:
-#      its logs go to /tmp and its database to the XDG data dir, both absolute).
+# It used to have a second job, making the Microsoft Identity Broker reachable. On a
+# containerized-Intune host the broker lives on the container's own D-Bus, reached through
+# /proc/<container-leader>/root/run/user/0/bus — a path that moves with every container
+# boot — and this wrapper carried a copy of the shell detection that found it, waited for
+# it and exported it into DBUS_SESSION_BUS_ADDRESS, where it stayed frozen for the life of
+# the process. The backend now finds that bus itself, on every connection, from the
+# container's own runtime state (src/intune.rs in the repository), so there is nothing left
+# for a wrapper to resolve — and TEAMS_LITE_BROKER_BUS, the operator's override for a
+# topology nothing detects, is read by the backend too.
 #
-#   2. Broker reach — teams-lite signs in through the Microsoft Identity Broker
-#      (com.microsoft.identity.broker1) over the session D-Bus, in either Intune
-#      topology, WITHOUT ever needing sudo:
-#        • Classic Intune: the broker runs as the real user and owns its name on
-#          the host session bus. We just launch directly.
-#        • Containerized Intune: the broker runs as the same host user inside a
-#          rootless container, on the container's own bus (/run/user/0/bus). That
-#          socket is reachable unprivileged from the host via
-#          /proc/<container-pid>/root/run/user/0/bus, so we just point
-#          DBUS_SESSION_BUS_ADDRESS at it and connect directly.
-#      Detection is automatic; if no broker is found we still launch and let the
-#      binary surface its own error — but only after WAITING for one, because this
-#      wrapper is also what teams-lite-app.service execs, and there the address it
-#      resolves is frozen for the life of a service that never exits on its own.
-#      Losing that race left a backend permanently signed in to nothing, on a front
-#      the user reads, with the app `active (running)` the whole time. The wait is
-#      bounded and happens only while a container is KNOWN (rootless.json exists),
-#      so a machine with classic Intune or none at all still launches at once.
-#
-#      This is a self-contained COPY of bin/broker-env.sh, because an installed
-#      binary has no repo to source it from. bin/broker-env.sh is the source of
-#      truth and carries the full explanation — in particular why the CONTAINER,
-#      not the broker process, is the handle: the broker is D-Bus activated, so
-#      most of the time no broker process exists to find.
+# A WRAPPER WRITTEN BY AN OLDER install.sh still exports that frozen address, and it is
+# harmless: the backend prefers a running container over whatever bus it inherited, so the
+# stale address is never dialled while there is a broker to reach — and with no container
+# running there is no broker on any bus. Re-running this installer replaces it anyway. The
+# OTHER pairing — this wrapper in front of a binary older than it — is the one that breaks
+# sign-in, and the marker check above is what keeps this installer from ever writing it.
 cat > "$BIN_DIR/teams" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
 TEAMS_BIN="$BIN_DIR/teams-bin"
-BROKER_DBUS_NAME='com.microsoft.identity.broker1'
-CONTAINER_STATE="\${TEAMS_LITE_CONTAINER_STATE:-\$HOME/.local/share/intune-container/rootless.json}"
-BROKER_WAIT_SECONDS="\${TEAMS_LITE_BROKER_WAIT_SECONDS:-30}"
 
-launch() {
-  cd "$BIN_DIR" || exit 1
-  exec "\$TEAMS_BIN" "\$@"
-}
-
-# Does a bus carry the broker name — owned, or merely activatable?
-broker_on_bus() {
-  command -v busctl >/dev/null 2>&1 || return 1
-  busctl --address="\$1" --list --no-legend 2>/dev/null |
-    awk '{print \$1}' | grep -qx "\$BROKER_DBUS_NAME"
-}
-
-# Both topologies, retried until the container is up. The launch function execs, so
-# the first bus that carries the broker ends this loop for good.
-waited=0
-while :; do
-  # Topology 1 — classic Intune: broker name already on our host session bus.
-  if command -v busctl >/dev/null 2>&1 &&
-     busctl --user --list --no-legend 2>/dev/null | awk '{print \$1}' | grep -qx "\$BROKER_DBUS_NAME"; then
-    launch "\$@"
-  fi
-
-  # Topology 2 — containerized Intune: the container's own bus, reached through
-  # /proc. The container leader first (it lives as long as the container), then any
-  # process that runs inside it.
-  for pid in \\
-    "\$(grep -o '"leader"[[:space:]]*:[[:space:]]*[0-9]\\+' "\$CONTAINER_STATE" 2>/dev/null | grep -o '[0-9]\\+\$' || true)" \\
-    \$(pgrep -f 'identity-broker/bin/microsoft-identity' 2>/dev/null || true) \\
-    \$(pgrep -f 'intune/bin/intune-daemon' 2>/dev/null || true); do
-    [ -n "\$pid" ] || continue
-    bus="/proc/\$pid/root/run/user/0/bus"
-    [ -S "\$bus" ] || continue
-    if broker_on_bus "unix:path=\$bus"; then
-      export DBUS_SESSION_BUS_ADDRESS="unix:path=\$bus"
-      launch "\$@"
-    fi
-  done
-
-  # Wait only while a container is KNOWN to exist. With no rootless.json there is
-  # nothing to wait for, so a classic-Intune host and a machine with no Intune at
-  # all launch at once rather than hanging.
-  [ -e "\$CONTAINER_STATE" ] || break
-  [ "\$waited" -lt "\$BROKER_WAIT_SECONDS" ] || break
-  sleep 1
-  waited=\$((waited + 1))
-done
-
-echo "teams-lite: identity broker not found on this session bus and no Intune" \\
-     "container was found — start Intune first. Launching anyway; sign-in will" \\
-     "fail while the broker stays unreachable." >&2
-launch "\$@"
+cd "$BIN_DIR" || exit 1
+exec "\$TEAMS_BIN" "\$@"
 EOF
 chmod 0755 "$BIN_DIR/teams"
 

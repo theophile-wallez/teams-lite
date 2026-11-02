@@ -69,8 +69,7 @@
 //     drops one the message is lost for everybody with nothing to report, while the BODY is
 //     the field the service has never dropped. Measured so the next reader need not wonder.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example sealed_message_probe
+//   cargo run --example sealed_message_probe
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

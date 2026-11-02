@@ -29,7 +29,8 @@ export const STATUS_INTERVAL_MS = 400;
  *  Exactly one, ever, and that is the whole point of deciding it in one place: a banner
  *  offering both "restart the container" and "sign in here" asks the reader to know which
  *  failure they have, which is the thing they came to the app to be told. The backend already
- *  answers both questions per failure (`can_repair`, `can_sign_in`), so this only picks. */
+ *  answers both questions per failure (`can_repair`, `can_sign_in`) and says whether a repair
+ *  is running (`repairing`), so this only picks. */
 export type BrokerRemedy =
   | { kind: "repair" }
   | { kind: "signin" }
@@ -38,6 +39,17 @@ export type BrokerRemedy =
 
 export function brokerRemedy(broker: BrokerStatus | null | undefined): BrokerRemedy {
   if (!broker || broker.ok) return { kind: "none" };
+  // A repair that is RUNNING wins over everything the failure itself would call for, because
+  // the failure is not what it was: the repair stops the container and boots it again, and the
+  // backend stays up through that minute and goes on asking for tokens — so it records what a
+  // container that is down or still booting looks like (no broker on the bus at all is
+  // `unreachable`, a broker not answering yet is `unresponsive`), and neither is one a restart
+  // fixes. Read from `can_repair` alone, the banner dropped "Repairing…" halfway through the
+  // repair the reader had just asked for and told them to go and sign in to Intune again. The
+  // backend says when the repair ends (`repairing: false`), and the failure decides from then.
+  // A sign-in is not offered meanwhile either: the broker that would draw its window is the
+  // one being restarted.
+  if (broker.repairing) return { kind: "repair" };
   // The repair comes first where it applies: it is the failure whose cause is a keyring that
   // re-locked, it needs nobody, and a sign-in window could not even be drawn for it.
   if (broker.can_repair) return { kind: "repair" };

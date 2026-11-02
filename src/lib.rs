@@ -54,6 +54,7 @@ pub mod gitlab_mr;
 pub mod gitlab_mr_write;
 pub mod gitlab_review;
 pub mod graph_time;
+pub mod intune;
 pub mod linear;
 pub mod link_preview;
 pub mod mail;

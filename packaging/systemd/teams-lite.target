@@ -12,17 +12,19 @@ Documentation=file://@REPO@/README.md
 # no members, so without that line a restart here would do nothing at all.
 Wants=teams-lite-backend.service
 Wants=teams-lite-web.service
-Wants=teams-lite-broker-bus.path
-Wants=teams-lite-broker-health.timer
 After=teams-lite-backend.service
 After=teams-lite-web.service
 
-# Ordering only, and NO Wants=: this pins teams-lite-broker-repair.service in memory so
-# its StartLimit counters survive between repairs. A finished oneshot is
-# garbage-collected, and garbage collection flushes those counters — `man systemd.unit`
-# says it outright: "configuring start rate limiting for a unit that is not referenced
-# continuously has no effect". `After=` never pulls a unit in, so this starts nothing.
-After=teams-lite-broker-repair.service
+# TWO MEMBERS, AND NOTHING THAT WATCHES THE INTUNE CONTAINER. This target used to pull in a
+# .path unit restarting the backend whenever the container rewrote rootless.json, a timer
+# that checked the container's keyring every fifteen minutes, and an ordering on the repair
+# unit that kept its rate-limit counters in memory. All three existed because the broker's
+# D-Bus address was frozen into the backend's environment at exec and the repair was an
+# installed unit running the `intune-container` binary. The backend now resolves that bus on
+# every connection and checks the keyring and asks for the repair itself (src/intune.rs,
+# `spawn_broker_health` in src/bin/server.rs), so a container restart is followed with no
+# restart of ours and the rate limit lives in the store every backend shares.
+# bin/teams-lite-service.sh RETIRES those units on a machine that still has them.
 
 [Install]
 WantedBy=default.target

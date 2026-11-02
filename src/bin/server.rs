@@ -114,7 +114,7 @@ use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
     agent, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
-    channel_layout, custom_emoji,
+    channel_layout, custom_emoji, intune,
     mail, push, push_policy, retry,
     sender_icon, signin, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
@@ -730,14 +730,29 @@ const CALL_RING_TIMEOUT: Duration = Duration::from_secs(60);
 /// button that stops appearing.
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(120);
 
-/// The systemd unit that repairs the broker by restarting the Intune container.
-/// Never run `intune-container` from here: one unit keeps the rate limit in one
-/// place, counted across the health timer, this backend and the in-app button.
-const BROKER_REPAIR_UNIT: &str = "teams-lite-broker-repair.service";
-
-/// The floor between two repairs this process asks for. Shorter than the unit's own
-/// limit (three an hour) so the backend refuses first and the journal names it.
+/// The floor between two AUTOMATIC broker repairs on this machine — at most three an hour,
+/// which is the limit the installed repair unit carried. Counted in the store, so it covers
+/// every backend on the machine and survives the restarts it used to be reset by (see
+/// `Store::claim_broker_repair`). A keyring that re-locks faster than this needs a person,
+/// and the app's own button is how one asks.
 const REPAIR_MIN_INTERVAL: Duration = Duration::from_secs(20 * 60);
+
+/// How long after boot the keyring health check first looks, and how often after that (see
+/// `spawn_broker_health`). Five minutes first, so a container that is still coming up is not
+/// read as a broken one; then every fifteen, which is the cadence the timer it replaced kept.
+const BROKER_HEALTH_FIRST: Duration = Duration::from_secs(5 * 60);
+const BROKER_HEALTH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// How many repairs this process is following right now (see `Ctx::follow_repair`), so a page
+/// that connects in the middle of one is told so in its greeting. Process-wide, like the broker
+/// state it sits beside.
+static BROKER_REPAIRS_FOLLOWED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How long the follower asks the broker after a repair before it says the repair is over. A
+/// broker call has no deadline of its own; this is long enough for a silent acquisition on a
+/// container that has just come up, and short enough that a broker that never answers does
+/// not hold "Repairing…" on the page.
+const REPAIR_SETTLE_PROBE: Duration = Duration::from_secs(30);
 
 /// How long an applied update waits for the launcher to restart the app before this
 /// backend concludes that nothing will (see `Ctx::apply_update`). Several seconds
@@ -1126,6 +1141,31 @@ fn write_lock_payload(presented: Option<&str>, token: Option<&str>, pinned: bool
     })
 }
 
+/// The sentence a press of "Repair sign-in" is refused with, per state of the keyring. Each one
+/// names what is true and the next move, because "the keyring is not locked" and "the container
+/// is not running" are different situations with different remedies — and the first version of
+/// this said "this machine runs no Intune container" about a container that was merely stopped.
+fn repair_refusal(keyring: &intune::KeyringCheck) -> String {
+    match keyring {
+        intune::KeyringCheck::Unlocked => "Not restarting the Intune container: its login keyring \
+             is unlocked. A restart only repairs a locked keyring, and it would take sign-in down \
+             for a minute for nothing."
+            .to_string(),
+        intune::KeyringCheck::NotRunning => "Not restarting the Intune container: it is not \
+             running right now (stopped, starting up, or being repaired). If it does not come \
+             back on its own, start it with `intune-container start`."
+            .to_string(),
+        intune::KeyringCheck::NoContainer => "Not restarting anything: intune-container is not \
+             set up on this machine, so there is no container to restart."
+            .to_string(),
+        intune::KeyringCheck::Unknown(why) => format!(
+            "Not restarting the Intune container: its keyring could not be read ({why}), and a \
+             restart on a guess would take sign-in down for a minute."
+        ),
+        intune::KeyringCheck::Locked => String::new(),
+    }
+}
+
 /// The `broker_status` event payload: what the backend thinks of the identity
 /// broker, and whether it can do anything about it.
 ///
@@ -1139,16 +1179,13 @@ fn broker_status_payload(repairing: bool) -> Value {
     // per field paid for the whole walk twice each time.
     let display = teams_lite::xwindow::broker_display();
     let state = auth::broker_state().unwrap_or_default();
-    // Only the one signature whose known cause a container restart fixes, and never
-    // from a read-only backend. Not checked here: whether this host HAS an Intune
-    // container. It does not need to be — a locked keyring is a containerized-Intune
-    // failure, and a classic host produces `Unreachable` or `Refused` instead, both of
-    // which already answer false. The repair unit re-checks anyway
-    // (ConditionFileIsExecutable + its ExecCondition), so a wrong yes costs nothing.
-    let can_repair = state
-        .failure
-        .map(|f| f.is_repairable() && !read_only())
-        .unwrap_or(false);
+    // Only the signatures whose known cause a container restart fixes, and only where there
+    // is a container to restart and this backend may restart it (`intune::repair_available`,
+    // which is false read-only and on a classic-Intune host). Whether the keyring really is
+    // locked is asked when the button is pressed, not here: this payload is built in every
+    // greeting, and a D-Bus round trip per connection is not what a banner is worth.
+    let can_repair = state.failure.is_some_and(|f| f.is_repairable()) && intune::repair_available();
+    let repairing = repairing || BROKER_REPAIRS_FOLLOWED.load(Ordering::SeqCst) > 0;
     json!({
         "ok": state.is_ok(),
         // Whether this app can serve the broker's own sign-in for this failure. Answered
@@ -1501,9 +1538,6 @@ struct Ctx {
     /// calendar UI shows exactly one range at a time, and re-reading the month the
     /// user navigated away from would be work nobody is looking at.
     calendar_watch: Arc<Mutex<Option<CalendarWatch>>>,
-    /// When this process last asked systemd for a broker repair, so it cannot loop.
-    /// See {@link REPAIR_MIN_INTERVAL} and `start_broker_repair`.
-    last_repair: Arc<Mutex<Option<std::time::Instant>>>,
     /// The one interactive sign-in this backend may be serving, and nothing else.
     ///
     /// One at a time, because the broker draws one window and a second flow would fight it
@@ -1913,65 +1947,153 @@ impl Ctx {
         let _ = self.events.send(json!({ "event": event, "data": data }));
     }
 
-    /// Ask systemd to run the broker repair unit, unless this process asked for one
-    /// too recently.
+    /// Ask the user's systemd manager to repair the broker — restart the Intune container,
+    /// through the `intune-container` crate — unless there is nothing a restart would fix or
+    /// this machine started one too recently.
     ///
-    /// Refuses in read-only mode HERE, not only at the dispatch choke point: the
-    /// automatic trigger never passes through `check_write_allowed`, so without this
-    /// guard a read-only backend started by tooling could restart the user's
-    /// container on its own.
+    /// Refuses in read-only mode HERE, not only at the dispatch choke point: the automatic
+    /// triggers (the broker observer and the keyring health check) never pass through
+    /// `check_write_allowed`, so without this guard a read-only backend started by tooling
+    /// could restart the user's container on its own.
     ///
-    /// Starting a unit through `systemctl` is a child process, and that is safe:
-    /// `systemctl` is only a D-Bus client, so the unit's own processes are forked by
-    /// the user manager into the UNIT's cgroup, a sibling of ours. The repair
-    /// therefore survives the backend restart that `teams-lite-broker-bus.path`
-    /// fires seconds later when the container rewrites rootless.json — which a
-    /// direct child would not, because KillMode=control-group kills our whole group.
+    /// FOUR GATES, in the order that costs least to be wrong about:
+    /// - **a container to restart** (`intune::repair_available`) — a classic-Intune host has
+    ///   none, and the button there would only report a failure;
+    /// - **no repair already running** (`intune::repair_running`, ours or the legacy installed
+    ///   unit) — during one the container is down, so the keyring cannot be asked and the floor
+    ///   is taken; a repair found running is FOLLOWED (`Ctx::follow_repair`), which is what was
+    ///   asked for and how this backend's pages learn one is under way;
+    /// - **a LOCKED keyring**, asked now — the one cause a restart fixes. The installed unit
+    ///   carried this as `ExecCondition=` and skipped silently; here a press on a healthy keyring
+    ///   is answered with why nothing happened, because an outward action that did nothing must
+    ///   not look like one that worked, in a sentence per state (`repair_refusal`). The repair
+    ///   asks again itself, inside the container's lifecycle lock, so no trigger can skip it;
+    /// - **the machine-wide floor** (`Store::claim_broker_repair`) for an automatic trigger. A
+    ///   press is the person the floor exists to hand the problem to, so it always claims.
+    ///
+    /// The repair runs in a transient unit of the user's own manager, never as our child: it
+    /// stops the container this backend talks through, and a child in our cgroup dies with us
+    /// (see `intune::start_repair_unit`). A unit that already exists is a repair already
+    /// running, which is what was asked for.
     async fn start_broker_repair(&self, automatic: bool) -> Result<Value> {
         anyhow::ensure!(
             !read_only(),
             "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never restarts the user's \
              Intune container"
         );
-
-        if automatic {
-            let mut last = self
-                .last_repair
-                .lock()
-                .map_err(|_| anyhow::anyhow!("repair timestamp lock poisoned"))?;
-            if let Some(at) = *last {
-                let waited = at.elapsed();
-                if waited < REPAIR_MIN_INTERVAL {
-                    let left = (REPAIR_MIN_INTERVAL - waited).as_secs() / 60;
-                    eprintln!(
-                        "[broker] repair already tried {}m ago — not asking again for {left}m",
-                        waited.as_secs() / 60
-                    );
-                    return Ok(json!({ "started": false, "reason": "rate_limited" }));
-                }
+        if !intune::repair_available() {
+            // Quiet for an automatic trigger: on a classic-Intune host the observer would
+            // otherwise log this every time the broker's state changed.
+            if automatic {
+                return Ok(json!({ "started": false, "reason": "no_container" }));
             }
-            *last = Some(std::time::Instant::now());
+            anyhow::bail!(
+                "this machine runs no Intune container (intune-container is not set up here), so \
+                 there is nothing teams-lite could restart"
+            );
         }
 
-        eprintln!("[broker] asking systemd to run {BROKER_REPAIR_UNIT}");
-        let status = tokio::process::Command::new("systemctl")
-            .args(["--user", "start", "--no-block", BROKER_REPAIR_UNIT])
-            // Explicit: dropping this future must never kill the client mid-enqueue.
-            .kill_on_drop(false)
-            .status()
-            .await
-            .with_context(|| format!("run systemctl to start {BROKER_REPAIR_UNIT}"))?;
+        // A repair already running anywhere on this machine comes FIRST, because everything
+        // after this reads wrong while one does: the container is stopped or booting, so the
+        // keyring cannot be asked, and the floor was claimed by whichever backend started it.
+        // Following it is what was asked for — and it is how THIS backend's pages learn a
+        // repair another backend started is under way.
+        match intune::repair_running().await {
+            Ok(true) => {
+                eprintln!("[broker] a repair is already running on this machine — following it");
+                self.follow_repair(None);
+                return Ok(if automatic {
+                    json!({ "started": false, "reason": "already_running" })
+                } else {
+                    json!({ "started": true })
+                });
+            }
+            Ok(false) => {}
+            // Not fatal here: the start below asks the same manager and says why it cannot.
+            Err(e) => eprintln!("[broker] could not ask whether a repair is running: {e:#}"),
+        }
 
-        // A non-zero exit is almost always the unit's own rate limit. `--no-block`
-        // only enqueues, so success says nothing about the repair itself — the
-        // outcome arrives as the broker recovering, or not.
-        anyhow::ensure!(
-            status.success(),
-            "{BROKER_REPAIR_UNIT} refused to start ({status}). Most likely its rate limit of \
-             three repairs an hour; check `systemctl --user status {BROKER_REPAIR_UNIT}`."
-        );
-        self.emit("broker_status", broker_status_payload(true));
+        let keyring = intune::container_keyring().await;
+        if keyring != intune::KeyringCheck::Locked {
+            if automatic {
+                eprintln!("[broker] not repairing: {}", keyring.describe());
+                return Ok(json!({ "started": false, "reason": "not_locked" }));
+            }
+            anyhow::bail!("{}", repair_refusal(&keyring));
+        }
+
+        let now = now_ms();
+        let not_since = if automatic {
+            now - REPAIR_MIN_INTERVAL.as_millis() as i64
+        } else {
+            i64::MAX
+        };
+        if !self.store()?.claim_broker_repair(now, not_since)? {
+            eprintln!(
+                "[broker] a repair started on this machine less than {}m ago — not asking again",
+                REPAIR_MIN_INTERVAL.as_secs() / 60
+            );
+            return Ok(json!({ "started": false, "reason": "rate_limited" }));
+        }
+
+        eprintln!("[broker] the container keyring is locked — asking systemd for {}", intune::REPAIR_UNIT);
+        match intune::start_repair_unit().await? {
+            intune::RepairStart::Started(job) => self.follow_repair(Some(job)),
+            // Started between the check above and this start, by another backend.
+            intune::RepairStart::AlreadyRunning => self.follow_repair(None),
+        }
         Ok(json!({ "started": true }))
+    }
+
+    /// Tell this backend's pages a repair is running, follow it to its end, and tell them it
+    /// ended. `job` is the repair this process started — whose own job signal says how it ended
+    /// — or `None` for one found running (another backend's, or one this process came up in the
+    /// middle of), which can only be watched until it is gone.
+    ///
+    /// The flag is a COUNT, because two followers can overlap in one process (a press while
+    /// the health check's follower still runs), and the first to finish must not clear it for
+    /// the other.
+    fn follow_repair(&self, job: Option<intune::RepairJob>) {
+        BROKER_REPAIRS_FOLLOWED.fetch_add(1, Ordering::SeqCst);
+        self.emit("broker_status", broker_status_payload(true));
+        let watcher = self.clone();
+        tokio::spawn(async move {
+            match job {
+                Some(job) => match job.finished().await {
+                    Ok(result) if result == "done" => eprintln!(
+                        "[broker] the repair finished (journalctl --user -t teams-lite-broker-repair)"
+                    ),
+                    Ok(result) => eprintln!(
+                        "[broker] the repair ended `{result}` — see journalctl --user -t \
+                         teams-lite-broker-repair"
+                    ),
+                    Err(e) => eprintln!("[broker] lost track of the repair: {e:#}"),
+                },
+                None => {
+                    if let Err(e) = intune::wait_for_repair_to_end().await {
+                        eprintln!("[broker] lost track of the running repair: {e:#}");
+                    }
+                }
+            }
+            // Ask the broker once, for the scope the failure was recorded against, BEFORE saying
+            // the repair is over. The state the payload is built from changes only on a token
+            // call, and the next one could be thirty seconds away — so a repair that WORKED
+            // would otherwise be announced with the old failure still in it, and the banner
+            // would offer "Repair sign-in" again for that long. A call that succeeds moves the
+            // state, and the observer announces that on its own. BOUNDED, because a broker call
+            // has no deadline of its own, and a broker that accepted the call and never answered
+            // would otherwise hold "Repairing…" on every page for the life of the process.
+            let scope = auth::broker_state()
+                .map(|s| s.scope)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| teams::SKYPE_SCOPE.to_string());
+            let _ = tokio::time::timeout(REPAIR_SETTLE_PROBE, watcher.tokens.refresh(&scope)).await;
+            // The backend stays up through a repair now, so nothing reconnects the page and
+            // nothing else would take `repairing` back: the broker observer only speaks on a
+            // CHANGE, and a repair that did not help changes nothing.
+            BROKER_REPAIRS_FOLLOWED.fetch_sub(1, Ordering::SeqCst);
+            watcher.emit("broker_status", broker_status_payload(false));
+        });
     }
 
     // ---- signing in again, from the app ---------------------------------------
@@ -3250,8 +3372,29 @@ async fn sign_in(ctx: &Ctx) -> Result<Session> {
     Ok(ctx.adopt_session(session).await)
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // THE CRATE'S OWN RE-EXEC TARGETS COME FIRST, before a runtime exists.
+    //
+    // The broker repair boots the Intune container through the `intune-container` crate, and
+    // the crate boots it from a detached supervisor it spawns by re-executing THIS binary with
+    // a hidden argument (`__rootless-supervise`). Unrouted, that supervisor would start a second
+    // teams-lite backend, which dies on the port, and no container boots. It has to be handled
+    // before tokio starts, because the supervisor forks to unshare a user namespace — which a
+    // multithreaded process cannot do safely — and builds a runtime of its own. The repair
+    // itself is the third such argument. See `intune::dispatch_reexec`.
+    if let Some(code) = intune::dispatch_reexec(std::env::args_os()) {
+        std::process::exit(code);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build the backend's runtime")?
+        .block_on(serve())
+}
+
+/// The backend: everything `server` does when it was not started as one of the hidden
+/// subcommands above.
+async fn serve() -> Result<()> {
     // CLAIM THE PORT FIRST, before anything with a side effect.
     //
     // The listener used to be bound at the very end, after authentication, the store
@@ -3349,7 +3492,6 @@ async fn main() -> Result<()> {
         chess_sounds_fetching: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         calendar_watch: Arc::new(Mutex::new(None)),
-        last_repair: Arc::new(Mutex::new(None)),
         signin: Arc::new(Mutex::new(None)),
         calling: Arc::new(Mutex::new(CallingPlane::default())),
         gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
@@ -3418,6 +3560,11 @@ async fn main() -> Result<()> {
     // calling: a second trouter connection, registered as the web client registers
     // it, so the user's calls ring here too (see `spawn_calling`).
     spawn_calling(ctx.clone());
+
+    // The container keyring re-locks on its own (roughly every 18 hours on this kind of host),
+    // and with a live real-time socket and nobody in Mail or the Calendar this backend can go
+    // hours without a token call that would notice. So it looks at the cause itself.
+    spawn_broker_health(ctx.clone());
 
     // mail: poll whichever folders a client opens (read-only, and idle until one
     // does — see `spawn_mail_sync`).
@@ -13705,6 +13852,45 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
     });
 }
 
+/// Look at the Intune container's login keyring every so often, and repair it when it is
+/// locked.
+///
+/// It replaced `teams-lite-broker-health.timer`, which ran a shell script that asked `busctl`
+/// the same question. In process it asks over the bus this backend already resolves, and the
+/// repair it asks for is the same one the broker observer and the app's button ask for — so
+/// one machine-wide floor covers all three (`Ctx::start_broker_repair`).
+///
+/// Never on a read-only backend, and never on a host with no container: there is nothing it
+/// could do there, and the host's own keyring is not one a container restart changes.
+fn spawn_broker_health(ctx: Ctx) {
+    if read_only() {
+        return;
+    }
+    tokio::spawn(async move {
+        // A backend that comes up in the middle of a repair — the launcher re-spawning one
+        // that crashed, a re-stage — would otherwise greet its pages with `repairing: false`
+        // while the container is down. Follow the one that is running.
+        if intune::repair_available() && intune::repair_running().await.unwrap_or(false) {
+            eprintln!("[broker] came up during a repair — following it");
+            ctx.follow_repair(None);
+        }
+        tokio::time::sleep(BROKER_HEALTH_FIRST).await;
+        let mut tick = tokio::time::interval(BROKER_HEALTH_INTERVAL);
+        loop {
+            tick.tick().await;
+            if !intune::repair_available() {
+                continue;
+            }
+            if intune::container_keyring().await == intune::KeyringCheck::Locked {
+                eprintln!("[broker] health check: the container's login keyring is locked");
+                if let Err(e) = ctx.start_broker_repair(true).await {
+                    eprintln!("[broker] could not start the repair: {e:#}");
+                }
+            }
+        }
+    });
+}
+
 /// Bring the calling connection up at boot, on every backend that calls at all.
 ///
 /// This is the whole of "calling is on": the app registers as a device the user's calls
@@ -14601,6 +14787,113 @@ mod tests {
             PRESENCE_HEARTBEAT < Duration::from_secs(300),
             "an endpoint registration expires after 300 s"
         );
+    }
+
+    // The Intune container's own supervisor is THIS binary, re-executed by the crate with a
+    // hidden argument (`intune-container`'s `backend::spawn_supervisor`). Routed after the
+    // runtime is built — or not at all — and the supervisor is a second teams-lite backend that
+    // dies on the port, so no container boots and the repair reports a 20-second timeout. And it
+    // must be routed before tokio exists: the supervisor forks to unshare a user namespace, which
+    // a multithreaded process cannot do safely, and it builds a runtime of its own.
+    #[test]
+    fn the_crates_reexec_targets_are_routed_before_the_runtime_exists() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let main = code
+            .split("\nfn main() -> Result<()> {")
+            .nth(1)
+            .expect("a plain, synchronous `fn main`")
+            .split("\n}\n")
+            .next()
+            .expect("main ends");
+        let routed = main.find("intune::dispatch_reexec(").expect("main routes the re-exec targets");
+        let runtime = main.find("new_multi_thread()").expect("main builds the backend's runtime");
+        assert!(
+            routed < runtime,
+            "the crate's re-exec targets must be handled before any runtime is built"
+        );
+        assert!(
+            !code.contains("#[tokio::main]"),
+            "`#[tokio::main]` builds the runtime before the body runs, so nothing could be routed \
+             ahead of it"
+        );
+    }
+
+    // The repair used to be `systemctl` starting an installed unit whose ExecStart was the
+    // `intune-container` binary. It is the crate now, inside a transient unit asked for over
+    // D-Bus — and the gates come in the order that costs least to be wrong about: a container to
+    // restart, a keyring that really is locked, then the machine-wide floor, then the start.
+    #[test]
+    fn the_broker_repair_runs_no_host_command_and_checks_its_gates_first() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let body = code
+            .split("async fn start_broker_repair(&self, automatic: bool) -> Result<Value> {")
+            .nth(1)
+            .expect("start_broker_repair")
+            .split("\n    }\n")
+            .next()
+            .expect("start_broker_repair ends");
+        assert!(!body.contains("Command::new"), "the repair spawns no host command");
+        assert!(!code.contains("Command::new(\"systemctl\")"), "no `systemctl` anywhere");
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing {needle}"));
+        let read_only = at("read_only()");
+        let available = at("intune::repair_available()");
+        let running = at("intune::repair_running()");
+        let keyring = at("intune::container_keyring()");
+        let claim = at("claim_broker_repair(");
+        let start = at("intune::start_repair_unit()");
+        assert!(
+            read_only < available
+                && available < running
+                && running < keyring
+                && keyring < claim
+                && claim < start,
+            "read-only, then a container to restart, then a repair ALREADY running (during one the \
+             container is down, so the keyring cannot be asked), then a LOCKED keyring, then the \
+             floor, then the start — a claim taken before the keyring check would spend the floor \
+             on nothing"
+        );
+    }
+
+    // crates.io 0.2.3 re-pulls the rootfs on every start and does not persist the device
+    // registration across it: a repair through it would unenroll the user's machine. The fix is
+    // in 2917d92, so the dependency is pinned to a commit that carries it.
+    #[test]
+    fn the_intune_container_dependency_is_never_the_release_that_unenrolls_the_machine() {
+        let manifest = include_str!("../../Cargo.toml");
+        let line = manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with("intune-container"))
+            .expect("teams-lite depends on the intune-container crate");
+        assert!(
+            !line.contains("\"0.2.3\"") && !line.contains("version = \"0.2.3\""),
+            "intune-container 0.2.3 from crates.io wipes the device registration on a repair: {line}"
+        );
+        assert!(line.contains("rev = ") || line.contains("version = "), "pinned: {line}");
+    }
+
+    // The mock refuses a press on an unlocked keyring with the backend's own sentence, so the
+    // banner the suite reviews is the banner a reader meets. Two spellings of one sentence across
+    // a process boundary drift silently — a test is the only thing that can notice.
+    #[test]
+    fn the_mock_refuses_a_press_with_the_backends_own_sentence() {
+        let mock = include_str!("../../web/mock/server.ts");
+        let declared = mock
+            .split("const MOCK_REPAIR_NOT_LOCKED =")
+            .nth(1)
+            .expect("the mock declares its refusal")
+            .split(';')
+            .next()
+            .expect("the declaration ends");
+        // Join the TypeScript string literals the declaration is split across.
+        let joined: String = declared
+            .split('"')
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 1)
+            .map(|(_, part)| part)
+            .collect();
+        assert_eq!(joined, repair_refusal(&intune::KeyringCheck::Unlocked));
     }
 
     #[test]
@@ -17810,9 +18103,9 @@ mod lifecycle_tests {
         let source = include_str!("server.rs");
         let code = source.split("#[cfg(test)]").next().unwrap_or(source);
         let main = code
-            .split("async fn main() -> Result<()> {")
+            .split("async fn serve() -> Result<()> {")
             .nth(1)
-            .expect("main")
+            .expect("serve")
             .split("\n/// ")
             .next()
             .expect("main ends before the next item");

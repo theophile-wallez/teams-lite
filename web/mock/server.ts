@@ -6983,6 +6983,37 @@ let mockBrokerStatus: {
   signin_blocker?: string;
 } | null = null;
 
+/** What the NEXT press of Repair sign-in does, armed by the `{kind:"broker"}` hook's `repair`
+ *  field. `start` (the default) is the repair that works; `refuse` answers the refusal the real
+ *  backend gives a press on a keyring that is NOT locked — the one refusal a reader really meets,
+ *  and unreachable here otherwise, since this mock has no keyring to ask; `hold` starts the repair
+ *  and never ends it, so the busy state has a duration a spec and a capture can see (the default
+ *  ends it half a second later); `refuse_late` is that same refusal answered only once the NEXT
+ *  `{kind:"broker"}` call has broadcast its status — a press whose round trip a newer status
+ *  crossed, which is what `repairBroker`'s rollback must not overwrite. The real backend asks a
+ *  D-Bus keyring before it answers, so that window is real there; here it would not exist at all.
+ *
+ *  EVERY `{kind:"broker"}` call sets it, from its own body, so the reset a spec already owes —
+ *  `{kind:"broker", ok:true}` in its `afterEach` — puts it back too, and that same call releases
+ *  a `refuse_late` press still waiting. One mock process serves the whole run, and a refusal left
+ *  armed would refuse a press in some later spec. */
+let mockRepairOutcome: "start" | "refuse" | "refuse_late" | "hold" = "start";
+
+/** Answers the `refuse_late` press that is waiting, once the next `{kind:"broker"}` call has
+ *  broadcast its status — so on the page's socket the newer status always arrives FIRST. */
+let releaseLateRepairRefusal: (() => void) | null = null;
+
+/** The sentence the real backend refuses a press with when the keyring is not locked
+ *  (`repair_refusal` in src/bin/server.rs, its `KeyringCheck::Unlocked` arm), word for word, so
+ *  what a spec reads is what a reader would. Only that arm is mirrored, because it is the only
+ *  state this mock's fixture stands for: a container that is up, with a broker that stopped
+ *  answering. The backend's other refusals — a container that is not running, one that is not
+ *  set up, a keyring that could not be read — are its own words for situations this mock has
+ *  no container to be in, and the page treats every one of them alike: a sentence to show. */
+const MOCK_REPAIR_NOT_LOCKED =
+  "Not restarting the Intune container: its login keyring is unlocked. A restart only repairs " +
+  "a locked keyring, and it would take sign-in down for a minute for nothing.";
+
 // ---- signing in again (see src/signin.rs, src/xwindow.rs and SIGN-IN.md) --------
 // The whole flow with no identity broker, no X display and no tenant: a sign-in that goes
 // `starting`, puts a WINDOW up, takes keystrokes into it, and ends when the reader presses the
@@ -8392,9 +8423,24 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // Pretend the repair unit started: flip `repairing`, then report a healthy
       // broker a beat later. That is what lets a spec — and `bun run preview` — drive
       // the whole flow with no Intune container anywhere near it.
+      //
+      // The real backend STAYS UP through a repair — the unit is the user's systemd manager's,
+      // not its child — so its page never loses this socket: it says the unit ended with a
+      // `broker_status` carrying `repairing: false`, and sign-in coming back with the broker's
+      // own `broker_status` once a token call succeeds. Here both arrive as ONE event, which is
+      // the repair that worked; `hold` is the one that has not ended, and a spec stands for its
+      // end — working or not — by emitting the status it ended in.
+      if (mockRepairOutcome === "refuse") throw new Error(MOCK_REPAIR_NOT_LOCKED);
+      if (mockRepairOutcome === "refuse_late") {
+        await new Promise<void>((resolve) => {
+          releaseLateRepairRefusal = resolve;
+        });
+        throw new Error(MOCK_REPAIR_NOT_LOCKED);
+      }
       if (mockBrokerStatus) {
         mockBrokerStatus = { ...mockBrokerStatus, repairing: true };
         broadcast("broker_status", mockBrokerStatus);
+        if (mockRepairOutcome === "hold") return { started: true };
         setTimeout(() => {
           mockBrokerStatus = {
             ok: true,
@@ -12518,8 +12564,14 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // Set the broker health the mock reports, and broadcast it — mirroring the Rust
     // backend's `broker_status` event. `{ kind: "broker", ok: true }` puts it back,
     // which a spec must do before it ends: the mock is shared and adopted across runs.
+    // `repair` arms what the next press of Repair sign-in does (see `mockRepairOutcome`), and
+    // is read from EVERY call, so that same reset disarms it.
     if (body.kind === "broker") {
       const ok = body.ok === true;
+      mockRepairOutcome =
+        body.repair === "refuse" || body.repair === "refuse_late" || body.repair === "hold"
+          ? body.repair
+          : "start";
       mockBrokerStatus = {
         ok,
         signature: typeof body.signature === "string" ? body.signature : ok ? "" : "disconnected",
@@ -12542,6 +12594,11 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
           typeof body.signin_blocker === "string" ? body.signin_blocker : undefined,
       };
       broadcast("broker_status", mockBrokerStatus);
+      // After the broadcast, never before it: the press waiting on this is the one whose
+      // answer a newer status has to beat to the page.
+      const lateRefusal = releaseLateRepairRefusal;
+      releaseLateRepairRefusal = null;
+      lateRefusal?.();
       return Response.json({ ok: true, broker: mockBrokerStatus }, { status: 200 });
     }
     // What the NEXT sign-in does. `window` (the default) puts a window up and waits for the

@@ -11,10 +11,20 @@ pinned here, so tightening one can't quietly widen the other.
 
 The blocking cases are the ones to keep: the incident's own command line, an
 inline browser driver, a script that writes to the live backend, a dev server
-with no declared backend, and a send-capable backend started by tooling.
+with no declared backend, a send-capable backend started by tooling, and the
+user's Intune container cycled by tooling — through its CLI, its unit, the
+hidden arguments teams-lite's own binary routes, a transient unit, or the crate
+called from a cargo example.
+
+Most of them come in the SHAPES a shell gives a command — behind `timeout` or
+`env -i`, inside `( … )` or `$( … )`, chained after a `pkill` — because each of
+those once walked past a rule written for the bare spelling. Their ALLOW twins
+are the same words as text: a commit message, a heredoc, a search, a probe.
 """
 
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -650,6 +660,103 @@ EXAMPLE_FIXTURES = {
     "guard-test-read-only.rs": (
         "fn main() { teams_read::history(&http, &session, \"19:whatever@thread.v2\"); }\n"
     ),
+    # The Intune container, through the crate teams-lite now links: its whole lifecycle is a
+    # function call from any example, with no `intune-container` on the command line for rule
+    # 3b to see. One fixture per way Rust reaches a function — the full path, the module
+    # imported and called through, and a grouped import of the function itself.
+    "guard-test-crate-stop.rs": (
+        "// Takes the user's sign-in down through the crate.\n"
+        "fn main() { intune_container::ops::stop().unwrap(); }\n"
+    ),
+    "guard-test-crate-restart.rs": (
+        "// The repair's own restart, run by hand.\n"
+        "use intune_container::{backend, config::Config};\n"
+        "fn main() {\n"
+        "    let mut config = Config::load().unwrap();\n"
+        "    backend::stop(&config).unwrap();\n"
+        "    backend::start(&mut config, &headless(), false).unwrap();\n"
+        "}\n"
+    ),
+    "guard-test-crate-grouped-import.rs": (
+        "use intune_container::ops::{start, status};\n"
+        "fn main() { println!(\"{:?}\", status()); start().unwrap(); }\n"
+    ),
+    "guard-test-crate-poweroff.rs": (
+        "// Powers the container's init off, past the crate's own lock.\n"
+        "fn main() {\n"
+        "    let state = intune_container::runtime::load_runtime_state().unwrap().unwrap();\n"
+        "    intune_container::runtime::poweroff_pid(state.leader);\n"
+        "}\n"
+    ),
+    "guard-test-crate-rootfs.rs": (
+        "// Re-pulls the container's rootfs, which needs it stopped.\n"
+        "use intune_container::backend;\n"
+        "fn main() { backend::update_rootfs(&mut config, true).unwrap(); }\n"
+    ),
+    # teams-lite's own half: the repair's transient unit, and the dispatcher that runs whichever
+    # hidden subcommand it is handed — the repair among them — in the calling process.
+    "guard-test-repair-unit.rs": (
+        "// Asks systemd for the broker repair, past the app's button and its floor.\n"
+        "#[tokio::main]\n"
+        "async fn main() { teams_lite::intune::start_repair_unit().await.unwrap(); }\n"
+    ),
+    "guard-test-reexec.rs": (
+        "use teams_lite::intune;\n"
+        "fn main() {\n"
+        "    let argv = [\"server\".into(), \"x\".into()];\n"
+        "    std::process::exit(intune::dispatch_reexec(argv).unwrap_or(0));\n"
+        "}\n"
+    ),
+    # …and the same act through a binary: the hidden argument handed to Command::new.
+    "guard-test-reexec-spawn.rs": (
+        "fn main() {\n"
+        "    std::process::Command::new(\"target/release/server\")\n"
+        "        .arg(\"__rootless-supervise\").status().unwrap();\n"
+        "}\n"
+    ),
+    # Running a program INSIDE the container is the library twin of `__rootless-exec`: as root, a
+    # poweroff is one argv away. And `autostart::disable` stops the container's own unit, which
+    # is `intune-container autostart disable` called as a function — in both of the other ways
+    # Rust reaches a function as well.
+    "guard-test-crate-exec.rs": (
+        "// Powers the container off from inside it, as root.\n"
+        "fn main() {\n"
+        "    let state = intune_container::runtime::load_runtime_state().unwrap().unwrap();\n"
+        "    intune_container::runtime::exec_pid(state.leader, &[\"/bin/systemctl\", \"poweroff\"], None).unwrap();\n"
+        "}\n"
+    ),
+    "guard-test-crate-exec-imported.rs": (
+        "use intune_container::{backend, config::Config, display::DisplayInfo};\n"
+        "fn main() {\n"
+        "    let config = Config::load().unwrap();\n"
+        "    backend::exec_foreground(&config, \"systemctl poweroff\", None, &DisplayInfo::detect()).unwrap();\n"
+        "}\n"
+    ),
+    "guard-test-crate-autostart.rs": (
+        "// Stops and removes the container's unit.\n"
+        "fn main() { intune_container::autostart::disable().unwrap(); }\n"
+    ),
+    "guard-test-crate-autostart-grouped.rs": (
+        "use intune_container::autostart::{disable, status};\n"
+        "fn main() { status().unwrap(); disable().unwrap(); }\n"
+    ),
+    # …while asking whether the unit is installed only reads.
+    "guard-test-crate-autostart-status.rs": (
+        "fn main() { intune_container::autostart::status().unwrap(); }\n"
+    ),
+    # READING the container is what the diagnostic is built on, and it names the crate too: the
+    # runtime state, whether the leader is alive, the status report, whether it is set up, a
+    # probe — and a type whose name merely STARTS with a lifecycle verb.
+    "guard-test-crate-read.rs": (
+        "use intune_container::{backend, ops, runtime};\n"
+        "fn main() {\n"
+        "    let state = runtime::load_runtime_state().unwrap();\n"
+        "    let alive = state.map(|s| runtime::is_running(s.leader));\n"
+        "    let _report: Option<intune_container::ops::StartReport> = None;\n"
+        "    println!(\"{alive:?} {:?} {}\", ops::status(), ops::is_initialized());\n"
+        "    println!(\"{}\", backend::probe(&Default::default(), \"true\"));\n"
+        "}\n"
+    ),
 }
 
 
@@ -858,7 +965,7 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/token-thief.ts"),
         ("BLOCK", PROJECT, "curl -s http://127.0.0.1:19440/__write-token"),
         ("BLOCK", PROJECT, 'cat "$XDG_RUNTIME_DIR/teams-lite/write-token"'),
-        # The always-on service: every spelling that STARTS the send-capable backend.
+        # The always-on service: the spellings that START the send-capable backend.
         ("BLOCK", PROJECT, "systemctl --user start teams-lite-backend.service"),
         ("BLOCK", PROJECT, "systemctl --user restart teams-lite.target"),
         ("BLOCK", PROJECT, "systemctl --user enable --now teams-lite.target"),
@@ -877,16 +984,23 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "~/.cache/teams-lite/server"),
         ("BLOCK", PROJECT, "TEAMS_NO_IDLE_EXIT=1 nohup /home/claude/.cache/teams-lite/server &"),
         ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 $HOME/.cache/teams-lite/server"),
-        ("BLOCK", PROJECT, "bin/teams-lite-backend.sh"),
+        # The backend's old ExecStart wrapper is retired from bin/, but a machine staged before
+        # that keeps its copy beside the binary until the service script retires it — and
+        # running that copy still starts the send-capable backend.
+        ("BLOCK", PROJECT, "bash ~/.local/share/teams-lite/service/teams-lite-backend.sh"),
         ("BLOCK", PROJECT, "bash bin/teams-dev-server.sh"),
+        # Handed to systemd-run, the backend is a transient unit of the user's manager — the
+        # same send-capable process, outliving the shell — and read-only only when it says so.
+        ("BLOCK", PROJECT, "systemd-run --user --scope target/release/server"),
+        ("ALLOW", PROJECT, "systemd-run --user -E TEAMS_LITE_READ_ONLY=1 target/release/server"),
         # An environment assignment is a prefix, not a disguise: the path class holds
         # no `=`, so these spellings used to match nothing at all.
         ("BLOCK", PROJECT, "TEAMS_NO_IDLE_EXIT=1 target/release/server"),
-        ("BLOCK", PROJECT, "TEAMS_LITE_PORT=19425 bin/teams-lite-backend.sh"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_PORT=19425 bin/teams-dev-server.sh"),
         ("BLOCK", PROJECT, "XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start teams-lite.target"),
         ("BLOCK", PROJECT, "cd /tmp && $HOME/.local/share/teams-lite/service/teams-lite-backend.sh"),
         # `teams` is that same send-capable backend plus the real app on 19440, in one
-        # word — every spelling that runs it, and no read-only escape from it.
+        # word — the spellings that run it, and no read-only escape from it.
         ("BLOCK", PROJECT, "teams"),
         ("BLOCK", PROJECT, "teams --no-open"),
         ("BLOCK", PROJECT, "launcher/dist/teams --port 19450"),
@@ -903,21 +1017,206 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "bun run launcher/src/index.ts --no-open"),
         # The production web server relays to the LIVE backend by default.
         ("BLOCK", WEB, "bun run start"),
-        # The repair unit restarts the Intune container: same rule, by unit name.
+        # The retired INSTALLED repair unit restarts the Intune container, and a machine not
+        # migrated yet still has it loaded: same rule, by unit name. So does the transient one
+        # the backend asks for now, under a name of its own.
         ("BLOCK", PROJECT, "systemctl --user start teams-lite-broker-repair.service"),
-        # …and the container itself is not ours to cycle, whatever the spelling.
+        ("BLOCK", PROJECT, "systemctl --user start teams-lite-intune-repair.service"),
+        # …and the container itself is not ours to cycle, in any spelling rule 3b knows.
         ("BLOCK", PROJECT, "intune-container stop"),
         ("BLOCK", PROJECT, "intune-container stop && intune-container start"),
         ("BLOCK", PROJECT, "$HOME/.local/bin/intune-container restart"),
         ("BLOCK", PROJECT, "intune-container -v start"),
-        # The check script is a read of the keyring — until `--repair`, which starts
-        # the repair unit and therefore restarts the container.
-        ("BLOCK", PROJECT, "bin/teams-lite-broker-check.sh --repair"),
-        # Its sibling asks about a stale broker BUS, and its `--repair` restarts the two
-        # send-capable BACKENDS rather than the container — the socket drops under
-        # whoever is reading the app, and a live @claude run dies with the process.
-        ("BLOCK", PROJECT, "bin/teams-lite-broker-bus-check.sh --repair"),
+        # Every verb of its CLI that stops, starts or rebuilds it: `update` swaps the rootfs
+        # under a stopped container, `restore` writes enrollment state over one, `backup` stops
+        # it for the archive, and a display attached or dropped is a restart.
+        ("BLOCK", PROJECT, "intune-container update"),
+        ("BLOCK", PROJECT, "intune-container update --force"),
+        ("BLOCK", PROJECT, "intune-container restore"),
+        ("BLOCK", PROJECT, "intune-container restore -i /tmp/enrollment-backup.tar.gz"),
+        ("BLOCK", PROJECT, "intune-container backup"),
+        ("BLOCK", PROJECT, "intune-container detach-display"),
+        ("BLOCK", PROJECT, "intune-container login --web"),
+        ("BLOCK", PROJECT, "intune-container autostart disable"),
+        # Its systemd unit is the same restart spelled through systemd — and here STOP is
+        # refused too, because stopping the container is taking the sign-in down.
+        ("BLOCK", PROJECT, "systemctl --user restart intune-container.service"),
+        ("BLOCK", PROJECT, "systemctl --user stop intune-container.service"),
+        # The hidden arguments `server` routes before anything else: the repair RESTARTS the
+        # container, and the crate's own two re-exec targets BOOT it and run a script inside it.
+        # Refused whatever TEAMS_LITE_READ_ONLY says — none of the three is a backend it would
+        # make read-only — through every program that routes them, and every prefix a shell takes.
+        ("BLOCK", PROJECT, "target/release/server __teams-lite-repair-broker"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 target/release/server __teams-lite-repair-broker"),
+        ("BLOCK", PROJECT, "env FOO=1 target/release/server __teams-lite-repair-broker"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 $HOME/.local/share/teams-lite/service/server __rootless-supervise"),
+        ("BLOCK", PROJECT, "~/.cache/teams-lite/server __rootless-supervise --display"),
+        ("BLOCK", PROJECT, "cd ~/.local/share/teams-lite/service && ./server __teams-lite-repair-broker"),
+        ("BLOCK", PROJECT, 'nohup "$HOME/.local/share/teams-lite/service/server" __teams-lite-repair-broker &'),
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 ./server __rootless-exec 6415 0 'true' -- A=1"),
+        ("BLOCK", PROJECT, "/proc/6410/exe __rootless-supervise"),
+        ("BLOCK", PROJECT, "intune-container -v __rootless-supervise"),
+        ("BLOCK", PROJECT, "cargo run --bin server -- __teams-lite-repair-broker"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 cargo run --release --bin server -- __rootless-supervise"),
+        # The repair runs as a TRANSIENT unit of the user's manager, so asking for one is the
+        # repair without the app: through systemd-run, or the very D-Bus call the backend makes.
+        ("BLOCK", PROJECT, "systemd-run --user --wait target/release/server __teams-lite-repair-broker"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 systemd-run --user ~/.cache/teams-lite/server __rootless-supervise"),
+        (
+            "BLOCK",
+            PROJECT,
+            "busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 "
+            "org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' "
+            "teams-lite-intune-repair.service fail 0 0",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "gdbus call --session --dest org.freedesktop.systemd1 --object-path "
+            "/org/freedesktop/systemd1 --method org.freedesktop.systemd1.Manager.StartTransientUnit x",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "dbus-send --session --print-reply --dest=org.freedesktop.systemd1 "
+            "/org/freedesktop/systemd1 org.freedesktop.systemd1.Manager.StartTransientUnit string:x",
+        ),
+        # Raw D-Bus is the other spelling of every systemctl verb these rules refuse: starting a
+        # teams-lite unit (by its name, or by its escaped object path), and cycling the
+        # container's own.
+        (
+            "BLOCK",
+            PROJECT,
+            "busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 "
+            "org.freedesktop.systemd1.Manager StartUnit ss teams-lite-broker-repair.service replace",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "busctl --user call org.freedesktop.systemd1 "
+            "/org/freedesktop/systemd1/unit/teams_2dlite_2dbackend_2eservice "
+            "org.freedesktop.systemd1.Unit Start s replace",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 "
+            "org.freedesktop.systemd1.Manager StopUnit ss intune-container.service replace",
+        ),
+        # A cargo example reaches the whole lifecycle through the crate, in each of the three ways
+        # Rust reaches a function that the scan follows, and the repair through teams-lite's own module.
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-stop"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-restart"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-grouped-import"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-poweroff"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-rootfs"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-repair-unit"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-reexec"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-reexec-spawn"),
+        # The two RETIRED check scripts read — until `--repair`, which a copy staged before
+        # their retirement still honours: the keyring check starts the retired repair unit,
+        # which restarts the container, and the bus check restarts the two send-capable
+        # BACKENDS, so the socket drops under whoever is reading the app and a live @claude run
+        # dies with the process. Their copies live beside the staged binary now.
+        ("BLOCK", PROJECT, "$HOME/.local/share/teams-lite/service/teams-lite-broker-check.sh --repair"),
+        ("BLOCK", PROJECT, "~/.local/share/teams-lite/service/teams-lite-broker-check.sh --locked --repair"),
         ("BLOCK", PROJECT, "$HOME/.local/share/teams-lite/service/teams-lite-broker-bus-check.sh --repair"),
+        # The crate's in-container exec and its autostart switch, in each way Rust reaches them.
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-exec"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-exec-imported"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-autostart"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-autostart-grouped"),
+        # A kill or a probe is cleanup, and only that COMMAND is: every one of these used to walk
+        # past rules 2, 3 and 3c because a kill word appeared somewhere on the line. The first is
+        # the ordinary "restart the backend" one-liner, and it started a send-capable backend.
+        ("BLOCK", PROJECT, "pkill -f target/release/server; target/release/server"),
+        ("BLOCK", PROJECT, "kill $(pgrep -f teams-lite) && systemd-run --user target/release/server"),
+        ("BLOCK", PROJECT, "pkill -f teams-bin; ~/.teams-lite/bin/teams --no-open"),
+        # …and the incident's own shape: a dev server RESTARTED without its variable.
+        ("BLOCK", PROJECT, "pkill -f vite; cd web && bun run dev"),
+        # `cargo run --bin server` stays matched anywhere, which is what catches a program this
+        # file does not know starting the backend.
+        ("BLOCK", PROJECT, "watchexec -r -- cargo run --bin server"),
+        # A transient SERVICE does not inherit the shell's environment, so the variable in front
+        # of systemd-run sets it for systemd-run alone and the unit comes up send-capable: only
+        # `-E` (or `--setenv`) reaches it, or `--scope`, or `-E NAME` with NAME set in front —
+        # and only in the systemd-run it is about, before the program.
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 systemd-run --user target/release/server"),
+        ("BLOCK", PROJECT, "systemd-run --user --unit=probe ~/.local/share/teams-lite/service/server"),
+        (
+            "BLOCK",
+            PROJECT,
+            "TEAMS_LITE_READ_ONLY=1 systemd-run --user --unit=probe ~/.local/share/teams-lite/service/server",
+        ),
+        ("BLOCK", PROJECT, "systemd-run --user target/release/server -E TEAMS_LITE_READ_ONLY=1"),
+        (
+            "BLOCK",
+            PROJECT,
+            "systemd-run --user -E TEAMS_LITE_READ_ONLY=1 target/release/server; "
+            "systemd-run --user target/release/server",
+        ),
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 systemd-run --user cargo run --bin server"),
+        ("BLOCK", PROJECT, "systemd-run --user bin/teams-dev-server.sh"),
+        ("BLOCK", PROJECT, "systemd-run --user teams --no-open"),
+        # A wrapper runs the program after it, so it is a prefix like `nohup` — `timeout N` most
+        # of all, the ordinary way to watch a server start — and so is a shell with its flags.
+        ("BLOCK", PROJECT, "timeout 20 target/release/server"),
+        ("BLOCK", PROJECT, "timeout -s KILL 20 target/release/server"),
+        ("BLOCK", PROJECT, "env -i target/release/server"),
+        ("BLOCK", PROJECT, "bash -x bin/teams-dev-server.sh"),
+        ("BLOCK", PROJECT, "command teams --no-open"),
+        ("BLOCK", PROJECT, "timeout 60 systemctl --user start teams-lite.target"),
+        ("BLOCK", PROJECT, "timeout 300 target/release/server __teams-lite-repair-broker"),
+        # A subshell, a brace group and a substitution open a command position too.
+        ("BLOCK", PROJECT, "(target/release/server)"),
+        ("BLOCK", PROJECT, "(intune-container stop)"),
+        ("BLOCK", PROJECT, "{ intune-container stop; }"),
+        ("BLOCK", PROJECT, "x=$(intune-container stop)"),
+        ("BLOCK", PROJECT, "echo `intune-container restart`"),
+        ("BLOCK", PROJECT, "if true; then intune-container stop; fi"),
+        # The container's verbs through a transient unit, a wrapper, a shell and a quoted path.
+        ("BLOCK", PROJECT, "systemd-run --user intune-container stop"),
+        ("BLOCK", PROJECT, "systemd-run --user --wait -- intune-container restart"),
+        ("BLOCK", PROJECT, "timeout 120 intune-container stop"),
+        ("BLOCK", PROJECT, "setsid intune-container stop"),
+        ("BLOCK", PROJECT, "nice -n 10 intune-container restart"),
+        ("BLOCK", PROJECT, "bash -c 'intune-container stop && intune-container start'"),
+        ("BLOCK", PROJECT, '"$HOME/.local/bin/intune-container" stop'),
+        # A verb or an argument ends at whatever ends a command, not only at whitespace.
+        ("BLOCK", PROJECT, "intune-container restart; echo ok"),
+        ("BLOCK", PROJECT, "intune-container stop|cat"),
+        ("BLOCK", PROJECT, "intune-container stop&&echo done"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 target/release/server __rootless-supervise;true"),
+        ("BLOCK", PROJECT, "bin/teams-lite-service.sh update --now; echo done"),
+        # A repair cut half-way leaves no container at all, and nothing automatic starts one:
+        # stopping, killing or freezing either repair unit, by systemctl or raw D-Bus, and killing
+        # a process that carries a hidden argument — the repair, or the container's supervisor.
+        ("BLOCK", PROJECT, "systemctl --user stop teams-lite-intune-repair.service"),
+        ("BLOCK", PROJECT, "systemctl --user kill teams-lite-intune-repair.service"),
+        ("BLOCK", PROJECT, "systemctl --user stop teams-lite-broker-repair.service"),
+        ("BLOCK", PROJECT, "systemctl --user freeze intune-container.service"),
+        (
+            "BLOCK",
+            PROJECT,
+            "busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 "
+            "org.freedesktop.systemd1.Manager StopUnit ss teams-lite-intune-repair.service replace",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 "
+            "org.freedesktop.systemd1.Manager KillUnit ssi teams-lite-broker-repair.service all 15",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "busctl --user call org.freedesktop.systemd1 "
+            "/org/freedesktop/systemd1/unit/teams_2dlite_2dbroker_2drepair_2eservice "
+            "org.freedesktop.systemd1.Unit Stop s replace",
+        ),
+        ("BLOCK", PROJECT, "pkill -f __teams-lite-repair-broker"),
+        ("BLOCK", PROJECT, "kill $(pgrep -f __teams-lite-repair-broker)"),
+        ("BLOCK", PROJECT, "pkill -f __rootless-supervise"),
         # --- must allow ------------------------------------------------------
         # Reading the live backend is deliberately fine, through either address.
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
@@ -1034,7 +1333,7 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "ls -la target/debug/server"),
         # `-n` is bash's syntax-check mode: it parses the launcher and exits.
         ("ALLOW", PROJECT, "bash -n bin/teams-dev-server.sh"),
-        ("ALLOW", PROJECT, "shellcheck bin/teams-lite-backend.sh"),
+        ("ALLOW", PROJECT, "shellcheck bin/teams-dev-server.sh"),
         # Ordinary file work on a launcher runs nothing — the `teams` command included.
         ("ALLOW", PROJECT, "ls -la launcher/dist/teams"),
         ("ALLOW", PROJECT, "git add launcher/src/index.ts launcher/build.ts"),
@@ -1059,8 +1358,11 @@ def cases(tmp: Path):
         # …but a usage line is not a licence for what follows it.
         ("BLOCK", PROJECT, "launcher/dist/teams --help && launcher/dist/teams"),
         ("ALLOW", PROJECT, "cd launcher && bun test"),
-        ("ALLOW", PROJECT, "chmod +x bin/teams-lite-backend.sh"),
-        ("ALLOW", PROJECT, "git add bin/teams-lite-backend.sh bin/teams-dev-server.sh"),
+        ("ALLOW", PROJECT, "chmod +x bin/teams-dev-server.sh"),
+        ("ALLOW", PROJECT, "git add bin/teams-launcher.sh bin/teams-dev-server.sh"),
+        # Removing the retired launcher and check scripts is the change that retired them, and
+        # it runs none of them.
+        ("ALLOW", PROJECT, "git rm bin/teams-lite-backend.sh bin/teams-lite-broker-check.sh"),
         ("ALLOW", PROJECT, "grep -n broker bin/teams-dev-server.sh"),
         ("BLOCK", PROJECT, "bash -n bin/teams-dev-server.sh && bin/teams-dev-server.sh"),
         ("BLOCK", PROJECT, "ls target/debug/server && ./target/debug/server"),
@@ -1101,20 +1403,125 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "pgrep -af 'cache/teams-lite/server'"),
         ("ALLOW", PROJECT, "pgrep -af teams-bin"),
         ("ALLOW", PROJECT, "ls -l ~/.teams-lite/bin/teams-bin"),
-        # Diagnosing the container is the normal way to answer "why is it empty".
+        # Diagnosing the container is the normal way to answer "why is it empty" — its own
+        # read-only verbs, and the diagnostic that replaced both check scripts, which reads
+        # the crate's runtime state and one keyring property and asks nothing else.
         ("ALLOW", PROJECT, "intune-container status"),
         ("ALLOW", PROJECT, "intune-container doctor"),
-        ("ALLOW", PROJECT, "bin/teams-lite-broker-check.sh"),
-        # And so is asking whether a backend is on a stale bus — that read IS the whole
-        # answer to "why is this front empty when the other one is fine".
-        ("ALLOW", PROJECT, "bin/teams-lite-broker-bus-check.sh"),
+        ("ALLOW", PROJECT, "intune-container --help"),
+        ("ALLOW", PROJECT, "intune-container autostart status"),
+        ("ALLOW", PROJECT, "intune-container backup-inspect"),
+        ("ALLOW", PROJECT, "cargo run --example intune_status"),
+        ("ALLOW", PROJECT, "systemctl --user status intune-container.service"),
+        ("ALLOW", PROJECT, "systemctl --user status teams-lite-intune-repair.service"),
+        ("ALLOW", PROJECT, "journalctl --user -t teams-lite-broker-repair -n 50 --no-pager"),
+        # Reading a unit's state over raw D-Bus names no method that starts anything.
+        (
+            "ALLOW",
+            PROJECT,
+            "busctl --user get-property org.freedesktop.systemd1 "
+            "/org/freedesktop/systemd1/unit/teams_2dlite_2dintune_2drepair_2eservice "
+            "org.freedesktop.systemd1.Unit ActiveState",
+        ),
+        ("ALLOW", PROJECT, "busctl --user introspect org.freedesktop.systemd1 /org/freedesktop/systemd1"),
+        # An example that only READS the crate is what the diagnostic is built on.
+        ("ALLOW", PROJECT, "cargo run --example guard-test-crate-read"),
+        # A retired check script WITHOUT `--repair` still only reads, wherever its copy is.
+        ("ALLOW", PROJECT, "$HOME/.local/share/teams-lite/service/teams-lite-broker-check.sh"),
+        ("ALLOW", PROJECT, "$HOME/.local/share/teams-lite/service/teams-lite-broker-bus-check.sh"),
+        # Searching for, killing or inspecting what NAMES a hidden argument runs nothing.
+        ("ALLOW", PROJECT, "grep -rn __teams-lite-repair-broker src"),
+        ("ALLOW", PROJECT, "rg '__rootless-supervise|__rootless-exec' src/intune.rs"),
+        ("ALLOW", PROJECT, "git grep -n __teams-lite-repair-broker"),
+        ("ALLOW", PROJECT, "pgrep -af __rootless-supervise"),
+        ("ALLOW", PROJECT, "cargo test --lib intune"),
+        ("ALLOW", PROJECT, "cargo test --bin server every_gated_method_is_named_in_the_automation_guard"),
         # Prose that names a repair runs nothing: a commit message, a doc line.
         ("ALLOW", PROJECT, "git commit -m 'feat: run broker-check.sh --repair from the timer'"),
         ("ALLOW", PROJECT, "git commit -m 'fix: broker-bus-check.sh --repair runs from the timer'"),
         ("ALLOW", PROJECT, "git commit -m 'docs: intune-container stop && start unlocks it'"),
+        ("ALLOW", PROJECT, "git commit -m 'feat: route __teams-lite-repair-broker before the runtime'"),
+        ("ALLOW", PROJECT, "git commit -m 'docs: target/release/server __rootless-supervise boots it'"),
+        ("ALLOW", PROJECT, "git commit -m 'fix: StartTransientUnit for the repair, over busctl'"),
+        # Asking whether autostart is installed only reads, through the crate too.
+        ("ALLOW", PROJECT, "cargo run --example guard-test-crate-autostart-status"),
+        # The systemd-run spellings that DO reach the unit: told with -E or --setenv, copied with
+        # -E NAME from a variable set in front, or a scope, which inherits this shell.
+        ("ALLOW", PROJECT, "systemd-run --user --setenv=TEAMS_LITE_READ_ONLY=1 --unit=probe target/release/server"),
+        ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 systemd-run --user -E TEAMS_LITE_READ_ONLY target/release/server"),
+        ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 systemd-run --user --scope target/release/server"),
+        # Cleanup stays cleanup when it is chained to more cleanup, or to nothing that starts —
+        # including a kill whose pattern names `cargo run --bin server`, which is matched anywhere.
+        ("ALLOW", PROJECT, "pkill -f target/release/server && sleep 1"),
+        ("ALLOW", PROJECT, "kill -9 $(pgrep -f target/release/server)"),
+        ("ALLOW", PROJECT, "pkill -f 'vite dev'; pkill -f 'mock/server.ts'"),
+        ("ALLOW", PROJECT, "pgrep -af 'vite dev|mock/server.ts' | head -5"),
+        ("ALLOW", PROJECT, "pkill -f 'cargo run --bin server'; sleep 1"),
+        ("ALLOW", PROJECT, "if pgrep -af 'vite dev' >/dev/null; then echo running; fi"),
+        ("ALLOW", PROJECT, "[ -n \"$(pgrep -af 'vite dev')\" ] && echo yes"),
+        ("ALLOW", PROJECT, "pgrep -af __teams-lite-repair-broker"),
+        # A wrapper is a prefix for what is refused, and nothing more: what it runs decides.
+        ("ALLOW", PROJECT, "timeout 600 cargo test"),
+        ("ALLOW", PROJECT, "timeout 30 intune-container status"),
+        ("ALLOW", PROJECT, "timeout 20 cargo run --example intune_status"),
+        ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=1 timeout 30 target/release/server"),
+        ("ALLOW", PROJECT, "timeout 20 env TEAMS_LITE_READ_ONLY=1 target/release/server"),
+        ("ALLOW", PROJECT, "(cd web && bun run dev:mock)"),
+        # `command -v` and `type` say where a program is, and run nothing.
+        ("ALLOW", PROJECT, "command -v intune-container teams"),
+        ("ALLOW", PROJECT, "type -a teams intune-container"),
+        # The repair unit's state is read, and a failed one is cleared, without touching it.
+        ("ALLOW", PROJECT, "systemctl --user reset-failed teams-lite-intune-repair.service"),
+        # The same words as TEXT: a search, a log search, a quoted commit message whose
+        # backticks, parentheses and separators are characters, and the heredoc a commit body is
+        # written with. Only the executable view can tell those from the commands above.
+        ("ALLOW", PROJECT, "rg '(intune-container stop)|timeout 120 intune-container stop' AGENTS.md"),
+        ("ALLOW", PROJECT, "git log --oneline --grep='intune-container stop'"),
+        (
+            "ALLOW",
+            PROJECT,
+            "git commit -m 'fix(guard): refuse `(intune-container stop)` and `intune-container restart; echo ok`'",
+        ),
+        ("ALLOW", PROJECT, 'git commit -m "fix(guard): (systemd-run --user target/release/server) needs -E"'),
+        (
+            "ALLOW",
+            PROJECT,
+            "git commit -m \"$(cat <<'EOF'\n"
+            "fix(guard): refuse `timeout 120 intune-container stop`\n"
+            "\n"
+            "The hook reads `(intune-container stop)`, `{ intune-container stop; }`,\n"
+            "`pkill -f x; target/release/server` and `$(teams --no-open)`, and\n"
+            "`systemd-run --user target/release/server` | as commands — and\n"
+            "`pkill -f __teams-lite-repair-broker` too.\n"
+            "EOF\n"
+            ")\"",
+        ),
+        ("ALLOW", PROJECT, 'python3 -c "print(\'(intune-container stop)\')"'),
         # A production web server that names a read-only backend is fine.
         ("ALLOW", WEB, "TEAMS_LITE_WS_URL=ws://127.0.0.1:19430 bun run start"),
     ]
+
+
+# The example fixtures are written into the repo's own examples/ directory, which is SHARED:
+# several agents work in one worktree at once, and each may run this file. With one name per
+# fixture, a copy that finished first removed the other copy's fixtures in its `finally`, the
+# hook then found no source behind `--example NAME` and allowed it — measured: the same eight
+# BLOCK rows read ALLOW (308/316), nondeterministically, with nothing wrong in the hook. So
+# every run writes its own copies under a suffix of its own, and points the commands at them.
+RUN_SUFFIX = f"-run{os.getpid()}"
+
+
+def this_runs_example(name: str) -> str:
+    """`guard-test-x.rs` -> the stem this run writes it under (`guard-test-x-run1234`)."""
+    return name[: -len(".rs")] + RUN_SUFFIX
+
+
+def aimed_at_this_run(command: str) -> str:
+    """Point every `--example NAME` naming a fixture at this run's own copy of it."""
+    for name in EXAMPLE_FIXTURES:
+        stem = re.escape(name[: -len(".rs")])
+        command = re.sub(rf"(--example\s+){stem}(?![\w-])", rf"\g<1>{this_runs_example(name)}", command)
+    return command
 
 
 def main() -> int:
@@ -1126,7 +1533,7 @@ def main() -> int:
         # written into examples/ and removed again in the `finally` below.
         written_examples = []
         for name, body in EXAMPLE_FIXTURES.items():
-            path = PROJECT / "examples" / name
+            path = PROJECT / "examples" / f"{this_runs_example(name)}.rs"
             path.write_text(body)
             written_examples.append(path)
 
@@ -1135,7 +1542,7 @@ def main() -> int:
             for expected, cwd, command in cases(tmp):
                 proc = subprocess.run(
                     [str(HOOK)],
-                    input=json.dumps({"tool_input": {"command": command}}),
+                    input=json.dumps({"tool_input": {"command": aimed_at_this_run(command)}}),
                     capture_output=True,
                     text=True,
                     cwd=cwd,

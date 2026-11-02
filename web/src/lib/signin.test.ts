@@ -36,6 +36,20 @@ describe("brokerRemedy", () => {
     expect(brokerRemedy(both).kind).toBe("repair");
   });
 
+  it("keeps a running repair on screen whatever the failure turns into meanwhile", () => {
+    // The repair stops the container and the backend stays up through it, so the failure it
+    // records halfway through is the one a stopped container looks like — no broker on the bus
+    // at all — which is not one a restart fixes. The repair the reader asked for is still
+    // running, and that is what the banner has to say, not "sign in to Intune again".
+    const midway = broken({ signature: "unreachable", can_repair: false, repairing: true });
+    expect(brokerRemedy(midway).kind).toBe("repair");
+    // Nor is a sign-in offered over it: the broker that would draw the window is the one
+    // being restarted.
+    expect(brokerRemedy({ ...midway, can_sign_in: true }).kind).toBe("repair");
+    // And once the backend says the repair ended, the failure decides again.
+    expect(brokerRemedy({ ...midway, repairing: false }).kind).toBe("none");
+  });
+
   it("offers the sign-in for the failure a restart cannot fix", () => {
     expect(brokerRemedy(broken({ can_sign_in: true })).kind).toBe("signin");
   });

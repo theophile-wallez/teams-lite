@@ -10,8 +10,7 @@
 // Start a READ-ONLY backend first (it binds 19430, never competing with the user's
 // own on 19420), then run this:
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     TEAMS_LITE_READ_ONLY=1 cargo run --bin server &
+//   TEAMS_LITE_READ_ONLY=1 cargo run --bin server &
 //   cargo run --example mail_rpc_check
 //
 // READS ONLY — the five methods it calls are the entire mail surface, and all five

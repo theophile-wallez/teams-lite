@@ -611,9 +611,14 @@ export type BrokerStatus = {
   detail: string;
   consecutive_failures: number;
   /** Whether the backend can restart the Intune container for this failure. False
-   *  for every failure a container restart cannot fix, and on a read-only backend. */
+   *  for every failure a container restart cannot fix, on a read-only backend, and on a
+   *  machine with no Intune container (`intune::repair_available` in src/intune.rs). It does
+   *  NOT say the keyring is locked: that is asked when the button is pressed, and a press on a
+   *  keyring that is not is refused with a sentence the banner shows. */
   can_repair: boolean;
-  /** True while a repair runs, so every open client disables its button. */
+  /** True while a repair runs, so every open client disables its button. The backend stays up
+   *  through a repair and sends this back as `false` when its unit ends — whether or not
+   *  sign-in came back, which is the broker's own `ok` to say. */
   repairing: boolean;
   /** Whether this app can serve the broker's OWN sign-in window for this failure — the
    *  remedy for the one a container restart cannot fix (see `can_sign_in` in

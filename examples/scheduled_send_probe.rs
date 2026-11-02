@@ -20,8 +20,7 @@
 //   - both messages it posts are reversible: one is cancelled before it is ever delivered,
 //     and the other is a line of probe text in the sandbox thread.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example scheduled_send_probe
+//   cargo run --example scheduled_send_probe
 use anyhow::{Context, Result};
 use serde_json::Value;
 

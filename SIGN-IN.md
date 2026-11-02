@@ -141,8 +141,10 @@ It appeared **within 2 s** of the call. Four facts follow, and each is a rule in
   watching. The number is ours, not the bus's.
 - **`cancelInteractiveFlow` with an empty body took the broker OFF THE BUS**: `Message
   recipient disconnected from message bus without replying` — which is
-  `BrokerFailure::Disconnected`, the signature whose automatic remedy is *restarting the
-  user's Intune container*. So teams-lite does not call it. **A flow is ended by closing
+  `BrokerFailure::Disconnected`, a signature whose automatic remedy is *restarting the
+  user's Intune container* (a remedy that now runs only once the container's keyring itself
+  reads locked — AGENTS.md § The always-on service — but the call has cost the reader their
+  broker either way). So teams-lite does not call it. **A flow is ended by closing
   its window** (`WM_DELETE_WINDOW`), which is what a person closing it would do and what
   the broker's own flow is built to handle. Measured: the window was gone afterwards and
   the broker re-activated cleanly on the next call (`getLinuxBrokerVersion` → 3.0.2).

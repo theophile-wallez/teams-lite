@@ -11,8 +11,7 @@
 // already makes on every start) and then printing. It never posts a callInvitation,
 // never registers a trouter endpoint and never touches a conversation.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example calling_endpoint_recon
+//   cargo run --example calling_endpoint_recon
 use anyhow::Result;
 use serde_json::Value;
 

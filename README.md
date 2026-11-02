@@ -84,8 +84,11 @@ Linux machine — through the **Microsoft Identity Broker** — so it needs:
     - **Classic Intune** — the broker runs as your user on the host session bus;
       teams-lite talks to it directly.
     - **Containerized Intune** — the broker runs inside a rootless container as
-      your user, on the container's own bus; the `teams` launcher points D-Bus at
-      that bus and teams-lite connects directly. No `sudo`, no privileges.
+      your user, on the container's own bus. teams-lite finds that bus itself, on
+      every connection, from the container's own state (through the
+      [`intune-container`](https://github.com/magicabdel/intune-container) crate), so
+      it follows the container across a restart with nothing to configure. No `sudo`,
+      no privileges.
 - **A browser.** Any current Chrome, Edge or Firefox renders the app; the same page
   installs as a web app, which is what lets a phone be notified while it is closed.
 
@@ -212,13 +215,21 @@ systemctl --user enable --now teams-lite.target   # start it (and at every boot)
 | `teams-lite-backend.service`     | the Rust backend on `ws://127.0.0.1:19420`            |
 | `teams-lite-web.service`         | the production SSR server on `127.0.0.1:19440`        |
 | `teams-lite-app.service`         | *optional* — the released `teams` build, 19422 / 19442  |
-| `teams-lite-broker-bus.path`     | restarts the backend when the Intune container moves   |
-| `teams-lite-broker-health.timer` | checks the sign-in keyring every 15 minutes            |
-| `teams-lite-broker-repair.service` | restarts the Intune container when that keyring locked |
-| `teams-lite.target`              | one handle for all of the above                        |
+| `teams-lite.target`              | one handle for the backend and the web server          |
+
+Nothing in that list watches the Intune container. The backend follows the container's bus and
+checks its sign-in keyring itself (see [When sign-in breaks](#when-sign-in-breaks)), so the
+units an older install used for that — a `.path`, a health timer and a repair unit — are
+removed by the next `update`, which also restarts the backend onto the build that no longer
+needs them. `install` and `units` remove them too, except while the backend that is RUNNING
+is still an older build that relies on them: they restart nothing, so they keep the three it
+lives by, say so, and leave the restart to you
+(`systemctl --user try-restart teams-lite-backend.service`). And `units`, which stages
+nothing, refuses outright in front of a staged backend older than the units it writes —
+`update` is the command for that machine, and `status` says so.
 
 ```bash
-bin/teams-lite-service.sh status      # units, ports, staged commit, broker, tailscale
+bin/teams-lite-service.sh status      # units, ports, staged commit, Intune, tailscale
 bin/teams-lite-service.sh logs -f     # both journals, interleaved
 bin/teams-lite-service.sh update      # rebuild, restage, restart what is running
 bin/teams-lite-service.sh uninstall   # remove the units (keeps your data)
@@ -237,9 +248,11 @@ Worth knowing:
 - **It survives a reboot** thanks to lingering (`loginctl enable-linger`, which
   `status` checks) — no session needed. The `tailscale serve` mapping persists on its
   own, in tailscaled's state.
-- **It retries forever, slowly.** If the identity broker is down, the backend fails to
-  start and systemd backs off from 5 s to 5 min rather than giving up — so a laptop
-  that comes back, or an Intune container that restarts, heals itself.
+- **A broken sign-in never takes it down.** If the identity broker is down, the backend
+  starts anyway and serves the history it has already stored, and keeps asking — every
+  attempt looks for the broker's bus again, so a laptop that comes back, or an Intune
+  container that restarts, heals itself with no restart of teams-lite. If the backend
+  itself dies, systemd brings it back, backing off from 5 s to 5 min rather than giving up.
 - **Local overrides** go in `~/.config/teams-lite/backend.env` and `web.env`; an
   update leaves both alone. Audio calling is not one of them: every install registers this
   machine with Teams as a device your calls ring on, like every other client you are
@@ -260,6 +273,10 @@ Worth knowing:
   systemctl --user enable --now teams-lite-app.service   # start it (and at every boot)
   ```
 
+  `units` rewrites every unit, the service's own included, so it needs the service staged
+  first (`install` above) — and from a build recent enough to find the identity broker
+  itself; on an older one it refuses and asks for `update`.
+
   It shares your message store — as the dev backend already does — and answers on
   `http://127.0.0.1:19442`. For your phone, give it a port of its own:
   `tailscale serve --bg --https=8444 http://127.0.0.1:19442`.
@@ -269,31 +286,54 @@ Worth knowing:
 On a **containerized-Intune** host the container's login keyring re-locks on its own,
 roughly every eighteen hours. The identity broker then answers no token call at all, and
 nothing else looks wrong: the socket stays up, the backend stays `active (running)`, the
-live dot stays green — and the app has no chats, mail or calendar.
+live dot stays green — and nothing new arrives or leaves. The app keeps showing what it had
+already stored, and no more.
 
 teams-lite handles that itself now:
 
 - **It says so.** A banner in the sidebar names the cause instead of leaving an empty
   list, on every tab, with a **Repair sign-in** button. For a failure a container
   restart cannot fix — an expired sign-in that needs you at a browser — the button stays
-  visible but inert and says why.
-- **It repairs itself.** Three triggers share one rate-limited unit
-  (`teams-lite-broker-repair.service`, at most three times an hour): the backend when a
-  token call fails with that signature, `teams-lite-broker-health.timer` every 15
-  minutes, and the button. The health timer matters most: with nobody in Mail or the
-  Calendar the backend makes no broker calls at all, so an outage at 03:00 would
-  otherwise wait for you to notice.
-- **It never restarts the container on a guess.** Every trigger checks the keyring's
-  actual `Locked` property first, and the repair unit checks again as its own
-  `ExecCondition` — so a button pressed on a healthy system does nothing.
+  visible but inert and says why. While a repair runs the banner says **Repairing…** until
+  it ends, whatever the broker looks like in the minute the container is down.
+- **It repairs itself.** Three triggers ask for one repair: the backend when a token call
+  fails with that signature, a keyring check the backend runs every 15 minutes, and the
+  button. The 15-minute check matters most: with nobody in Mail or the Calendar the
+  backend makes no broker calls at all, so an outage at 03:00 would otherwise wait for you
+  to notice. Automatic repairs are limited to three an hour across the whole machine, so
+  several teams-lite installs sharing one store share one budget; a press of the button is
+  never refused for that.
+- **It never restarts the container on a guess, or twice.** Every trigger first asks whether
+  a repair is already running anywhere on the machine, and follows it rather than starting
+  another; then it reads the keyring's actual `Locked` property, and the repair reads it again
+  before it touches anything and once more after it holds the container's lock — so a button
+  pressed on a healthy system restarts nothing, and says why: the keyring is unlocked, the
+  container is not running (start it with `intune-container start` if it does not come back),
+  or intune-container is not set up on this machine.
+- **It goes through the `intune-container` crate, not your shell.** The repair is the
+  teams-lite binary itself, run as a short-lived systemd unit of your own user
+  (`teams-lite-intune-repair.service`, so it outlives any restart of the backend that asked
+  for it). It stops the container and boots it again under the same lock every
+  `intune-container` command takes, and the backend stays up throughout and follows the
+  container to its new bus on its own. It never updates the container's image while it does:
+  a new image would mean deleting the old one and downloading the whole thing with the
+  container already stopped, so that waits for your own next `intune-container start`. Its
+  log is `journalctl --user -t teams-lite-broker-repair`; the unit ends `failed` when the
+  restart did not unlock the keyring, or when nothing was restarted because nothing could be
+  told.
 
 To look, or to repair by hand:
 
 ```bash
-bin/teams-lite-broker-check.sh            # is the keyring locked?
+cargo run --example intune_status         # where is the broker, is the keyring locked? (read-only)
+intune-container status                   # is the container running?
 intune-container doctor                   # the whole Intune stack
 intune-container stop && intune-container start   # the manual repair
 ```
+
+`intune_status` runs from a source checkout and changes nothing: it finds the container the
+way the backend does, reads one property, and exits 0 when the keyring is unlocked, 1 when it
+is locked and 2 when it cannot tell.
 
 A bare `intune-container start` does **not** fix it: on a running container it
 short-circuits and never re-runs the session setup that unlocks the keyring.
@@ -337,10 +377,11 @@ cd web && bun run dev:mock        # mock on 19455, app on 19445
 #   …or drive the REAL backend + web dev server yourself, two terminals from web/.
 #   `dev:server` runs the backend from source with idle-exit disabled
 #   (TEAMS_NO_IDLE_EXIT) so it stays up across browser reloads/inactivity and only
-#   stops on Ctrl+C, and it bridges D-Bus to the Identity Broker the same way the
-#   production launcher does (so sign-in works from source, incl. containerized
-#   Intune). This pair uses ports of its own — backend 19421, app 19441 — so it runs
-#   happily alongside the always-on service on 19420/19440. See bin/teams-dev-server.sh:
+#   stops on Ctrl+C. Sign-in needs nothing from it: the backend finds the Identity
+#   Broker's D-Bus itself, containerized Intune included, so sign-in works from source
+#   with nothing exported first. This pair uses ports of its own — backend 19421, app
+#   19441 — so it runs happily alongside the always-on service on 19420/19440. See
+#   bin/teams-dev-server.sh:
 cd web
 bun run dev:server                # terminal 1  (real backend on 19421, kept alive)
 bun run dev                       # terminal 2  (Vite HMR on 19441, against :19421)

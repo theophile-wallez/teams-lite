@@ -23,8 +23,7 @@
 // and the browser is what produces a real offer (see web/src/lib/call-media.ts). So a
 // successful join carries no audio in either direction.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example meeting_join_probe
+//   cargo run --example meeting_join_probe
 use anyhow::{Context, Result};
 use serde_json::json;
 use teams_lite::calling;

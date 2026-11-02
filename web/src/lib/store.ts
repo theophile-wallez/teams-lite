@@ -6825,20 +6825,42 @@ export class TeamsController {
   /** Ask the backend to repair sign-in by restarting the Intune container.
    *
    *  Marks the broker as repairing straight away, so the button disables before the
-   *  backend's own event arrives, and REJECTS on refusal so the banner can say why
-   *  (the backend's refusal text is the useful part: a missing write token, or
-   *  read-only mode). The repair drops the socket a moment later; the page's own
-   *  reconnect brings it back — see `watchWakeups` and the `reconnected` handler. */
+   *  backend's own event arrives, and REJECTS on refusal so the banner can say why. The
+   *  backend's refusal text is the useful part: a missing write token, read-only mode, a
+   *  machine with no Intune container, a container that is not running right now — and, the
+   *  one a reader really meets, a keyring that is NOT locked, where a restart would take
+   *  sign-in down for a minute and fix nothing.
+   *
+   *  From an ACCEPTED press on, `repairing` is the backend's to say: the backend stays up
+   *  through the repair, and its `broker_status` with `repairing: false` is what ends it —
+   *  whether the repair worked or not. Sign-in coming back is a separate `broker_status`, the
+   *  broker's own, once a token call succeeds again.
+   *
+   *  A refusal takes back THIS press's flag and nothing newer. The backend asks a D-Bus
+   *  keyring before it answers, so a `broker_status` can land during the round trip — sign-in
+   *  coming back on its own retry, or another failure — and putting the snapshot from before
+   *  the press back over it restored a broken sign-in over a working one. Nothing would ever
+   *  have corrected that: the backend speaks only on a CHANGE, and its greeting re-sends a
+   *  failure but never news that all is well. So the rollback happens only while the status on
+   *  screen is still the very object this press put there. */
   async repairBroker(): Promise<void> {
     const before = this.get().brokerStatus;
-    if (before) this.set({ brokerStatus: { ...before, repairing: true } });
+    const optimistic = before ? { ...before, repairing: true } : null;
+    if (optimistic) this.set({ brokerStatus: optimistic });
     try {
-      await this.backend.repairBroker();
+      const answer = await this.backend.repairBroker();
+      // A press is refused in words rather than answered `started: false` — that answer is
+      // the automatic triggers' — so this is a backend that disagrees with this page about the
+      // contract. The flag set above would then claim a repair nothing will ever end, and a
+      // press that changed nothing must not look like one that worked.
+      if (!answer.started) {
+        throw new Error(`No repair was started (${answer.reason || "no reason given"}).`);
+      }
     } catch (e) {
-      if (before) this.set({ brokerStatus: { ...before, repairing: false } });
+      if (optimistic && this.get().brokerStatus === optimistic) this.set({ brokerStatus: before });
       // A refused repair sounds; an accepted one does not. The repair only STARTS
-      // here — the socket drops a moment later and the reconnect is the real answer,
-      // so a success cue now would applaud a result nobody has yet.
+      // here — a minute of container restart is still ahead, and sign-in coming back is
+      // the real answer — so a success cue now would applaud a result nobody has yet.
       playCue("error");
       throw e;
     }

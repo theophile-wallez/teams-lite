@@ -16,8 +16,7 @@
 //     a colleague never agreed to be pinged by a probe, so the only identity this file
 //     may mention is `session.self_mri`.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example mention_send_probe
+//   cargo run --example mention_send_probe
 use anyhow::{Context, Result};
 
 use teams_lite::{teams, teams_read, teams_send};

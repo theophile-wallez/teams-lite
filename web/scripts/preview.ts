@@ -1471,16 +1471,31 @@ if (import.meta.main) {
   // touched — and the banner cannot be seen any other way without breaking sign-in.
   if (args.includes("--broker")) {
     await withPreview(async ({ page, shot, setTheme, emit }) => {
-      await emit({
+      const banner = '[data-testid="broker-banner"]';
+      const disconnected = {
         kind: "broker",
         ok: false,
         signature: "disconnected",
         message: "The identity broker stopped answering. Its keyring is usually locked.",
-      });
-      await page.locator('[data-testid="broker-banner"]').waitFor({ state: "visible" });
+      };
+      await emit(disconnected);
+      await page.locator(banner).waitFor({ state: "visible" });
       await shot(`${out}-light.png`);
       await setTheme("dark");
       await shot(`${out}-dark.png`);
+      // A repair RUNNING, held by the mock so the state has a duration: the busy sentence is
+      // the one that changed when the backend stopped restarting with the container, and the
+      // mock's own repair otherwise ends before a capture could see it.
+      await emit({ ...disconnected, repair: "hold" });
+      await page.locator('[data-testid="broker-repair"]').click();
+      await page.locator('[data-testid="broker-repair"]:disabled').waitFor();
+      await shot(`${out}-repairing-dark.png`, banner);
+      // A press on a keyring that is NOT locked: refused, in the backend's own sentence, under
+      // a button that is the reader's again.
+      await emit({ ...disconnected, repair: "refuse" });
+      await page.locator('[data-testid="broker-repair"]').click();
+      await page.locator('[data-testid="broker-repair-error"]').waitFor({ state: "visible" });
+      await shot(`${out}-not-locked-dark.png`, banner);
       // The other half: a failure a container restart cannot fix keeps the button
       // visible but inert, so the boundary is explicit.
       await emit({
@@ -1492,9 +1507,12 @@ if (import.meta.main) {
       });
       await page.waitForTimeout(200);
       await shot(`${out}-refused-dark.png`);
-      // Leave the shared mock healthy again.
+      // Leave the shared mock healthy again — which also disarms the repair outcome armed above.
       await emit({ kind: "broker", ok: true });
-      console.log(`[preview] wrote ${out}-light.png, ${out}-dark.png and ${out}-refused-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-{light,dark}.png, ${out}-repairing-dark.png, ` +
+          `${out}-not-locked-dark.png and ${out}-refused-dark.png`,
+      );
     });
     process.exit(0);
   }

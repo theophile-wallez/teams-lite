@@ -7,8 +7,7 @@
 //      endpoint that names a 1:1 chat, asked with addresses instead of mris.
 //   2. GET  /api/mt/beta/users/{mri}/profilepicturev2 — the existing photo proxy.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example mail_avatar_recon -- [address …]
+//   cargo run --example mail_avatar_recon -- [address …]
 //
 // With no argument it reads the newest page of the Inbox and probes every distinct
 // address on it (sender and recipients), which is exactly the population the mail

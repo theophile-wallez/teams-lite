@@ -300,25 +300,32 @@ const EDGE_CLIENT_ID: &str = "d7b530a4-7680-4c23-a8bf-c52c121d2e87";
 const OFFICE_CLIENT_ID: &str = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
 const NATIVE_REDIRECT: &str = "https://login.microsoftonline.com/common/oauth2/nativeclient";
 
-/// Connect to the broker's session bus, transparently handling both Intune
-/// topologies.
+/// Connect to the broker's bus, wherever it is right now.
 ///
-/// In a **classic** install the broker runs as us on our own session bus, and the
-/// default EXTERNAL handshake (which sends our real uid) is accepted.
-///
-/// In a **containerized** install (e.g. `intune-container`) the broker runs as us
-/// but on the container's session bus, whose `dbus-daemon` lives in a user
-/// namespace where we appear as uid 0. That daemon only accepts an EXTERNAL
-/// handshake claiming uid 0, so zbus's default (our real host uid) is rejected
-/// with "EXTERNAL rejected". We detect that and retry claiming uid 0 — the same
-/// credential `busctl` negotiates implicitly via SO_PEERCRED.
-///
-/// The `teams` launcher points `DBUS_SESSION_BUS_ADDRESS` at the right bus; here
-/// we only pick the uid the handshake must claim.
+/// WHERE is [`crate::intune::broker_bus`]'s answer, asked on every connection — never an
+/// address frozen into this process at exec. It used to be: a shell wrapper resolved the
+/// container's bus once and exported it, so a backend kept dialling a socket the container
+/// had taken away with it when it restarted, and the only cure was restarting the backend
+/// (which is what a `.path` unit, a health check and a restart unit existed to do).
 async fn connect_broker_bus() -> Result<zbus::Connection> {
-    let address = zbus::Address::session()
-        .map_err(|e| anyhow::Error::new(e).context(BrokerFailure::Unreachable))
-        .context("resolve session bus address")?;
+    connect_bus(&crate::intune::broker_bus()).await
+}
+
+/// Connect to a given broker bus, transparently handling both Intune topologies.
+///
+/// In a **classic** install the broker runs as us on our own session bus, and the default
+/// EXTERNAL handshake (which sends our real uid) is accepted.
+///
+/// In a **containerized** install (`intune-container`) the broker runs as us but on the
+/// container's session bus, whose `dbus-daemon` lives in a user namespace where we appear as
+/// uid 0. That daemon only accepts an EXTERNAL handshake claiming uid 0, so zbus's default
+/// (our real host uid) is rejected with "EXTERNAL rejected". We detect that and retry claiming
+/// uid 0 — the same credential `busctl` negotiated implicitly via SO_PEERCRED.
+pub(crate) async fn connect_bus(bus: &crate::intune::BrokerBus) -> Result<zbus::Connection> {
+    let address = bus
+        .address()
+        .map_err(|e| e.context(BrokerFailure::Unreachable))
+        .context("resolve the broker's bus address")?;
 
     // Default handshake first (correct for a classic, same-uid broker bus).
     match zbus::connection::Builder::address(address.clone())?
@@ -377,25 +384,6 @@ pub async fn get_token(scope: &str) -> Result<String> {
     let outcome = acquire_token(scope).await;
     record(&outcome, scope);
     outcome
-}
-
-// The login keyring, as org.freedesktop.secrets exposes it inside the container — the
-// same names bin/teams-lite-broker-check.sh reads over busctl.
-const SECRETS_NAME: &str = "org.freedesktop.secrets";
-const SECRETS_PATH: &str = "/org/freedesktop/secrets/collection/login";
-const SECRETS_IFACE: &str = "org.freedesktop.Secret.Collection";
-
-/// Is the container's login keyring locked? `Some(true)`/`Some(false)` when the secret
-/// service answers, `None` when it cannot be told — no service, an older interface, a
-/// property that would not decode. `None` is deliberately NOT "locked": this only ever
-/// escalates a refusal to a repairable one, and a repair must never fire on a guess (the
-/// discipline bin/teams-lite-broker-check.sh keeps for the shell path). Asked over the
-/// broker's own bus connection, so it costs no second handshake.
-async fn keyring_locked(conn: &zbus::Connection) -> Option<bool> {
-    let proxy = zbus::Proxy::new(conn, SECRETS_NAME, SECRETS_PATH, SECRETS_IFACE)
-        .await
-        .ok()?;
-    proxy.get_property::<bool>("Locked").await.ok()
 }
 
 async fn acquire_token(scope: &str) -> Result<String> {
@@ -457,10 +445,10 @@ async fn broker_account(
             // re-locked and the broker, though answering, cannot READ the account it
             // holds (`KeyringLocked`, which a container restart fixes). The two want
             // opposite remedies and look identical here, so ask the keyring's own
-            // `Locked` property to tell them apart — the same cause
-            // bin/teams-lite-broker-check.sh tests. Unknown is never "locked": a repair
+            // `Locked` property to tell them apart — the same cause the repair itself
+            // checks (`intune::container_keyring`). Unknown is never "locked": a repair
             // must not fire on a guess.
-            let failure = if keyring_locked(conn).await == Some(true) {
+            let failure = if crate::intune::keyring_locked(conn).await == Some(true) {
                 BrokerFailure::KeyringLocked
             } else {
                 BrokerFailure::NoAccount

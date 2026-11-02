@@ -17,9 +17,8 @@
 // waiting for a typo, and `.claude/hooks/guard-live-automation.sh` (rule 1c) refuses
 // to run one.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example agent_stream_probe -- "what does the Ports table say?" \
-//       [claude|opencode] [model]
+//   cargo run --example agent_stream_probe -- "what does the Ports table say?" \
+//     [claude|opencode] [model]
 //
 use anyhow::{Context, Result};
 

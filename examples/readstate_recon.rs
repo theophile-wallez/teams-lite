@@ -17,11 +17,10 @@
 // the thread as read.
 //
 //   # list the unread chats
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example readstate_recon
+//   cargo run --example readstate_recon
 //
 //   # one thread's read positions
-//   … cargo run --example readstate_recon -- --conv 19:<id>
+//   cargo run --example readstate_recon -- --conv 19:<id>
 use anyhow::Result;
 
 #[tokio::main]

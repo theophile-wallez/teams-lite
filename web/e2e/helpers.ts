@@ -641,6 +641,13 @@ export async function emitBrokerStatus(
      *  for the failure a container restart cannot fix (see e2e/signin.spec.ts). */
     can_sign_in?: boolean;
     signin_blocker?: string;
+    /** What the NEXT press of Repair sign-in does: `refuse` answers the real backend's
+     *  refusal of a keyring that is not locked, `refuse_late` answers it only after the NEXT
+     *  call of this helper has broadcast its status (a press crossed by newer news), `hold`
+     *  starts a repair that never ends on its own. Absent is the repair that works — and EVERY
+     *  call sets it, so the `{ ok: true }` reset every spec already owes disarms it too, and
+     *  answers a `refuse_late` press still waiting. */
+    repair?: "refuse" | "refuse_late" | "hold";
   } = {},
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {

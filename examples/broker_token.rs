@@ -1,11 +1,11 @@
 // Manual live check: acquire a real broker token through the production auth path.
 //
-// This is NOT a unit test — it talks to a live Microsoft Identity Broker. Run it
-// with DBUS_SESSION_BUS_ADDRESS pointed at whichever bus the broker is on (the
-// `teams` launcher sets this automatically):
+// This is NOT a unit test — it talks to a live Microsoft Identity Broker. Nothing has to
+// be exported first: the library finds the broker's bus itself, on every connection
+// (`src/intune.rs` — the running Intune container's bus, or this shell's own session bus
+// on a classic-Intune host):
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example broker_token
+//   cargo run --example broker_token
 //
 // Prints the scope and a short token prefix on success; anything else is a failure.
 use anyhow::Result;
