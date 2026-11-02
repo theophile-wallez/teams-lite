@@ -123,14 +123,22 @@ It appeared **within 2 s** of the call. Four facts follow, and each is a rule in
   the take-back looks at the same wrong display. A display that cannot be read is a display we
   do not know, and saying so is the only honest answer.
 - **A display the broker names but nothing serves is a diagnosable state**, not a mystery:
-  the socket at `/tmp/.X11-unix/X<n>` is either there or it is not, and teams-lite says which,
-  naming the display and the remedy. It does NOT start one: an `Xvfb` on the number the broker
+  something serves `:<n>` here or it does not, and teams-lite says which, naming the display
+  and the remedy. "Serves" is TWO sockets, asked in the order x11rb connects: the ABSTRACT
+  `@/tmp/.X11-unix/X<n>` (a listener in `/proc/net/unix`, flag `00010000` — an accepted
+  connection carries the same name and is no server), then the file `/tmp/.X11-unix/X<n>`.
+  Asking for the file alone reported the broker's own `:99` as `Missing` on the machine this
+  was built for (2026-11-02, below), and refused the served sign-in there. It does NOT start one: an `Xvfb` on the number the broker
   already expects is the one display change that could not strand it, but a display this app
   spawns and then outlives is exactly the bug `intune-container`'s `BROKER_DISPLAY_SCRIPT` exists
   for, and getting the ownership right is a feature of its own rather than a line here.
-- **The container shares `/tmp/.X11-unix` with the host** (measured: `X77` and `X99` are
-  the same sockets inside and out), so a host-side X server is reachable by the
-  in-container broker, and a host-side capture sees the in-container window.
+- **The container shares the host's NETWORK namespace, and that is what the window is reached
+  through.** Measured 2026-08-18, `/tmp/.X11-unix` was shared too (`X77` and `X99` the same
+  sockets inside and out). Measured 2026-11-02 it was NOT: the broker drew on `:99`, the
+  container's `/tmp/.X11-unix` held `X99`, the host's held only `X0` and `X1` — and
+  `/proc/net/unix` listed a listening `@/tmp/.X11-unix/X99`, because the container, its broker
+  and the host all report one `net:[…]` namespace. So the abstract socket is the one both sides
+  reach whatever the container's mount layout is this week.
 
 ### The pending call, and how to end it
 

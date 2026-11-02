@@ -10423,7 +10423,12 @@ Nine rules hold it, and each is pinned by a test:
   `DISPLAY=:77`). The broker is D-Bus activated and its environment is frozen at activation, so
   a display chosen here would either be ignored or, worse, strand it — `intune-container` ships
   a whole script for that bug. A display the broker names and nothing serves is a stated state
-  with a remedy, not a mystery. **This process's own `DISPLAY` is not a fallback either**: on a
+  with a remedy, not a mystery — and "serves" is the ABSTRACT socket first, then the file, the
+  order x11rb connects in (`display_is_served`): on a containerized-Intune host the broker's
+  Xvfb is inside the Intune container, so its file socket is in a `/tmp` this process does not
+  see, while its abstract one is in the network namespace the container shares with the host.
+  Asking for the file alone called the broker's `:99` `Missing` on this machine and refused the
+  served sign-in there (measured 2026-11-02; SIGN-IN.md). **This process's own `DISPLAY` is not a fallback either**: on a
   desktop session it answers `:0`, whose socket exists, so the app offered a sign-in and then
   watched a display the broker never draws on — ten minutes at `starting`, with the real window
   left standing somewhere else.

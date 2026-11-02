@@ -132,7 +132,8 @@ impl Button {
 /// Where the broker draws, and whether anything is serving it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisplayState {
-    /// The broker names a display and its socket is there.
+    /// The broker names a display and something serves it here — its file socket, or its
+    /// abstract one (see `display_is_served`).
     Ready { display: String },
     /// The broker names a display that nothing is serving. Its own window cannot be drawn
     /// at all in this state — for any client, not only for us.
@@ -196,13 +197,48 @@ pub fn broker_display() -> DisplayState {
     match display {
         None => DisplayState::None,
         Some(display) => {
-            if display_socket(&display).is_some_and(|p| std::path::Path::new(&p).exists()) {
+            if display_is_served(&display) {
                 DisplayState::Ready { display }
             } else {
                 DisplayState::Missing { display }
             }
         }
     }
+}
+
+/// Is anything serving `display` where a connection from here would reach it?
+///
+/// TWO places, because the X server is in another container. On a containerized-Intune host the
+/// broker's Xvfb runs inside the Intune container: its FILE socket is in that container's `/tmp`,
+/// which this process does not see, and its ABSTRACT socket (`@/tmp/.X11-unix/X99`) is in the
+/// network namespace the container shares with the host. Asking for the file alone reported a
+/// display that was there as `Missing` — measured on 2026-11-02, the broker on `:99`, no
+/// `/tmp/.X11-unix/X99` on the host, `@/tmp/.X11-unix/X99` in `/proc/net/unix` — and the served
+/// sign-in was refused on the very machine it was built for. The connection itself never had
+/// this problem: x11rb tries the abstract name first and the file second, which is the order
+/// asked in here too.
+fn display_is_served(display: &str) -> bool {
+    let Some(path) = display_socket(display) else { return false };
+    let abstract_socket = || {
+        std::fs::read_to_string("/proc/net/unix")
+            .is_ok_and(|table| unix_table_lists_abstract(&table, &path))
+    };
+    abstract_socket() || std::path::Path::new(&path).exists()
+}
+
+/// Does a `/proc/net/unix` table hold a LISTENING abstract socket named `path`? The kernel
+/// prints an abstract name with a leading `@`, as the last column, and marks a listener with
+/// `__SO_ACCEPTCON` (`00010000`) in the fourth — which matters, because every connection the
+/// server ACCEPTED carries the listener's name too, and one of those outliving its server is
+/// not a display anybody serves. The header line names no socket. Split out so the parse is
+/// tested without a table to read.
+fn unix_table_lists_abstract(table: &str, path: &str) -> bool {
+    const LISTENING: &str = "00010000";
+    let wanted = format!("@{path}");
+    table.lines().skip(1).any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        fields.get(3) == Some(&LISTENING) && fields.last() == Some(&wanted.as_str())
+    })
 }
 
 /// The running broker's pids, most specific first. Empty when it is not resident, which is
@@ -619,6 +655,27 @@ mod tests {
         assert_eq!(display_socket("otherhost:0"), None);
         assert_eq!(display_socket("localhost:12.0"), None);
         assert_eq!(display_socket(""), None);
+    }
+
+    #[test]
+    fn an_abstract_socket_is_a_display_being_served() {
+        // The shape of /proc/net/unix as read on 2026-11-02, with the Intune container's Xvfb
+        // listening on its abstract name and the host's own displays on both kinds.
+        let table = "Num       RefCount Protocol Flags    Type St Inode Path\n\
+            0000000000000000: 00000002 00000000 00010000 0001 01 21512 @/tmp/.X11-unix/X99\n\
+            0000000000000000: 00000002 00000000 00010000 0001 01 19022 /tmp/.X11-unix/X0\n\
+            0000000000000000: 00000003 00000000 00000000 0001 03 33571\n\
+            0000000000000000: 00000003 00000000 00000000 0001 03 33572 @/tmp/.X11-unix/X98\n";
+        assert!(unix_table_lists_abstract(table, "/tmp/.X11-unix/X99"));
+        // A connection the server accepted carries its name and is no server: X98's listener
+        // is gone, and what is left of it does not make a display.
+        assert!(!unix_table_lists_abstract(table, "/tmp/.X11-unix/X98"));
+        // The FILE socket is not an abstract one; the file is asked about separately.
+        assert!(!unix_table_lists_abstract(table, "/tmp/.X11-unix/X0"));
+        // A display number is matched whole, never as a prefix of a longer one.
+        assert!(!unix_table_lists_abstract(table, "/tmp/.X11-unix/X9"));
+        // A socket with no name names nothing, and the header is not a row.
+        assert!(!unix_table_lists_abstract(table, "Path"));
     }
 
     #[test]
