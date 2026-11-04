@@ -39,10 +39,9 @@ ONLY THE ADDRESS IS CHECKED. On a provider where anybody may register an organiz
 account, or where another organization's admin (or Microsoft Entra's tenant) sets a user's
 address, somebody else can be given yours — pin your own user id with auth.oauth2Proxy.subjects.
 {{- end }}
-The web front listens on the
-pod's own loopback, so the sign-in is the only way to it — for the Service, every route, every
-other pod and the node alike. A sign-in lasts {{ .Values.auth.oauth2Proxy.cookieExpire }}; the page signs in again by itself when
-it runs out. Register {{ include "teams-lite.redirectUrl" . }} as the client's redirect URI.
+The web front listens on the pod's own loopback, so the sign-in is the only way to it — for the
+Service, every route, every other pod and the node alike. A sign-in lasts {{ .Values.auth.oauth2Proxy.cookieExpire }}; the page signs
+in again by itself when it runs out. Register {{ include "teams-lite.redirectUrl" . }} as the client's redirect URI.
 {{- if include "teams-lite.networkPolicyApplies" . }}
 A NetworkPolicy keeps other pods away from the sign-in's port too.
 {{- end }}
