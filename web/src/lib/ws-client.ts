@@ -128,11 +128,31 @@ export function needsRelay(
   return pointsAtLoopback(configured) && !isLoopbackHost(loc.hostname);
 }
 
-/** `configured`, or the relay on this page's own origin when that address cannot
- *  work from where the page is running (see {@link needsRelay}). */
-function reachableFromThisPage(configured: string): string {
-  if (!needsRelay(configured, globalThis.location)) return configured;
-  return backendUrlForPage(globalThis.location) ?? configured;
+/**
+ * Where this page's socket goes, given the backend the BUILD was pinned to (`VITE_TEAMS_WS_URL`, or
+ * nothing) and where the page is running.
+ *
+ * AN UNPINNED BUILD ALWAYS GOES THROUGH THE SERVER THAT SERVED IT, on this machine too. That server
+ * is web/server.ts by construction — a dev server is always pinned — and it relays the socket to the
+ * backend it was started against (`TEAMS_LITE_WS_URL`), which is the right one by construction. It
+ * used to dial `ws://127.0.0.1:19420` directly whenever the page was on loopback, which is correct
+ * for exactly one front: the always-on service's 19440. Every other one dialled the wrong backend
+ * from this machine — the released build on 19442, the container image on 19443, a
+ * `kubectl port-forward` — reaching the always-on service's backend with a token it refuses (the
+ * `foreign` write lock), or nothing at all. The cost is one loopback hop, which the relay already
+ * pays for every phone.
+ *
+ * A PINNED build keeps the address it names, relayed only when that address is loopback and the page
+ * is not (see {@link needsRelay}): the mock stays the mock, a dev page on this machine dials its
+ * backend directly, and the safety catch in {@link defaultWsUrl} keeps meaning what it says.
+ */
+export function chooseBackendUrl(
+  pinned: string | undefined,
+  loc: { protocol: string; host: string; hostname: string } | null | undefined,
+): string {
+  if (!pinned) return backendUrlForPage(loc) ?? PRODUCTION_WS_URL;
+  if (!needsRelay(pinned, loc)) return pinned;
+  return backendUrlForPage(loc) ?? pinned;
 }
 
 /**
@@ -150,10 +170,11 @@ function reachableFromThisPage(configured: string): string {
  * 1:1 chats because a restarted `vite dev` lost its `VITE_TEAMS_WS_URL`. Failing
  * loudly at startup costs one variable; the silent fallback costs a real message.
  *
- * Either way, a page opened from ANOTHER DEVICE goes through the relay instead:
- * whatever this machine calls "the backend", a loopback address does not name it
- * from a phone (see {@link needsRelay} and {@link backendUrlForPage}). That is what
- * makes the app usable over Tailscale without exposing the backend's own port.
+ * A production page goes through the server that served it, from any device (see
+ * {@link chooseBackendUrl}); a pinned page does when it runs on ANOTHER device, since a
+ * loopback address does not name this machine from a phone (see {@link needsRelay} and
+ * {@link backendUrlForPage}). That is what makes the app usable over Tailscale without
+ * exposing the backend's own port.
  *
  * Resolved lazily (a function, not a module constant) so importing this module
  * stays side-effect-free — unit tests construct `Backend` with an explicit URL
@@ -161,7 +182,7 @@ function reachableFromThisPage(configured: string): string {
  */
 export function defaultWsUrl(): string {
   const configured = (import.meta.env?.VITE_TEAMS_WS_URL as string | undefined)?.trim();
-  if (configured) return reachableFromThisPage(configured);
+  if (configured) return chooseBackendUrl(configured, globalThis.location);
   if (import.meta.env?.DEV) {
     throw new Error(
       "VITE_TEAMS_WS_URL is not set. A dev server must name its backend explicitly — " +
@@ -171,7 +192,7 @@ export function defaultWsUrl(): string {
         "work against your own account.",
     );
   }
-  return reachableFromThisPage(PRODUCTION_WS_URL);
+  return chooseBackendUrl(undefined, globalThis.location);
 }
 
 /**
@@ -350,8 +371,10 @@ export class Backend {
     const ws = new WebSocket(this.url);
     this.ws = ws;
     let settled = false;
+    let opened = false;
 
     ws.onopen = () => {
+      opened = true;
       this.reconnectDelay = this.initialDelayMs;
       this.firstFailureAt = null;
       this.reconnecting = false;
@@ -376,6 +399,11 @@ export class Backend {
       for (const p of this.pending.values()) p.reject(new Error("connection closed"));
       this.pending.clear();
       this.emit("disconnected", {});
+      // A socket that never OPENED is a handshake something refused, and the browser will not say
+      // what: a 302 to a sign-in page, a 401, a 403 and a backend that is down all arrive as the
+      // same bare close. Said separately, so the store can ask the question a socket cannot answer
+      // — is it the SIGN-IN in front of this app that expired (see lib/auth-wall.ts)?
+      if (!opened) this.emit("handshake_failed", {});
       this.scheduleReconnect();
     };
     ws.onmessage = (m) => this.onMessage(String(m.data));

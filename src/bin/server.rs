@@ -4378,14 +4378,93 @@ async fn serve() -> Result<()> {
 /// exist to state.
 const MAX_REQUEST_BYTES: usize = 128 * 1024 * 1024;
 
+/// Why a WebSocket handshake carrying this `Origin` is refused, or `None` when it may go through.
+///
+/// This port answers every read with no token, so a page on ANOTHER SITE that opens a socket here
+/// reads the user's chats, mail and calendar: WebSockets are outside the same-origin policy, and the
+/// backend is on 127.0.0.1 of exactly the machine whose browser that page is running in. A browser
+/// always says which page asked, and the only page that should ever dial this socket itself is one
+/// this machine serves on loopback — a dev build pinned at it. Every other path to it is a server
+/// that relays the page (web/server.ts, the Vite dev proxy), and a relay's own socket sends no
+/// Origin: the production relay because Bun's client sends none (measured), the dev proxy because it
+/// takes the decision itself (web/request-origin.ts) and strips it.
+///
+/// So: NO Origin is not a page and goes through — the relays, the launcher's keepalive, an example,
+/// none of which an Origin was ever going to stop. A LOOPBACK origin is this machine's own page. Any
+/// other origin, `null` included (a sandboxed frame, a `data:` page), is refused before the
+/// handshake completes. It refuses names rather than resolving them, so a DNS-rebinding page —
+/// same-origin under the attacker's name — is refused too.
+fn ws_origin_refusal(origin: Option<&str>) -> Option<String> {
+    let origin = origin?.trim();
+    let refusal = || {
+        Some(format!(
+            "a page on {origin} may not open the backend's socket: only a page this machine serves \
+             on loopback, or a server that relays it, may"
+        ))
+    };
+    let authority = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"));
+    let Some(authority) = authority else { return refusal() };
+    if authority.is_empty() || authority.contains(['/', '@', '?', '#']) {
+        return refusal();
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inside, tail)) if tail.is_empty() || tail.strip_prefix(':').is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())) => inside,
+            _ => return refusal(),
+        }
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+            Some(_) => return refusal(),
+            None => authority,
+        }
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    // The UNSPECIFIED address counts as this machine too: a browser routes `0.0.0.0` (and `[::]`)
+    // to itself, so only a local listener can serve a page of that origin — and the page itself
+    // calls it loopback (`LOOPBACK_HOSTS` in web/src/lib/ws-client.ts), so a pinned dev page opened
+    // at http://0.0.0.0:19440 (`teams --dev --host 0.0.0.0`) dials this socket directly.
+    let loopback = host == "localhost"
+        || host.ends_with(".localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified());
+    if loopback {
+        None
+    } else {
+        refusal()
+    }
+}
+
+/// The last origin a refusal was logged for, so a page retrying in a loop says so once.
+static LAST_REFUSED_ORIGIN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// Handle one UI connection: answer requests + forward broadcast events.
 async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTracker) -> Result<()> {
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
         max_message_size: Some(MAX_REQUEST_BYTES),
         max_frame_size: Some(MAX_REQUEST_BYTES),
         ..Default::default()
     };
-    let ws = tokio_tungstenite::accept_async_with_config(stream, Some(config)).await?;
+    // The Origin check, decided BEFORE the handshake answers, so a refused page is never upgraded
+    // and never reads a single frame (see `ws_origin_refusal`).
+    let check_origin = |request: &Request, response: Response| -> std::result::Result<Response, ErrorResponse> {
+        let origin = request.headers().get("origin").map(|v| v.to_str().unwrap_or("(not text)"));
+        let Some(reason) = ws_origin_refusal(origin) else { return Ok(response) };
+        if let Ok(mut last) = LAST_REFUSED_ORIGIN.lock() {
+            if last.as_deref() != origin {
+                eprintln!("[ws] refused a handshake: {reason}");
+                *last = origin.map(str::to_string);
+            }
+        }
+        let mut refused = ErrorResponse::new(Some(reason));
+        *refused.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN;
+        Err(refused)
+    };
+    let ws = tokio_tungstenite::accept_hdr_async_with_config(stream, check_origin, Some(config)).await?;
     let _client_lease = clients.connect();
     let (mut write, mut read) = ws.split();
     let mut events_rx = ctx.events.subscribe();
@@ -16976,6 +17055,48 @@ mod tests {
                  script scan"
             );
         }
+    }
+
+    #[test]
+    fn a_browser_page_may_dial_the_backend_only_from_loopback() {
+        // No Origin is not a page: the relays, the launcher's keepalive, an example.
+        assert_eq!(ws_origin_refusal(None), None);
+        for origin in [
+            "http://127.0.0.1:19441",
+            "http://localhost:19441",
+            "http://app.localhost:5173",
+            "http://[::1]:19441",
+            "http://127.0.0.2",
+            "https://localhost.",
+            "http://0.0.0.0:19440",
+            "http://[::]:19440",
+        ] {
+            assert_eq!(ws_origin_refusal(Some(origin)), None, "{origin}");
+        }
+        for origin in [
+            "https://evil.example",
+            "http://localhost.evil.example",
+            "https://box.tail1.ts.net:8443",
+            "http://192.168.1.10:19440",
+            "null",
+            "file://",
+            "http://127.0.0.1:x",
+            "http://[::1",
+            "http://user@127.0.0.1",
+            "ws://127.0.0.1",
+            "",
+        ] {
+            assert!(ws_origin_refusal(Some(origin)).is_some(), "{origin}");
+        }
+    }
+
+    #[test]
+    fn the_origin_check_runs_before_the_handshake_answers() {
+        let source = include_str!("server.rs");
+        let serve = &source[source.find("async fn serve_conn(").expect("serve_conn")..];
+        let serve = &serve[..serve.find("\n}\n").expect("end of serve_conn")];
+        assert!(serve.contains("accept_hdr_async_with_config(stream, check_origin"), "the handshake is not checked");
+        assert!(!serve.contains("accept_async_with_config("), "an unchecked accept is back");
     }
 
     #[test]

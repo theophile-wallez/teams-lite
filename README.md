@@ -525,6 +525,11 @@ Anything that can reach the web port can send as you, so it ships as a ClusterIP
 Ingress, and a NetworkPolicy that lets no other pod in. To reach it from your phone, use the
 Tailscale operator: `--set ingress.enabled=true --set ingress.className=tailscale
 --set 'ingress.tls[0].hosts[0]=teams-lite' --set 'networkPolicy.allowNamespaces[0]=tailscale'`.
+To reach it from anywhere without a VPN client, the chart runs a sign-in in front of it —
+oauth2-proxy beside the app in the pod (`auth.oauth2Proxy`), OpenID Connect against your provider,
+letting in only the addresses you list — and publishes it through your Gateway with an HTTPRoute
+(`httpRoute`); it refuses a public route with no sign-in in front. The chart's README has
+[the whole walk-through](packaging/helm/teams-lite/README.md#publishing-it-a-sign-in-in-front-and-a-gateway-api-route).
 `helm uninstall` keeps both volume claims; deleting the `intune-…` one unenrolls the pod. Every
 value — the user-namespace opt-in instead of privileged, the microVM-runtime declaration
 (`broker.embedded.vmIsolated`), the classic Intune `sessionBus` mode, the trade-offs `hostNetwork`

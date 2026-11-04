@@ -19,6 +19,7 @@ import { WRITE_TOKEN_ROUTE, writeTokenResponse } from "./write-token";
 import { CHESS_SOUND_ROUTE, chessSoundFileResponse } from "./chess-sound-file";
 import { ENGINE_ROUTE, engineFileResponse } from "./engine-file";
 import { bundleWasReplaced, readBuildInfo, refuseToServeReason } from "./build-info";
+import { ALLOWED_HOSTS_ENV, hostVerdict, policyFromEnv, upgradeVerdict } from "./request-origin";
 
 const here = import.meta.dir;
 const distDir = join(here, "dist");
@@ -60,13 +61,71 @@ const hostname = process.env.HOST ?? "127.0.0.1";
  */
 const backendWsUrl = process.env.TEAMS_LITE_WS_URL?.trim() || "ws://127.0.0.1:19420";
 
+/**
+ * Which names this server answers to and which pages may open its socket (see request-origin.ts).
+ * Read once: a change is a restart, like every other variable this server reads.
+ */
+// The name this server was told to bind is one it answers to: `teams --host mybox.lan` opens that
+// URL itself, and refusing it would be the app refusing its own front door.
+const originPolicy = policyFromEnv(process.env, [hostname]);
+if (originPolicy.anyHost) {
+  console.warn(
+    `[teams-web] ${ALLOWED_HOSTS_ENV} contains "*": this server answers to ANY name, so a DNS-rebinding ` +
+      `page can read the write token. The socket's Origin check still applies.`,
+  );
+}
+
 /** Per-connection state for one page socket relayed to the backend. */
 type Relay = {
-  /** Our socket to the backend, opened when the page's socket opens. */
+  /** Our socket to the backend, already OPEN when the page's is accepted (see `openUpstream`). */
   upstream: WebSocket | null;
-  /** Frames from the page that arrived before `upstream` finished opening. */
-  pending: (string | ArrayBufferLike | ArrayBufferView)[];
+  /** What the backend sent between its socket opening and the page's — its greeting. */
+  early: unknown[];
 };
+
+/** How long a page's handshake waits for the backend's socket to open before it is refused. */
+const UPSTREAM_OPEN_TIMEOUT_MS = 10_000;
+
+/**
+ * Our socket to the backend, OPEN, with whatever it said before anybody was listening — or null
+ * when it does not open.
+ *
+ * The page's handshake is completed only once this has opened, and that order is the point. It used
+ * to be the other way round: the page's socket was accepted at once and ours opened afterwards, so
+ * with the backend down — a restart from Settings, an update, a crash the launcher is mending — the
+ * page saw its socket OPEN and then close. An open resets the page's reconnect backoff, so it
+ * redialled every 500 ms for as long as the backend was gone, never reached "Backend lost", and
+ * re-synced its whole state on every one of those "reconnects". Refused instead, the handshake is
+ * one that never opened: the backoff grows, the page says the backend is lost when it is, and its
+ * sign-in probe (web/src/lib/auth-wall.ts) finds this server answering and does not mistake a
+ * backend that is down for a sign-in that expired.
+ */
+function openUpstream(): Promise<{ upstream: WebSocket; early: unknown[] } | null> {
+  return new Promise((resolve) => {
+    const upstream = new WebSocket(backendWsUrl);
+    const early: unknown[] = [];
+    let settled = false;
+    const settle = (value: { upstream: WebSocket; early: unknown[] } | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      settle(null);
+      try {
+        upstream.close();
+      } catch {
+        // Never opened: nothing to release.
+      }
+    }, UPSTREAM_OPEN_TIMEOUT_MS);
+    // The backend greets a connection the moment it opens; held here until the page's socket is.
+    upstream.onmessage = (event: MessageEvent) => early.push(event.data);
+    upstream.onopen = () => settle({ upstream, early });
+    upstream.onerror = () => settle(null);
+    upstream.onclose = () => settle(null);
+  });
+}
 
 // Ceiling on a single relayed frame, both ways. Generous because the protocol
 // carries proxied media inline: `fetch_media` and `mail_attachment` answer with a
@@ -232,16 +291,38 @@ export const server = Bun.serve<Relay>({
   idleTimeout: 60,
   async fetch(request, server) {
     const url = new URL(request.url);
+    const header = (name: string) => request.headers.get(name);
+    // FIRST, on every request: a name this app does not answer to is a DNS-rebinding page as far as
+    // this server can tell, and it must not be handed even the shell — let alone the write token.
+    const host = hostVerdict(header, originPolicy);
+    if (!host.ok) {
+      reportOnce(`refused a request: ${host.reason}`);
+      return plainPage(403, "teams-lite does not answer to this address", host.reason);
+    }
     // A WebSocket upgrade is always the page asking for the backend: the app opens
-    // exactly one socket, on `BACKEND_WS_ROUTE` (see `defaultWsUrl` in
-    // src/lib/ws-client.ts; the dev server proxies the same path). Relaying it is
-    // what lets the app work from another device — a phone's own 127.0.0.1 is not
-    // this machine's backend, and an https: page may not open a plaintext ws:// at
-    // all — while the backend itself stays bound to loopback. Any path is accepted:
+    // exactly one socket, on `BACKEND_WS_ROUTE`, and a page this server served ALWAYS opens
+    // it here (see `defaultWsUrl` in src/lib/ws-client.ts; the dev server proxies the same
+    // path). Relaying it is what lets the app work from another device — a phone's own
+    // 127.0.0.1 is not this machine's backend, and an https: page may not open a plaintext
+    // ws:// at all — and what makes it reach THIS server's backend from this machine too,
+    // while the backend itself stays bound to loopback. Any path is accepted:
     // this server has no other socket to confuse it with, and matching loosely
     // keeps it working if the route ever moves.
+    //
+    // It is also the one request a page on ANOTHER site can make here and read the answer of —
+    // WebSockets are outside the same-origin policy — so the page that asked has to be this app's.
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      if (server.upgrade(request, { data: { upstream: null, pending: [] } })) return undefined;
+      const verdict = upgradeVerdict(header, originPolicy);
+      if (!verdict.ok) {
+        reportOnce(`refused a WebSocket: ${verdict.reason}`);
+        return new Response(verdict.reason, { status: 403 });
+      }
+      const opened = await openUpstream();
+      if (!opened) {
+        return new Response("the teams-lite backend is not reachable", { status: 502 });
+      }
+      if (server.upgrade(request, { data: opened })) return undefined;
+      opened.upstream.close();
       return new Response("expected a WebSocket upgrade", { status: 400 });
     }
     // The app's page cannot read the backend's write token from disk, so hand it
@@ -289,40 +370,44 @@ export const server = Bun.serve<Relay>({
     // reconnects and reissues, whereas a hole in the stream would hang a request
     // until its timeout with no way to tell what went missing.
     closeOnBackpressureLimit: true,
-    // Bun pings on its own (`sendPings` defaults to true) and browsers answer, so
-    // an idle chat stays open instead of being torn down every couple of minutes.
-    idleTimeout: 120,
+    // Bun pings on its own (`sendPings` defaults to true) and browsers answer, so an idle chat
+    // stays open — and the ping is also what keeps every PROXY between the page and here from
+    // calling the socket idle. Bun sends it once a socket has been quiet for HALF this value
+    // (measured: 16 s pinged at 8, 16, 24, …), so the 120 s this used to be let a socket sit silent
+    // for 60 s — exactly the idle limit of ingress-nginx (`proxy-read-timeout`) and of an AWS load
+    // balancer, which then raced the ping and cut the socket. 50 s means no socket is quiet for more
+    // than 25 s: under every common default (nginx and ALB 60 s, Cloudflare 100 s) — measured
+    // through oauth2-proxy too — and a page that stops answering is still let go within a minute.
+    idleTimeout: 50,
 
     open(ws) {
-      const upstream = new WebSocket(backendWsUrl);
-      ws.data.upstream = upstream;
-      upstream.onopen = () => {
-        for (const frame of ws.data.pending) upstream.send(frame as string);
-        ws.data.pending = [];
-      };
+      const upstream = ws.data.upstream;
+      // The backend's greeting first, in the order it was said, then everything after it.
+      for (const frame of ws.data.early) ws.send(frame as string);
+      ws.data.early = [];
+      if (!upstream) {
+        ws.close(1011, "backend unreachable");
+        return;
+      }
       upstream.onmessage = (event: MessageEvent) => ws.send(event.data);
       upstream.onclose = () => ws.close();
-      // A refused connection means no backend is listening. Close with "server
-      // error" so the page's own reconnect/backoff handles it (see ws-client.ts)
-      // instead of waiting on requests that can never be answered.
+      // The backend going away mid-session: close with "server error" so the page's own
+      // reconnect/backoff handles it (see ws-client.ts) instead of waiting on requests that can
+      // never be answered.
       upstream.onerror = () => ws.close(1011, "backend unreachable");
+      // It may have closed between the handshake and now, with nobody listening to say so.
+      if (upstream.readyState !== WebSocket.OPEN) ws.close(1011, "backend unreachable");
     },
 
     message(ws, message) {
+      // Ours is open before the page's is accepted, so nothing has to be held: a frame for a
+      // backend that has just gone is dropped with the socket the close above is taking down.
       const upstream = ws.data.upstream;
-      if (!upstream) return;
-      // The page can send as soon as ITS socket is open, which happens before ours
-      // to the backend is — hold those frames rather than dropping them, or the
-      // first request of every session (`conversations`) would vanish.
-      if (upstream.readyState !== WebSocket.OPEN) {
-        ws.data.pending.push(message);
-        return;
-      }
-      upstream.send(message as string);
+      if (upstream?.readyState === WebSocket.OPEN) upstream.send(message as string);
     },
 
     close(ws) {
-      ws.data.pending = [];
+      ws.data.early = [];
       try {
         ws.data.upstream?.close();
       } catch {

@@ -11102,7 +11102,9 @@ older build never overwrites `latest`.
 compose.yaml, entrypoint.sh, install.sh and the launcher so the chart cannot drift from them), and
 every variant validated against the Kubernetes API schemas by kubeconform in strict mode, for the
 oldest version `Chart.yaml` claims (1.25) and a current one (1.33, where the shapes only 1.30 and
-later accept are validated) — and ci.yml and build.yml both run that one script. The rules below
+later accept are validated) — the HTTPRoute against the Gateway API's own schema, from the CRDs
+catalog at a pinned commit, since kubeconform's default location does not carry it — and ci.yml and
+build.yml both run that one script. The rules below
 hold it, and the render tests pin every one of them but three halves, which rest on a measurement
 or on nothing and say so: the read-only-root run, the build-from-source reasoning (the tests pin
 the job's Dockerfile, platform and uid, not why), and everything about a cluster, which nothing has
@@ -11324,9 +11326,20 @@ Kubernetes refuses to change in place: uninstall first (the claims are kept), th
   reach its own pods (k3s's kube-router accepts it explicitly), so every process of every account
   on the machine and every hostNetwork pod there can still reach the port — which is also how the
   probes and `kubectl port-forward` work. An earlier draft said the policy "lets nobody in"; review
-  corrected it. Host-level isolation is the node's firewall, or `hostNetwork`. The ports are the
-  image's own (19423 / 19443), left to its entrypoint rather than restated, so a read-only release
-  keeps 19430.
+  corrected it. Host-level isolation is the node's firewall, or `hostNetwork` — or the sign-in
+  sidecar below, which moves the web front onto the POD's loopback, out of the node's reach too.
+  The ports are the image's own (19423 / 19443), left to its entrypoint rather than restated, so a
+  read-only release keeps 19430.
+- **A ROUTE BEYOND THE TAILNET NEEDS A SIGN-IN IN FRONT, and the chart refuses one without it.**
+  An HTTPRoute, a NodePort or LoadBalancer Service, an Ingress of any class but `tailscale`, and a
+  Tailscale Ingress carrying the `tailscale.com/funnel` annotation (which publishes it to the
+  internet) each render only with `auth.oauth2Proxy` (below) or `auth.external` — the user's WORD
+  that something in front authenticates every request (an ingress controller's auth annotations,
+  a Gateway SecurityPolicy, Cloudflare Access) or that only a trusted network reaches it, which
+  the chart cannot check and NOTES says so. It is CLAUDE.md's "Tailscale, never Funnel" turned into
+  a render rule: the tailnet is a wall, a hostname on the internet is not. The Service types were
+  open before this, and the independent review that found it noted as much; they are refused now
+  because a LoadBalancer with nothing in front is the easiest way there is to publish the account.
 - **`readOnly: true` HAS THE LAST WORD.** It writes `TEAMS_LITE_READ_ONLY=1` AFTER `extraEnv`, so
   nothing a value adds can turn a release installed read-only into one that sends: with Helm 3's
   client-side apply a container's later entry for a name wins, and Helm 4's server-side apply
@@ -11414,9 +11427,11 @@ shell will put there (`:$TAG`) — a first version of that widening narrowed the
 `teams-lite:$TAG` through, which review caught. What it CANNOT see: a manifest applied from a URL or a
 kustomization (`-k`), a helmfile it cannot read, a release with another name upgraded, scaled or
 uninstalled by that name alone, a claim of such a release deleted by its own name, a `kubectl drain`
-of the node, a delete of the PersistentVolume under a claim, and an Ingress, NodePort or
+of the node, a delete of the PersistentVolume under a claim, and an Ingress, HTTPRoute, NodePort or
 LoadBalancer on a hostname or port of the user's own — a live front neither guard can recognize,
 while a `*.ts.net` one is, which is one more reason the Tailscale operator is the recommended way in.
+The sign-in sidecar's port (`auth`, 4180) needs nothing of the guard: a port-forward onto it is still
+judged by its LOCAL port, and 19443 is the one to forward.
 
 **What is VERIFIED, and what is not.** Verified on this workstation, offline: the chart renders,
 lints strict, passes its render tests, and every variant — the embedded default, its read-only
@@ -11436,6 +11451,176 @@ gives the AppArmor setting for 1.30+ and the annotation before it), the NetworkP
 and the Tailscale Ingress are all unexercised; and the publishing jobs have not run yet, so the GHCR
 packages' visibility and the chart package's link to its repository (through `sources[0]`, which
 `helm push` writes as the OCI source annotation) are what the first push to master will show.
+
+### Published beyond the tailnet: a sign-in INSIDE the pod, and a Gateway API route
+
+Option 1 is the Tailscale operator's Ingress, above. Option 2 is the internet, and the chart offers
+it as two values that are meant to be used together: **`auth.oauth2Proxy`** runs oauth2-proxy as a
+SIDECAR in the pod, and **`httpRoute`** publishes the Service through a Gateway the cluster already
+runs (`gateway.networking.k8s.io/v1`, `templates/httproute.yaml`). An Ingress takes the same sidecar.
+Ten rules hold it, and `packaging/helm/chart.test.ts` pins each:
+
+- **A SIDECAR, never a separate proxy, because of the node.** With the sign-in in front, the web
+  front listens on the POD's 127.0.0.1 (`TEAMS_WEB_HOST`, which extraEnv may no longer set), the
+  Service and the NetworkPolicy target the sidecar's port (`auth`, 4180), and so the sign-in is the
+  only way to the app for the route, every other pod AND the node — which no NetworkPolicy keeps
+  out, and which a separate oauth2-proxy Deployment would have left with a direct path around it.
+  The one way around it left is `kubectl port-forward pod/…-0 19443:19443`, which lands on the
+  pod's loopback; whoever may port-forward in the namespace holds the account either way.
+- **So the app container is probed from INSIDE**: a kubelet's TCP probe comes from the node and
+  cannot reach a pod's loopback, so the probes become `exec` of the image's own bash
+  (`exec 3<>/dev/tcp/127.0.0.1/19443`; Debian trixie's, measured to refuse a closed port), and the
+  sidecar is probed on its own `/ping` and `/ready`.
+- **Only the listed addresses get in**: `auth.oauth2Proxy.emails` (required, one address each — the
+  schema refuses `*`, a bare domain and anything that is not an address) in a ConfigMap read by
+  `--authenticated-emails-file`, and never `--email-domain`, which would widen it to a domain (`*` to
+  every account at the provider). oauth2-proxy also refuses an address its provider has not verified.
+- **The cookie is `__Host-teams-lite`, Secure, HttpOnly, SameSite=Lax**: no sibling name under the
+  same domain can plant or overwrite it, and Lax rather than Strict because the provider's redirect
+  back is a cross-site navigation that must carry it. A sign-in lasts `cookieExpire` (168h, its
+  default). `cookieRefresh` is OFF, and that is a finding rather than a default: read from
+  oauth2-proxy v7.15.5's own `stored_session.go`, a session older than the refresh period is
+  re-validated against the provider's TOKEN expiry once a refresh is attempted — so with a provider
+  that issues no refresh token, refresh on means signing in about every hour.
+- **The page signs in again by itself** (`web/src/lib/auth-wall.ts`), and the sidecar is shaped for
+  it: `--api-route=^/__write-token$` makes an expired session answer that route with a 401 instead of
+  a redirect. A WebSocket handshake cannot follow a redirect and the browser tells a page nothing
+  about why one failed, so the page used to retry a socket the wall would never let through and say
+  "Backend lost" over a backend that was fine. Now a socket that never OPENED (`handshake_failed`,
+  `Backend` in ws-client.ts) sends one probe of that route with `redirect: "manual"`; a 401 or a
+  redirect is a sign-in. A VISIBLE page then reloads — the one request a browser follows through
+  the provider and back — but ONLY when a reload loses nothing (`signInRemedy`): a thread's draft, a
+  typed title and pasted pictures live in this page alone (each composer reports them,
+  `lib/unsent-work.ts`), and a reload would drop a live call's audio too. When something would be
+  lost the reader gets a BAR instead, not the blocking overlay, so the words are still there to copy,
+  with "Sign in again" one press away; the blocking "Backend lost" overlay stands aside while it is
+  up. An automatic reload happens at most once per five minutes (sessionStorage; the bar inside that
+  window), and never where storage is refused — a loop is the one outcome it must never have. 403 is
+  a refusal, not a sign-in, so it reloads into nothing. The app's own servers never answer that route
+  with a redirect or a 401, so without a wall in front this never fires. That the reload could lose
+  work was the independent review's finding; the first version reloaded regardless.
+- **What is open without a session is what INSTALLING the app takes**: the manifest, the PNG icons
+  and the favicon, each by an anchored pattern admitting one file name of its own shape. A browser
+  fetches a manifest without cookies unless told, so the page now says `crossorigin=
+  "use-credentials"` on it too — the fix for every other wall (Cloudflare Access, Pomerium) — and
+  the skip route covers the icons and a browser that ignores the attribute.
+- **The callback is derived, never guessed**: `auth.oauth2Proxy.redirectUrl`, else
+  `https://<the first non-wildcard route hostname>/oauth2/callback`; neither is a refusal. NOTES
+  names it, since it has to be registered at the provider.
+- **The app answers to every route's names**: the chart writes `TEAMS_LITE_ALLOWED_HOSTS` from every
+  `httpRoute.hostnames` and `ingress.hosts` entry (a wildcard as a domain), the callback's host and
+  `web.allowedHosts` — see § Who may reach the web front for why a Host it does not know is refused,
+  and why extraEnv may not write it.
+- **An HTTPRoute is one rule for every path**, to the Service. It is refused without `parentRefs`,
+  on `hostNetwork`, and behind a NetworkPolicy that lets nothing in (the Gateway's proxies have to be
+  named: envoy-gateway-system for Envoy Gateway, the Gateway's own namespace for Istio and kgateway).
+  WebSockets are an implementation's business in Gateway API; the common ones proxy an Upgrade on an
+  HTTPRoute as they are, and `httpRoute.timeouts` (`request: "0s"`) is for one that applies a request
+  timeout to it. `httpRoute.filters` carries HSTS where the Extended ResponseHeaderModifier is
+  supported.
+- **Every annotation value is rendered as a STRING** (`teams-lite.annotations`). kubeconform caught
+  it on the new Funnel variant: `--set ingress.annotations.tailscale\.com/funnel=true` reads as a
+  boolean and `proxy-read-timeout=3600` as a number, and either renders a manifest the API server
+  refuses.
+
+**MEASURED under Docker, through the chart's own flags** — oauth2-proxy v7.15.5 run with exactly the
+args `helm template` renders (only the issuer, the port and the callback's port swapped for the test),
+a stand-in OpenID Connect provider (`ghcr.io/navikt/mock-oauth2-server`), the app's own production
+server (web/server.ts) and its mock backend, on 2026-11-04. Every flag parsed, the `__Host-` cookie
+included. With no session: the page and the socket answered 302 to the provider, the manifest, an
+icon and the favicon answered 200, an `--api-route` path answered 401 (measured on a stand-in path:
+the token route is the guard's to protect, and the test relay ran with a dummy token so it could
+never serve the real one), and `/icons/../…` was redirected by oauth2-proxy rather than served.
+Signed in: the page loaded through the proxy and the relay (so the forwarded Host passed the app's
+own check); a socket opened with the app's own Origin answered 101 and carried a real request to the
+backend; the SAME cookie with another site's Origin was refused 403 by the relay — the hijacking a
+cookie wall alone would have allowed; an address taken off the list was refused at sign-in AND cut
+off in an existing session on its next request, the list reloaded live (`reloading after event:
+WRITE`); and an idle socket stayed open past 55 s with the relay's ping arriving after 25 s of
+silence. NOT measured: a real Gateway, a real provider, a cluster, the ConfigMap's symlink-swap
+update (only an edit of the file), and the page's reload or its bar through a real browser.
+
+**AND AN INDEPENDENT REVIEW READ IT ALL**, as a workflow of four reviewers and a skeptic per finding:
+of ten findings, eight held (two of them the same `0.0.0.0` case) and were fixed here — the forwarded-header bypass of the Host check
+(above), the reload that could lose unsent work (above), an allowed-host entry with a port that never
+matched while the 403 told the reader to add exactly that, the server refusing the name it was bound
+to, the backend refusing a `0.0.0.0` page the page calls loopback, a values FILE's whole numbers
+rendered as `3.1536e+07` annotations, and the values.yaml Secret command collapsed onto one line.
+
+## Who may reach the web front (an ADDRESS, and a PAGE, of its own)
+
+The web front hands the write token to every page it serves and relays that page's socket to a
+backend whose reads need no token, so "who can make a browser talk to it" is the whole account. Two
+browser attacks reach it without the attacker touching this machine, and `web/request-origin.ts`
+answers both — imported by the production server (web/server.ts) and the dev server's proxy
+(vite.config.ts), so the two cannot disagree, and naming nothing from Bun, because vite.config.ts is
+evaluated under Node:
+
+- **CROSS-SITE WEBSOCKET HIJACKING.** WebSockets are outside the same-origin policy, so a page on
+  any site could open the app's socket — on loopback, on the tailnet, or behind a sign-in wall whose
+  cookie the browser attaches — and read every chat. An upgrade is refused unless its `Origin` is
+  SAME-ORIGIN with the address it came in on (the Host, or a proxy's X-Forwarded-Host or
+  `Forwarded: host=` — trustworthy HERE only, because a WebSocket handshake is the one request a page
+  cannot add a header to), or listed in `TEAMS_LITE_ALLOWED_ORIGINS`. No Origin is not a page and
+  goes through; `null` (a sandboxed frame, a `data:` page) does not. An allowed NAME is not an
+  allowed ORIGIN: somebody else's Funnel is under `.ts.net` too.
+- **DNS REBINDING.** A page served under the attacker's name and then re-pointed at 127.0.0.1 is
+  same-origin with the app, so the Origin check passes and so does a read of the token route. What
+  the browser cannot fake is the name it used, so EVERY request is refused (403, a page naming the
+  variable) unless its HOST — Host alone — is a loopback name, an IP literal, a tailnet name under
+  `.ts.net`, the name the server was told to bind (`teams --host mybox.lan`), or one of
+  `TEAMS_LITE_ALLOWED_HOSTS` (a leading `.` covers subdomains, a port is ignored; `*` turns it off
+  and the server says so). HOST ALONE, and that is a correction the independent review made: the
+  first version also took X-Forwarded-Host and `Forwarded: host=`, on the belief that no page can
+  set them. They are not forbidden headers, so a rebound page's same-origin `fetch` — no preflight —
+  could name 127.0.0.1 in one while its Host named the attacker, and read the token. A proxy that
+  rewrites Host to our own address still passes, because addresses are built in. That is Vite's own
+  `allowedHosts`, which the dev server already enforced; the production server had nothing. The
+  chart writes the variable from its routes (above); the always-on service and the container need
+  none, because they are reached on loopback and `.ts.net`.
+
+**THE BACKEND REFUSES A BROWSER IT WAS NOT MEANT TO MEET** (`ws_origin_refusal` in
+src/bin/server.rs, decided in the handshake's own callback so a refused page never reads a frame):
+no Origin goes through — the production relay's own socket sends none (Bun's client, measured), the
+launcher's keepalive and every example likewise — a LOOPBACK origin is this machine's own page (a
+pinned dev build dialling it directly; the unspecified `0.0.0.0` and `[::]` count, as the page itself
+counts them, because a browser routes them to this machine), and any other origin is refused, rebound names included,
+because it refuses names rather than resolving them. That is what made the dev proxy's change
+necessary: it checks the upgrade with the same policy and then STRIPS the Origin, exactly what the
+production relay's upstream already is — stripping it unchecked would have handed the backend a page
+from any site.
+
+**AN UNPINNED PAGE ALWAYS USES ITS OWN RELAY** (`chooseBackendUrl` in ws-client.ts), and that was a
+bug fix found on the way here. A page on loopback used to dial `ws://127.0.0.1:19420` directly, which
+is right for exactly one front — the always-on service's 19440. The released build on 19442, the
+container image on 19443 and a `kubectl port-forward` all reached the ALWAYS-ON service's backend from
+this machine with a token it refuses (the `foreign` write lock), or nothing. The server that served
+an unpinned page is web/server.ts by construction, and it relays to the backend it was started
+against; the cost is one loopback hop. A pinned build (a dev server, the E2E suite) keeps the address
+it names. The E2E suite's relay now names its upstream too (`TEAMS_LITE_WS_URL` = the mock): it
+defaulted to 19420, the user's real backend, and `e2e/relay-origin.spec.ts` opens a socket through it
+on purpose. And its token is a stand-in (`TEAMS_LITE_WRITE_TOKEN`): unset, web/write-token.ts read the
+REAL backend's published token off this machine and handed it to every page the suite drove.
+
+**AND THE RELAY OPENS THE BACKEND'S SOCKET BEFORE IT ACCEPTS THE PAGE'S** (`openUpstream` in
+web/server.ts), which routing every page through it made necessary rather than nice. It accepted the
+page first and dialled the backend afterwards, so with the backend down — a restart from Settings, an
+update, a crash the launcher is mending — the page saw its socket OPEN and then close: an open resets
+the reconnect backoff, so it redialled every 500 ms, never reached "Backend lost", and re-synced its
+whole state on every one of those reconnects. Phones always had that; local pages joined them the
+moment they used the relay. Now the handshake waits for the backend (bounded at 10 s, its greeting
+held and replayed) and is refused 502 when it does not come — a handshake that never opened, which
+also tells the sign-in probe the wall is not the problem.
+
+**AND THE RELAY PINGS A SOCKET QUIET FOR 25 s** (`idleTimeout: 50`; Bun pings at half of it,
+measured). It was 120, so a quiet socket sat silent for 60 s — exactly ingress-nginx's and an AWS
+load balancer's idle limit, which raced the ping and cut it.
+
+`request-origin.test.ts` pins the policy, `e2e/relay-origin.spec.ts` pins that the production server
+applies it to every request and before an upgrade reaches the backend,
+`a_browser_page_may_dial_the_backend_only_from_loopback` and
+`the_origin_check_runs_before_the_handshake_answers` pin the backend's half, and `stage-bundle.ts`
+ships the module (without it the staged server does not start).
 
 ## A broken sign-in costs the LIVE feed, never the history
 

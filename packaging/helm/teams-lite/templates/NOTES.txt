@@ -27,11 +27,27 @@ token and can post as the account enrolled there.
 This is a send-capable Teams client signed in as the node's user ({{ .Values.hostUser.uid }}:{{ .Values.hostUser.gid }}).
 Whatever can open its web port is handed the write token and can post as them.
 {{- end }}
+{{- if include "teams-lite.oauth2Proxy" . }}
+{{- $emails := .Values.auth.oauth2Proxy.emails }}
+
+In front of it, oauth2-proxy signs in against {{ .Values.auth.oauth2Proxy.issuerUrl }} and lets in
+{{ len $emails }} address{{ if gt (len $emails) 1 }}es{{ end }} and nobody else ({{ join ", " $emails }}). The web front listens on the
+pod's own loopback, so the sign-in is the only way to it — for the Service, every route, every
+other pod and the node alike. A sign-in lasts {{ .Values.auth.oauth2Proxy.cookieExpire }}; the page signs in again by itself when
+it runs out. Register {{ include "teams-lite.redirectUrl" . }} as the client's redirect URI.
 {{- if include "teams-lite.networkPolicyApplies" . }}
+A NetworkPolicy keeps other pods away from the sign-in's port too.
+{{- end }}
+{{- else if include "teams-lite.networkPolicyApplies" . }}
 A NetworkPolicy keeps other pods away from that port; nothing keeps out the node itself (every
 process on the machine, every hostNetwork pod there).
 {{- else if not .Values.hostNetwork }}
 NO NetworkPolicy: every pod in the cluster can reach that port.
+{{- end }}
+{{- if and .Values.auth.external (include "teams-lite.publishedBeyondTailnet" .) (not (include "teams-lite.oauth2Proxy" .)) }}
+
+auth.external: the chart was told that something in front of this route authenticates every
+request. It cannot check that — if nothing does, the route is a public door to the account.
 {{- end }}
 
 Open it:
@@ -39,6 +55,18 @@ Open it:
 
   # The web front is on the NODE's loopback (hostNetwork). From the node: http://127.0.0.1:19443
   kubectl -n {{ .Release.Namespace }} port-forward pod/{{ $fullname }}-0 19443:19443
+{{- else if include "teams-lite.oauth2Proxy" . }}
+{{- with (include "teams-lite.redirectUrl" .) }}
+
+  # Through the sign-in: {{ printf "https://%s/" (urlParse .).host }}
+{{- end }}
+  # Or from this machine, AROUND it: a port-forward to the POD reaches its loopback, where the web
+  # front listens. Whoever may port-forward in this namespace holds the account either way.
+  kubectl -n {{ .Release.Namespace }} port-forward pod/{{ $fullname }}-0 19443:19443
+{{- else if .Values.httpRoute.enabled }}
+
+  # Through the Gateway{{ with .Values.httpRoute.hostnames }} at https://{{ first . }}/{{ end }}, or straight from this machine:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} 19443:{{ .Values.service.port }}
 {{- else if .Values.ingress.enabled }}
 
   # Through the Ingress{{ with .Values.ingress.className }} ({{ . }}){{ end }}, or straight from this machine:

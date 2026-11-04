@@ -33,7 +33,7 @@ const HOST = { "broker.mode": "intuneContainer", "broker.intuneContainer.stateDi
 const BUS = { "broker.mode": "sessionBus", "broker.sessionBus.socket": "/run/user/1000/bus" };
 
 type Doc = Record<string, any>;
-type Options = { release?: string; kubeVersion?: string; chart?: string; showOnly?: string };
+type Options = { release?: string; kubeVersion?: string; chart?: string; showOnly?: string; valuesFile?: string };
 
 function helm(args: string[]): { ok: boolean; out: string; err: string } {
   let proc;
@@ -49,6 +49,7 @@ function templateArgs(set: Record<string, string>, options: Options): string[] {
   const args = ["template", options.release ?? "teams-lite", options.chart ?? CHART, "--namespace", "teams"];
   if (options.kubeVersion) args.push("--kube-version", options.kubeVersion);
   if (options.showOnly) args.push("--show-only", options.showOnly);
+  if (options.valuesFile) args.push("-f", options.valuesFile);
   for (const [key, value] of Object.entries(set)) args.push("--set", `${key}=${value}`);
   return args;
 }
@@ -1076,16 +1077,19 @@ describe("the variants", () => {
     ]);
   });
 
-  test("an Ingress with hosts routes each one to the web port", () => {
+  test("an Ingress with hosts routes each one to the web port, and the app answers to them", () => {
     const docs = render({
       "ingress.enabled": "true",
       "ingress.className": "nginx",
       "ingress.hosts[0].host": "teams.example.internal",
       "networkPolicy.allowNamespaces[0]": "ingress-nginx",
+      "auth.external": "true",
     });
     const [rule] = of(docs, "Ingress")[0].spec.rules;
     expect(rule.host).toBe("teams.example.internal");
     expect(rule.http.paths[0]).toMatchObject({ path: "/", pathType: "Prefix", backend: { service: { name: "teams-lite", port: { name: "web" } } } });
+    // A Host the app does not answer to is refused as a DNS-rebinding page (web/request-origin.ts).
+    expect(env(docs).TEAMS_LITE_ALLOWED_HOSTS).toBe("teams.example.internal");
   });
 
   test("a NetworkPolicy's own peers are kept beside the named namespaces", () => {
@@ -1123,6 +1127,380 @@ describe("the variants", () => {
 
   test("a release named otherwise keeps the chart's name in its resources", () => {
     expect(statefulSet(render({}, { release: "me" })).metadata.name).toBe("me-teams-lite");
+  });
+});
+
+// The sign-in the chart runs in front of the app, the minimum it needs.
+const SIGN_IN = {
+  "auth.oauth2Proxy.enabled": "true",
+  "auth.oauth2Proxy.issuerUrl": "https://accounts.google.com",
+  "auth.oauth2Proxy.clientId": "client",
+  "auth.oauth2Proxy.existingSecret": "teams-lite-oauth2-proxy",
+  "auth.oauth2Proxy.emails[0]": "You@Example.com",
+};
+// A Gateway API route, the minimum it needs.
+const ROUTE = {
+  "httpRoute.enabled": "true",
+  "httpRoute.parentRefs[0].name": "public",
+  "httpRoute.parentRefs[0].namespace": "gateway-system",
+  "httpRoute.hostnames[0]": "teams.example.com",
+  "networkPolicy.allowNamespaces[0]": "envoy-gateway-system",
+};
+const sidecar = (docs: Doc[]) => pod(docs).containers.find((c: Doc) => c.name === "oauth2-proxy");
+const args = (docs: Doc[]) => sidecar(docs).args as string[];
+/** The pattern oauth2-proxy is handed for `--skip-auth-route=GET=<pattern>`, as a JS RegExp (the
+ *  patterns are plain RE2 anchors, classes and escapes, which read the same in both). */
+const skipRoutes = (docs: Doc[]) =>
+  args(docs)
+    .filter((a) => a.startsWith("--skip-auth-route="))
+    .map((a) => new RegExp(a.replace(/^--skip-auth-route=GET=/, "")));
+
+describe("publishing it beyond the tailnet", () => {
+  test("is refused with no sign-in in front — whatever reaches the web port can send as the user", () => {
+    for (const set of [
+      ROUTE,
+      { "ingress.enabled": "true", "ingress.className": "nginx", "networkPolicy.allowNamespaces[0]": "ingress-nginx" },
+      {
+        "ingress.enabled": "true",
+        "ingress.className": "tailscale",
+        "ingress.annotations.tailscale\\.com/funnel": "true",
+        "networkPolicy.allowNamespaces[0]": "tailscale",
+      },
+    ]) {
+      const why = refusal(set);
+      expect(why).toContain("no sign-in in front of it");
+      expect(why).toContain("auth.oauth2Proxy");
+      expect(why).toContain("auth.external=true");
+    }
+  });
+
+  test("so is a NodePort or LoadBalancer Service: it publishes the port to whatever reaches it", () => {
+    for (const type of ["NodePort", "LoadBalancer"]) {
+      expect(refusal({ "service.type": type })).toContain("no sign-in in front of it");
+      expect(() => render({ "service.type": type, "auth.external": "true" })).not.toThrow();
+      const [service] = of(render({ ...SIGN_IN, "service.type": type, "auth.oauth2Proxy.redirectUrl": "https://t.example.com/oauth2/callback" }), "Service").filter((d) => d.spec.type === type);
+      expect(service.spec.ports[0].targetPort).toBe("auth");
+    }
+  });
+
+  test("the Tailscale operator's Ingress needs no sign-in: the tailnet is the wall", () => {
+    expect(() =>
+      render({ "ingress.enabled": "true", "ingress.className": "tailscale", "networkPolicy.allowNamespaces[0]": "tailscale" }),
+    ).not.toThrow();
+  });
+
+  test("auth.external is the user's word, and the notes say the chart cannot check it", () => {
+    const docs = render({ ...ROUTE, "auth.external": "true" });
+    expect(of(docs, "HTTPRoute")).toHaveLength(1);
+    expect(pod(docs).containers).toHaveLength(1);
+    expect(notes({ ...ROUTE, "auth.external": "true" })).toContain("It cannot check that");
+  });
+});
+
+describe("the Gateway API route", () => {
+  test("routes every path of the Service from the Gateway it names, and the app answers to its names", () => {
+    const docs = render({ ...SIGN_IN, ...ROUTE });
+    const [route] = of(docs, "HTTPRoute");
+    expect(route.apiVersion).toBe("gateway.networking.k8s.io/v1");
+    expect(route.spec.parentRefs).toEqual([{ name: "public", namespace: "gateway-system" }]);
+    expect(route.spec.hostnames).toEqual(["teams.example.com"]);
+    expect(route.spec.rules).toEqual([
+      {
+        matches: [{ path: { type: "PathPrefix", value: "/" } }],
+        backendRefs: [{ name: "teams-lite", port: 19443 }],
+      },
+    ]);
+    expect(env(docs).TEAMS_LITE_ALLOWED_HOSTS).toBe("teams.example.com");
+  });
+
+  test("takes the rule's filters and timeouts as written in an HTTPRoute", () => {
+    const docs = render({
+      ...SIGN_IN,
+      ...ROUTE,
+      "httpRoute.timeouts.request": "0s",
+      "httpRoute.filters[0].type": "ResponseHeaderModifier",
+      "httpRoute.filters[0].responseHeaderModifier.set[0].name": "Strict-Transport-Security",
+      "httpRoute.filters[0].responseHeaderModifier.set[0].value": "max-age=31536000",
+    });
+    const [rule] = of(docs, "HTTPRoute")[0].spec.rules;
+    expect(rule.timeouts).toEqual({ request: "0s" });
+    expect(rule.filters[0].type).toBe("ResponseHeaderModifier");
+  });
+
+  test("a wildcard hostname is a domain to the app, and never where the callback lives", () => {
+    const docs = render({ ...SIGN_IN, ...ROUTE, "httpRoute.hostnames[0]": "*.example.com", "httpRoute.hostnames[1]": "teams.example.com" });
+    expect(env(docs).TEAMS_LITE_ALLOWED_HOSTS).toBe(".example.com,teams.example.com");
+    expect(args(docs)).toContain("--redirect-url=https://teams.example.com/oauth2/callback");
+  });
+
+  test("is refused without a Gateway, on the node's network, or behind a policy nothing passes", () => {
+    const { "httpRoute.parentRefs[0].name": _n, "httpRoute.parentRefs[0].namespace": _ns, ...noParent } = ROUTE;
+    expect(refusal({ ...SIGN_IN, ...noParent })).toContain("httpRoute.enabled needs httpRoute.parentRefs");
+    const { "networkPolicy.allowNamespaces[0]": _p, ...closed } = ROUTE;
+    expect(refusal({ ...SIGN_IN, ...closed })).toContain("the Gateway's proxies could not reach the app");
+    expect(refusal({ ...HOST, ...ROUTE, "auth.external": "true", "hostNetwork": "true" })).toContain(
+      "httpRoute.enabled needs hostNetwork=false",
+    );
+  });
+});
+
+describe("the sign-in in front of the app (oauth2-proxy)", () => {
+  test("puts the web front on the pod's loopback, so the sign-in is the only way to it", () => {
+    const docs = render({ ...SIGN_IN, ...ROUTE });
+    expect(env(docs).TEAMS_WEB_HOST).toBe("127.0.0.1");
+    expect(args(docs)).toContain("--upstream=http://127.0.0.1:19443/");
+    expect(args(docs)).toContain("--http-address=0.0.0.0:4180");
+    expect(sidecar(docs).ports).toEqual([{ name: "auth", containerPort: 4180, protocol: "TCP" }]);
+    // The Service, the policy and so every route reach the sign-in, never the front itself.
+    const [service] = of(docs, "Service").filter((s) => s.spec.clusterIP !== "None");
+    expect(service.spec.ports[0]).toMatchObject({ name: "web", targetPort: "auth" });
+    expect(of(docs, "NetworkPolicy")[0].spec.ingress[0].ports).toEqual([{ port: "auth", protocol: "TCP" }]);
+  });
+
+  test("probes the front from INSIDE the pod, since the kubelet cannot reach its loopback", () => {
+    const app = container(render({ ...SIGN_IN, ...ROUTE }));
+    for (const probe of [app.startupProbe, app.readinessProbe, app.livenessProbe]) {
+      expect(probe.exec.command).toEqual(["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/19443"]);
+      expect(probe.tcpSocket).toBeUndefined();
+    }
+    const proxy = sidecar(render({ ...SIGN_IN, ...ROUTE }));
+    expect(proxy.readinessProbe.httpGet).toEqual({ path: "/ready", port: "auth" });
+    expect(proxy.livenessProbe.httpGet).toEqual({ path: "/ping", port: "auth" });
+  });
+
+  test("…and the image that probe runs in really holds bash: Debian's, which has /dev/tcp", () => {
+    const dockerfile = read("packaging/docker/Dockerfile");
+    expect(dockerfile).toMatch(/^ARG DEBIAN_RELEASE=trixie$/m);
+    expect(dockerfile).toMatch(/^FROM debian:\$\{DEBIAN_RELEASE\}-slim$/m);
+  });
+
+  test("its values.yaml spells the Secret's command on lines a shell can paste", () => {
+    const values = chartFile("values.yaml");
+    expect(values).toContain("create secret generic teams-lite-oauth2-proxy \\\n");
+    expect(values).toContain("--from-literal=client-secret='<from your provider>' \\\n");
+  });
+
+  test("lets in the listed addresses and nobody else", () => {
+    const docs = render({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.emails[1]": "other@example.org" });
+    expect(args(docs)).toContain("--authenticated-emails-file=/etc/oauth2-proxy/authenticated-emails");
+    expect(args(docs).some((a) => a.startsWith("--email-domain"))).toBe(false);
+    const [list] = of(docs, "ConfigMap").filter((c) => c.metadata.name === "teams-lite-oauth2-proxy");
+    expect(list.data["authenticated-emails"].trim().split("\n")).toEqual(["you@example.com", "other@example.org"]);
+    expect(mount(docs, "oauth2-proxy-emails")).toBeUndefined(); // the APP container does not see it…
+    expect(sidecar(docs).volumeMounts).toEqual([{ name: "oauth2-proxy-emails", mountPath: "/etc/oauth2-proxy", readOnly: true }]);
+  });
+
+  test("keeps its secrets in the user's Secret, never in a value", () => {
+    const proxy = sidecar(render({ ...SIGN_IN, ...ROUTE }));
+    expect(proxy.env).toEqual([
+      { name: "OAUTH2_PROXY_CLIENT_SECRET", valueFrom: { secretKeyRef: { name: "teams-lite-oauth2-proxy", key: "client-secret" } } },
+      { name: "OAUTH2_PROXY_COOKIE_SECRET", valueFrom: { secretKeyRef: { name: "teams-lite-oauth2-proxy", key: "cookie-secret" } } },
+    ]);
+    expect(proxy.args.some((a: string) => /secret/i.test(a))).toBe(false);
+  });
+
+  test("sets a cookie no sibling name can plant, that the provider's redirect back still carries", () => {
+    const a = args(render({ ...SIGN_IN, ...ROUTE }));
+    for (const flag of [
+      "--cookie-name=__Host-teams-lite",
+      "--cookie-secure=true",
+      "--cookie-httponly=true",
+      "--cookie-samesite=lax",
+      "--cookie-expire=168h",
+      "--cookie-refresh=0",
+      "--skip-provider-button=true",
+      "--code-challenge-method=S256",
+    ]) {
+      expect(a).toContain(flag);
+    }
+    expect(a.some((f) => /^--cookie-domain/.test(f))).toBe(false); // `__Host-` forbids one
+  });
+
+  test("answers the page's sign-in probe with a 401, on the very route the page probes", () => {
+    expect(args(render({ ...SIGN_IN, ...ROUTE }))).toContain("--api-route=^/__write-token$");
+    expect(read("web/src/lib/store.ts")).toContain('const WRITE_TOKEN_PATH = "/__write-token";');
+    expect(read("web/write-token.ts")).toContain('export const WRITE_TOKEN_ROUTE = "/__write-token";');
+  });
+
+  test("lets through exactly what installing the app takes, and nothing that names a route", () => {
+    const routes = skipRoutes(render({ ...SIGN_IN, ...ROUTE }));
+    const open = (path: string) => routes.some((r) => r.test(path));
+    const manifest = JSON.parse(read("web/public/manifest.webmanifest")) as { icons: { src: string }[] };
+    const files = [
+      "/manifest.webmanifest",
+      "/favicon.svg",
+      "/favicon.ico",
+      "/icons/apple-touch-icon-180.png",
+      ...manifest.icons.map((icon) => icon.src),
+    ];
+    for (const path of files) expect(open(path), path).toBe(true);
+    for (const path of [
+      "/",
+      "/__write-token",
+      "/__backend",
+      "/icons/../__write-token",
+      "/icons/x/y.png",
+      "/icons/.png",
+      "/manifest.webmanifest/x",
+      "/x/manifest.webmanifest",
+      "/favicon.svg.map",
+    ]) {
+      expect(open(path), path).toBe(false);
+    }
+  });
+
+  test("runs as its own non-root user with no privilege, whatever the app beside it needs", () => {
+    const proxy = sidecar(render({ ...SIGN_IN, ...ROUTE }));
+    expect(proxy.securityContext).toEqual({
+      runAsNonRoot: true,
+      runAsUser: 65532,
+      runAsGroup: 65532,
+      allowPrivilegeEscalation: false,
+      readOnlyRootFilesystem: true,
+      capabilities: { drop: ["ALL"] },
+      seccompProfile: { type: "RuntimeDefault" },
+    });
+    expect(container(render({ ...SIGN_IN, ...ROUTE })).securityContext.privileged).toBe(true);
+  });
+
+  test("keeps kubectl's logs and exec on the app's container", () => {
+    const template = statefulSet(render({ ...SIGN_IN, ...ROUTE })).spec.template;
+    expect(template.metadata.annotations["kubectl.kubernetes.io/default-container"]).toBe("teams-lite");
+    expect(pod(render({ ...SIGN_IN, ...ROUTE })).containers[0].name).toBe("teams-lite");
+  });
+
+  test("derives its callback from the first route hostname, or takes the one it is given", () => {
+    expect(args(render({ ...SIGN_IN, ...ROUTE }))).toContain("--redirect-url=https://teams.example.com/oauth2/callback");
+    const named = render({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.redirectUrl": "https://login.example.com/oauth2/callback" });
+    expect(args(named)).toContain("--redirect-url=https://login.example.com/oauth2/callback");
+    expect(env(named).TEAMS_LITE_ALLOWED_HOSTS).toBe("teams.example.com,login.example.com");
+    const ingress = render({
+      ...SIGN_IN,
+      "ingress.enabled": "true",
+      "ingress.className": "nginx",
+      "ingress.hosts[0].host": "teams.example.internal",
+      "networkPolicy.allowNamespaces[0]": "ingress-nginx",
+    });
+    expect(args(ingress)).toContain("--redirect-url=https://teams.example.internal/oauth2/callback");
+  });
+
+  test("works in a host mode too, and pins its own image", () => {
+    const docs = render({ ...HOST, ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.image.digest": `sha256:${"a".repeat(64)}` });
+    expect(sidecar(docs).image).toBe(`quay.io/oauth2-proxy/oauth2-proxy@sha256:${"a".repeat(64)}`);
+    expect(env(docs).TEAMS_WEB_HOST).toBe("127.0.0.1");
+    expect(env(docs).TEAMS_LITE_INTUNE_MODE).toBe("host");
+  });
+
+  test("is refused without what it needs, and on the node's network", () => {
+    for (const [key, words] of [
+      ["auth.oauth2Proxy.issuerUrl", "auth.oauth2Proxy.issuerUrl is required"],
+      ["auth.oauth2Proxy.clientId", "auth.oauth2Proxy.clientId is required"],
+      ["auth.oauth2Proxy.existingSecret", "auth.oauth2Proxy.existingSecret is required"],
+    ] as const) {
+      expect(refusal({ ...SIGN_IN, ...ROUTE, [key]: "" })).toContain(words);
+    }
+    const { "auth.oauth2Proxy.emails[0]": _e, ...nobody } = SIGN_IN;
+    expect(refusal({ ...nobody, ...ROUTE })).toContain("auth.oauth2Proxy.emails is required");
+    expect(refusal({ ...SIGN_IN, "networkPolicy.allowNamespaces[0]": "x" })).toContain("needs a redirect URL");
+    expect(refusal({ ...HOST, ...SIGN_IN, hostNetwork: "true" })).toContain("auth.oauth2Proxy.enabled needs hostNetwork=false");
+  });
+
+  test("its schema refuses an issuer over http, an address that is not one, and a flag that is not a flag", () => {
+    expect(refusal({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.issuerUrl": "http://idp.example.com" })).toContain("issuerUrl");
+    for (const email of ["*", "@example.com", "example.com", "a@*.example.com", "a b@example.com"]) {
+      expect(refusal({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.emails[0]": email }), email).toContain("emails");
+    }
+    expect(refusal({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.extraArgs[0]": "email-domain=*" })).toContain("extraArgs");
+    expect(refusal({ ...SIGN_IN, ...ROUTE, "web.allowedHosts[0]": "*" })).toContain("allowedHosts");
+  });
+
+  test("extraEnv cannot move the front out from behind it, nor write the names the app answers to", () => {
+    expect(refusal({ ...SIGN_IN, ...ROUTE, "extraEnv[0].name": "TEAMS_WEB_HOST", "extraEnv[0].value": "0.0.0.0" })).toContain(
+      "extraEnv must not set TEAMS_WEB_HOST",
+    );
+    expect(refusal({ "extraEnv[0].name": "TEAMS_LITE_ALLOWED_HOSTS", "extraEnv[0].value": "*" })).toContain(
+      "extraEnv must not set TEAMS_LITE_ALLOWED_HOSTS",
+    );
+  });
+
+  test("the notes say who may sign in, where, and the way around it from this machine", () => {
+    const said = notes({ ...SIGN_IN, ...ROUTE });
+    expect(said).toContain("lets in\n1 address and nobody else (You@Example.com)");
+    expect(said).toContain("Register https://teams.example.com/oauth2/callback as the client's redirect URI");
+    expect(said).toContain("port-forward pod/teams-lite-0 19443:19443");
+  });
+});
+
+describe("the app's own address and origin checks, as the chart feeds them", () => {
+  test("the names the chart adds are the ones the app reads", () => {
+    expect(read("web/request-origin.ts")).toContain('export const ALLOWED_HOSTS_ENV = "TEAMS_LITE_ALLOWED_HOSTS";');
+    const docs = render({ ...SIGN_IN, ...ROUTE, "web.allowedHosts[0]": ".corp.example", "web.allowedHosts[1]": "teams.example.com" });
+    expect(env(docs).TEAMS_LITE_ALLOWED_HOSTS).toBe("teams.example.com,.corp.example");
+  });
+
+  test("a release with no route names nothing: loopback, IPs and tailnet names need no telling", () => {
+    expect(env(render()).TEAMS_LITE_ALLOWED_HOSTS).toBeUndefined();
+  });
+
+  test("the server pings under the idle limit the docs name for ingress-nginx (60 s)", () => {
+    const server = read("web/server.ts");
+    const socket = server.slice(server.indexOf("websocket: {"));
+    const idle = Number(socket.match(/idleTimeout: (\d+),/)?.[1]);
+    // Bun pings a socket quiet for HALF its idleTimeout (measured), and the docs promise 25 s.
+    expect(idle / 2).toBe(25);
+    expect(chartFile("README.md")).toContain("the app's server pings any socket quiet for 25 s");
+    expect(chartFile("values.yaml")).toContain("The app's server pings any\n  # socket quiet for 25 s");
+  });
+});
+
+describe("annotations", () => {
+  test("keep a values FILE's whole numbers whole, where `toString` would write 3.1536e+07", () => {
+    const dir = mkdtempSync(join(tmpdir(), "teams-lite-annotations-"));
+    try {
+      const file = join(dir, "values.yaml");
+      writeFileSync(file, "service:\n  annotations:\n    a.example/big: 31536000\n    a.example/frac: 1.5\n");
+      const [service] = of(render({}, { valuesFile: file }), "Service").filter((d) => d.metadata.annotations);
+      expect(service.metadata.annotations).toEqual({ "a.example/big": "31536000", "a.example/frac": "1.5" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("are rendered as strings, so `--set …=true` or `=3600` is still a manifest the API accepts", () => {
+    const docs = render({
+      ...SIGN_IN,
+      ...ROUTE,
+      "ingress.enabled": "true",
+      "ingress.className": "nginx",
+      "ingress.annotations.nginx\\.ingress\\.kubernetes\\.io/proxy-read-timeout": "3600",
+      "httpRoute.annotations.example\\.com/flag": "true",
+      "service.annotations.a": "1",
+      "podAnnotations.b": "false",
+    });
+    expect(of(docs, "Ingress")[0].metadata.annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"]).toBe("3600");
+    expect(of(docs, "HTTPRoute")[0].metadata.annotations["example.com/flag"]).toBe("true");
+    expect(of(docs, "Service").find((d) => d.metadata.annotations)?.metadata.annotations.a).toBe("1");
+    expect(statefulSet(docs).spec.template.metadata.annotations.b).toBe("false");
+  });
+});
+
+describe("the README's own public values file", () => {
+  test("renders the sign-in and the route it describes", () => {
+    const readme = chartFile("README.md");
+    const block = readme.match(/<!-- public-values[^>]*-->\s*```yaml\n([\s\S]*?)```/)?.[1];
+    expect(block, "the README's public.yaml block").toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), "teams-lite-public-"));
+    try {
+      const file = join(dir, "public.yaml");
+      writeFileSync(file, block!.replace(/^ {3}/gm, ""));
+      const docs = render({}, { valuesFile: file });
+      expect(of(docs, "HTTPRoute")).toHaveLength(1);
+      expect(sidecar(docs)).toBeDefined();
+      expect(env(docs).TEAMS_WEB_HOST).toBe("127.0.0.1");
+      expect(args(docs)).toContain("--redirect-url=https://teams.example.com/oauth2/callback");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -2,7 +2,7 @@
 // FakeWebSocket is injected via globalThis.WebSocket and driven synchronously by
 // the test, and fake timers make the reconnect backoff deterministic.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { Backend, backendUrlForPage, needsRelay } from "./ws-client";
+import { Backend, backendUrlForPage, chooseBackendUrl, needsRelay } from "./ws-client";
 
 type WsEvent = { data?: unknown };
 
@@ -718,6 +718,76 @@ describe("needsRelay", () => {
   it("has nothing to decide without a page (SSR)", () => {
     expect(needsRelay("ws://127.0.0.1:19420", null)).toBe(false);
     expect(needsRelay("ws://127.0.0.1:19420", { hostname: "" })).toBe(false);
+  });
+});
+
+describe("where a page's socket goes", () => {
+  const page = (protocol: string, host: string) => ({
+    protocol,
+    host,
+    hostname: host.replace(/:\d+$/, ""),
+  });
+
+  it("is the server that served it, for an unpinned build — on this machine too", () => {
+    // The released build on 19442, the container image on 19443, a kubectl port-forward: each
+    // relays to ITS backend, and dialling 19420 directly reached the always-on service's instead.
+    expect(chooseBackendUrl(undefined, page("http:", "127.0.0.1:19443"))).toBe(
+      "ws://127.0.0.1:19443/__backend",
+    );
+    expect(chooseBackendUrl(undefined, page("http:", "localhost:19442"))).toBe(
+      "ws://localhost:19442/__backend",
+    );
+    expect(chooseBackendUrl(undefined, page("https:", "box.tail1.ts.net:8443"))).toBe(
+      "wss://box.tail1.ts.net:8443/__backend",
+    );
+    expect(chooseBackendUrl(undefined, page("https:", "teams.example.com"))).toBe(
+      "wss://teams.example.com/__backend",
+    );
+  });
+
+  it("is the local backend only when there is no page to ask (SSR)", () => {
+    expect(chooseBackendUrl(undefined, null)).toBe("ws://127.0.0.1:19420");
+  });
+
+  it("is what a PINNED build names, relayed only from another device", () => {
+    expect(chooseBackendUrl("ws://127.0.0.1:19457", page("http:", "127.0.0.1:19447"))).toBe(
+      "ws://127.0.0.1:19457",
+    );
+    expect(chooseBackendUrl("ws://127.0.0.1:19421", page("https:", "box.tail1.ts.net:8445"))).toBe(
+      "wss://box.tail1.ts.net:8445/__backend",
+    );
+    expect(chooseBackendUrl("ws://mock.internal:19455", page("https:", "box.tail1.ts.net"))).toBe(
+      "ws://mock.internal:19455",
+    );
+  });
+});
+
+describe("a handshake that never opened", () => {
+  it("is said on its own, because the browser hides why — a sign-in wall looks like a dead backend", () => {
+    const backend = new Backend("ws://test", { giveUpMs: 10_000, initialDelayMs: 50 });
+    let failed = 0;
+    backend.on("handshake_failed", () => {
+      failed += 1;
+    });
+    backend.connect().catch(() => {});
+    FakeWebSocket.last().simulateClose();
+    expect(failed).toBe(1);
+    vi.advanceTimersByTime(50);
+    FakeWebSocket.last().simulateError();
+    FakeWebSocket.last().simulateClose();
+    expect(failed).toBe(2);
+    backend.close();
+  });
+
+  it("is not a socket that opened and then dropped", async () => {
+    const { backend, socket } = await connected({ giveUpMs: 10_000, initialDelayMs: 50 });
+    let failed = 0;
+    backend.on("handshake_failed", () => {
+      failed += 1;
+    });
+    socket.simulateClose();
+    expect(failed).toBe(0);
+    backend.close();
   });
 });
 

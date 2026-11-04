@@ -13,6 +13,14 @@
 
 import { Store } from "@tanstack/store";
 import { Backend, defaultWsUrl } from "./ws-client";
+import {
+  AUTH_RELOAD_KEY,
+  SESSION_PROBE_INTERVAL_MS,
+  sessionVerdict,
+  signInRemedy,
+  type ProbeAnswer,
+} from "./auth-wall";
+import { hasUnsentWork } from "./unsent-work";
 import type { SendImage } from "./composer-image";
 import {
   channelMentionCandidate,
@@ -474,6 +482,9 @@ export type AppState = {
   ready: boolean;
   splashMessage: string;
   fatal: string | null;
+  /** The sign-in in front of this app (an authenticating proxy) expired, and an automatic reload
+   *  would have lost something — so the reader is asked instead (lib/auth-wall.ts). */
+  signInExpired: boolean;
   update: UpdateInfo | null;
   /** How far the update has got (the backend's `update_progress` event), or null while
    *  nothing has been asked of it. Held apart from `update` because they answer two
@@ -1238,6 +1249,7 @@ function initialState(): AppState {
     ready: false,
     splashMessage: "connecting",
     fatal: null,
+    signInExpired: false,
     update: null,
     updateProgress: null,
     draft: "",
@@ -1390,6 +1402,20 @@ function initialState(): AppState {
     gitlabActionError: null,
     gitlabActionDone: null,
   };
+}
+
+/** The app server's route for the backend's write token (`WRITE_TOKEN_ROUTE` in web/write-token.ts). */
+const WRITE_TOKEN_PATH = "/__write-token";
+
+/** When this tab last reloaded to sign in again, or null (see lib/auth-wall.ts). */
+function lastSignInReload(): number | null {
+  try {
+    const raw = window.sessionStorage.getItem(AUTH_RELOAD_KEY);
+    const at = raw === null ? Number.NaN : Number(raw);
+    return Number.isFinite(at) ? at : null;
+  } catch {
+    return null;
+  }
 }
 
 export class TeamsController {
@@ -1549,6 +1575,10 @@ export class TeamsController {
   // and consulted when we reconnect: a genuine recovery re-syncs, but the very
   // first connect (no prior drop) does not. See `handleLiveRecovery`.
   private connectionDropped = false;
+
+  // When the last sign-in probe left, and whether one is out (see `checkSignInWall`).
+  private signInProbeAt = 0;
+  private signInProbing = false;
 
   constructor(url: string = defaultWsUrl()) {
     this.backend = new Backend(url);
@@ -1713,7 +1743,10 @@ export class TeamsController {
   private async loadWriteToken(): Promise<string | null> {
     if (typeof window === "undefined") return null; // SSR: no writes happen there
     try {
-      const res = await fetch("/__write-token", { cache: "no-store" });
+      // `redirect: "manual"`: a sign-in proxy in front of this app answers an expired session with
+      // a redirect to its identity provider, and following it cross-origin only to fail CORS says
+      // nothing. Not followed, it is a response that is not ok — read-only, as before.
+      const res = await fetch(WRITE_TOKEN_PATH, { cache: "no-store", redirect: "manual" });
       if (!res.ok) return null;
       const body = (await res.json()) as { token?: string };
       if (!body.token) return null;
@@ -1723,6 +1756,62 @@ export class TeamsController {
       /* offline or no endpoint: leave the client read-only */
       return null;
     }
+  }
+
+  /**
+   * After a handshake failed: is it the SIGN-IN in front of this app that expired? If so, reload —
+   * the one request a browser follows through an identity provider and back (lib/auth-wall.ts says
+   * why, and what bounds it).
+   *
+   * The question is asked of the token route, because it is behind the same wall as everything
+   * else and this app's own servers never answer it with a redirect or a 401. Throttled to one
+   * probe in flight and one per {@link SESSION_PROBE_INTERVAL_MS}: the reconnect backoff fails a
+   * handshake every few seconds while a backend is down.
+   */
+  private async checkSignInWall(): Promise<void> {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    const started = Date.now();
+    if (this.signInProbing || started - this.signInProbeAt < SESSION_PROBE_INTERVAL_MS) return;
+    this.signInProbing = true;
+    this.signInProbeAt = started;
+    let answer: ProbeAnswer = null;
+    try {
+      const res = await fetch(WRITE_TOKEN_PATH, { cache: "no-store", redirect: "manual" });
+      answer = { type: res.type, status: res.status };
+    } catch {
+      answer = null;
+    } finally {
+      this.signInProbing = false;
+    }
+    const now = Date.now();
+    const { threadDrafts, callStatus } = this.get();
+    const remedy = signInRemedy({
+      verdict: sessionVerdict(answer),
+      visible: document.visibilityState === "visible",
+      lastReloadAt: lastSignInReload(),
+      now,
+      // A thread's draft, a title, pasted pictures (the composers report them) and a live call's
+      // audio: everything a reload would throw away. The conversation's own draft is in the list
+      // too, as the composer's words, because its last edits never reached the backend.
+      wouldLoseWork:
+        hasUnsentWork() ||
+        callStatus.call !== null ||
+        Object.values(threadDrafts).some((text) => text.trim() !== ""),
+    });
+    if (remedy === "none") return;
+    if (remedy === "reload") {
+      try {
+        window.sessionStorage.setItem(AUTH_RELOAD_KEY, String(now));
+        this.set({ status: "signing in again — the sign-in in front of this app expired" });
+        window.location.reload();
+        return;
+      } catch {
+        // No storage to remember the reload in (a browser that refuses it): the next page could
+        // not tell it had just reloaded, so a wall it cannot satisfy would be a loop. Ask instead.
+      }
+    }
+    // A bar, not the blocking overlay: the reader's unsent words are still on screen to copy.
+    this.set({ signInExpired: true, fatal: null, status: "the sign-in in front of this app expired" });
   }
 
   /**
@@ -2279,7 +2368,7 @@ export class TeamsController {
       // backend is not reachable" under a green dot is a sentence the page can no longer
       // stand behind, and the token is re-read below. The words stay in the composer, so
       // the user retries rather than retypes.
-      this.set({ live: "connected", fatal: null, status: "reconnected", sendError: null, sendErrorAt: null });
+      this.set({ live: "connected", fatal: null, signInExpired: false, status: "reconnected", sendError: null, sendErrorAt: null });
       // Refetch the write token. The backend mints a new one per PROCESS, so a
       // backend that restarted — a crash, an update, a `systemctl restart` of the
       // always-on service — invalidates the one this page fetched at startup. Reads
@@ -2304,10 +2393,17 @@ export class TeamsController {
         void this.handleLiveRecovery();
       }
     });
+    // A socket the browser could not even OPEN: ask whether a sign-in in front of this app is what
+    // refused it, since the socket itself can never say (see lib/auth-wall.ts).
+    on("handshake_failed", () => void this.checkSignInWall());
     on("backend_lost", () =>
       this.set({
         live: "disconnected",
-        fatal: "Backend lost — the teams-lite server is no longer reachable.",
+        // Not while the sign-in bar says why: the backend is not lost, the session is, and the
+        // overlay would cover the very words the bar asks the reader to copy first.
+        fatal: this.get().signInExpired
+          ? null
+          : "Backend lost — the teams-lite server is no longer reachable.",
         status: "backend lost — retries exhausted",
       }),
     );

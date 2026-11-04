@@ -51,7 +51,13 @@ export const Route = createRootRoute({
       // installable web app (which is what unlocks Web Push on iOS), and the
       // apple-touch-icon is the icon itself — iOS will not take an SVG, and without
       // a PNG it uses a screenshot of the page.
-      { rel: "manifest", href: "/manifest.webmanifest" },
+      //
+      // `use-credentials`, because a browser fetches a manifest WITHOUT cookies unless told to: behind
+      // a sign-in proxy (the Helm chart's oauth2-proxy, Cloudflare Access) that request is answered
+      // with a redirect to the identity provider, the manifest never loads, and the app cannot be
+      // installed — which also takes Web Push on iOS with it. It is same-origin, so it needs no CORS
+      // header, and with nothing in front of the app it changes nothing.
+      { rel: "manifest", href: "/manifest.webmanifest", crossOrigin: "use-credentials" },
       { rel: "apple-touch-icon", href: "/icons/apple-touch-icon-180.png", sizes: "180x180" },
     ],
   }),

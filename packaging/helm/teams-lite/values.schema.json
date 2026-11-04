@@ -202,6 +202,14 @@
         "listenAddress": {
           "type": "string",
           "minLength": 1
+        },
+        "allowedHosts": {
+          "description": "Names the app answers to beyond loopback, IP addresses and tailnet names (.ts.net); a leading \".\" covers a domain and every name under it. The chart adds every httpRoute and ingress hostname itself. There is no `*`: a name the app answers to is one a DNS-rebinding page can read the write token under.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^\\.?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$"
+          }
         }
       },
       "additionalProperties": false
@@ -268,6 +276,152 @@
         },
         "tls": {
           "type": "array"
+        }
+      },
+      "additionalProperties": false
+    },
+    "httpRoute": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "parentRefs": {
+          "description": "The Gateway (and listener) the route attaches to, as written in an HTTPRoute's parentRefs.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "hostnames": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+          }
+        },
+        "annotations": {
+          "type": "object"
+        },
+        "labels": {
+          "type": "object"
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "timeouts": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "external": {
+          "description": "Your word that something in front of this chart authenticates every request to its route, or that the route is reachable only from a network you trust. Never detected.",
+          "type": "boolean"
+        },
+        "oauth2Proxy": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": "object",
+              "properties": {
+                "repository": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tag": {
+                  "type": "string"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^(sha256:[a-f0-9]{64})?$"
+                },
+                "pullPolicy": {
+                  "enum": [
+                    "",
+                    "Always",
+                    "IfNotPresent",
+                    "Never"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "issuerUrl": {
+              "description": "The OpenID Connect issuer, over https.",
+              "type": "string",
+              "pattern": "^(https://[^\\s]+)?$"
+            },
+            "clientId": {
+              "type": "string"
+            },
+            "existingSecret": {
+              "type": "string",
+              "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
+            },
+            "clientSecretKey": {
+              "type": "string",
+              "pattern": "^[-._a-zA-Z0-9]+$"
+            },
+            "cookieSecretKey": {
+              "type": "string",
+              "pattern": "^[-._a-zA-Z0-9]+$"
+            },
+            "emails": {
+              "description": "Who may sign in, one verified address each. Never a domain, and never everyone.",
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[^@\\s*,]+@[^@\\s*,]+\\.[^@\\s*,]+$"
+              }
+            },
+            "redirectUrl": {
+              "type": "string",
+              "pattern": "^(https://[^\\s/]+/[^\\s]*)?$"
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cookieExpire": {
+              "type": "string",
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+            },
+            "cookieRefresh": {
+              "type": "string",
+              "pattern": "^(([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)?$"
+            },
+            "extraArgs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^--"
+              }
+            },
+            "resources": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

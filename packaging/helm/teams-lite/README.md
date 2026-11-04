@@ -279,19 +279,137 @@ a NetworkPolicy (on by default) that lets no other pod in — and these are the 
 | --- | --- |
 | From the machine | `kubectl -n teams-lite port-forward svc/teams-lite 19443:19443` |
 | From your phone, on your tailnet | the [Tailscale operator](https://tailscale.com/kb/1236/kubernetes-operator): `ingress.enabled=true`, `ingress.className=tailscale`, `ingress.tls[0].hosts[0]=teams-lite`, `networkPolicy.allowNamespaces[0]=tailscale` |
-| Through another Ingress controller | only behind authentication you trust; it publishes the account |
+| From anywhere, through your Gateway | an [HTTPRoute](https://gateway-api.sigs.k8s.io/api-types/httproute/) behind the chart's own sign-in — see [Publishing it](#publishing-it-a-sign-in-in-front-and-a-gateway-api-route) |
+| Through another Ingress controller | the same sign-in (`auth.oauth2Proxy`), or `auth.external=true` when the controller authenticates every request itself |
 
 The chart refuses an Ingress with no `className` (the cluster's default controller — Traefik on k3s
 — would take it and publish the account) and one the NetworkPolicy would let nothing reach: name the
 controller's namespace in `networkPolicy.allowNamespaces`, or any other peers in `networkPolicy.from`.
+It refuses **anything that publishes the app beyond your tailnet with no sign-in in front of it** —
+an HTTPRoute, a NodePort or LoadBalancer Service, an Ingress of any class but `tailscale`, and a
+Tailscale Ingress carrying the `tailscale.com/funnel` annotation — unless `auth.oauth2Proxy` runs one
+or `auth.external` says something in front already authenticates every request (or only a network
+you trust reaches it).
+
+**The app answers only to names it knows.** A request whose `Host` is not a loopback name, an IP
+address, a tailnet name (`*.ts.net`) or one of `web.allowedHosts` is refused with a 403: that is what
+a DNS-rebinding page looks like — same-origin with the app under the attacker's name, and able to
+read the write token. The chart adds every `httpRoute.hostnames` and `ingress.hosts` entry itself;
+name any other address you reach it under in `web.allowedHosts`. Its socket, likewise, opens only
+for a page the app itself served.
 
 **What no NetworkPolicy can keep out is the pod's own node**: every process of every account on the
 machine, and every hostNetwork pod running there, can still reach the port — Kubernetes always
 allows a node's traffic to its own pods (that is also how the probes and `kubectl port-forward`
 work). For host-level isolation, use the node's firewall (or, in a host mode, `hostNetwork`, where
-the front stays on `127.0.0.1`). A NodePort or LoadBalancer Service publishes the port to whatever
-reaches the node. Egress stays open in every mode: the app talks to Microsoft, and the embedded
+the front stays on `127.0.0.1`), or the sign-in sidecar below, which moves the front onto the pod's
+own loopback. A NodePort or LoadBalancer Service publishes the port to whatever reaches the node,
+which is why the chart wants a sign-in in front of one too. Egress stays open in every mode: the app talks to Microsoft, and the embedded
 Intune container downloads its image and enrolls through the same door.
+
+## Publishing it: a sign-in in front, and a Gateway API route
+
+To reach the app from anywhere without a VPN client, run **oauth2-proxy beside it in the pod**
+(`auth.oauth2Proxy`) and route your Gateway to it (`httpRoute`). The web front then listens on the
+pod's own `127.0.0.1`, so the sign-in is the only way to it — for the route, every other pod and the
+node alike, which no NetworkPolicy could have kept out. Signing in is OpenID Connect against a
+provider you already use, and **only the addresses you list get in**.
+
+1. **Register a client** at your provider (Google, Microsoft Entra, Pocket ID, Authentik, Keycloak,
+   Zitadel…), with `https://teams.example.com/oauth2/callback` as its redirect URI. Prefer a provider
+   where your account has phishing-resistant MFA (a passkey): it is now the lock on your Teams
+   account.
+2. **Create the Secret** with the client's secret and a cookie secret:
+
+   ```sh
+   kubectl -n teams-lite create secret generic teams-lite-oauth2-proxy \
+     --from-literal=client-secret='<from your provider>' \
+     --from-literal=cookie-secret="$(openssl rand -base64 32 | tr -- '+/' '-_')"
+   ```
+
+3. **Install** with a values file:
+
+   <!-- public-values: the chart's tests render this block -->
+   ```yaml
+   # public.yaml
+   httpRoute:
+     enabled: true
+     parentRefs:
+       - name: public               # your Gateway, and the listener that holds the certificate
+         namespace: gateway-system
+         sectionName: https
+     hostnames:
+       - teams.example.com
+   auth:
+     oauth2Proxy:
+       enabled: true
+       issuerUrl: https://accounts.google.com
+       clientId: 1234-abcd.apps.googleusercontent.com
+       existingSecret: teams-lite-oauth2-proxy
+       emails:
+         - you@example.com
+   networkPolicy:
+     allowNamespaces:
+       - envoy-gateway-system       # where your Gateway's proxies run
+   ```
+
+   ```sh
+   helm install teams-lite oci://ghcr.io/theophile-wallez/charts/teams-lite -n teams-lite -f public.yaml
+   ```
+
+What the chart does with it, and why:
+
+- **The Gateway is yours.** Its listener terminates TLS (cert-manager's gateway-shim annotation on the
+  Gateway is the usual way) and must admit routes from this namespace (`allowedRoutes`). The route
+  is one rule for every path; the app's socket is an ordinary HTTP/1.1 Upgrade on it, which the
+  common implementations (Envoy Gateway, Istio, Cilium, Traefik, NGINX Gateway Fabric) proxy as
+  they are. One that applies a request timeout to it cuts the socket: `httpRoute.timeouts.request:
+  "0s"` turns that off where it is supported. HSTS and other headers go in `httpRoute.filters`.
+- **Let the Gateway's proxies through the NetworkPolicy** (`networkPolicy.allowNamespaces`):
+  `envoy-gateway-system` for Envoy Gateway, the Gateway's own namespace for Istio and kgateway. The
+  chart refuses a route the policy would let nothing reach.
+- **Only the listed addresses**: `--authenticated-emails-file`, never `--email-domain`, and only an
+  address the provider says it has verified. The list is a ConfigMap oauth2-proxy watches, so a
+  change reaches it without restarting the pod (which would power the Intune container off) — and
+  an address taken off it is refused on its very next request, signed in or not. A socket already
+  open stays open until it next reconnects: the sign-in is checked when a connection opens.
+- **A sign-in lasts a week** (`cookieExpire: 168h`), in a `__Host-` cookie that is Secure, HttpOnly
+  and SameSite=Lax. When it runs out, the page notices its socket being refused and reloads, which
+  walks through your provider and back — a blink while the provider's own session is alive.
+  `cookieRefresh` (off) re-checks the session with the provider that often, so an account the
+  provider disables loses access within it — but it needs a refresh token (Entra: add
+  `offline_access` to `scope`), or the session ends with the provider's ID token, about hourly.
+- **What is reachable without signing in**: the web manifest, its icons and the favicon — static
+  files a phone fetches to install the app, which say nothing but its name. Nothing else.
+- **Push notifications and calls are unaffected**: the backend reaches the push service and Teams'
+  media relays directly, never through the route.
+- **The hostname is public anyway**: its certificate lands in the Certificate Transparency logs
+  within minutes, and scanners find it. The sign-in is what stands there.
+- **Behind the sign-in is your employer's account.** The enrolled, compliant device your
+  organization's Conditional Access sees is this pod; it never sees the device you browse from.
+  Check that publishing it is acceptable to your organization.
+
+Through an Ingress controller instead of a Gateway, the sign-in is the same: `ingress.enabled=true`
+with its `className` and `hosts`, and `auth.oauth2Proxy` as above. ingress-nginx cuts a WebSocket
+that is quiet for 60 s by default; the app's server pings any socket quiet for 25 s, and
+`nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"` (with `proxy-send-timeout`) stops relying
+on it. To keep your own authentication in front instead (an ingress controller's auth annotations,
+an Envoy Gateway SecurityPolicy, Cloudflare Access), set `auth.external=true` — your word, which the
+chart cannot check.
+
+From this machine, a port-forward to the **pod** (`kubectl -n teams-lite port-forward
+pod/teams-lite-0 19443:19443`) reaches its loopback around the sign-in; whoever may port-forward in
+this namespace holds the account either way.
+
+**UNVERIFIED on a cluster**, like the rest of this chart, and never behind a real Gateway or a real
+provider. What WAS measured, under Docker: oauth2-proxy v7.15.5 run with exactly the flags this chart
+renders, against a stand-in OpenID Connect provider, in front of the app's own production server and
+its mock backend. The page and the socket were sent to sign in; the manifest, the icons and the
+favicon were not; a signed-in page loaded and its socket carried a real request to the backend; a
+socket opened by another site's page, with the session cookie attached, was refused by the app; an
+address taken off the list was refused at sign-in and cut off in an existing session, with the list
+reloaded live; and an idle socket stayed open past a minute. The ConfigMap's own way of updating the
+file (a symlink swap) was not measured, only an edit of the file.
 
 ### `hostNetwork` (host modes only)
 
@@ -339,7 +457,16 @@ at the same time. No NetworkPolicy applies to a host-network pod, so none is ren
 | `nodeSelector` | `{}` | host modes: pin to the enrolled node |
 | `hostNetwork` | `false` | host modes only; see above |
 | `service.type` / `service.port` | `ClusterIP` / `19443` | |
-| `ingress.*` | disabled | |
+| `ingress.*` | disabled | any class but `tailscale` (or with Funnel) needs a sign-in in front |
+| `httpRoute.enabled` | `false` | a Gateway API HTTPRoute; needs `parentRefs` and a sign-in in front |
+| `httpRoute.parentRefs` / `.hostnames` / `.filters` / `.timeouts` | — | as written in an HTTPRoute |
+| `auth.oauth2Proxy.enabled` | `false` | oauth2-proxy beside the app; the web front moves to the pod's loopback |
+| `auth.oauth2Proxy.issuerUrl` / `.clientId` / `.existingSecret` / `.emails` | — | required with it |
+| `auth.oauth2Proxy.redirectUrl` | `https://<first route hostname>/oauth2/callback` | |
+| `auth.oauth2Proxy.cookieExpire` / `.cookieRefresh` | `168h` / off | refresh needs a refresh token from the provider |
+| `auth.oauth2Proxy.image.tag` | `v7.15.5` | |
+| `auth.external` | `false` | your word that something in front authenticates every request |
+| `web.allowedHosts` | `[]` | names the app answers to beyond loopback, IPs, `*.ts.net` and the route hostnames |
 | `networkPolicy.enabled` | `true` | no other pod may reach the web port |
 | `networkPolicy.allowNamespaces` / `.from` | `[]` / `[]` | who may (e.g. `[tailscale]`) |
 | `persistence.enabled` | `true` | `false` keeps the store in an emptyDir, lost with the pod (the Intune claim stays) |
@@ -349,7 +476,7 @@ at the same time. No NetworkPolicy applies to a host-network pod, so none is ren
 | `timezone` | UTC | an IANA name |
 | `resources` | requests only | no memory limit by default: an OOM-kill mid-call is worse |
 | `terminationGracePeriodSeconds` | 90 embedded / 30 host | a ceiling for the clean stop |
-| `extraEnv`, `extraEnvFrom`, `extraVolumes`, `extraVolumeMounts` | | `extraEnv` may not set `TEAMS_LITE_INTUNE_MODE` or `TEAMS_LITE_NETNS_IS_OWN` |
+| `extraEnv`, `extraEnvFrom`, `extraVolumes`, `extraVolumeMounts` | | `extraEnv` may not set `TEAMS_LITE_INTUNE_MODE`, `TEAMS_LITE_NETNS_IS_OWN`, `TEAMS_WEB_HOST` or `TEAMS_LITE_ALLOWED_HOSTS` |
 | `podSecurityContext`, `securityContext` | | merged over the chart's own, per mode; the embedded mode refuses `fsGroup`, `runAsUser` and `runAsNonRoot` |
 
 An unknown value is refused rather than ignored, at every level the chart defines

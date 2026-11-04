@@ -1,0 +1,17 @@
+{{- include "teams-lite.validate" . -}}
+{{- if include "teams-lite.oauth2Proxy" . }}
+# WHO MAY SIGN IN: auth.oauth2Proxy.emails, one address per line, read by the oauth2-proxy sidecar
+# (`--authenticated-emails-file`). It watches the file, so an edit here reaches it without the pod
+# restarting — which matters, because restarting this pod powers the user's Intune container off.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "teams-lite.fullname" . }}-oauth2-proxy
+  labels:
+    {{- include "teams-lite.labels" . | nindent 4 }}
+data:
+  authenticated-emails: |
+    {{- range .Values.auth.oauth2Proxy.emails }}
+    {{ . | lower }}
+    {{- end }}
+{{- end }}

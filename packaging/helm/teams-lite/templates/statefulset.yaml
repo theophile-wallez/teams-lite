@@ -21,6 +21,11 @@ that came and went with readOnly would turn the upgrade that switches it off int
 {{- $vmIsolated := and $boots .Values.broker.embedded.vmIsolated -}}
 {{- $storeClaim := and .Values.persistence.enabled (not .Values.persistence.existingClaim) -}}
 {{- $intunePath := include "teams-lite.intuneStatePath" . -}}
+{{- /* The sign-in in front of the app (auth.oauth2Proxy): the web front then listens on the pod's own
+       loopback, and oauth2-proxy on the pod's address is the only way in — for the Service, every
+       route, every other pod and the node alike. */ -}}
+{{- $oauth2Proxy := include "teams-lite.oauth2Proxy" . | eq "true" -}}
+{{- $allowedHosts := include "teams-lite.allowedHosts" . -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -57,9 +62,14 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
+      {{- $podAnnotations := .Values.podAnnotations }}
+      {{- if $oauth2Proxy }}
+      {{- /* Two containers: `kubectl logs` and `kubectl exec` go to the app's unless told otherwise. */}}
+      {{- $podAnnotations = merge (dict "kubectl.kubernetes.io/default-container" "teams-lite") $podAnnotations }}
+      {{- end }}
+      {{- with $podAnnotations }}
       annotations:
-        {{- toYaml . | nindent 8 }}
+        {{- include "teams-lite.annotations" . | nindent 8 }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "teams-lite.serviceAccountName" . }}
@@ -163,10 +173,18 @@ spec:
               value: "1"
             {{- end }}
             # Where the web front listens. With hostNetwork that is the NODE's loopback, so the
-            # write token it serves never leaves the machine; otherwise the pod's own interface,
-            # which is what a Service reaches.
+            # write token it serves never leaves the machine; behind auth.oauth2Proxy the POD's
+            # loopback, which only the sign-in beside it (and `kubectl port-forward pod/…`) reaches;
+            # otherwise the pod's own interface, which is what a Service reaches.
             - name: TEAMS_WEB_HOST
-              value: {{ ternary "127.0.0.1" .Values.web.listenAddress .Values.hostNetwork | quote }}
+              value: {{ ternary "127.0.0.1" .Values.web.listenAddress (or .Values.hostNetwork $oauth2Proxy) | quote }}
+            {{- with $allowedHosts }}
+            # The names the app answers to beyond loopback, IP addresses and tailnet names — every
+            # route hostname and web.allowedHosts. Any other Host is refused as a DNS-rebinding page
+            # (web/request-origin.ts).
+            - name: TEAMS_LITE_ALLOWED_HOSTS
+              value: {{ . | quote }}
+            {{- end }}
             {{- if $sessionBus }}
             # The socket at the very path it has on the node: /run/user is mounted where it is.
             - name: TEAMS_LITE_BROKER_BUS
@@ -196,23 +214,25 @@ spec:
               protocol: TCP
           # A TCP connect, never a page: rendering the app on every probe is work for nothing, and
           # the launcher already brings a dead backend back on its own. With hostNetwork the front
-          # listens on the node's loopback, which is where the kubelet has to knock.
-          {{- $probe := dict "port" "web" }}
+          # listens on the node's loopback, which is where the kubelet has to knock. Behind
+          # auth.oauth2Proxy it listens on the POD's loopback, which the kubelet cannot reach from
+          # the node at all — so the connect is made from INSIDE the container, by the image's own
+          # bash (Debian's, which has /dev/tcp).
+          {{- $probe := dict "tcpSocket" (dict "port" "web") }}
           {{- if .Values.hostNetwork }}
-          {{- $probe = dict "port" $webPort "host" "127.0.0.1" }}
+          {{- $probe = dict "tcpSocket" (dict "port" $webPort "host" "127.0.0.1") }}
+          {{- else if $oauth2Proxy }}
+          {{- $probe = dict "exec" (dict "command" (list "/bin/bash" "-c" (printf "exec 3<>/dev/tcp/127.0.0.1/%d" $webPort))) "timeoutSeconds" 2 }}
           {{- end }}
           startupProbe:
-            tcpSocket:
-              {{- toYaml $probe | nindent 14 }}
+            {{- toYaml $probe | nindent 12 }}
             periodSeconds: 2
             failureThreshold: 90
           readinessProbe:
-            tcpSocket:
-              {{- toYaml $probe | nindent 14 }}
+            {{- toYaml $probe | nindent 12 }}
             periodSeconds: 10
           livenessProbe:
-            tcpSocket:
-              {{- toYaml $probe | nindent 14 }}
+            {{- toYaml $probe | nindent 12 }}
             periodSeconds: 20
             failureThreshold: 3
           {{- with .Values.resources }}
@@ -318,6 +338,101 @@ spec:
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+        {{- if $oauth2Proxy }}
+        {{- $o := .Values.auth.oauth2Proxy }}
+        # THE SIGN-IN (auth.oauth2Proxy): OpenID Connect against your provider, and only the
+        # addresses in auth.oauth2Proxy.emails get past it to the web front on this pod's loopback.
+        # Its own container, at its own (default) privilege: none, whatever the app beside it needs.
+        - name: oauth2-proxy
+          image: {{ ternary (printf "%s@%s" $o.image.repository $o.image.digest) (printf "%s:%s" $o.image.repository $o.image.tag) (ne $o.image.digest "") | quote }}
+          imagePullPolicy: {{ default "IfNotPresent" $o.image.pullPolicy }}
+          args:
+            - --http-address=0.0.0.0:{{ include "teams-lite.authPort" . }}
+            # The web front on this pod's loopback. The Host header is passed through
+            # (--pass-host-header, oauth2-proxy's default), which is what the app's own address and
+            # origin checks compare a page against.
+            - --upstream=http://127.0.0.1:{{ $webPort }}/
+            - --provider=oidc
+            - --oidc-issuer-url={{ $o.issuerUrl }}
+            - --client-id={{ $o.clientId }}
+            - --redirect-url={{ include "teams-lite.redirectUrl" . }}
+            - --scope={{ $o.scope }}
+            # Who may sign in: the listed addresses and nobody else — no --email-domain, which would
+            # widen it to a whole domain (`*` to every account at the provider).
+            - --authenticated-emails-file=/etc/oauth2-proxy/authenticated-emails
+            # Straight to the provider, with PKCE.
+            - --skip-provider-button=true
+            - --code-challenge-method=S256
+            # `__Host-`: Secure, Path=/ and no Domain, so no other name under the same domain can
+            # set or overwrite it. SameSite=Lax rather than Strict, because the provider's redirect
+            # back is a cross-site navigation that has to carry it.
+            - --cookie-name=__Host-teams-lite
+            - --cookie-secure=true
+            - --cookie-httponly=true
+            - --cookie-samesite=lax
+            - --cookie-expire={{ $o.cookieExpire }}
+            - --cookie-refresh={{ default "0" $o.cookieRefresh }}
+            # The page's sign-in probe (web/src/lib/auth-wall.ts): an expired session answers this
+            # route with a 401 rather than a redirect, which is the one answer the page reloads on.
+            - --api-route=^/__write-token$
+            # What a browser fetches WITHOUT the session to install the app: the manifest (unless it
+            # honours crossorigin=use-credentials) and its icons. Static files that say nothing but
+            # the app's name. Every pattern is anchored at both ends and admits one file name of
+            # its own shape, so no `/`, no `..` and no other route can ride on it.
+            - --skip-auth-route=GET=^/manifest\.webmanifest$
+            - --skip-auth-route=GET=^/icons/[a-z0-9-]+\.png$
+            - --skip-auth-route=GET=^/favicon\.(svg|ico)$
+            - --silence-ping-logging=true
+            {{- with $o.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $o.existingSecret | quote }}
+                  key: {{ $o.clientSecretKey | quote }}
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $o.existingSecret | quote }}
+                  key: {{ $o.cookieSecretKey | quote }}
+          ports:
+            - name: auth
+              containerPort: {{ include "teams-lite.authPort" . }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: auth
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: auth
+            periodSeconds: 20
+          {{- with $o.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # oauth2-proxy's image is distroless and runs as its own `nonroot` user (65532), named
+          # here so runAsNonRoot can be checked. RuntimeDefault seccomp even in the embedded mode,
+          # whose POD profile is Unconfined for the app's Intune container.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: oauth2-proxy-emails
+              mountPath: /etc/oauth2-proxy
+              readOnly: true
+        {{- end }}
       volumes:
         # Re-made on every start, and it must allow exec: the launcher unpacks the backend here
         # and runs it (an emptyDir does; a noexec tmpfs would not).
@@ -329,6 +444,13 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi
+        {{- if $oauth2Proxy }}
+        # Who may sign in (templates/oauth2-proxy.yaml), as a file oauth2-proxy watches.
+        - name: oauth2-proxy-emails
+          configMap:
+            name: {{ $fullname }}-oauth2-proxy
+            defaultMode: 292
+        {{- end }}
         {{- if $import }}
         # The enrollment backup, as the one file the backend is told about. 0444 because the pod
         # has no fsGroup to give it to: the file is root's, and the process that imports it is the
@@ -377,7 +499,7 @@ spec:
           {{- include "teams-lite.selectorLabels" . | nindent 10 }}
         {{- with .Values.persistence.annotations }}
         annotations:
-          {{- toYaml . | nindent 10 }}
+          {{- include "teams-lite.annotations" . | nindent 10 }}
         {{- end }}
       spec:
         accessModes:

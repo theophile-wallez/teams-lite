@@ -11,7 +11,7 @@ metadata:
     {{- include "teams-lite.labels" . | nindent 4 }}
   {{- with .Values.service.annotations }}
   annotations:
-    {{- toYaml . | nindent 4 }}
+    {{- include "teams-lite.annotations" . | nindent 4 }}
   {{- end }}
 spec:
   type: {{ .Values.service.type }}
@@ -20,7 +20,9 @@ spec:
   ports:
     - name: web
       port: {{ .Values.service.port }}
-      targetPort: web
+      # The sign-in in front of the app when the chart runs one (auth.oauth2Proxy) — the web front
+      # itself is then on the pod's loopback, out of every Service's reach.
+      targetPort: {{ ternary "auth" "web" (eq (include "teams-lite.oauth2Proxy" .) "true") }}
       protocol: TCP
 ---
 {{- end }}

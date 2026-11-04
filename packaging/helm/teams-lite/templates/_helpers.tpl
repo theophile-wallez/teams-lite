@@ -22,6 +22,23 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
+{{/*
+Annotations, every value a STRING. An annotation must be one, and `--set` reads `true` and `3600` as
+a boolean and a number — so `--set ingress.annotations.tailscale\.com/funnel=true` or an nginx
+`proxy-read-timeout=3600` would otherwise render a manifest the API server refuses.
+*/}}
+{{- define "teams-lite.annotations" -}}
+{{- range $key, $value := . }}
+{{- /* A values FILE hands every number over as a float64, which `toString` writes as 3.1536e+07:
+       a whole number is written as the integer it is, so a max-age or a timeout keeps its digits. */}}
+{{- if and (kindIs "float64" $value) (eq $value (floor $value)) }}
+{{ $key }}: {{ $value | int64 | toString | quote }}
+{{- else }}
+{{ $key }}: {{ $value | toString | quote }}
+{{- end }}
+{{- end -}}
+{{- end -}}
+
 {{- define "teams-lite.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "teams-lite.fullname" .) .Values.serviceAccount.name -}}
@@ -72,6 +89,73 @@ told about (TEAMS_LITE_INTUNE_IMPORT) whatever the key is called in the Secret.
 */}}
 {{- define "teams-lite.importDir" -}}/run/teams-lite/intune-import{{- end -}}
 {{- define "teams-lite.importFile" -}}enrollment-backup.tar.gz{{- end -}}
+
+{{/* The sign-in sidecar's own port (oauth2-proxy's default), which the Service targets when it runs. */}}
+{{- define "teams-lite.authPort" -}}4180{{- end -}}
+
+{{/* Whether the pod runs oauth2-proxy in front of the web front. */}}
+{{- define "teams-lite.oauth2Proxy" -}}
+{{- if .Values.auth.oauth2Proxy.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Whether a route publishes the app beyond the user's own tailnet: any HTTPRoute (a Gateway is the
+cluster's front door), a NodePort or LoadBalancer Service (whatever reaches the node, or the
+balancer's address), and any Ingress but the Tailscale operator's — whose `tailscale.com/funnel`
+annotation publishes it to the internet too.
+*/}}
+{{- define "teams-lite.publishedBeyondTailnet" -}}
+{{- if or .Values.httpRoute.enabled (ne .Values.service.type "ClusterIP") -}}true
+{{- else if .Values.ingress.enabled -}}
+{{- if or (ne .Values.ingress.className "tailscale") (eq (toString (index (default (dict) .Values.ingress.annotations) "tailscale.com/funnel")) "true") -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The names a route answers on, wildcards spelled the app's way (`*.example.com` → `.example.com`):
+every HTTPRoute hostname, then every Ingress host — the Tailscale operator's names are under
+.ts.net, which the app answers to unasked.
+*/}}
+{{- define "teams-lite.routeHosts" -}}
+{{- $hosts := list -}}
+{{- if .Values.httpRoute.enabled -}}
+{{- range .Values.httpRoute.hostnames }}{{ $hosts = append $hosts (regexReplaceAll "^\\*\\." . ".") }}{{ end -}}
+{{- end -}}
+{{- if .Values.ingress.enabled -}}
+{{- range .Values.ingress.hosts }}{{ $hosts = append $hosts (regexReplaceAll "^\\*\\." .host ".") }}{{ end -}}
+{{- end -}}
+{{- join "," $hosts -}}
+{{- end -}}
+
+{{/*
+Where the identity provider sends the browser back: `auth.oauth2Proxy.redirectUrl`, else
+https://<the first non-wildcard route hostname>/oauth2/callback. Empty when neither names one, which
+teams-lite.validate refuses.
+*/}}
+{{- define "teams-lite.redirectUrl" -}}
+{{- if .Values.auth.oauth2Proxy.redirectUrl -}}
+{{- .Values.auth.oauth2Proxy.redirectUrl -}}
+{{- else -}}
+{{- $first := "" -}}
+{{- range splitList "," (include "teams-lite.routeHosts" .) }}{{ if and (not $first) . (not (hasPrefix "." .)) }}{{ $first = . }}{{ end }}{{ end -}}
+{{- with $first }}https://{{ . }}/oauth2/callback{{ end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+TEAMS_LITE_ALLOWED_HOSTS: every route hostname, the redirect URL's host, and `web.allowedHosts` —
+the names a request may come in under beyond the ones the app answers to unasked (see
+web/request-origin.ts), de-duplicated, in that order.
+*/}}
+{{- define "teams-lite.allowedHosts" -}}
+{{- $hosts := list -}}
+{{- range splitList "," (include "teams-lite.routeHosts" .) }}{{ if . }}{{ $hosts = append $hosts . }}{{ end }}{{ end -}}
+{{- if include "teams-lite.oauth2Proxy" . -}}
+{{- with include "teams-lite.redirectUrl" . }}{{ $hosts = append $hosts (urlParse .).hostname }}{{ end -}}
+{{- end -}}
+{{- range .Values.web.allowedHosts }}{{ $hosts = append $hosts . }}{{ end -}}
+{{- join "," (uniq $hosts) -}}
+{{- end -}}
 
 {{/* Whether the pod runs its own Intune container. */}}
 {{- define "teams-lite.embedded" -}}
@@ -161,6 +245,39 @@ file of a rootfs owned by the pod's subordinate ids and the device's 0600 keyrin
 {{- if and .Values.broker.embedded.import.secretName (has "TEAMS_LITE_INTUNE_IMPORT" $extraEnv) -}}
 {{- fail "extraEnv sets TEAMS_LITE_INTUNE_IMPORT beside broker.embedded.import.secretName: two answers to which enrollment to import. Keep one — the Secret, or (for an archive over a Secret's 1 MiB) your own volume and the variable." -}}
 {{- end -}}
+{{- if has "TEAMS_LITE_ALLOWED_HOSTS" $extraEnv -}}
+{{- fail "extraEnv must not set TEAMS_LITE_ALLOWED_HOSTS: the chart writes it from every httpRoute and ingress hostname and web.allowedHosts. Name the extra names in web.allowedHosts instead." -}}
+{{- end -}}
+{{- if has "TEAMS_WEB_HOST" $extraEnv -}}
+{{- fail "extraEnv must not set TEAMS_WEB_HOST: where the web front listens is the chart's to write — the pod's loopback behind auth.oauth2Proxy, which is what keeps the sign-in the only way in, and web.listenAddress otherwise. Set web.listenAddress instead." -}}
+{{- end -}}
+{{- $oauth2Proxy := include "teams-lite.oauth2Proxy" . -}}
+{{- if and $oauth2Proxy .Values.hostNetwork -}}
+{{- fail "auth.oauth2Proxy.enabled needs hostNetwork=false: with hostNetwork the pod is the NODE's network, so the web front would be on the node's loopback — where every process of every account on that machine reaches it around the sign-in — and the sign-in would take a port of the node's. Use the sidecar in the pod's own network." -}}
+{{- end -}}
+{{- if $oauth2Proxy -}}
+{{- $o := .Values.auth.oauth2Proxy -}}
+{{- $_ := required "auth.oauth2Proxy.issuerUrl is required: your OpenID Connect provider's issuer, https://… (e.g. https://accounts.google.com)" $o.issuerUrl -}}
+{{- $_ := required "auth.oauth2Proxy.clientId is required: the client you registered for this app at your provider" $o.clientId -}}
+{{- $_ := required "auth.oauth2Proxy.existingSecret is required: a Secret holding the client's secret and a cookie secret (the chart's README says how to create it)" $o.existingSecret -}}
+{{- if not $o.emails -}}
+{{- fail "auth.oauth2Proxy.emails is required: who may sign in, one address each. A sign-in that lets every account at the provider in is not a wall in front of one person's Teams account." -}}
+{{- end -}}
+{{- if not (include "teams-lite.redirectUrl" .) -}}
+{{- fail "auth.oauth2Proxy needs a redirect URL: set auth.oauth2Proxy.redirectUrl (https://<host>/oauth2/callback), or give httpRoute.hostnames or ingress.hosts a name it can be derived from." -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.httpRoute.enabled -}}
+{{- if .Values.hostNetwork -}}
+{{- fail "httpRoute.enabled needs hostNetwork=false: with hostNetwork the web front listens on the NODE's 127.0.0.1, which no Service and no route can reach." -}}
+{{- end -}}
+{{- if not .Values.httpRoute.parentRefs -}}
+{{- fail "httpRoute.enabled needs httpRoute.parentRefs: the Gateway (and listener) the route attaches to, e.g. --set 'httpRoute.parentRefs[0].name=public' --set 'httpRoute.parentRefs[0].namespace=gateway-system'." -}}
+{{- end -}}
+{{- if and (include "teams-lite.networkPolicyApplies" .) (not .Values.networkPolicy.from) (not .Values.networkPolicy.allowNamespaces) -}}
+{{- fail "httpRoute.enabled with a NetworkPolicy that lets nothing in: the Gateway's proxies could not reach the app. Name the namespace they run in, in networkPolicy.allowNamespaces (envoy-gateway-system for Envoy Gateway; the Gateway's own namespace for Istio and kgateway), or describe them in networkPolicy.from." -}}
+{{- end -}}
+{{- end -}}
 {{- if and .Values.hostNetwork .Values.ingress.enabled -}}
 {{- fail "ingress.enabled needs hostNetwork=false: with hostNetwork the web front listens on the NODE's 127.0.0.1, which no Service and no Ingress can reach. Reach it from the node (tailscale serve) or with kubectl port-forward." -}}
 {{- end -}}
@@ -172,6 +289,9 @@ file of a rootfs owned by the pod's subordinate ids and the device's 0600 keyrin
 {{- end -}}
 {{- if and .Values.ingress.enabled (include "teams-lite.networkPolicyApplies" .) (not .Values.networkPolicy.from) (not .Values.networkPolicy.allowNamespaces) -}}
 {{- fail "ingress.enabled with a NetworkPolicy that lets nothing in: the Ingress controller could not reach the app. Name its namespace in networkPolicy.allowNamespaces (`tailscale` for the Tailscale operator), or describe it in networkPolicy.from." -}}
+{{- end -}}
+{{- if and (include "teams-lite.publishedBeyondTailnet" .) (not $oauth2Proxy) (not .Values.auth.external) -}}
+{{- fail "this release publishes the app beyond your tailnet — an HTTPRoute, a NodePort or LoadBalancer Service, or an Ingress other than the Tailscale operator's — with no sign-in in front of it, and whatever reaches the web port is handed the write token and can post as you. Enable auth.oauth2Proxy (a sign-in inside the pod), or, if something in front of the route already authenticates every request (an ingress controller's auth annotations, a Gateway SecurityPolicy, Cloudflare Access), say so with auth.external=true. The Tailscale operator's Ingress (ingress.className=tailscale, without Funnel) needs neither." -}}
 {{- end -}}
 {{- if eq .Values.broker.mode "intuneContainer" -}}
 {{- $_ := required "broker.intuneContainer.stateDir is required: the node's intune-container state, normally /home/<user>/.local/share/intune-container" .Values.broker.intuneContainer.stateDir -}}

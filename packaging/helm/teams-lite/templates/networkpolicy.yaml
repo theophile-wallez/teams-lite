@@ -34,7 +34,9 @@ spec:
     - from:
         {{- toYaml $peers | nindent 8 }}
       ports:
-        - port: web
+        # The sign-in's port when the chart runs one: the web front is then on the pod's loopback,
+        # which no peer reaches anyway.
+        - port: {{ ternary "auth" "web" (eq (include "teams-lite.oauth2Proxy" .) "true") }}
           protocol: TCP
   {{- else }}
   ingress: []

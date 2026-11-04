@@ -36,7 +36,9 @@
 #     kubectl -n <namespace> port-forward svc/teams-lite 19443:19443
 #
 # or put it on your tailnet with the Tailscale operator (see `ingress` below) — which is the shape
-# the always-on service already has (`tailscale serve`, tailnet-only).
+# the always-on service already has (`tailscale serve`, tailnet-only). To publish it on the
+# internet, put a sign-in in front of it first: `auth.oauth2Proxy` runs one inside the pod, and
+# `httpRoute` (Gateway API) or `ingress` routes to it. The chart refuses a public route with no wall.
 
 image:
   repository: ghcr.io/theophile-wallez/teams-lite
@@ -224,12 +226,22 @@ hostNetwork: false
 web:
   # Where the web front listens INSIDE THE POD when hostNetwork is false. 0.0.0.0 is the pod's own
   # interface (and its loopback), nothing more; use "::" on an IPv6-only cluster. Ignored with
-  # hostNetwork, where it is always 127.0.0.1.
+  # hostNetwork, where it is always 127.0.0.1, and with `auth.oauth2Proxy`, where it is always the
+  # pod's own 127.0.0.1 so the sign-in in front of it is the only way in.
   listenAddress: 0.0.0.0
+  # The NAMES the app answers to, beyond the ones it answers to unasked (loopback, an IP address, a
+  # tailnet name under .ts.net). A request under any other Host is refused (403), because that is
+  # what a DNS-rebinding page looks like: same-origin with the app under the attacker's name, and
+  # able to read the write token (web/request-origin.ts). The chart already adds every hostname of
+  # `httpRoute` and `ingress` and the host of `auth.oauth2Proxy.redirectUrl`; name any other here.
+  # A leading "." covers a domain and every name under it.
+  #   allowedHosts: [teams.example.com, .corp.example]
+  allowedHosts: []
 
 service:
   # ClusterIP on purpose: a NodePort or a LoadBalancer publishes the write token to whatever can
-  # reach the node — and it is a front the automation guards cannot recognize as the live app.
+  # reach the node — and it is a front the automation guards cannot recognize as the live app. So
+  # either one, like a public route, is refused without `auth.oauth2Proxy` or `auth.external`.
   type: ClusterIP
   port: 19443
   annotations: {}
@@ -237,10 +249,17 @@ service:
 ingress:
   enabled: false
   # "tailscale" with the Tailscale Kubernetes operator puts the app on your tailnet, behind
-  # Tailscale's own authenticated HTTPS — the recommended way in. Any other controller publishes
-  # the app to whatever can reach it: put authentication in front of it, or do not. The controller
-  # has to be let through the NetworkPolicy (networkPolicy.allowNamespaces: [tailscale]); the chart
-  # refuses an Ingress nothing could reach.
+  # Tailscale's own authenticated HTTPS — the recommended way in, and the one class the chart lets
+  # through with no sign-in in front (a `tailscale.com/funnel` annotation, which publishes it to the
+  # internet, is not). Any other controller needs `auth.oauth2Proxy.enabled` or `auth.external`.
+  # The controller has to be let through the NetworkPolicy (networkPolicy.allowNamespaces:
+  # [tailscale]); the chart refuses an Ingress nothing could reach.
+  #
+  # ingress-nginx cuts a WebSocket that is quiet for 60 s by default. The app's server pings any
+  # socket quiet for 25 s, which is under it; to stop relying on that, raise it:
+  #   annotations:
+  #     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  #     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
   className: ""
   annotations: {}
   # Empty: one default backend (what the Tailscale operator expects; it names the device from
@@ -253,6 +272,110 @@ ingress:
   #   tls:
   #     - hosts: [teams-lite]          # the Tailscale device name
   tls: []
+
+# A Gateway API HTTPRoute (gateway.networking.k8s.io/v1) — the way to publish the app through a
+# Gateway your cluster already runs (Envoy Gateway, Istio, Cilium, Traefik, NGINX Gateway Fabric,
+# kgateway…). It routes the Service: with `auth.oauth2Proxy` that is the sign-in, without it the app
+# itself, which the chart refuses unless `auth.external` says something in front authenticates.
+#
+# The Gateway is yours: its listener holds the TLS certificate (cert-manager's gateway-shim
+# annotation on the Gateway is the usual way), and it must admit routes from this namespace
+# (`allowedRoutes.namespaces`). Its data plane has to be let through the NetworkPolicy — name the
+# namespace its proxies run in (`networkPolicy.allowNamespaces`: envoy-gateway-system for Envoy
+# Gateway, the Gateway's own namespace for Istio and kgateway) — and the chart refuses a route the
+# policy would let nothing reach.
+httpRoute:
+  enabled: false
+  # REQUIRED: the Gateway (and listener) this route attaches to, as written in an HTTPRoute.
+  #   parentRefs:
+  #     - name: public
+  #       namespace: gateway-system
+  #       sectionName: https
+  parentRefs: []
+  # The names it answers on. The first one is also where oauth2-proxy's callback lives, unless
+  # `auth.oauth2Proxy.redirectUrl` names it, and every one is added to `web.allowedHosts`.
+  hostnames: []
+  annotations: {}
+  labels: {}
+  # Filters on the route's one rule, as written in an HTTPRoute — e.g. HSTS, where your
+  # implementation supports the (Extended) ResponseHeaderModifier filter:
+  #   filters:
+  #     - type: ResponseHeaderModifier
+  #       responseHeaderModifier:
+  #         set:
+  #           - name: Strict-Transport-Security
+  #             value: max-age=31536000
+  filters: []
+  # The rule's timeouts. The app's socket lives for hours; an implementation that applies a request
+  # timeout to a WebSocket cuts it, and Gateway API says "0s" turns one off where it is supported:
+  #   timeouts:
+  #     request: "0s"
+  timeouts: {}
+
+# A SIGN-IN IN FRONT OF THE APP — what the chart asks for before it publishes the app anywhere but
+# your tailnet. Whatever reaches the web port is handed the write token and can post as you, so a
+# public route with nothing in front of it is a public route to the account.
+auth:
+  # YOUR WORD that something in front of this chart already authenticates EVERY request to the
+  # route — an ingress controller's auth annotations, an Envoy Gateway SecurityPolicy, Cloudflare
+  # Access — or that the route is reachable only from a network you trust. Never detected: the
+  # chart cannot see your Gateway's policies, so with this set it publishes what it is told to.
+  external: false
+  # OAUTH2-PROXY, AS A SIDECAR in the same pod: the web front then listens on the pod's own
+  # 127.0.0.1, and the sign-in on the pod's address is the only thing the Service, the route and
+  # every other pod can reach — the node included, which no NetworkPolicy can keep out. Signing in
+  # is OpenID Connect against your provider, and only the addresses in `emails` get in.
+  oauth2Proxy:
+    enabled: false
+    image:
+      repository: quay.io/oauth2-proxy/oauth2-proxy
+      tag: v7.15.5
+      # A digest (sha256:…) pins the image byte for byte, and wins over the tag.
+      digest: ""
+      pullPolicy: IfNotPresent
+    # REQUIRED: the provider's issuer (https://…; the chart reads nothing else of it — oauth2-proxy
+    # discovers the rest from <issuer>/.well-known/openid-configuration). For example
+    #   Google           https://accounts.google.com
+    #   Microsoft Entra  https://login.microsoftonline.com/<tenant id>/v2.0
+    #   Pocket ID, Authentik, Keycloak, Zitadel — your instance's own issuer URL
+    issuerUrl: ""
+    # REQUIRED: the client you registered for this app at the provider, with
+    # <redirectUrl> (https://<host>/oauth2/callback) as its redirect URI.
+    clientId: ""
+    # REQUIRED: a Secret you create, holding the client's secret and a cookie secret:
+    #   kubectl -n <namespace> create secret generic teams-lite-oauth2-proxy \
+    #     --from-literal=client-secret='<from your provider>' \
+    #     --from-literal=cookie-secret="$(openssl rand -base64 32 | tr -- '+/' '-_')"
+    # The cookie secret encrypts every session: whoever holds it can mint one, so treat the Secret
+    # like the store.
+    existingSecret: ""
+    clientSecretKey: client-secret
+    cookieSecretKey: cookie-secret
+    # REQUIRED: who may sign in, one address each — the address the provider asserts and has
+    # VERIFIED (oauth2-proxy refuses an unverified one). Never a domain and never "everyone": this is
+    # one person's Teams account. Read from a ConfigMap oauth2-proxy watches, so a change takes
+    # effect without restarting the pod.
+    emails: []
+    # Where the provider sends the browser back. Empty: https://<the first hostname of httpRoute,
+    # else of ingress>/oauth2/callback.
+    redirectUrl: ""
+    # Microsoft Entra issues a refresh token only with `offline_access` added here.
+    scope: openid email profile
+    # How long a sign-in lasts. 168h is oauth2-proxy's own default; once it ends the page signs in
+    # again by itself (a reload through the provider, which with the provider's own session alive
+    # is a blink) the next time its socket reconnects.
+    cookieExpire: 168h
+    # Empty (off): the session lasts cookieExpire whatever the provider's tokens say. Set (e.g. 1h)
+    # to have oauth2-proxy re-check the session with the provider that often, so an account the
+    # provider disables loses access within it — which NEEDS a refresh token: without one, the
+    # session ends when the provider's ID token does (about an hour), and you sign in that often.
+    cookieRefresh: ""
+    # More oauth2-proxy flags (`--allowed-group=…`, `--prompt=…`), appended after the chart's.
+    extraArgs: []
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
 
 persistence:
   # The store: every synced message, the settings (the GitLab and Linear tokens among them), the
@@ -341,7 +464,7 @@ serviceAccount:
   annotations: {}
 
 # A NetworkPolicy, ON BY DEFAULT: without it every pod in the cluster can reach the web port and
-# collect the write token. Only the namespaces in `allowNamespaces` and the peers in `from` may
+# collect the write token (or, with `auth.oauth2Proxy`, the sign-in's port in front of it). Only the namespaces in `allowNamespaces` and the peers in `from` may
 # reach it; with neither, no other pod may. What NO policy can keep out is the pod's own NODE:
 # every process of every account on that machine, and every hostNetwork pod there (which is also
 # why the probes and `kubectl port-forward` still work). Not rendered with hostNetwork, where no
