@@ -1419,6 +1419,52 @@ describe("the sign-in in front of the app (oauth2-proxy)", () => {
     expect(groups).toContain("--allowed-group=admins");
   });
 
+  test("extraArgs may tune the sign-in and never widen it", () => {
+    // oauth2-proxy admits an address that is in the emails file OR under --email-domain, so a
+    // domain ADDS people; the others add a list, a password file, a bearer token, an address, a
+    // path open with no session, or a second upstream around the app's own checks.
+    for (const flag of [
+      "--email-domain=example.com",
+      "--email-domain",
+      "--authenticated-emails-file=/tmp/more",
+      "--htpasswd-file=/etc/htpasswd",
+      "--skip-auth-route=GET=^/__backend$",
+      "--skip-auth-regex=.*",
+      "--skip-jwt-bearer-tokens=true",
+      "--extra-jwt-issuers=https://idp.example.com=aud",
+      "--trusted-ip=0.0.0.0/0",
+      "--upstream=http://10.0.0.1/",
+    ]) {
+      expect(refusal({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.extraArgs[0]": flag }), flag).toContain(
+        `must not hold ${flag}: it lets somebody past the sign-in`,
+      );
+    }
+    // Matched on the flag's NAME: a flag that merely starts like one of them is the reader's.
+    const tuned = args(
+      render({
+        ...SIGN_IN,
+        ...ROUTE,
+        "auth.oauth2Proxy.extraArgs[0]": "--prompt=login",
+        "auth.oauth2Proxy.extraArgs[1]": "--upstream-timeout=1h",
+      }),
+    );
+    expect(tuned.slice(-2)).toEqual(["--prompt=login", "--upstream-timeout=1h"]);
+  });
+
+  test("every value it hands oauth2-proxy arrives as the string it was given", () => {
+    // Unquoted, ` #` began a YAML comment (`--client-id=abc`, the rest dropped with no error) and a
+    // trailing `:` made the argument a map.
+    // From a values FILE, and the fixture's own --set clientId left out: --set would win over it.
+    const { "auth.oauth2Proxy.clientId": _client, ...noClient } = SIGN_IN;
+    const a = withSubjects('    clientId: "abc #tail"\n    scope: "openid email:"\n    subjects: ["id:"]\n', (file) =>
+      args(render({ ...noClient, ...ROUTE }, { valuesFile: file })),
+    );
+    expect(a).toContain("--client-id=abc #tail");
+    expect(a).toContain("--scope=openid email:");
+    expect(a).toContain("--allowed-group=id:");
+    expect(a.every((x) => typeof x === "string")).toBe(true);
+  });
+
   test("…and the schema refuses a subject oauth2-proxy would split or misread — an UNQUOTED id too", () => {
     // --allowed-group is a StringSlice: pflag reads it as CSV, so a comma is two groups. And a
     // Zitadel id written without quotes is a YAML number — refused, never rounded to 3.12e+17.

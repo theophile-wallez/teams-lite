@@ -263,6 +263,17 @@ file of a rootfs owned by the pod's subordinate ids and the device's 0600 keyrin
 {{- if not $o.emails -}}
 {{- fail "auth.oauth2Proxy.emails is required: who may sign in, one address each. A sign-in that lets every account at the provider in is not a wall in front of one person's Teams account." -}}
 {{- end -}}
+{{- /* The flags that WIDEN the wall rather than tune it: each lets somebody past who is not on the
+     list (a domain, a second list, a password file, a bearer token, an address), or makes a path
+     reachable with no session at all. NOTES says only the listed addresses get in, and that has
+     to stay true whatever extraArgs holds. Matched on the flag's NAME, so --upstream-timeout is
+     not --upstream. */ -}}
+{{- $widening := list "--email-domain" "--authenticated-emails-file" "--htpasswd-file" "--skip-auth-route" "--skip-auth-regex" "--skip-jwt-bearer-tokens" "--extra-jwt-issuers" "--trusted-ip" "--upstream" -}}
+{{- range $o.extraArgs -}}
+{{- if has (regexReplaceAll "=.*$" . "") $widening -}}
+{{- fail (printf "auth.oauth2Proxy.extraArgs must not hold %s: it lets somebody past the sign-in who is not in auth.oauth2Proxy.emails, or makes a path reachable without signing in — and the chart says only the listed addresses get in. List the people in emails (and subjects); the paths the app needs open are already open." .) -}}
+{{- end -}}
+{{- end -}}
 {{- if $o.subjects -}}
 {{- range $o.extraArgs -}}
 {{- if or (hasPrefix "--oidc-groups-claim" .) (hasPrefix "--allowed-group" .) -}}

@@ -391,7 +391,9 @@ What the chart does with it, and why:
   true` adds a CiliumNetworkPolicy admitting that identity on the same one port; Cilium admits the
   union of the two, and the NetworkPolicy still keeps every pod out.
 - **Only the listed addresses**: `--authenticated-emails-file`, never `--email-domain`, and only an
-  address the provider says it has verified. The list is a ConfigMap oauth2-proxy watches, so a
+  address the provider says it has verified. `extraArgs` cannot add a way past it: a flag that lets
+  in somebody who is not on the list, or opens a path with no session (`--email-domain`,
+  `--skip-auth-route`, `--htpasswd-file`, `--trusted-ip`, …), is refused. The list is a ConfigMap oauth2-proxy watches, so a
   change reaches it without restarting the pod (which would power the Intune container off) — and
   an address taken off it is refused on its very next request, signed in or not. A socket already
   open stays open until it next reconnects: the sign-in is checked when a connection opens.
@@ -402,7 +404,8 @@ What the chart does with it, and why:
   provider disables loses access within it — but it needs a refresh token (Entra: add
   `offline_access` to `scope`), or the session ends with the provider's ID token, about hourly.
 - **What is reachable without signing in**: the web manifest, its icons and the favicon — static
-  files a phone fetches to install the app, which say nothing but its name. Nothing else.
+  files a phone fetches to install the app, which say nothing but its name. Nothing else — and the
+  app takes its socket on `/__backend` alone, so none of those paths can be used to open one.
 - **Push notifications and calls are unaffected**: the backend reaches the push service and Teams'
   media relays directly, never through the route.
 - **The hostname is public anyway**: its certificate lands in the Certificate Transparency logs

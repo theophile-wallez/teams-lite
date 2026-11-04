@@ -11476,7 +11476,13 @@ Thirteen rules hold it, and `packaging/helm/chart.test.ts` pins each:
   `--authenticated-emails-file`, and never `--email-domain`, which would widen it to a domain (`*` to
   every account at the provider). oauth2-proxy refuses an address its provider MARKS unverified —
   and accepts one it says nothing about (`email_verified` absent), read from v7.15.5's own
-  `buildSessionFromClaims`.
+  `buildSessionFromClaims`. **And `extraArgs` cannot widen it**: oauth2-proxy admits an address in
+  the file OR under `--email-domain`, so a domain ADDS people — the chart refuses that flag and every
+  other that lets somebody past who is not on the list or opens a path with no session
+  (`--authenticated-emails-file`, `--htpasswd-file`, `--skip-auth-route`, `--skip-auth-regex`,
+  `--skip-jwt-bearer-tokens`, `--extra-jwt-issuers`, `--trusted-ip`, `--upstream`), matched on the
+  flag's NAME so `--upstream-timeout` stays the reader's. Every value the chart hands oauth2-proxy
+  is QUOTED too: unquoted, `clientId: "abc #tail"` rendered as `--client-id=abc` with no error.
 - **AN ADDRESS IS NOT AN IDENTITY ON A PROVIDER YOU SHARE, so the chart pins the user id too**
   (`auth.oauth2Proxy.subjects`). Found by the independent review of the first internet deployment
   and MEASURED there: its Zitadel instance serves its public "Organization Registration"
@@ -11528,6 +11534,14 @@ Thirteen rules hold it, and `packaging/helm/chart.test.ts` pins each:
   fetches a manifest without cookies unless told, so the page now says `crossorigin=
   "use-credentials"` on it too — the fix for every other wall (Cloudflare Access, Pomerium) — and
   the skip route covers the icons and a browser that ignores the attribute.
+  **AND THE RELAY TAKES A SOCKET ON `/__backend` ALONE, because those open paths were a way in.**
+  oauth2-proxy matches a skip route by method and path and forwards an upgrade, and web/server.ts
+  relayed an upgrade on ANY path — so `GET /manifest.webmanifest` with `Upgrade: websocket` reached
+  the backend with no session, and its reads need no token: every chat, readable by anybody who
+  could reach the hostname. Found by the final review before this was first pushed, and measured
+  against the production server: `101` without the fix, `404` with it. The route is one constant on
+  both sides of the socket (`web/src/lib/backend-route.ts`, now in `RUNTIME_ENTRIES`), and
+  `e2e/relay-origin.spec.ts` opens a socket on each open path and expects the refusal.
 - **The callback is derived, never guessed**: `auth.oauth2Proxy.redirectUrl`, else
   `https://<the first non-wildcard route hostname>/oauth2/callback`; neither is a refusal. NOTES
   names it, since it has to be registered at the provider.

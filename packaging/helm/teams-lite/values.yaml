@@ -392,7 +392,9 @@ auth:
     # provider disables loses access within it — which NEEDS a refresh token: without one, the
     # session ends when the provider's ID token does (about an hour), and you sign in that often.
     cookieRefresh: ""
-    # More oauth2-proxy flags (`--allowed-group=…`, `--prompt=…`), appended after the chart's.
+    # More oauth2-proxy flags (`--allowed-group=…`, `--prompt=…`), appended after the chart's. The
+    # flags that would let somebody past who is not in `emails`, or open a path with no session
+    # (`--email-domain`, `--skip-auth-route`, `--htpasswd-file`, `--trusted-ip`, …), are refused.
     extraArgs: []
     resources:
       requests:

@@ -346,6 +346,8 @@ spec:
         - name: oauth2-proxy
           image: {{ ternary (printf "%s@%s" $o.image.repository $o.image.digest) (printf "%s:%s" $o.image.repository $o.image.tag) (ne $o.image.digest "") | quote }}
           imagePullPolicy: {{ default "IfNotPresent" $o.image.pullPolicy }}
+          # Every value from values.yaml is QUOTED: unquoted, `clientId: "abc #tail"` rendered as
+          # `--client-id=abc` (YAML reads ` #` as a comment) and a value ending in `:` as a map.
           args:
             - --http-address=0.0.0.0:{{ include "teams-lite.authPort" . }}
             # The web front on this pod's loopback. The Host header is passed through
@@ -353,16 +355,16 @@ spec:
             # origin checks compare a page against.
             - --upstream=http://127.0.0.1:{{ $webPort }}/
             - --provider=oidc
-            - --oidc-issuer-url={{ $o.issuerUrl }}
-            - --client-id={{ $o.clientId }}
+            - {{ printf "--oidc-issuer-url=%s" $o.issuerUrl | quote }}
+            - {{ printf "--client-id=%s" $o.clientId | quote }}
             {{- if $o.publicClient }}
             # A PUBLIC client (auth.oauth2Proxy.publicClient): registered with no secret. oauth2-proxy
             # refuses an OIDC provider with none at all, and reads an empty file as the empty secret
             # — so the token exchange carries the client id and the PKCE verifier, and nothing else.
             - --client-secret-file=/dev/null
             {{- end }}
-            - --redirect-url={{ include "teams-lite.redirectUrl" . }}
-            - --scope={{ $o.scope }}
+            - {{ printf "--redirect-url=%s" (include "teams-lite.redirectUrl" .) | quote }}
+            - {{ printf "--scope=%s" $o.scope | quote }}
             # Who may sign in: the listed addresses and nobody else — no --email-domain, which would
             # widen it to a whole domain (`*` to every account at the provider).
             - --authenticated-emails-file=/etc/oauth2-proxy/authenticated-emails
@@ -372,7 +374,7 @@ spec:
             # admin can give a user any address, never a `sub`.
             - --oidc-groups-claim=sub
             {{- range . }}
-            - --allowed-group={{ . }}
+            - {{ printf "--allowed-group=%s" . | quote }}
             {{- end }}
             {{- end }}
             # Straight to the provider, with PKCE.
@@ -385,8 +387,8 @@ spec:
             - --cookie-secure=true
             - --cookie-httponly=true
             - --cookie-samesite=lax
-            - --cookie-expire={{ $o.cookieExpire }}
-            - --cookie-refresh={{ default "0" $o.cookieRefresh }}
+            - {{ printf "--cookie-expire=%s" $o.cookieExpire | quote }}
+            - {{ printf "--cookie-refresh=%s" (default "0" $o.cookieRefresh) | quote }}
             # The page's sign-in probe (web/src/lib/auth-wall.ts): an expired session answers this
             # route with a 401 rather than a redirect, which is the one answer the page reloads on.
             - --api-route=^/__write-token$
