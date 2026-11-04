@@ -45,6 +45,7 @@ import {
   type PresenceSchedule,
   type LinearWorkspace,
   type BrokerStatus,
+  type PortalPurpose,
   type SigninState,
   INITIAL_SIGNIN,
   type CalendarEvent,
@@ -6892,6 +6893,45 @@ export class TeamsController {
       });
       playCue("error");
     }
+  }
+
+  /** Open the Intune portal in this backend's own Intune container — embedded mode only, offered
+   *  by the banner's "Enroll this device", and by its "Sign in through the Intune portal" on a
+   *  container that is enrolled but whose broker holds no account. ONE press for both: the
+   *  backend decides what the portal is opened for, from the same state the banner drew its offer
+   *  from, and `purpose` is only what the optimistic panel says until its answer arrives. The same
+   *  panel and the same optimistic `starting` as a sign-in, and for the same reason: the portal
+   *  can take half a minute to appear, and a press answered by nothing reads as one that missed.
+   *  A refusal is the whole answer and is shown in the panel the press opened, in the backend's
+   *  own words. */
+  async startEnroll(purpose: PortalPurpose = "enroll"): Promise<void> {
+    this.set({
+      signin: { ...INITIAL_SIGNIN, kind: "enroll", purpose, phase: "starting" },
+      signinDismissed: false,
+    });
+    try {
+      const answer = await this.backend.intuneEnroll();
+      if (answer.signin) this.set({ signin: answer.signin });
+    } catch (e) {
+      this.set({
+        signin: {
+          ...INITIAL_SIGNIN,
+          kind: "enroll",
+          purpose,
+          phase: "failed",
+          detail: e instanceof Error ? e.message : String(e),
+        },
+      });
+      playCue("error");
+    }
+  }
+
+  /** Bring back a panel the reader put away, without touching the flow behind it — the
+   *  banner's "Show the enrollment". Starting the flow again is not the same act: an enrollment
+   *  already open is refused a second time, and the reader asked to SEE the one they have. */
+  reopenSignin(): void {
+    this.set({ signinDismissed: false });
+    void this.refreshSignin();
   }
 
   /** Re-read the phase. The panel polls this while it waits, because the transition that

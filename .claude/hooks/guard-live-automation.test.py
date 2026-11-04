@@ -13,8 +13,17 @@ The blocking cases are the ones to keep: the incident's own command line, an
 inline browser driver, a script that writes to the live backend, a dev server
 with no declared backend, a send-capable backend started by tooling, and the
 user's Intune container cycled by tooling — through its CLI, its unit, the
-hidden arguments teams-lite's own binary routes, a transient unit, or the crate
-called from a cargo example.
+hidden arguments teams-lite's own binary routes (on the host, or behind a
+`docker exec` / `kubectl exec` into the image that runs one of its own), a
+transient unit, or the crate called from a cargo example — and the image or the
+chart that holds the user's enrollment stopped, signalled from inside or from a
+container joined to its pid namespace, a second backend exec'd into it, or its
+volumes deleted.
+
+The refusals are held to the same two halves (`check_advice`): every command a
+block text recommends as the way forward must itself be allowed, and be the
+spelling that works — a refusal whose own advice fails is one its reader stops
+reading.
 
 Most of them come in the SHAPES a shell gives a command — behind `timeout` or
 `env -i`, inside `( … )` or `$( … )`, chained after a `pkill` — because each of
@@ -31,11 +40,45 @@ import tempfile
 from pathlib import Path
 
 HOOK = Path(__file__).with_name("guard-live-automation.sh")
-PROJECT = HOOK.parent.parent.parent
+# The checkout the cases run in. It is the one this file sits in — except when GUARD_TEST_PROJECT
+# names another, which is how an edited COPY of the hook is tested before it replaces the live
+# one. The live hook guards every command of every session in this checkout, and a syntax error
+# in it exits 2, which refuses ALL of them: so a change is staged outside .claude/hooks/, tested
+# there against the real checkout (whose tracked files, examples/ and packaging/ the cases need),
+# and only then copied back.
+PROJECT = Path(os.environ.get("GUARD_TEST_PROJECT") or HOOK.parent.parent.parent)
 WEB = PROJECT / "web"
 
 # Ad-hoc scripts, written outside the repo like the real ones were.
 FIXTURES = {
+    # The chart rendered to a file (and into a directory), the two-step spelling of
+    # `helm template … | kubectl apply -f -` — and a manifest of something else.
+    "rendered.yaml": (
+        "apiVersion: apps/v1\n"
+        "kind: StatefulSet\n"
+        "metadata:\n"
+        "  labels:\n"
+        "    app.kubernetes.io/name: teams-lite\n"
+        "spec:\n"
+        "  template:\n"
+        "    spec:\n"
+        "      containers:\n"
+        '        - image: "ghcr.io/theophile-wallez/teams-lite:build-0123abc"\n'
+    ),
+    "rendered-dir/statefulset.yaml": (
+        "kind: StatefulSet\n"
+        "spec:\n"
+        "  template:\n"
+        "    spec:\n"
+        "      containers:\n"
+        "        - image: ghcr.io/somefork/teams-lite:latest\n"
+    ),
+    "unrelated.yaml": "kind: ConfigMap\nmetadata:\n  name: grafana\ndata:\n  a: b\n",
+    "helmfile.yaml": (
+        "releases:\n"
+        "  - name: chat\n"
+        "    chart: oci://ghcr.io/theophile-wallez/charts/teams-lite\n"
+    ),
     "incident-driver.ts": (
         "// The ad-hoc driver from the incident: launches a browser and types.\n"
         "import { chromium } from 'playwright-core';\n"
@@ -752,6 +795,58 @@ EXAMPLE_FIXTURES = {
         "use intune_container::autostart::{disable, status};\n"
         "fn main() { status().unwrap(); disable().unwrap(); }\n"
     ),
+    # The pinned commit's own additions: the portal opened INSIDE the running container (the
+    # enrollment), the archive halves `backup|restore` stop it around, and the state file every
+    # backend finds the broker through, cleared under a live container.
+    "guard-test-crate-portal-headless.rs": (
+        "fn main() { intune_container::ops::portal_open_headless().unwrap(); }\n"
+    ),
+    "guard-test-crate-restore-rootless.rs": (
+        "use intune_container::backup;\n"
+        "fn main() { backup::restore_rootless(Some(std::path::Path::new(\"/tmp/b.tar.gz\"))).unwrap(); }\n"
+    ),
+    "guard-test-crate-clear-state.rs": (
+        "fn main() { intune_container::runtime::clear_runtime_state().unwrap(); }\n"
+    ),
+    # teams-lite's embedded half: the helper spawned (a boot is a 1.7 GB pull on a fresh volume),
+    # a helper's own body called in-process, a grouped import of one, the mode-aware repair entry
+    # point, and the hidden arguments handed to a binary, as a constant and as a literal.
+    "guard-test-embedded-spawn.rs": (
+        "use teams_lite::intune_embedded::{self, Helper};\n"
+        "fn main() { intune_embedded::spawn_helper(Helper::Boot).unwrap(); }\n"
+    ),
+    "guard-test-embedded-main.rs": (
+        "fn main() { std::process::exit(teams_lite::intune_embedded::stop_main()); }\n"
+    ),
+    "guard-test-embedded-grouped.rs": (
+        "use teams_lite::intune_embedded::{portal_main, Helper};\n"
+        "fn main() { let _ = Helper::Portal; std::process::exit(portal_main()); }\n"
+    ),
+    "guard-test-embedded-repair.rs": (
+        "#[tokio::main]\n"
+        "async fn main() { teams_lite::intune::start_repair().await.unwrap(); }\n"
+    ),
+    "guard-test-embedded-boot-binary.rs": (
+        "use teams_lite::intune_embedded::BOOT_SUBCOMMAND;\n"
+        "fn main() { std::process::Command::new(\"/usr/local/lib/teams-lite/server\").arg(BOOT_SUBCOMMAND).status().unwrap(); }\n"
+    ),
+    "guard-test-embedded-portal-literal.rs": (
+        "fn main() { std::process::Command::new(\"server\").arg(\"__teams-lite-intune-portal\").status().unwrap(); }\n"
+    ),
+    # …while READING the embedded state is what the diagnostic prints: the mode, which helper
+    # holds the slot, the status the greeting carries, whether the device is registered, whether
+    # the portal is up, and the PURE liveness of the runtime state.
+    "guard-test-embedded-read.rs": (
+        "use intune_container::{backup, ops, runtime};\n"
+        "use teams_lite::intune_embedded::{self, Helper};\n"
+        "fn main() {\n"
+        "    println!(\"{:?} {:?}\", intune_embedded::mode(), intune_embedded::helper_running());\n"
+        "    println!(\"{:?}\", intune_embedded::status(false));\n"
+        "    println!(\"{} {}\", backup::has_device_registration(), ops::portal_is_running());\n"
+        "    let live = runtime::load_runtime_state().unwrap().map(|s| runtime::state_is_live(&s));\n"
+        "    println!(\"{live:?} {:?}\", Helper::Boot.subcommand());\n"
+        "}\n"
+    ),
     # …while asking whether the unit is installed only reads.
     "guard-test-crate-autostart-status.rs": (
         "fn main() { intune_container::autostart::status().unwrap(); }\n"
@@ -1229,6 +1324,202 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, "pkill -f __teams-lite-repair-broker"),
         ("BLOCK", PROJECT, "kill $(pgrep -f __teams-lite-repair-broker)"),
         ("BLOCK", PROJECT, "pkill -f __rootless-supervise"),
+        # The image's self-contained mode routes three more: the boot (init, an import, a start —
+        # a 1.7 GB pull on a fresh volume), the stop the entrypoint's trap runs, and the portal
+        # that enrolls the device. Refused run, wrapped, through cargo, as a unit and killed —
+        # and whatever TEAMS_LITE_READ_ONLY says, since the stop never looks at it.
+        ("BLOCK", PROJECT, "/usr/local/lib/teams-lite/server __teams-lite-intune-boot"),
+        ("BLOCK", PROJECT, "TEAMS_LITE_READ_ONLY=1 /usr/local/lib/teams-lite/server __teams-lite-intune-stop"),
+        ("BLOCK", PROJECT, "target/release/server __teams-lite-intune-portal"),
+        ("BLOCK", PROJECT, "timeout 60 ~/.cache/teams-lite/server __teams-lite-intune-boot"),
+        ("BLOCK", PROJECT, "cargo run --bin server -- __teams-lite-intune-boot"),
+        ("BLOCK", PROJECT, "systemd-run --user target/release/server __teams-lite-intune-stop"),
+        ("BLOCK", PROJECT, "pkill -f __teams-lite-intune-boot"),
+        ("BLOCK", PROJECT, "pkill -f __teams-lite-intune-portal"),
+        ("BLOCK", PROJECT, "kill $(pgrep -f __teams-lite-intune-stop)"),
+        # Inside the image the binary sits behind an `exec`, which puts it at no command position
+        # on this line: so a container CLI's exec reaching a hidden argument is the same act, in
+        # whatever container or pod it names — and so is a `run` of the image handed one, told
+        # read-only or not, and a kill exec'd into it.
+        ("BLOCK", PROJECT, "docker exec teams-lite /usr/local/lib/teams-lite/server __teams-lite-intune-stop"),
+        ("BLOCK", PROJECT, "docker exec -it -u teams teams-lite /usr/local/lib/teams-lite/server __teams-lite-intune-portal"),
+        ("BLOCK", PROJECT, "podman exec teams-lite /usr/local/lib/teams-lite/server __teams-lite-repair-broker"),
+        ("BLOCK", PROJECT, "docker container exec teams-lite pkill -f __rootless-supervise"),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker compose -f packaging/docker/compose.yaml exec teams-lite "
+            "/usr/local/lib/teams-lite/server __teams-lite-intune-boot",
+        ),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite exec teams-lite-0 -- /usr/local/lib/teams-lite/server __teams-lite-intune-stop"),
+        (
+            "BLOCK",
+            PROJECT,
+            "kubectl exec -it teams-lite-0 -c teams-lite -- sh -c '/usr/local/lib/teams-lite/server __teams-lite-intune-boot'",
+        ),
+        ("BLOCK", PROJECT, "k3s kubectl exec pod/teams-lite-0 -- /usr/local/lib/teams-lite/server __teams-lite-intune-portal"),
+        ("BLOCK", PROJECT, "oc exec teams-lite-0 -- /usr/local/lib/teams-lite/server __teams-lite-intune-boot"),
+        ("BLOCK", PROJECT, "(docker exec teams-lite /usr/local/lib/teams-lite/server __teams-lite-intune-stop)"),
+        ("BLOCK", PROJECT, "x=$(kubectl exec teams-lite-0 -- /usr/local/lib/teams-lite/server __teams-lite-intune-stop)"),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm -e TEAMS_LITE_READ_ONLY=1 --entrypoint /usr/local/lib/teams-lite/server "
+            "teams-lite:local __teams-lite-intune-stop",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker compose -f packaging/docker/compose.yaml run --rm teams-lite "
+            "/usr/local/lib/teams-lite/server __teams-lite-intune-boot",
+        ),
+        # The self-test's sanctioned shape is a THROWAWAY run: exec'd into a live install it acts
+        # on that install's own volume, and it ends with the stop.
+        ("BLOCK", PROJECT, "docker exec teams-lite teams-lite-intune-selftest"),
+        ("BLOCK", PROJECT, "kubectl exec teams-lite-0 -- /usr/local/bin/teams-lite-intune-selftest"),
+        # …and so is the image's own ENTRYPOINT. In an image built from this checkout a second copy
+        # is refused by its own one-copy lock before it acts; the hook cannot see which build a
+        # container runs, and in one built before that lock a second copy exits at once — its
+        # launcher finds the ports taken, or prints its usage — and powers the RUNNING Intune
+        # container off on its way out. `--help` is no exemption, because the stop follows any exit.
+        # What is refused is RUNNING it: past a wrapper, inside a `-c` script, as a shell's script
+        # operand, or sourced.
+        ("BLOCK", PROJECT, "docker exec teams-lite teams-lite-container"),
+        ("BLOCK", PROJECT, "docker exec teams-lite teams-lite-container --help"),
+        ("BLOCK", PROJECT, "docker exec -it -u teams teams-lite /usr/local/bin/teams-lite-container"),
+        ("BLOCK", PROJECT, "podman exec teams-lite teams-lite-container"),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml exec teams-lite teams-lite-container"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite exec teams-lite-0 -- teams-lite-container"),
+        ("BLOCK", PROJECT, "kubectl exec teams-lite-0 -- sh -c '/usr/local/bin/teams-lite-container --help'"),
+        ("BLOCK", PROJECT, "x=$(docker exec teams-lite teams-lite-container)"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh /usr/local/bin/teams-lite-container"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c '. /usr/local/bin/teams-lite-container'"),
+        ("BLOCK", PROJECT, "docker exec teams-lite timeout 60 /usr/local/bin/teams-lite-intune-selftest"),
+        ("BLOCK", PROJECT, "docker exec teams-lite-ro teams-lite-intune-selftest"),
+        # Rule 3c-ii: the launcher or the backend exec'd INTO a running install is a SECOND
+        # send-capable backend — the exec inherits the container's environment but not the ports its
+        # entrypoint chose, so it binds the default 19420 there, free, and signs in through the same
+        # identity broker. With any arguments (`--help` included) and whatever an `-e` on the exec or
+        # an `env` in front of the program says; through every wrapper the image's own entrypoint
+        # uses to drop privileges (setpriv), and the others (runuser, su, gosu, timeout, nohup, exec,
+        # sudo); inside a `-c` script, its newlines included; through compose and kubectl; and the
+        # backend at its two teams-lite paths in ANY container, a bare `teams` or `server` in the
+        # install's own (or one the shell computes).
+        ("BLOCK", PROJECT, "docker exec -u teams teams-lite /usr/local/lib/teams-lite/server"),
+        ("BLOCK", PROJECT, "docker exec -d -u teams teams-lite /usr/local/lib/teams-lite/server"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite exec teams-lite-0 -- /usr/local/lib/teams-lite/server"),
+        ("BLOCK", PROJECT, "docker exec -u teams teams-lite teams --no-open"),
+        ("BLOCK", PROJECT, "docker exec teams-lite teams --help"),
+        ("BLOCK", PROJECT, "docker exec teams-lite /usr/local/bin/teams"),
+        ("BLOCK", PROJECT, "docker container exec teams-lite /usr/local/bin/teams --no-open"),
+        ("BLOCK", PROJECT, "podman exec teams-lite teams"),
+        (
+            "BLOCK",
+            PROJECT,
+            "kubectl -n teams-lite exec teams-lite-0 -- setpriv --reuid=teams --regid=teams "
+            "--init-groups -- teams --no-open",
+        ),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml exec teams-lite teams --no-open"),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml exec -d teams-lite /usr/local/bin/teams"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c 'cd /tmp && exec teams --no-open'"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c 'cd /tmp\nteams --no-open'"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c 'nohup /usr/local/lib/teams-lite/server >/dev/null 2>&1 &'"),
+        # A newline ends a command in a `-c` script as a `;` does.
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c 'cd /tmp\n/usr/local/lib/teams-lite/server'"),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker exec teams-lite bash -lc 'exec setpriv --reuid=teams --regid=teams --init-groups -- "
+            "/usr/local/lib/teams-lite/server'",
+        ),
+        ("BLOCK", PROJECT, "docker exec teams-lite runuser -u teams -- teams --no-open"),
+        ("BLOCK", PROJECT, "docker exec teams-lite runuser teams -c /usr/local/lib/teams-lite/server"),
+        ("BLOCK", PROJECT, "docker exec teams-lite su teams -c 'teams --no-open'"),
+        ("BLOCK", PROJECT, "docker exec teams-lite gosu teams teams"),
+        ("BLOCK", PROJECT, "docker exec teams-lite timeout 30 server"),
+        ("BLOCK", PROJECT, "docker exec -w /usr/local/lib/teams-lite teams-lite ./server"),
+        ("BLOCK", PROJECT, "docker exec teams-lite /proc/123/exe"),
+        ("BLOCK", PROJECT, "docker exec -e TEAMS_LITE_READ_ONLY=1 teams-lite /usr/local/lib/teams-lite/server"),
+        ("BLOCK", PROJECT, "docker exec teams-lite env TEAMS_LITE_READ_ONLY=1 /usr/local/lib/teams-lite/server"),
+        ("BLOCK", PROJECT, "docker exec teams-lite /home/teams/.cache/teams-lite/server"),
+        ("BLOCK", PROJECT, "docker exec teams-lite-ro /usr/local/lib/teams-lite/server"),
+        ("BLOCK", PROJECT, "docker exec $(docker ps -q) teams"),
+        ("BLOCK", PROJECT, "x=$(docker exec teams-lite teams)"),
+        ("BLOCK", PROJECT, "(docker exec -u teams teams-lite /usr/local/lib/teams-lite/server)"),
+        ("BLOCK", PROJECT, "sudo docker exec -u teams teams-lite teams"),
+        ("BLOCK", PROJECT, "timeout 10 docker exec teams-lite teams"),
+        ("BLOCK", PROJECT, "kubectl exec sts/teams-lite -- teams"),
+        ("BLOCK", PROJECT, "kubectl exec tl-teams-lite-0 -c teams-lite -- /usr/local/bin/teams --no-open"),
+        ("BLOCK", PROJECT, "oc exec teams-lite-0 -- teams --no-open"),
+        # Rule 3d-iii: another container JOINED to the install's pid namespace is inside it — every
+        # process of the install is then one of its own, as root with CAP_KILL, and what it runs
+        # next (a shell, a script) is beyond this hook. So the join is refused, whatever it runs:
+        # `--pid container:` on a run or a create, on docker, podman and nerdctl, a computed target,
+        # and `kubectl debug --target` on the chart's pod.
+        ("BLOCK", PROJECT, "docker run --rm --pid container:teams-lite busybox kill 1"),
+        ("BLOCK", PROJECT, "docker run --rm --pid=container:teams-lite busybox kill -TERM 1"),
+        ("BLOCK", PROJECT, "docker run --rm --pid container:teams-lite busybox pkill -f teams"),
+        ("BLOCK", PROJECT, "docker run --rm --pid=container:teams-lite busybox ps"),
+        ("BLOCK", PROJECT, 'docker run --rm --pid "container:teams-lite" busybox ps'),
+        ("BLOCK", PROJECT, "docker run --rm -it --pid container:teams-lite alpine sh"),
+        ("BLOCK", PROJECT, "docker create --pid container:teams-lite busybox"),
+        ("BLOCK", PROJECT, "docker container run --pid container:teams-lite busybox"),
+        ("BLOCK", PROJECT, "podman run --rm --pid=container:teams-lite alpine kill 1"),
+        ("BLOCK", PROJECT, "nerdctl run --pid container:teams-lite busybox ps"),
+        ("BLOCK", PROJECT, "docker run --rm --pid=container:$(docker ps -q --filter name=teams) busybox kill 1"),
+        ("BLOCK", PROJECT, "sudo docker run --rm --pid container:teams-lite busybox ps"),
+        ("BLOCK", PROJECT, "x=$(docker run --rm --pid container:teams-lite busybox ps)"),
+        ("BLOCK", PROJECT, "kubectl debug -it teams-lite-0 --image=busybox --target=teams-lite -- kill 1"),
+        # …with no command at all: the image's own (a shell, for busybox) runs inside it.
+        ("BLOCK", PROJECT, "kubectl debug -it teams-lite-0 --image=busybox --target=teams-lite"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite debug teams-lite-0 -it --image=busybox --target teams-lite -- ps"),
+        ("BLOCK", PROJECT, "kubectl debug pod/teams-lite-0 --target=teams-lite --image=busybox"),
+        ("BLOCK", PROJECT, "kubectl debug -it --image=busybox --target=teams-lite tl-teams-lite-0"),
+        # Rule 3d-ii: a SIGNAL sent inside teams-lite's container is `docker stop` by other means —
+        # PID 1 (tini), the entrypoint whose exit powers the Intune container off, the launcher,
+        # the backend and the Intune container's own processes are all the install. By number, by
+        # name, through a wrapper, inside a `-c` script (its quoted separators included), under
+        # xargs, into a computed target, through compose and through kubectl — by pod, by
+        # `kind/name`, under a release's prefix.
+        ("BLOCK", PROJECT, "docker exec teams-lite kill 1"),
+        ("BLOCK", PROJECT, "docker exec teams-lite kill -TERM 1"),
+        ("BLOCK", PROJECT, "docker exec teams-lite kill -s TERM 1"),
+        ("BLOCK", PROJECT, "docker exec teams-lite kill -9 -1"),
+        ("BLOCK", PROJECT, "docker exec -u root teams-lite /usr/bin/kill --signal=KILL 1"),
+        ("BLOCK", PROJECT, "podman exec teams-lite kill 1"),
+        ("BLOCK", PROJECT, "docker container exec teams-lite kill 1"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c 'kill -TERM 1'"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c 'kill 23; kill 1'"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c 'cat /run/pid | xargs kill'"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c '\nkill 1\n'"),
+        ("BLOCK", PROJECT, "docker exec teams-lite sh -c 'cat /run/pid\nkill 1'"),
+        ("BLOCK", PROJECT, 'docker exec -it teams-lite bash -lc "pkill -f teams"'),
+        ("BLOCK", PROJECT, "docker exec teams-lite timeout 5 kill 1"),
+        ("BLOCK", PROJECT, "docker exec teams-lite killall tini"),
+        ("BLOCK", PROJECT, "docker exec $(docker ps -q --filter name=teams) kill 1"),
+        ("BLOCK", PROJECT, "docker exec `docker ps -q` kill -TERM 1"),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml exec teams-lite kill 1"),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml exec -T teams-lite sh -c 'kill -s TERM 1'"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite exec teams-lite-0 -- kill 1"),
+        ("BLOCK", PROJECT, 'kubectl exec -it teams-lite-0 -c teams-lite -- sh -c "kill -TERM 1"'),
+        ("BLOCK", PROJECT, "kubectl exec pod/teams-lite-0 -- kill -s TERM 1"),
+        ("BLOCK", PROJECT, "kubectl exec sts/teams-lite -- kill 1"),
+        ("BLOCK", PROJECT, "kubectl exec tl-teams-lite-0 -- kill 1"),
+        ("BLOCK", PROJECT, "oc exec teams-lite-0 -- kill 1"),
+        ("BLOCK", PROJECT, "(docker exec teams-lite kill 1)"),
+        ("BLOCK", PROJECT, "x=$(docker exec teams-lite kill 1)"),
+        ("BLOCK", PROJECT, "sudo docker exec teams-lite kill 1"),
+        ("BLOCK", PROJECT, "timeout 10 docker exec teams-lite kill 1"),
+        # The same lifecycle from a cargo example, through the crate or teams-lite's own module.
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-portal-headless"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-restore-rootless"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-crate-clear-state"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-embedded-spawn"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-embedded-main"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-embedded-grouped"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-embedded-repair"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-embedded-boot-binary"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-embedded-portal-literal"),
         # The container image's pair (19423 / 19443) is the same account on this loopback.
         ("BLOCK", PROJECT, f"bun run {tmp}/image-backend-writer.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/image-relay-writer.ts"),
@@ -1263,6 +1554,295 @@ def cases(tmp: Path):
             PROJECT,
             "docker run --rm -e TEAMS_LITE_READ_ONLY=1 teams-lite:local; docker run -d teams-lite:local",
         ),
+        # Rule 3d, the other way: the image runs the user's Intune container now, so taking the
+        # container named teams-lite DOWN signs that install out — a stop, a kill, a pause, a
+        # removal, behind the engine's global flags or a wrapper — and so does a list the shell
+        # computes, which this hook cannot see inside. These used to be ALLOWED as cleanup.
+        ("BLOCK", PROJECT, "docker stop teams-lite"),
+        ("BLOCK", PROJECT, "docker kill teams-lite"),
+        ("BLOCK", PROJECT, "docker container stop -t 0 teams-lite"),
+        ("BLOCK", PROJECT, "docker rm -f teams-lite"),
+        ("BLOCK", PROJECT, "docker container remove teams-lite"),
+        ("BLOCK", PROJECT, "podman pause teams-lite"),
+        ("BLOCK", PROJECT, "docker --context default stop teams-lite"),
+        ("BLOCK", PROJECT, "sudo docker kill -s KILL teams-lite"),
+        ("BLOCK", PROJECT, "docker stop $(docker ps -q)"),
+        ("BLOCK", PROJECT, "docker rm -f `docker ps -aq`"),
+        # …and its compose project, by any compose file there, a `cd` into it, a shell already
+        # standing there, or its project name.
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml stop"),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml down"),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.host-broker.yaml down"),
+        ("BLOCK", PROJECT, "cd packaging/docker && docker compose down"),
+        ("BLOCK", PROJECT / "packaging" / "docker", "docker compose down"),
+        ("BLOCK", PROJECT / "packaging" / "docker", "docker compose kill"),
+        ("BLOCK", PROJECT, "docker compose -p teams-lite kill"),
+        ("BLOCK", PROJECT, "docker-compose -f packaging/docker/compose.yaml rm -f"),
+        ("BLOCK", PROJECT, "podman compose -f packaging/docker/compose.yaml pause"),
+        # IRREVERSIBLE: the volumes hold the device's enrollment and the store. `down -v`, a
+        # volume of the project by name (the Intune one under any project name), `--all`, a
+        # computed list, a prune of any kind that takes volumes, and podman's reset.
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml down -v"),
+        ("BLOCK", PROJECT, "docker compose -f packaging/docker/compose.yaml down --volumes"),
+        ("BLOCK", PROJECT / "packaging" / "docker", "docker compose down -v"),
+        ("BLOCK", PROJECT, "docker volume rm teams-lite_intune"),
+        ("BLOCK", PROJECT, "docker volume rm intune"),
+        ("BLOCK", PROJECT, "docker volume rm -f teams-lite_data"),
+        ("BLOCK", PROJECT, "docker volume rm myproj_intune"),
+        ("BLOCK", PROJECT, "docker volume rm $(docker volume ls -q)"),
+        ("BLOCK", PROJECT, "podman volume rm --all"),
+        ("BLOCK", PROJECT, "docker volume prune"),
+        ("BLOCK", PROJECT, "docker volume prune -f --filter label=x"),
+        ("BLOCK", PROJECT, "docker system prune -af --volumes"),
+        ("BLOCK", PROJECT, "podman system reset"),
+        # The self-test boots an Intune container on the image's data directory and STOPS it, so
+        # anything mounted on that directory, above it or inside it — or another container's
+        # volumes — voids the proof, read-only or not; and a compose run mounts the service's own.
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm --entrypoint teams-lite-intune-selftest "
+            "-v teams-lite_intune:/home/teams/.local/share/intune-container teams-lite:local",
+        ),
+        ("BLOCK", PROJECT, "docker run --rm --entrypoint teams-lite-intune-selftest -v /x:/home/teams/.local/share/ teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm --entrypoint teams-lite-intune-selftest -v /x:/home/teams teams-lite:local"),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm --entrypoint teams-lite-intune-selftest --mount "
+            "type=volume,src=teams-lite_intune,target=/home/teams/.local/share/intune-container teams-lite:local",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm --entrypoint=/usr/local/bin/teams-lite-intune-selftest --volumes-from teams-lite teams-lite:local",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm --entrypoint teams-lite-intune-selftest "
+            "-v /x:/home/teams/.local/share/intune-container/persist:ro teams-lite:local",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm -e TEAMS_LITE_READ_ONLY=1 --entrypoint teams-lite-intune-selftest "
+            "-v teams-lite_intune:/home/teams/.local/share/intune-container teams-lite:local",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker compose -f packaging/docker/compose.yaml run --rm --entrypoint teams-lite-intune-selftest teams-lite",
+        ),
+        # A proof is read as the engine reads its flags. The LAST --entrypoint is the one that
+        # runs, so a proof stands only as the SOLE one — in both spellings, and whichever proof it
+        # is; with --pid=host and the host's bus that second entrypoint is a send-capable backend
+        # signed in as the user, with no mount anywhere.
+        ("BLOCK", PROJECT, "docker run --rm --entrypoint teams-lite-intune-selftest --entrypoint teams-lite-container teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm --entrypoint=teams-lite-intune-selftest --entrypoint=teams-lite-container teams-lite:local"),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm --entrypoint teams-lite-intune-selftest --entrypoint /usr/local/lib/teams-lite/server "
+            "-v teams-lite_intune:/srv teams-lite:local",
+        ),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm --user 1000:1000 --pid=host -e TEAMS_LITE_INTUNE_MODE=host "
+            "-e TEAMS_LITE_BROKER_BUS=unix:path=/proc/6415/root/run/user/0/bus "
+            "--entrypoint teams-lite-intune-selftest --entrypoint teams-lite-container teams-lite:local",
+        ),
+        ("BLOCK", PROJECT, "docker run --rm --entrypoint teams-lite-intune-status --entrypoint teams-lite-container teams-lite:local"),
+        ("BLOCK", PROJECT, "podman run --rm --entrypoint=teams-lite-intune-status --entrypoint teams-lite-container teams-lite:local"),
+        # …the LAST word on TEAMS_LITE_READ_ONLY is the one the container gets, in any spelling — a
+        # bare `-e TEAMS_LITE_READ_ONLY` hands it the CLI's own value…
+        ("BLOCK", PROJECT, "docker run --rm -e TEAMS_LITE_READ_ONLY=1 -e TEAMS_LITE_READ_ONLY=0 teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm --env TEAMS_LITE_READ_ONLY=1 --env=TEAMS_LITE_READ_ONLY=0 teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm -e TEAMS_LITE_READ_ONLY=1 -eTEAMS_LITE_READ_ONLY=0 teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm -e TEAMS_LITE_READ_ONLY=1 -e TEAMS_LITE_READ_ONLY teams-lite:local"),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker compose -f packaging/docker/compose.yaml run --rm -e TEAMS_LITE_READ_ONLY=1 "
+            "-e TEAMS_LITE_READ_ONLY=0 teams-lite",
+        ),
+        # …and a word after the IMAGE is an argument for the image's own program, never a flag.
+        ("BLOCK", PROJECT, "docker run --rm teams-lite:local -e TEAMS_LITE_READ_ONLY=1"),
+        ("BLOCK", PROJECT, "docker run --rm teams-lite:local --entrypoint teams-lite-intune-status"),
+        # The self-test's display :99 is an ABSTRACT socket, which belongs to the network
+        # namespace: in the host's it is the user's own Intune container's, in another
+        # container's that install's — docker and podman, every spelling.
+        ("BLOCK", PROJECT, "docker run --rm --network host --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm --network=host --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm --net host --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm --net=host --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, "podman run --rm --network=host --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, "podman run --rm --net host --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined "
+            '--network "host" --entrypoint teams-lite-intune-selftest ghcr.io/theophile-wallez/teams-lite:latest',
+        ),
+        ("BLOCK", PROJECT, "docker run --rm --network container:teams-lite --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, "podman run --rm --network ns:/proc/1/ns/net --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        # …nor an IPC namespace — a /dev/shm — that is not its own: its Intune container binds the
+        # outer /dev, and its boot deletes every broker semaphore there that no process IT can see
+        # holds — in the host's /dev/shm, a lock the user's own broker may hold that moment.
+        ("BLOCK", PROJECT, "docker run --rm --ipc host --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, "docker run --rm --ipc=host --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, 'docker run --rm --ipc "host" --entrypoint teams-lite-intune-selftest teams-lite:local'),
+        ("BLOCK", PROJECT, "docker run --rm --ipc container:teams-lite --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, "podman run --rm --ipc host --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("BLOCK", PROJECT, "podman run --rm --ipc=ns:/proc/1/ns/ipc --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        (
+            "BLOCK",
+            PROJECT,
+            "docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined "
+            "--security-opt apparmor=unconfined --ipc host --entrypoint teams-lite-intune-selftest "
+            "ghcr.io/theophile-wallez/teams-lite:latest",
+        ),
+        # The PUBLISHED image is the same image under a registry's name, by tag or by digest.
+        ("BLOCK", PROJECT, "docker run --rm --pid=host --network=host ghcr.io/theophile-wallez/teams-lite:latest"),
+        ("BLOCK", PROJECT, "podman run ghcr.io/theophile-wallez/teams-lite:build-0123abc"),
+        ("BLOCK", PROJECT, f"docker run --rm ghcr.io/theophile-wallez/teams-lite@sha256:{'a' * 64}"),
+        ("BLOCK", PROJECT, "docker run --rm localhost:5000/teams-lite"),
+        # A FORK publishes the same image under its own owner (build.yml names it from the
+        # repository it runs in), and its chart under its own `charts/`: neither is upstream's name.
+        ("BLOCK", PROJECT, "docker run --rm ghcr.io/somefork/teams-lite:latest"),
+        ("BLOCK", PROJECT, "helm install teams-lite oci://ghcr.io/somefork/charts/teams-lite"),
+        # Rule 3e: the chart deployed, upgraded or rolled back — by release name, path, OCI
+        # reference, package, or from the chart's own directory — is the live stack on a cluster.
+        (
+            "BLOCK",
+            PROJECT,
+            "helm install teams-lite oci://ghcr.io/theophile-wallez/charts/teams-lite -n teams-lite "
+            "--set broker.intuneContainer.stateDir=/home/u/.local/share/intune-container",
+        ),
+        ("BLOCK", PROJECT, "helm upgrade --install teams-lite packaging/helm/teams-lite"),
+        ("BLOCK", PROJECT, "helm upgrade --install me ./packaging/helm/teams-lite/"),
+        ("BLOCK", PROJECT, "helm install me out/teams-lite-0.1.42.tgz"),
+        ("BLOCK", PROJECT, "helm --kube-context dedibox upgrade teams-lite oci://ghcr.io/theophile-wallez/charts/teams-lite"),
+        ("BLOCK", PROJECT, "helm rollback teams-lite 3"),
+        ("BLOCK", PROJECT / "packaging" / "helm" / "teams-lite", "helm install me ."),
+        ("BLOCK", PROJECT, "timeout 120 helm upgrade teams-lite packaging/helm/teams-lite --wait"),
+        # The read-only proof is the LAST word on the value, and a flag that outranks --set voids it.
+        ("BLOCK", PROJECT, "helm install teams-lite packaging/helm/teams-lite --set readOnly=true --set readOnly=false"),
+        ("BLOCK", PROJECT, "helm install teams-lite packaging/helm/teams-lite --set readOnly=true,readOnly=false"),
+        (
+            "BLOCK",
+            PROJECT,
+            "helm install teams-lite packaging/helm/teams-lite --set readOnly=true --set-literal readOnly=false",
+        ),
+        ("BLOCK", PROJECT, "helm install teams-lite packaging/helm/teams-lite -f read-only.yaml"),
+        ("BLOCK", PROJECT, "helm install teams-lite packaging/helm/teams-lite --dry-run=none"),
+        # The rendered manifests applied, or a manifest named after it.
+        ("BLOCK", PROJECT, "helm template teams-lite packaging/helm/teams-lite | kubectl apply -f -"),
+        ("BLOCK", PROJECT, "kubectl apply -f deploy/teams-lite.yaml"),
+        ("BLOCK", PROJECT, "k3s kubectl create -f teams-lite.yml"),
+        # Every kubectl verb that starts or restarts the pod.
+        ("BLOCK", PROJECT, "kubectl -n teams-lite scale statefulset/teams-lite --replicas=1"),
+        ("BLOCK", PROJECT, "kubectl scale sts teams-lite --replicas 1"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite rollout restart statefulset/teams-lite"),
+        ("BLOCK", PROJECT, "kubectl rollout undo sts/teams-lite"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite delete pod teams-lite-0"),
+        ("BLOCK", PROJECT, "kubectl delete pods -l app.kubernetes.io/name=teams-lite"),
+        ("BLOCK", PROJECT, "kubectl delete pod/teams-lite-0 --namespace=teams-lite"),
+        ("BLOCK", PROJECT, "kubectl set env statefulset/teams-lite TEAMS_LITE_CALL_DEBUG=1"),
+        ("BLOCK", PROJECT, "kubectl patch sts teams-lite -p '{\"spec\":{}}'"),
+        ("BLOCK", PROJECT, "kubectl run tl --image=ghcr.io/theophile-wallez/teams-lite:latest"),
+        (
+            "BLOCK",
+            PROJECT,
+            "kubectl run tl --image=ghcr.io/theophile-wallez/teams-lite --env=TEAMS_LITE_READ_ONLY=1 --env=TEAMS_LITE_READ_ONLY=0",
+        ),
+        # A port-forward is the account's door: only onto a live loopback port the browser guard knows.
+        ("BLOCK", PROJECT, "kubectl -n teams-lite port-forward svc/teams-lite 8080:19443"),
+        ("BLOCK", PROJECT, "kubectl port-forward pod/teams-lite-0 :19443"),
+        ("BLOCK", PROJECT, "kubectl port-forward --address 0.0.0.0 svc/teams-lite 19443:19443"),
+        ("BLOCK", PROJECT, "kubectl port-forward svc/teams-lite 19443:19443 --address=127.0.0.1,192.168.1.4"),
+        ("BLOCK", PROJECT, "kubectl port-forward svc/teams-lite 19443 9000:19443"),
+        # Found by review, each one a real spelling that walked past the first version of 3d/3e.
+        # A tag the shell fills in is still the image's tag.
+        ("BLOCK", PROJECT, "docker run --rm --pid=host --network=host teams-lite:$TAG"),
+        ("BLOCK", PROJECT, "docker run --rm teams-lite:${TAG:-latest}"),
+        ("BLOCK", PROJECT, 'docker run --rm teams-lite:"$(git rev-parse --short HEAD)"'),
+        ("BLOCK", PROJECT, "kubectl run tl --image=ghcr.io/theophile-wallez/teams-lite:$TAG"),
+        # An OCI chart reference carries its version as a tag, or a digest.
+        ("BLOCK", PROJECT, "helm install tl oci://ghcr.io/theophile-wallez/charts/teams-lite:0.1.42"),
+        ("BLOCK", PROJECT, f"helm install tl oci://ghcr.io/theophile-wallez/charts/teams-lite@sha256:{'b' * 64}"),
+        # The chart's own directory, reached by a `cd` on the same line.
+        ("BLOCK", PROJECT, "cd packaging/helm/teams-lite && helm install tl . --set hostUser.uid=1000"),
+        ("BLOCK", PROJECT / "packaging" / "helm", "cd teams-lite; helm upgrade --install tl ."),
+        # A subshell or a substitution is a command too.
+        ("BLOCK", PROJECT, "(helm install tl packaging/helm/teams-lite)"),
+        ("BLOCK", PROJECT, "x=$(helm upgrade --install teams-lite oci://ghcr.io/theophile-wallez/charts/teams-lite)"),
+        ("BLOCK", PROJECT, "(kubectl -n teams-lite port-forward svc/teams-lite 8080:19443 >/dev/null 2>&1 &)"),
+        ("BLOCK", PROJECT, "x=$(kubectl -n teams-lite rollout restart sts/teams-lite)"),
+        ("BLOCK", PROJECT, "(docker run --rm teams-lite:local)"),
+        # The read-only proof is an INSTALL's: an upgrade to read-only restarts the user's client.
+        ("BLOCK", PROJECT, "helm upgrade teams-lite oci://ghcr.io/theophile-wallez/charts/teams-lite --set readOnly=true"),
+        (
+            "BLOCK",
+            PROJECT,
+            "helm upgrade --install teams-lite packaging/helm/teams-lite --reuse-values --set readOnly=true",
+        ),
+        # Restarting every workload of its namespace restarts it.
+        ("BLOCK", PROJECT, "kubectl -n teams-lite rollout restart statefulset"),
+        ("BLOCK", PROJECT, "kubectl rollout restart sts -n teams-lite"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite delete pods --all"),
+        ("BLOCK", PROJECT, "kubectl delete pod --all -n teams-lite"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite scale sts --all --replicas=1"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite set env sts --all FOO=bar"),
+        # A named or quoted port is the same door.
+        ("BLOCK", PROJECT, "kubectl -n teams-lite port-forward svc/teams-lite 8080:web"),
+        ("BLOCK", PROJECT, "kubectl port-forward pod/teams-lite-0 :web"),
+        ("BLOCK", PROJECT, "kubectl port-forward svc/teams-lite '8080:19443'"),
+        ("BLOCK", PROJECT, 'kubectl port-forward svc/teams-lite "8080:19443"'),
+        # The image named on a `kubectl create`, and helmfile, which runs `helm upgrade --install`.
+        ("BLOCK", PROJECT, "kubectl create deployment tl --image=ghcr.io/theophile-wallez/teams-lite:latest"),
+        ("BLOCK", PROJECT, "helmfile -l name=teams-lite sync"),
+        ("BLOCK", PROJECT, f"helmfile -f {tmp}/helmfile.yaml apply"),
+        # A manifest rendered to a FILE and applied next, by file or by directory.
+        ("BLOCK", PROJECT, f"kubectl apply -f {tmp}/rendered.yaml"),
+        ("BLOCK", PROJECT, f"kubectl apply -f {tmp}/rendered-dir/"),
+        # A second copy of the live pod, on the same claims, is the live client again.
+        ("BLOCK", PROJECT, "kubectl debug teams-lite-0 -n teams-lite --copy-to=tl-debug"),
+        # A kind is read in a comma list too, wherever it stands in it.
+        ("BLOCK", PROJECT, "kubectl delete pod,svc teams-lite-0"),
+        ("BLOCK", PROJECT, "kubectl delete svc,pod teams-lite-0"),
+        # Rule 3e, the other way: in the default self-contained mode the pod runs the user's Intune
+        # container, so STOPPING the release signs it out — an uninstall (under any of its helm
+        # names), a scale to 0, a delete of the StatefulSet, of `all` its kinds or of its manifests.
+        # These used to be ALLOWED as cleanup.
+        ("BLOCK", PROJECT, "helm -n teams-lite uninstall teams-lite"),
+        ("BLOCK", PROJECT, "helm uninstall teams-lite --keep-history"),
+        ("BLOCK", PROJECT, "helm del teams-lite"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite scale statefulset/teams-lite --replicas=0"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite scale sts --all --replicas=0"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite delete statefulset teams-lite"),
+        ("BLOCK", PROJECT, "kubectl delete sts/teams-lite --cascade=orphan"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite delete all --all"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite delete sts"),
+        ("BLOCK", PROJECT, f"kubectl delete -f {tmp}/rendered.yaml"),
+        ("BLOCK", PROJECT, "helm template teams-lite packaging/helm/teams-lite | kubectl delete -f -"),
+        # IRREVERSIBLE: the chart's claims (the store, and the device's enrollment) by name, by
+        # label, or `--all` / `-A` anywhere — a read-only release's own included, since every
+        # release names its claims after the chart — and ANY namespace, which takes every claim in
+        # it, on whichever real cluster the kubeconfig names.
+        ("BLOCK", PROJECT, "kubectl -n teams-lite delete pvc data-teams-lite-0"),
+        ("BLOCK", PROJECT, "kubectl delete pvc intune-teams-lite-0 -n teams-lite"),
+        ("BLOCK", PROJECT, "kubectl delete persistentvolumeclaim/data-tl-teams-lite-0"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite delete pvc -l app.kubernetes.io/name=teams-lite"),
+        ("BLOCK", PROJECT, "kubectl delete pvc --all -n other"),
+        ("BLOCK", PROJECT, "kubectl delete pvc -A --all"),
+        ("BLOCK", PROJECT, "kubectl -n teams-lite delete pvc data-teams-lite-ro-0"),
+        ("BLOCK", PROJECT, "kubectl delete namespace teams-lite"),
+        ("BLOCK", PROJECT, "kubectl delete ns scratch"),
+        ("BLOCK", PROJECT, "kubectl delete namespaces --all"),
+        ("BLOCK", PROJECT, "kubectl delete ns/teams-lite"),
+        ("BLOCK", PROJECT, "x=$(kubectl delete namespace teams-lite)"),
         # --- must allow ------------------------------------------------------
         # Reading the live backend is deliberately fine, through either address.
         ("ALLOW", PROJECT, f"bun run {tmp}/backend-reader.ts"),
@@ -1558,15 +2138,172 @@ def cases(tmp: Path):
         ),
         ("ALLOW", PROJECT, "docker images teams-lite:local"),
         ("ALLOW", PROJECT, "docker logs teams-lite"),
-        ("ALLOW", PROJECT, "docker stop teams-lite"),
-        ("ALLOW", PROJECT, "docker rm -f teams-lite"),
-        ("ALLOW", PROJECT / "packaging" / "docker", "docker compose down"),
+        ("ALLOW", PROJECT, "docker inspect teams-lite"),
+        # Taking down what is NOT the user's install stays cleanup: a container of another name —
+        # which is why tooling's own runs give theirs one — an image, another project, a volume of
+        # one's own, and a prune that takes no volume.
+        ("ALLOW", PROJECT, "docker stop teams-lite-ro"),
+        ("ALLOW", PROJECT, "docker rm -f tl-check"),
+        ("ALLOW", PROJECT, "docker image rm teams-lite:local"),
+        ("ALLOW", PROJECT, "docker rmi teams-lite:local"),
+        ("ALLOW", PROJECT, "docker volume rm my-scratch-volume"),
+        ("ALLOW", PROJECT, "docker volume ls"),
+        ("ALLOW", PROJECT, "docker volume inspect teams-lite_intune"),
+        ("ALLOW", PROJECT, "docker system prune -f"),
+        ("ALLOW", PROJECT, "docker container prune -f"),
+        ("ALLOW", PROJECT, "cd ~/other && docker compose down"),
+        ("ALLOW", PROJECT, "cd ~/other && docker compose down -v"),
+        # …and an `exec` of anything but a hidden argument is reading the container, or tidying
+        # inside it — a compose `rm` exec'd in is not a compose `rm`.
+        ("ALLOW", PROJECT, "docker exec teams-lite teams-lite-intune-status"),
+        ("ALLOW", PROJECT, "docker exec teams-lite ls -la /home/teams/.local/share/intune-container"),
+        ("ALLOW", PROJECT, "docker compose -f packaging/docker/compose.yaml exec teams-lite rm -f /tmp/scratch"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite exec teams-lite-0 -- cat /proc/1/status"),
+        # The entrypoint is read in the checkout, and a container that merely shares the prefix of
+        # its name is another container.
+        ("ALLOW", PROJECT, "cat packaging/docker/entrypoint.sh"),
+        ("ALLOW", PROJECT, "docker exec teams-lite-ro ls /usr/local/bin"),
+        ("ALLOW", PROJECT, "git commit -m 'docs: docker exec teams-lite teams-lite-container stops the container'"),
+        # …and READING the image's own programs inside the install runs none of them: what a
+        # published image really carries is checked against the checkout this way. Rules 3b and
+        # 3c-ii refuse the program the exec RUNS, never a file it is handed.
+        ("ALLOW", PROJECT, "docker exec teams-lite cat /usr/local/bin/teams-lite-container"),
+        ("ALLOW", PROJECT, "docker exec teams-lite ls -l /usr/local/bin/teams-lite-container"),
+        ("ALLOW", PROJECT, "docker exec teams-lite sha256sum /usr/local/bin/teams-lite-container"),
+        ("ALLOW", PROJECT, "docker exec teams-lite grep -n trap /usr/local/bin/teams-lite-container"),
+        ("ALLOW", PROJECT, "docker exec teams-lite sh -c 'grep -n take_instance_lock /usr/local/bin/teams-lite-container'"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite exec teams-lite-0 -- cat /usr/local/bin/teams-lite-container"),
+        ("ALLOW", PROJECT, "docker exec teams-lite cat /usr/local/bin/teams-lite-intune-selftest"),
+        ("ALLOW", PROJECT, "docker exec teams-lite sha256sum /usr/local/lib/teams-lite/server /usr/local/bin/teams"),
+        ("ALLOW", PROJECT, "docker exec teams-lite ls -la /home/teams/.cache/teams-lite"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite exec teams-lite-0 -- ls -l /usr/local/lib/teams-lite"),
+        ("ALLOW", PROJECT, "docker exec teams-lite sh -c 'command -v teams'"),
+        ("ALLOW", PROJECT, "docker exec teams-lite sh -c 'echo teams'"),
+        ("ALLOW", PROJECT, "docker exec teams-lite runuser teams -c id"),
+        ("ALLOW", PROJECT, "docker exec -u teams teams-lite id"),
+        # The read-only diagnostic is another program, by its wrapper or by the binary behind it.
+        ("ALLOW", PROJECT, "docker exec teams-lite /usr/local/lib/teams-lite/intune-status"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite exec teams-lite-0 -- teams-lite-intune-status"),
+        # A bare `teams` or `server` in a container of ANOTHER name is somebody else's program.
+        ("ALLOW", PROJECT, "docker exec teams-lite-ro teams --version"),
+        ("ALLOW", PROJECT, "docker exec other-app ./server"),
+        ("ALLOW", PROJECT, "kubectl exec api-0 -- server --version"),
+        ("ALLOW", PROJECT, "echo docker exec teams-lite teams"),
+        ("ALLOW", PROJECT, "git commit -m 'docs: docker exec teams-lite teams starts a second stack'"),
+        ("ALLOW", PROJECT, "grep -rn 'docker exec -u teams teams-lite teams --no-open' AGENTS.md"),
+        # Rule 3d-iii's open half: a container of ANOTHER name is somebody's own to join, the host's
+        # pid namespace is not this rule's, an ephemeral container with no --target joins nothing,
+        # and `docker top` lists the install's processes from the host's side with no join at all.
+        ("ALLOW", PROJECT, "docker run --rm --pid container:teams-lite-ro busybox ps"),
+        ("ALLOW", PROJECT, "kubectl debug -it teams-lite-ro-0 --image=busybox --target=teams-lite -- sh"),
+        ("ALLOW", PROJECT, "kubectl debug node/worker-1 -it --image=busybox"),
+        ("ALLOW", PROJECT, "docker top teams-lite"),
+        ("ALLOW", PROJECT, "docker top teams-lite -o pid,comm"),
+        ("ALLOW", PROJECT, "git commit -m 'docs: docker run --pid container:teams-lite busybox kill 1 is refused'"),
+        # Rule 3d-ii's open half: looking inside sends nothing — signal 0 only asks whether PID 1
+        # exists, a list of signal names is a list, and `kill` as a WORD is not a command — and a
+        # container or a pod of another name (tooling's own `teams-lite-ro` included, and a pod
+        # of another name in the chart's namespace) is somebody's own to signal.
+        ("ALLOW", PROJECT, "docker exec teams-lite kill -0 1"),
+        # …which in this image is dash's builtin: it ships no kill binary, so a direct exec of
+        # `kill` finds nothing to run — the shell spelling is the one that answers.
+        ("ALLOW", PROJECT, "docker exec teams-lite sh -c 'kill -0 1'"),
+        ("ALLOW", PROJECT, "docker exec teams-lite kill -l"),
+        ("ALLOW", PROJECT, "docker exec teams-lite kill -l 15"),
+        ("ALLOW", PROJECT, "docker exec teams-lite cat /proc/1/status"),
+        ("ALLOW", PROJECT, "docker exec teams-lite grep -c kill /usr/local/bin/teams-lite-intune-status"),
+        ("ALLOW", PROJECT, "docker exec teams-lite sh -c 'echo kill 1'"),
+        ("ALLOW", PROJECT, "docker exec teams-lite sh -c 'command -v kill'"),
+        ("ALLOW", PROJECT, "docker exec teams-lite ls /proc"),
+        ("ALLOW", PROJECT, "docker exec teams-lite-ro kill 1"),
+        ("ALLOW", PROJECT, "docker exec other kill 1"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite exec debug-shell -- kill 1"),
+        ("ALLOW", PROJECT, "kubectl exec teams-lite-ro-0 -- kill 1"),
+        ("ALLOW", PROJECT, "docker kill -s HUP my-scratch"),
+        ("ALLOW", PROJECT, "echo docker exec teams-lite kill 1"),
+        ("ALLOW", PROJECT, "git commit -m 'docs: docker exec teams-lite kill 1 is a stop'"),
+        ("ALLOW", PROJECT, "grep -rn 'docker exec teams-lite kill 1' AGENTS.md"),
+        ("ALLOW", PROJECT, "grep -rn __teams-lite-intune-boot src"),
+        ("ALLOW", PROJECT, "pgrep -af __teams-lite-intune-boot"),
+        ("ALLOW", PROJECT, "git commit -m 'docs: kubectl exec teams-lite-0 -- server __teams-lite-intune-stop is refused'"),
+        ("ALLOW", PROJECT, "git commit -m 'docs: docker compose down -v deletes the enrollment'"),
+        ("ALLOW", PROJECT, "grep -rn 'docker volume prune' AGENTS.md"),
+        ("ALLOW", PROJECT, "cargo run --example guard-test-embedded-read"),
+        # The self-test on a THROWAWAY container: nothing mounted on the Intune data directory
+        # (an unrelated mount, or a tmpfs there, is nothing of the user's), local or published.
+        ("ALLOW", PROJECT, "docker run --rm --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined "
+            "--entrypoint teams-lite-intune-selftest teams-lite:local",
+        ),
+        # The spelling every block text hands out — the self-test's own header's, the Dockerfile's
+        # and compose.yaml's, with the AppArmor option a host that enforces a profile needs — on
+        # one line and in the block texts' own three lines.
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined "
+            "--security-opt apparmor=unconfined --entrypoint teams-lite-intune-selftest teams-lite:local",
+        ),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined \\\n"
+            "    --security-opt apparmor=unconfined \\\n"
+            "    --entrypoint teams-lite-intune-selftest teams-lite:local",
+        ),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm --entrypoint teams-lite-intune-selftest -v /tmp/scratch:/tmp/scratch "
+            "ghcr.io/theophile-wallez/teams-lite:latest",
+        ),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm --entrypoint teams-lite-intune-selftest "
+            "--tmpfs /home/teams/.local/share/intune-container teams-lite:local",
+        ),
+        # …on a network namespace of its OWN, by default or by name — a network merely called
+        # `hostnet` is one of those — and podman's own user-mode network.
+        ("ALLOW", PROJECT, "docker run --rm --network bridge --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("ALLOW", PROJECT, "docker run --rm --network hostnet --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("ALLOW", PROJECT, "podman run --rm --network=slirp4netns --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        # …and an IPC namespace of its own, by default or by name; another image may share the host's.
+        ("ALLOW", PROJECT, "docker run --rm --ipc private --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("ALLOW", PROJECT, "docker run --rm --ipc=shareable --entrypoint teams-lite-intune-selftest teams-lite:local"),
+        ("ALLOW", PROJECT, "docker run --rm --ipc host python:3.13-alpine ls /dev/shm"),
+        # The self-test refuses any argument itself, so a word after the image is not a second run.
+        ("ALLOW", PROJECT, "docker run --rm --entrypoint teams-lite-intune-selftest teams-lite:local --help"),
+        # A read-only run with the store (it boots no Intune container), and the host-broker
+        # diagnostic, which reads the host's state read-only as the host user.
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm --name teams-lite-ro -e TEAMS_LITE_READ_ONLY=1 "
+            "-v teams-lite_data:/home/teams/.local/share/teams-lite teams-lite:local",
+        ),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm --pid=host --user 1000:1000 -e TEAMS_LITE_INTUNE_MODE=host "
+            "--entrypoint teams-lite-intune-status "
+            "-v /home/u/.local/share/intune-container:/home/teams/.local/share/intune-container:ro teams-lite:local",
+        ),
         (
             "ALLOW",
             PROJECT,
             "docker run --rm -e TEAMS_LITE_READ_ONLY=1 --pid=host --network=host teams-lite:local",
         ),
         ("ALLOW", PROJECT, "docker run --rm --env=TEAMS_LITE_READ_ONLY=1 teams-lite:local"),
+        # The LAST word on the value is the one that counts, so a 1 after an earlier 0 is a proof
+        # (and a 0 written for the CLI in front of `docker` is nothing the container sees); and a
+        # read-only run may share the host's network, because it boots no Intune container.
+        ("ALLOW", PROJECT, "docker run --rm -e TEAMS_LITE_READ_ONLY=0 -e TEAMS_LITE_READ_ONLY=1 teams-lite:local"),
+        ("ALLOW", PROJECT, "TEAMS_LITE_READ_ONLY=0 docker run --rm -e TEAMS_LITE_READ_ONLY=1 teams-lite:local"),
+        ("ALLOW", PROJECT, "docker run --rm -e TEAMS_LITE_READ_ONLY=1 --network host teams-lite:local"),
         (
             "ALLOW",
             PROJECT,
@@ -1583,6 +2320,90 @@ def cases(tmp: Path):
         ("ALLOW", PROJECT, "docker compose up -d"),
         # And prose about it runs nothing.
         ("ALLOW", PROJECT, 'git commit -m "docs: start it with docker compose up teams-lite"'),
+        # The published image is pulled, inspected and run read-only like the local one; a bind
+        # mount named after the project is still a mount.
+        ("ALLOW", PROJECT, "docker pull ghcr.io/theophile-wallez/teams-lite:latest"),
+        (
+            "ALLOW",
+            PROJECT,
+            "docker run --rm -e TEAMS_LITE_READ_ONLY=1 --pid=host ghcr.io/theophile-wallez/teams-lite:latest",
+        ),
+        ("ALLOW", PROJECT, "docker run --rm -v ./teams-lite:/data alpine ls /data"),
+        # Rule 3e's open half: rendering, checking, packaging, publishing and reading the chart.
+        (
+            "ALLOW",
+            PROJECT,
+            "helm template teams-lite packaging/helm/teams-lite --set broker.intuneContainer.stateDir=/x",
+        ),
+        ("ALLOW", PROJECT, "helm lint --strict packaging/helm/teams-lite"),
+        ("ALLOW", PROJECT, "packaging/helm/check.sh"),
+        ("ALLOW", PROJECT / "packaging" / "helm", "bun test"),
+        ("ALLOW", PROJECT, "helm package packaging/helm/teams-lite --version 0.1.7 --app-version build-0123abc"),
+        ("ALLOW", PROJECT, "helm show values oci://ghcr.io/theophile-wallez/charts/teams-lite"),
+        ("ALLOW", PROJECT, "helm -n teams-lite status teams-lite"),
+        ("ALLOW", PROJECT, "helm -n teams-lite history teams-lite"),
+        # …a dry run, and a release that states it is read-only as the last word on the value…
+        ("ALLOW", PROJECT, "helm install teams-lite packaging/helm/teams-lite --dry-run"),
+        ("ALLOW", PROJECT, "helm upgrade --install teams-lite packaging/helm/teams-lite --dry-run=server"),
+        ("ALLOW", PROJECT, "helm install teams-lite packaging/helm/teams-lite --set readOnly=false --set readOnly=true"),
+        ("ALLOW", PROJECT, "helm install teams-lite packaging/helm/teams-lite --set hostUser.uid=1000,readOnly=true"),
+        ("ALLOW", PROJECT, "helm template teams-lite packaging/helm/teams-lite | kubectl apply --dry-run=client -f -"),
+        # …another chart, or a values file that merely lives under a path named after the project…
+        ("ALLOW", PROJECT, "helm upgrade --install grafana grafana/grafana -f /home/u/.t3/worktrees/teams-lite/x/values.yaml"),
+        # …reading the workload…
+        ("ALLOW", PROJECT, "kubectl -n teams-lite get pods"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite logs -f teams-lite-0"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite describe statefulset teams-lite"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite exec teams-lite-0 -- teams-lite-intune-status"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite rollout status statefulset/teams-lite"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite get pvc"),
+        ("ALLOW", PROJECT, "kubectl get ns"),
+        # …a stop or a delete that says it is only a rehearsal…
+        ("ALLOW", PROJECT, "kubectl -n teams-lite delete pvc data-teams-lite-0 --dry-run=client"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite scale statefulset/teams-lite --replicas=0 --dry-run=client"),
+        ("ALLOW", PROJECT, "helm uninstall teams-lite --dry-run"),
+        # …and taking down what is NOT the chart's: a release of another name (a read-only one
+        # tooling installed itself), its StatefulSet, a plugin, another claim, a PersistentVolume
+        # (held back by its finalizer while a claim exists), every StatefulSet of another
+        # namespace, and an ephemeral debug container, which copies nothing. (One aimed with
+        # `--target` at the pod's container joins its pid namespace, which is rule 3d-iii's to
+        # refuse; with no target it stands in a pid namespace of its own.)
+        ("ALLOW", PROJECT, "helm uninstall teams-lite-ro -n teams-lite"),
+        ("ALLOW", PROJECT, "helm plugin uninstall diff"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite delete statefulset teams-lite-ro"),
+        ("ALLOW", PROJECT, "kubectl delete pvc my-scratch-claim -n my-scratch-namespace"),
+        ("ALLOW", PROJECT, "kubectl delete pv pvc-0123"),
+        ("ALLOW", PROJECT, "kubectl -n other delete sts --all"),
+        ("ALLOW", PROJECT, "kubectl debug -it teams-lite-0 --image=busybox"),
+        ("ALLOW", PROJECT, 'git commit -m "docs: kubectl delete namespace teams-lite deletes the PVCs"'),
+        # …a namespace named after it is a place, not the workload…
+        ("ALLOW", PROJECT, "kubectl -n teams-lite rollout restart deployment/other"),
+        ("ALLOW", PROJECT, "kubectl --namespace=teams-lite delete pod debug-shell"),
+        # …and a port-forward onto the live loopback port the browser guard knows.
+        ("ALLOW", PROJECT, "kubectl -n teams-lite port-forward svc/teams-lite 19443:19443"),
+        ("ALLOW", PROJECT, "kubectl port-forward pod/teams-lite-0 19443 --address 127.0.0.1"),
+        ("ALLOW", PROJECT, "kubectl port-forward svc/other 8080:80"),
+        ("ALLOW", PROJECT, 'git commit -m "docs: helm install teams-lite, then port-forward 8080:19443"'),
+        # The other half of the review's fixes: what must stay open.
+        ("ALLOW", PROJECT, "helm diff upgrade teams-lite packaging/helm/teams-lite -n teams-lite"),
+        ("ALLOW", PROJECT, "helm diff rollback teams-lite 3"),
+        (
+            "ALLOW",
+            PROJECT,
+            "helm install tl packaging/helm/teams-lite --set-string image.tag=0123456 --set readOnly=true",
+        ),
+        ("ALLOW", PROJECT, "helm install tl packaging/helm/teams-lite --set-json readOnly=false --set readOnly=true"),
+        ("ALLOW", PROJECT, "helm install teams-lite-ro oci://ghcr.io/theophile-wallez/charts/teams-lite --set readOnly=true"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite port-forward svc/teams-lite 19443:web"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite get pods --all"),
+        ("ALLOW", PROJECT, "kubectl -n teams-lite rollout status statefulset"),
+        ("ALLOW", PROJECT, "kubectl -n other rollout restart statefulset"),
+        ("ALLOW", PROJECT, f"kubectl apply -f {tmp}/unrelated.yaml"),
+        ("ALLOW", PROJECT, f"kubectl apply -f {tmp}/rendered.yaml --dry-run=client"),
+        ("ALLOW", PROJECT, "docker run --rm -v ./teams-lite:/data alpine ls /data"),
+        ("ALLOW", PROJECT, "cd packaging/helm/teams-lite && helm template tl ."),
+        ("ALLOW", PROJECT, "cd ~/src/teams-lite && helm upgrade --install grafana grafana/grafana"),
+        ("ALLOW", PROJECT, "helmfile -f /dev/null sync"),
     ]
 
 
@@ -1608,10 +2429,90 @@ def aimed_at_this_run(command: str) -> str:
     return command
 
 
+# WHAT A REFUSAL RECOMMENDS is held to the same two halves. A block text that hands the reader a
+# way forward which itself fails — or which this hook refuses — is a guard whose reader learns to
+# stop reading it. Two shipped that way: the self-test without `--security-opt
+# apparmor=unconfined`, which a host enforcing an AppArmor profile refuses `mount` for, and
+# `docker exec teams-lite kill -0 1`, which finds no `kill` in an image that ships none. So each
+# case is a command the hook refuses, the commands its refusal must recommend — each of which must
+# itself be ALLOWED — and the words it must no longer say.
+SELFTEST_SPELLING = (
+    "docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined "
+    "--security-opt apparmor=unconfined --entrypoint teams-lite-intune-selftest teams-lite:local"
+)
+
+
+def advice_cases():
+    return [
+        (
+            "docker run --rm --entrypoint teams-lite-intune-selftest "
+            "-v teams-lite_intune:/home/teams/.local/share/intune-container teams-lite:local",
+            [SELFTEST_SPELLING],
+            [],
+        ),
+        ("docker run --rm --network host --entrypoint teams-lite-intune-selftest teams-lite:local", [SELFTEST_SPELLING], []),
+        ("docker run --rm --ipc host --entrypoint teams-lite-intune-selftest teams-lite:local", [SELFTEST_SPELLING], []),
+        ("docker run --rm teams-lite:local", [SELFTEST_SPELLING], []),
+        (
+            "docker exec teams-lite kill 1",
+            ["docker top teams-lite", "docker exec teams-lite cat /proc/1/status"],
+            ["docker exec teams-lite kill -0"],
+        ),
+        (
+            "docker run --rm --pid container:teams-lite busybox ps",
+            ["docker top teams-lite", "docker exec teams-lite cat /proc/1/status", "docker exec teams-lite ls /proc"],
+            [],
+        ),
+        (
+            "docker exec -u teams teams-lite /usr/local/lib/teams-lite/server",
+            ["docker exec teams-lite sha256sum /usr/local/lib/teams-lite/server /usr/local/bin/teams"],
+            [],
+        ),
+        (
+            "docker exec teams-lite teams-lite-container",
+            ["docker exec teams-lite sha256sum /usr/local/bin/teams-lite-container"],
+            # The entrypoint's own lock refuses a second copy before it acts: a refusal saying the
+            # copy "exits at once … and stops the container" says two things that cannot both be true.
+            ["exits at once, even for --help, and stops"],
+        ),
+    ]
+
+
+def run_hook(command: str, cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [str(HOOK)],
+        input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env={"CLAUDE_PROJECT_DIR": str(PROJECT), "HOME": str(Path.home()), "PATH": "/usr/bin:/bin"},
+    )
+
+
+def flattened(text: str) -> str:
+    """A block text as one line: its `\\` continuations joined, its whitespace runs single."""
+    return re.sub(r"\s+", " ", text.replace("\\\n", " "))
+
+
+def check_advice() -> int:
+    failures = 0
+    for trigger, recommended, retired in advice_cases():
+        proc = run_hook(trigger, PROJECT)
+        message = flattened(proc.stderr)
+        problems = [] if proc.returncode != 0 else ["the trigger itself was allowed"]
+        problems += [f"does not recommend `{c}`" for c in recommended if c not in message]
+        problems += [f"still says `{w}`" for w in retired if w in message]
+        problems += [f"recommends `{c}`, which it refuses" for c in recommended if run_hook(c, PROJECT).returncode != 0]
+        failures += 1 if problems else 0
+        print(f"{'FAIL' if problems else 'ok  '} advice <- {trigger}{'' if not problems else ': ' + '; '.join(problems)}")
+    return failures
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         for name, body in FIXTURES.items():
+            (tmp / name).parent.mkdir(parents=True, exist_ok=True)
             (tmp / name).write_text(body)
         # The example fixtures have to live where cargo would find them, so they are
         # written into examples/ and removed again in the `finally` below.
@@ -1624,14 +2525,7 @@ def main() -> int:
         failures = 0
         try:
             for expected, cwd, command in cases(tmp):
-                proc = subprocess.run(
-                    [str(HOOK)],
-                    input=json.dumps({"tool_input": {"command": aimed_at_this_run(command)}}),
-                    capture_output=True,
-                    text=True,
-                    cwd=cwd,
-                    env={"CLAUDE_PROJECT_DIR": str(PROJECT), "HOME": str(Path.home()), "PATH": "/usr/bin:/bin"},
-                )
+                proc = run_hook(aimed_at_this_run(command), cwd)
                 got = "ALLOW" if proc.returncode == 0 else "BLOCK"
                 ok = got == expected
                 failures += 0 if ok else 1
@@ -1640,9 +2534,12 @@ def main() -> int:
             for path in written_examples:
                 path.unlink(missing_ok=True)
 
+    advice_failures = check_advice()
     total = len(cases(Path("/tmp")))
     print(f"\n{total - failures}/{total} as expected")
-    return 1 if failures else 0
+    advice_total = len(advice_cases())
+    print(f"{advice_total - advice_failures}/{advice_total} refusals recommend what works")
+    return 1 if failures or advice_failures else 0
 
 
 if __name__ == "__main__":

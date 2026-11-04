@@ -46,6 +46,19 @@ import {
  *  - **It is a DIALOG, and it owns Escape.** The app's own Escape leaves the open pane, and
  *    the shell stands aside while a modal is up (`aModalIsOpen`) — the same arrangement the
  *    custom-agent form needed.
+ *
+ * THE SAME PANEL ENROLLS A DEVICE (`signin.kind === "enroll"`): an embedded backend's own Intune
+ * container, through the Intune portal's window rather than the broker's. Every rule above holds
+ * for it unchanged — one window, no password field, the reader's keys one at a time — and only
+ * the WORDS differ, which `signinView` decides per kind: whose window it is, what the spinner
+ * waits for, and the control that ends it, which says "Close the portal" once the container
+ * holds a registration (the portal may still be finishing its steps, so the READER closes it).
+ * The same portal also signs an ACCOUNT in again on a container that is enrolled but whose broker
+ * holds none (`signin.purpose === "account"`), and only the words differ again.
+ *
+ * A CANCEL IS CARRIED OUT, NOT ASSUMED: the backend asks the portal's helper to close the portal
+ * and settles only once it has, so for those seconds the session reports `stopping` and this
+ * panel says it is closing — no window, no keys, and no second Cancel to press.
  */
 export function SigninPanel() {
   const signin = useAppState((s) => s.signin);
@@ -168,6 +181,10 @@ export function SigninPanel() {
       <DialogContent
         data-testid="signin-panel"
         data-phase={signin.phase}
+        data-kind={signin.kind ?? "signin"}
+        data-purpose={signin.kind === "enroll" ? (signin.purpose ?? "enroll") : undefined}
+        data-registered={signin.registered ? "true" : undefined}
+        data-stopping={signin.stopping ? "true" : undefined}
         // Bounded and scrolling, because the content is a picture 675 px tall: without this the
         // Cancel button sits below the fold on a laptop and off the screen on a phone. The spec
         // caught it by not being able to click it, which is exactly what a reader would hit.
@@ -190,15 +207,15 @@ export function SigninPanel() {
         {view.busy && (
           <div className="flex items-center gap-2 text-xs text-text-dim">
             <FadeArc className="size-4" />
-            Waiting for Microsoft…
+            {view.waitingLabel}
           </div>
         )}
 
         {view.showsWindow && (
           <div className="flex flex-col gap-2">
-            {/* The broker's own window. `alt` names whose page it is rather than describing a
-                picture: a screen reader cannot read pixels, and what matters is that this is
-                Microsoft's page and not this app's. */}
+            {/* The broker's own window — or the Intune portal's. `alt` names whose page it is
+                rather than describing a picture: a screen reader cannot read pixels, and what
+                matters is that this is Microsoft's page and not this app's. */}
             {frame ? (
               <img
                 ref={pictureRef}
@@ -206,7 +223,7 @@ export function SigninPanel() {
                 data-window-width={frame.width}
                 data-window-height={frame.height}
                 src={`data:image/png;base64,${frame.png}`}
-                alt="Microsoft's sign-in page, running on this machine"
+                alt={view.frameAlt}
                 onClick={onPress}
                 data-stale={frame.stale ? "true" : undefined}
                 // Height-capped with an automatic width, never `object-contain`: the click
@@ -286,7 +303,7 @@ export function SigninPanel() {
               data-testid="signin-cancel"
               onClick={() => void controller.cancelSignin()}
             >
-              Cancel
+              {view.cancelLabel}
             </Button>
           ) : (
             <Button size="sm" data-testid="signin-close" onClick={() => controller.dismissSignin()}>

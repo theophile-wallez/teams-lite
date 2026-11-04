@@ -4814,24 +4814,60 @@ user. Two independent mechanisms enforce that split:
   itself, which is that backend plus the real app on 19440 in one word, and including
   teams-lite's CONTAINER IMAGE brought up (`docker compose … up`, `start`, or a `docker run`
   of it whose container is not told `-e TEAMS_LITE_READ_ONLY=1` — see § Running teams-lite in
-  a container image) — and
+  a container image), and including its Helm CHART deployed, upgraded or restarted (`helm
+  install|upgrade|rollback`, the rendered manifests applied, a scale up, a rollout restart, a
+  delete of its pod — see § Running teams-lite on Kubernetes) — and
   `teams-lite-service.sh update --now`, the switch that skips the wait for a live
   `@claude` run and so freezes a half-written reply in the thread — and `restart_backend`,
   which is that same failure from inside the app (see § Settings › This app) — and cycling the
   user's Intune container in the spellings its rule 3b lists: the CLI's own lifecycle verbs
   (directly, behind a wrapper such as `timeout` or `setsid`, inside a subshell or a
   substitution, or handed to `systemd-run`), the container's unit and the repair's (over
-  `systemctl` or raw D-Bus), the three hidden arguments and a kill that names one, any
-  `StartTransientUnit`, and an example that calls the crate's lifecycle (see § The always-on
-  service). Asking whether a release is newer (`update_check`) stays allowed: it is a read, and
-  the backend already makes that request every two minutes. It reads the *contents* of what a
-  command runs, including an untracked `examples/*.rs` a `cargo run --example` names.
+  `systemctl` or raw D-Bus), the SIX hidden arguments `server` routes — the crate's two re-exec
+  targets, the repair's, and the image's own three (`__teams-lite-intune-boot`, `-stop`,
+  `-portal`, § The Intune container is a LIBRARY) — run on the host or reached inside a container
+  through `docker|podman exec`, `docker compose exec` or `kubectl exec`, and a kill that names one,
+  any `StartTransientUnit`, and an example that calls the crate's lifecycle (see § The always-on
+  service). Behind an `exec` it refuses two of the image's own PROGRAMS for the same reason, because
+  both end by powering a running install's Intune container off: the self-test, and the image's
+  ENTRYPOINT (`teams-lite-container`). In an image built from this checkout neither ever gets that
+  far — the entrypoint's instance lock refuses a second copy of either, `--help` included, before it
+  acts — so the guard is the half that covers an image built BEFORE that lock, whose second copy's
+  second launcher found the ports taken, or printed its usage, and then reached the graceful stop of
+  the RUNNING container. Both are refused as the PROGRAM an exec runs (read past `--`, `sh -c`,
+  `env`, `setpriv` and their like), never as a word it is handed, so `cat`, `ls` or `sha256sum` of
+  either file stays open. And behind an `exec` it refuses a SECOND STACK (rule 3c-ii): the launcher
+  or the backend binary run inside the live install binds 19420 in the container's own network
+  namespace, finds it free and comes up send-capable, signed in through the install's own broker —
+  a second calling endpoint, presence publisher and `@claude` claimant. Asking whether a release is newer
+  (`update_check`) stays allowed: it is a read, and the backend already makes that request every
+  two minutes. It reads the *contents* of what a command runs, including an untracked
+  `examples/*.rs` a `cargo run --example` names.
   Searching, stopping and inspecting stay allowed on purpose: a `grep` whose pattern names a
   launcher runs nothing, and a guard that fired on it would only teach its next reader to
-  phrase around the guard. **The one stop that is not cleanup is refused**: stopping or killing
-  the CONTAINER, a repair in progress, or a process carrying a hidden argument takes the
-  sign-in down rather than tidying anything up. Two more edges are worth knowing before
-  writing a command the hook will read. A kill or a probe exempts ONLY ITSELF —
+  phrase around the guard. **The stops that are not cleanup are refused**: stopping or killing
+  the Intune CONTAINER, a repair in progress, or a process carrying a hidden argument takes the
+  sign-in down rather than tidying anything up — and so, now that the image runs an Intune
+  container of its OWN, does stopping teams-lite's container (`docker|podman stop|kill|rm|pause`
+  of the one named `teams-lite`, a compose `stop|kill|down|rm|pause` of its project, any signal
+  sent inside it through an `exec` — `kill 1` is `docker stop` by other means — or from a tools
+  container joined to its pid namespace, `docker run --pid container:teams-lite … kill 1` or
+  `kubectl debug --target`) or its Kubernetes release (`helm uninstall`, a scale to 0, a delete of
+  its StatefulSet). **Sharper still, and
+  refused for being IRREVERSIBLE**: a compose `down -v`, a `docker volume rm` of its volumes, any
+  `docker volume prune`, `docker system prune --volumes`, `podman system reset`, `kubectl delete pvc` of the chart's
+  claims and `kubectl delete namespace` of ANY namespace — the `intune` volume IS the device's
+  enrollment, and only a new enrollment (a second device in the user's organization) or a backup
+  brings it back. A container or a release of ANOTHER name is tooling's own to stop, which is why
+  tooling names its own (`--name teams-lite-ro`). Three runs of the image state their proof in the
+  command and stay open: `-e TEAMS_LITE_READ_ONLY=1`, `--entrypoint teams-lite-intune-status`, and
+  the SELF-TEST — `docker run --rm … --entrypoint teams-lite-intune-selftest <image>` — only with no
+  volume on the Intune data directory and a network AND an IPC namespace of its own; and a proof is read the
+  way the engine reads its flags: only BEFORE the image, only as the SOLE `--entrypoint` (the
+  engine keeps the last of two, so `--entrypoint teams-lite-intune-selftest --entrypoint
+  teams-lite-container` is the live stack), and only while the LAST word naming
+  `TEAMS_LITE_READ_ONLY` sets it to 1 (§ Running teams-lite in a container image). Two more edges
+  are worth knowing before writing a command the hook will read. A kill or a probe exempts ONLY ITSELF —
   `pkill -f target/release/server; target/release/server` still starts what its second
   command names, and it used to walk past because the whole line was exempted. And
   `systemd-run` counts as read-only only when the UNIT is told so, before the program
@@ -4841,7 +4877,9 @@ user. Two independent mechanisms enforce that split:
   cannot see**: a command assembled while the line runs (`eval`, a variable, `bash -c
   "$CMD"`), a wrapper in front of the first program of a quoted `bash -c '…'`, a program that
   runs another (`xargs`, `flock`, `watch`), a kill by pid or by a pattern that merely matches,
-  and `TEAMS_LITE_READ_ONLY=1` written anywhere on the line for a binary run directly. It is a
+  a container, volume, release or claim known by an id or by a name the chart's is not in, a pid
+  namespace shared by other means (a compose file's own `pid: "container:teams-lite"`), and
+  `TEAMS_LITE_READ_ONLY=1` written anywhere on the line for a binary run directly. It is a
   tripwire for the shapes an agent really types rather than a proof; for a write to Teams the
   backend's own token is what holds when it misses, and for the container nothing does.
 
@@ -5005,7 +5043,10 @@ user. Two independent mechanisms enforce that split:
   write-lock banner, in both of its
   causes: `bun run preview -- --out /tmp/wl --write-lock`. For SIGNING IN AGAIN — the offer,
   the sign-in that needed nobody, the broker's own window served into the app in both themes,
-  the words typed into it, a phone's width, the cancel and the machine that cannot serve one:
+  the words typed into it, a phone's width, the cancel and the machine that cannot serve one —
+  and the image's EMBEDDED states: its Intune container being set up, "Enroll this device", the
+  portal served, registered, closing and done, and the portal offered to sign an account in again
+  (§ The same surface ENROLLS the image's own Intune container):
   `bun run preview -- --out /tmp/si --signin`. For the notification offer —
   the row that asks once, in both themes and at a phone's width:
   `bun run preview -- --out /tmp/notif --notifications`. To review a detail too
@@ -5555,7 +5596,12 @@ call does — this side never handles RTP, and the page never learns a Teams URL
     idle shutdown, because a registration Teams still believes in keeps routing their
     calls to a process that is gone, and a call offered to a device that never rings is a
     call they miss. It would expire within the hour on its own; every call inside that
-    hour is the reason not to wait for it.
+    hour is the reason not to wait for it. **It is NOT taken back when the launcher stops its
+    backend** — a container or pod stop, a `teams` Ctrl+C — because the launcher SIGKILLs its
+    child (`killChildOnExit`) and the backend has no TERM handler of its own: that is a known
+    gap, recorded in § Running teams-lite in a container image, and mending it is a separate
+    change (a backend that answers TERM with `stop_calling`, and a launcher that sends TERM and
+    waits before it KILLs).
   - **What a window cannot do, it says.** `enabled: false` is no longer something the user
     can fix, so the disabled call and Join controls say what that window IS — never "turn
     it on in Settings", which would name a switch that does not exist
@@ -9151,7 +9197,10 @@ user's. What changes is only what is asked.
 - Backend: Rust (`src/`, binary `server` in `src/bin/server.rs`) — auth broker over
   D-Bus, whose bus, keyring and repair on a containerized-Intune host are asked of the
   `intune-container` crate in one module and never of a host command (`src/intune.rs`, see
-  § The Intune container is a LIBRARY), real-time trouter client, local-first SQLite store,
+  § The Intune container is a LIBRARY) — and which, in the container image's self-contained
+  EMBEDDED mode, boots, stops, repairs and enrolls an Intune container of its OWN through helpers
+  that are this same binary re-executed (`src/intune_embedded.rs`, see § Running teams-lite in a
+  container image) — real-time trouter client, local-first SQLite store,
   send, name resolution, Web Push to the user's own devices (`src/push.rs` +
   `src/push_policy.rs`), the
   READ-ONLY Outlook mail surface (`src/mail.rs` + `src/mail_html.rs`), the
@@ -9317,12 +9366,12 @@ can never lose a race to it.
 | **19420** | Backend, send-capable — the always-on service      | `src/bin/server.rs` `DEFAULT_PORT` |
 | **19421** | Backend, send-capable — the user's hands-on dev one | `bin/teams-dev-server.sh` |
 | **19422** | Backend, send-capable — the RELEASED build beside it | `bin/teams-lite-service.sh` `APP_BACKEND_PORT` |
-| **19423** | Backend, send-capable — the CONTAINER IMAGE      | `packaging/docker/entrypoint.sh` |
+| **19423** | Backend, send-capable — the CONTAINER IMAGE (and the Helm chart's pod) | `packaging/docker/entrypoint.sh` |
 | **19430** | Backend, read-only (`TEAMS_LITE_READ_ONLY=1`)      | `src/bin/server.rs` `READ_ONLY_PORT` |
 | **19440** | Web app, production — the always-on service, and `teams` | `web/server.ts`, `launcher/src/launch.ts` |
 | **19441** | Web UI, `vite dev`                                 | `web/vite.config.ts` `DEV_PORT` |
 | **19442** | Web app — the RELEASED build's own front            | `bin/teams-lite-service.sh` `APP_WEB_PORT` |
-| **19443** | Web app — the CONTAINER IMAGE's own front           | `packaging/docker/entrypoint.sh` |
+| **19443** | Web app — the CONTAINER IMAGE's own front (and the chart's Service) | `packaging/docker/entrypoint.sh` |
 | 19455 / 19445 | `bun run dev:mock` — mock backend / app        | `web/package.json` |
 | 19456 / 19446 | `bun run preview` — mock backend / app         | `web/scripts/preview.ts` |
 | 19457 / 19447 | E2E — mock backend / app                       | `web/playwright.config.ts` |
@@ -9332,9 +9381,14 @@ can never lose a race to it.
 RELEASED build; x423/x443 is the CONTAINER IMAGE.** All four are send-capable backends that may
 share one SQLite store, so they must never share a port: the service holds 19420 for weeks,
 `bin/teams-dev-server.sh` plus `bun run dev` step aside to 19421/19441, `teams-lite-app.service`
-takes 19422/19442 (see § Running the released build beside the staged one), and the image runs
-in the host's network namespace, so its pair is this machine's loopback like the others (see
-§ Running teams-lite in a container image). Read-only is the exception that keeps its own 19430
+takes 19422/19442 (see § Running the released build beside the staged one), and the image's
+pair is this machine's loopback like the others in BOTH of its modes, by two different routes
+(see § Running teams-lite in a container image): in its HOST mode (compose.host-broker.yaml) it
+runs in the host's network namespace, so 19423/19443 ARE host ports; in its default, self-contained
+EMBEDDED mode (compose.yaml) it runs on a bridge network of its own, the web front listens on
+`0.0.0.0` INSIDE it, and only 19443 is published, as `127.0.0.1:19443:19443` — that prefix is what
+keeps the write token off the LAN, and its backend's 19423 is never published at all. The chart's
+pod takes the same pair behind a ClusterIP Service. Read-only is the exception that keeps its own 19430
 — and `teams-dev-server.sh` and the image's entrypoint deliberately do not pin `TEAMS_LITE_PORT`
 when `TEAMS_LITE_READ_ONLY=1`, because an explicit port would drag it off 19430.
 
@@ -9899,18 +9953,32 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
     always claims — the person pressing is who the floor exists to hand the problem to — and
     moves the floor for the automatic triggers behind it.
 
-  Past the gates, `intune::start_repair_unit` asks the user's systemd manager, over D-Bus, for
+  IN THE IMAGE'S EMBEDDED MODE the same four gates stand in the same order, and two of them read
+  the pod rather than a manager: `repair_available` is the container being SET UP (the image is
+  no reason to refuse there, because the container is the pod's own), and `repair_running` is
+  ANY holder of the helper slot — a boot, a repair, an enrollment's portal or the stop — because
+  each has the container in hand. A press against a holder that is not a repair is refused in
+  words (`busy_refusal`), never answered `{started: true}`; a container that is set up and not
+  running (`NotRunning`) is answered with a BOOT as well as the refusal, whose sentence then says
+  the app starts it itself (`repair_refusal_in`), since nobody else will start the pod's
+  container; and the start is a helper rather than a unit (§ The Intune container is a LIBRARY,
+  which has the whole embedded lifecycle).
+
+  Past the gates, `intune::start_repair` picks the shape, and on a host
+  `intune::start_repair_unit` asks the user's systemd manager, over D-Bus, for
   a TRANSIENT unit — `teams-lite-intune-repair.service`, running this same binary as
   `server __teams-lite-repair-broker`. That process asks the keyring AGAIN — the installed
   unit's `ExecCondition=`, and the one check no trigger can skip — and once more after it holds
   the crate's lifecycle lock, and restarts nothing unless it is still locked; then it stops the
-  container and boots it again through the crate, and never updates the image while it does
-  (§ The Intune container is a LIBRARY says why it is a unit, why it is never a bare start and
-  why the boot runs with `auto_update` off). It logs to `journalctl --user -t
+  container, waits for that poweroff to have really ended, and boots it again through the crate,
+  and never updates the image while it does (§ The Intune container is a LIBRARY says why it is a
+  unit, why it is never a bare start, why the start waits for the stop, and why the boot runs with
+  `auto_update` off). It logs to `journalctl --user -t
   teams-lite-broker-repair`, the identifier the installed unit used, and its exit code is the
   job's result: **0** when the keyring is unlocked at the end — repaired, found unlocked, or
   unlocked by somebody else's restart while this one waited for the lock; **1** when a restart
-  ran and the keyring is not unlocked after it; **2** when nothing was restarted because
+  ran and the keyring is not unlocked after it, or the container it stopped was still powering
+  off when the wait ran out (so nothing was started over it); **2** when nothing was restarted because
   nothing could be told (not running, not set up, no answer from the keyring, or a read-only
   process), so systemd reports a repair that did nothing as `failed` rather than as success.
   **The backend stays up through it**, which is new: it follows the new bus on its next call,
@@ -9936,7 +10004,9 @@ phone. `bin/teams-lite-service.sh` owns it and `packaging/systemd/` holds the un
   (`intune-container stop|start|restart` and the rest, behind a wrapper or handed to
   `systemd-run` too), the container's systemd unit and the repair's (start, stop, kill or
   freeze, over `systemctl` or raw D-Bus), the hidden arguments that make `server` boot, enter
-  or repair it (`__rootless-supervise`, `__rootless-exec`, `__teams-lite-repair-broker`) and a
+  or repair it (`__rootless-supervise`, `__rootless-exec`, `__teams-lite-repair-broker`, and the
+  image's own `__teams-lite-intune-boot`, `-stop` and `-portal` — on the host or behind a
+  container CLI's `exec`) and a
   kill that names one, any `StartTransientUnit`, and an example that calls the crate's
   lifecycle — because with the crate linked, a container restart is a function call any
   example can make. STOPPING a repair is refused with the rest, and is the worst of them: cut
@@ -9958,17 +10028,26 @@ user's own `intune-container` project manages, and teams-lite talks to it in ONE
 (`src/intune.rs`), through that project's crate — never by running `busctl`, `pgrep`,
 `systemctl` or the `intune-container` binary. Three questions, each answered in process:
 where the broker's bus is (`broker_bus`), whether the container's login keyring is locked
-(`container_keyring`), and the repair (`restart_container`, inside its transient unit). The
-one process teams-lite's own code still spawns is the local agent's CLI.
+(`container_keyring`), and the repair (`restart_container`, inside its transient unit).
+**No HOST program is spawned for any of it**, and `src/intune.rs` spawns no process at all — a
+test in it says so. The processes teams-lite's own code spawns are two: the local agent's CLI,
+and — in the image's self-contained EMBEDDED mode only — THIS binary again, re-executed with one
+hidden argument as a lifecycle helper (`intune_embedded::spawn_helper`, below), which
+`the_only_program_a_helper_spawn_runs_is_this_binary` pins to `own_executable()` and nothing else.
 
 **WHAT THE CRATE IS ASKED, AND WHAT IT IS DELIBERATELY NOT.** It is asked for its runtime state
-(`runtime::load_runtime_state`, a pure read), whether that leader is alive
-(`runtime::is_running`), whether it is set up at all (`ops::is_initialized`) — and, inside the
-repair unit only, for its configuration (`config::Config::load`, and `save` for one field),
-`backend::is_running`, `backend::stop` and `backend::start`, under `lock::LifecycleLock`.
-Three things it offers are refused on purpose, and each would break something real;
-`the_crate_is_read_without_side_effects_and_never_rewires_browser_sso` scans the module for
-the first two:
+(`runtime::load_runtime_state`, a pure read), whether that state is still LIVE
+(`runtime::state_is_live`, as pure: the leader is PID 1 of a pid namespace of its own and, where
+the state recorded one, the very process that was started — kept beside this module's own
+not-our-namespace check, because in a pod the pid namespace starts again at 1 on every restart
+while the saved state survives on a volume), whether it is set up at all (`ops::is_initialized`)
+and whether it holds a device registration (`backup::has_device_registration`) — and, inside the
+repair (and in embedded mode the boot, stop and portal helpers) only, for its configuration
+(`config::Config::load`, and `save` for one field), `backend::is_running`, `backend::stop` and
+`backend::start`, under `lock::LifecycleLock`, plus `ops::init`, `ops::restore` and the portal's
+three calls in the embedded helpers. Three things it offers are refused on purpose, and each would
+break something real; `the_crate_is_read_without_side_effects_and_never_rewires_browser_sso`
+scans `src/intune.rs` AND `src/intune_embedded.rs` for the first two:
 
 - **`runtime::running_leader()` DELETES a stale `rootless.json`** as a side effect. This module
   reads on every token call, from read-only backends included, and a read that writes another
@@ -9982,11 +10061,41 @@ the first two:
   compares the index digest, so every start re-pulls the whole rootfs, and it does not persist
   `/etc/microsoft/identity-broker` across a pull — so that re-pull erases the device
   registration ("Device is not registered"), and a repair through it would take the machine
-  out of Intune. Cargo.toml pins the git commit `7605004` (master, on top of `2917d92`, which
-  fixed both), and the version number cannot tell the two apart: both say 0.2.3. The pin ends
-  the re-pull on EVERY start, not every re-pull: at `7605004` a start with `auto_update` on
-  still replaces the rootfs whenever the registry tag has moved, which is why the repair boots
-  with updates off (below).
+  out of Intune. `2917d92` fixed both, and the version number cannot tell the builds apart: all
+  of them say 0.2.3. The fix ends the re-pull on EVERY start, not every re-pull: a start with
+  `auto_update` on still replaces the rootfs whenever the registry tag has moved, which is why
+  every boot this crate makes runs with updates off (below).
+
+**THE PIN IS `0f5fe0d`, the branch `fix/boot-without-a-user-manager` on magicabdel's repository**,
+three commits on top of master (`7605004`, the code the user's own installed binary is built
+from, so the two agree on the state file, the lock and the config). They add exactly what booting
+the container INSIDE teams-lite's own image takes, and change nothing a host install relies on —
+the state file only gains an optional field:
+
+- **`de75eca` — a boot with NO systemd user session.** `runtime::CGROUP_ENV`
+  (`INTUNE_CONTAINER_CGROUP`): `user-manager` (the transient scope, as before), `own` (a child of
+  the cgroup this process already runs in, which the image's root entrypoint has delegated; where
+  `/sys/fs/cgroup` is read-only the runtime places the container through a private cgroup2 mount of
+  its own) and `auto` (the default: the manager, falling back to `own` only where there is no
+  manager at all). With it: the subordinate range read from `/etc/subuid` / `/etc/subgid` (≥ 65 535
+  ids) rather than a hard-coded 100000; a container whose id maps or cgroup fail is KILLED rather
+  than released half-made; a recycled pid never read as the container (the state records the
+  leader's start time, and a leader must be PID 1 of a pid namespace of its own — a pod restart
+  reuses low pids, and the old check answered "already running" for any live process); and the
+  container's PID 1 started with a CLEARED environment, so nothing the caller held reaches it.
+- **`98f23b7` — the portal on the container's own display, for an embedding app.**
+  `ops::portal_open_headless` launches `intune-portal` on `:99` with no host display and NO restart
+  (the older `portal_start` attaches one, restarting the container twice per sign-in);
+  `backup::has_device_registration`, so a backup is imported only where nothing is registered;
+  `runtime::state_is_live` made public, so a reader judges the saved state without
+  `running_leader`'s deletion; and `:99` grown from `640x480x16` to `1280x800x24`, because the
+  served window's capture reads four bytes a pixel.
+- **`0f5fe0d` — a registration nobody can read counts as one.** `has_device_registration` used
+  to answer false for a directory this process could not read, which is exactly the answer both
+  of teams-lite's callers act on — an import, or an offer to enroll. Only a missing or empty
+  directory is "none" now.
+
+Move to a release once one carries those commits.
 
 **WHY `server` ROUTES `__rootless-supervise` AND `__rootless-exec` BEFORE ITS RUNTIME**
 (`intune::dispatch_reexec`, the first thing `main` does). `backend::start` boots the container
@@ -9999,6 +10108,16 @@ multithreaded process cannot do safely, and it builds runtimes of its own that w
 inside ours. An argument shape it does not expect is refused with exit 2 rather than ignored,
 and `tracing-subscriber` is installed in those processes alone — the crate logs through
 `tracing`, and without a subscriber a failed boot would leave nothing to read.
+
+**SIX hidden arguments are routed there now, and four are teams-lite's.** The crate's two above;
+`__teams-lite-repair-broker` (`intune::REPAIR_SUBCOMMAND`, the repair's body); and the embedded
+mode's three (`src/intune_embedded.rs`): `__teams-lite-intune-boot` (`BOOT_SUBCOMMAND`),
+`__teams-lite-intune-stop` (`STOP_SUBCOMMAND`) and `__teams-lite-intune-portal`
+(`PORTAL_SUBCOMMAND`). Teams-lite's four take NO argument (`BARE_SUBCOMMANDS`, one table), and an
+extra one — or one that is not UTF-8 — is a refusal of THAT helper with exit 2, never read as an
+ordinary start, which would boot a whole second backend
+(`a_helper_with_an_argument_that_is_not_utf8_is_refused_not_started_as_a_backend`). Each is
+double-underscored and named for what it does, so the automation guard refuses it by name.
 
 **WHY THE REPAIR IS A TRANSIENT UNIT, and never a child of the backend.** Four reasons, and
 each is about what it survives or what it can reach:
@@ -10024,19 +10143,22 @@ each is about what it survives or what it can reach:
   two units single-flight WITH EACH OTHER, so `repair_running` asks for the installed name as
   well (`intune::LEGACY_REPAIR_UNIT`): the migration never stops a repair in progress, and a
   second one started beside it would wait on the lifecycle lock and then restart a container
-  the first had just repaired. `TimeoutStartUSec` is 300 s, because a oneshot has no start
-  timeout by default and a hung boot would hold the name — and every later repair with it —
-  for good. The stop waits up to 20 s and the start up to 20 s, and with the session setup that
-  unlocks the keyring behind them a repair takes about two and a half minutes at worst — an
-  arithmetic that holds only because a repair never pulls an image (below).
+  the first had just repaired. `TimeoutStartUSec` is `intune::REPAIR_TIMEOUT` — 420 s, the
+  repair's 300 s of work (`REPAIR_WORK`) plus the 120 s it may wait for the container it stopped
+  to finish powering off (`POWEROFF_WAIT`, below) — because a oneshot has no start timeout by
+  default and a hung boot would hold the name, and every later repair with it, for good. The stop
+  waits up to 20 s and the start up to 20 s, and with the session setup that unlocks the keyring
+  behind them the work takes about two and a half minutes at worst — an arithmetic that holds only
+  because a repair never pulls an image (below). The same constant is the embedded repair helper's
+  watchdog and every follower's bound, so the three cannot drift apart.
   `CollectMode=inactive-or-failed` unloads a failed repair too, so the result is read off the
   job's `JobRemoved` signal rather than off a unit kept around to be asked, and the
   subscription is taken BEFORE the start, so a repair that ends quickly cannot end unheard.
 
-**INSIDE THE UNIT: THE KEYRING ASKED TWICE, THEN A STOP AND A START — never a bare start, and
-never an image update.** Three rules, and
+**INSIDE THE UNIT: THE KEYRING ASKED TWICE, THEN A STOP, ITS POWEROFF WAITED OUT, AND A START —
+never a bare start, and never an image update.** Four rules, and
 `a_repair_boots_without_an_image_update_and_never_saves_that` pins the order of the first and
-the whole of the third:
+the whole of the third, `a_repair_waits_for_its_own_poweroff_before_it_starts` the fourth:
 
 - **The second question is asked once the lifecycle lock is HELD.** Under that lock the repair
   WAITS for the user's own CLI or GUI rather than racing it — the lock a browser's SSO request
@@ -10051,13 +10173,215 @@ the whole of the third:
 - **The boot runs from a CLONE of the configuration with `auto_update = false`, and the clone
   is never saved.** With updates on — the crate's default, and this machine's setting — a start
   whose registry tag has moved DELETES the rootfs and pulls the whole image again, over a
-  registry call with no timeout, after the stop and inside the 300 s bound: a repair killed in
+  registry call with no timeout, after the stop and inside the repair's bound: a repair killed in
   the middle of that leaves no container at all, or a half-extracted tree the next start adopts
   as current. The installed unit had the same exposure under a comment saying a repair never
   pulls the rootfs; this is the first version of which that is true. The user's own next
   `intune-container start` updates as it always did. The boot is headless, as `ops::start`
   boots, so `display_forwarding` is cleared the same way — on the ORIGINAL configuration, so the
-  clone's `auto_update` never reaches the disk.
+  clone's `auto_update` never reaches the disk. It is ONE function (`intune::boot_headless`),
+  shared by the repair and the embedded boot helper, so "a boot never updates the image" is one
+  rule kept in one place — and `backend::start(` is spelled exactly once in `src/intune.rs`.
+- **The start waits for the STOP to have really happened** (`await_our_container_to_settle`, up to
+  `POWEROFF_WAIT`, 120 s — the embedded boot's own wait, shared rather than re-spelled). The crate's
+  `backend::stop` sends the poweroff, waits at most twenty seconds, then clears the runtime state
+  and answers `Ok` whether or not the leader went; a start over a container still powering off (a
+  unit at systemd's ninety-second stop timeout) spawns a supervisor that finds the old one still
+  holding `supervisor.lock`, refuses to boot a duplicate and exits, so the start gives up after its
+  own twenty seconds — and the old container then finishes going down with NOTHING running. In the
+  embedded mode that was the "stopped" banner and the start-or-repair floor holding the next boot
+  off for twenty minutes, on a fifteen-minute health tick: about half an hour with no sign-in, from
+  a repair that "failed". The leader is recorded BEFORE the stop (`live_leader_state`, since the
+  crate clears it after), the stop is waited out, and a container still going down when the wait
+  ends is a failure said in true words — still powering off, so nothing was started over it —
+  rather than a start that boots nothing. Host mode had the same exposure under its unit, and gets
+  the same fix: it is one function. The repair's bound grew by that wait (above). THE LIFECYCLE IS FOUR HELPERS, NOT A UNIT (`src/intune_embedded.rs`)
+
+**THE MODE IS DECLARED, never detected** (`TEAMS_LITE_INTUNE_MODE`, `intune_embedded::MODE_ENV`):
+`embedded` — this process OWNS its Intune container and boots, stops, repairs and enrolls it, with
+no systemd anywhere; the image's `ENV` says so — or `host`, which unset is, and which every install
+outside the image (and the image's host-broker shape) has always been. What it decides is whether
+this process may stop a container, and no file inside the process can prove a container is ours to
+stop. Any other word is refused LOUDLY: the backend exits 2 with a sentence before its runtime
+exists, and every helper body refuses with exit 2 — read as `host` an image would follow a broker
+that is not there, read as `embedded` a host install would boot and stop the user's own container
+(`the_mode_is_declared_and_an_unknown_one_is_refused`). A blank value is unset, so an empty compose
+line does not refuse to start the app. `src/intune.rs` is still the ONE place that decides
+(`repair_available`, `repair_blocker`, `repair_running`, `start_repair`), now per mode; the spawn
+lives in the other module so that this one keeps its promise.
+
+**EVERY PROPERTY THE TRANSIENT UNIT HAD IS A PROPERTY OF THE HELPER**, because there is no manager
+in a pod to ask for one — and the reasons a repair was a unit hold for a helper just the same. Each
+lifecycle act is THIS binary re-executed with one hidden argument (`spawn_helper`):
+
+- **It survives the backend** (the unit's "not our child"): a SESSION of its own (`setsid` before
+  exec, the crate's own `detach` shape), `kill_on_drop(false)`, stdin null, reparented to the
+  pod's init (tini) when the backend goes. A boot can spend ten minutes pulling 1.7 GB and a repair
+  stops the container this backend talks through, so a backend restart in the middle of either —
+  the launcher re-spawning one that crashed — must not leave the pod with no container.
+- **Its environment is built from SCRATCH** (the unit's "the manager's, not ours";
+  `helper_env`, pinned by `a_helper_gets_an_environment_built_from_scratch`): `env_clear()`, then
+  only `HOME`, `USER`, `LOGNAME`, `XDG_DATA_HOME`, `LANG`, `TZ`, `RUST_LOG`, a `PATH` (a default when
+  the backend had none — the crate runs `newuidmap`, `newgidmap` and `tar` by name),
+  `TEAMS_LITE_INTUNE_MODE=embedded`, `TEAMS_LITE_INTUNE_IMPORT` when set, and
+  `INTUNE_CONTAINER_CGROUP=own`. NEVER the write token, a bus address or a display: the crate's
+  supervisor inherits this and lives as long as the container (the pinned crate also starts the
+  container's PID 1 with a cleared environment — a second line of defence, not the first). `own` is the unit's `DBUS_SESSION_BUS_ADDRESS=<the user's own bus>` turned round: the
+  container's cgroup is a child of the pod's, never a scope asked of a manager the helper happened
+  to inherit. A helper run DIRECTLY (the self-test) sets `own` itself when nothing else did
+  (`own_cgroup_by_default`).
+- **Single-flight by a LOCK rather than by a unit name** (`HELPER_LOCK_FILE`,
+  `teams-lite-helper.lock` in the intune data dir — the pod's own volume, so the slot is per VOLUME,
+  across processes and pid namespaces alike): an exclusive `flock` the helper takes FIRST and holds
+  for its whole life, and `teams-lite-helper.json` naming the holder, checked against that pid's
+  own command line, so a stale file under a free lock means nothing. It is ASKED (`slot_holder`)
+  with a non-blocking SHARED try-lock on a read-only open that never creates the file — it is read
+  in every greeting a page gets — and because a probe holds that shared lock for a moment, a helper
+  retries its own lock for a second before concluding another is at work. The STOP takes the same
+  slot without being a helper (`SlotHolder::Stop`): a page has no words for it, but no boot, repair
+  or enrollment may start beside a poweroff.
+- **Bounded by WATCHDOGS rather than `TimeoutStartUSec`** (`arm_watchdog`, a thread whose deadline
+  MOVES, pinned by `a_watchdogs_deadline_moves_both_ways`). The boot's SETUP gets
+  `BOOT_SETUP_TIMEOUT` (2 h): the crate's registry client sets no read timeout, and reqwest's
+  keepalive ends a DEAD path in about a minute but not a live peer that never answers — unbounded,
+  such a pull would hold the slot and the lifecycle lock for the life of the pod. Killing a setup
+  is SAFE, which is what lets it be bounded: every layer is pulled into memory before anything is
+  extracted, `initialized` is written last, and a later extraction overwrites what an interrupted
+  one left. The rest of the boot gets `BOOT_START_TIMEOUT` (the repair's own `REPAIR_TIMEOUT` —
+  its 300 s of work and the 120 s poweroff wait — plus two 90 s waits for the bus) and the repair
+  its `REPAIR_TIMEOUT`, each through a watchdog; the stop and the
+  portal need none, because every wait in them is bounded where it is made — the stop's
+  `STOP_LOCK_WAIT` (25 s for the slot and the lock) plus `backend::stop`'s own 20 s, the portal's
+  90 s to appear and 30 minutes open.
+- **Its result is its EXIT, reaped by the spawner** (the unit's `JobRemoved`): a task of the
+  backend's runtime awaits the child, so a backend that lives for weeks keeps no zombie; a backend
+  that did not spawn it polls the slot (`wait_for_helper_to_end`).
+- **Its log is the container's own** (the unit's journal): stdout and stderr are inherited, so
+  `docker logs` / `kubectl logs` carry lines prefixed `teams-lite(intune-boot)`,
+  `(intune-stop)`, `(intune-portal)` or `(broker-repair)`, and the backend points there instead of
+  at `journalctl`, which answers nothing in a pod (`intune::repair_log_hint`).
+
+**THE FOUR BODIES** — sync, single-threaded, no tokio runtime alive while the crate is called
+(`repair_main`'s shape) — and the exit code each answers, which is what its follower reads:
+
+| helper | argv | body | exits |
+| --- | --- | --- | --- |
+| boot (`boot_main`) | `__teams-lite-intune-boot` | refuse read-only and host mode; the slot; the other-namespace refusal; SET UP when not (`ops::init` — outside the lifecycle lock, which it takes itself: a `flock` taken twice in one process through two open files waits on itself); then under the lock: IMPORT when due, and START when not up through `intune::boot_headless` — a leader whose bus never came is stopped first, and its poweroff WAITED for (`POWEROFF_WAIT`, 120 s) before anything is read or started | **0** UP at the end (leader AND bus); **1** failed (the reason on stderr — among them a container of ours still powering off when that wait ran out); **2** refused; **3** `BOOT_SLOT_TAKEN` — another holder had the slot, so this boot did nothing |
+| stop (`stop_main`) | `__teams-lite-intune-stop` | the SLOT first, then the lifecycle lock, both within 25 s; a portal holding the slot is asked to close; the leader recorded; `backend::stop`; that leader checked again | **0** the leader it powered off is gone, or nothing was running (where no leader could be named before the stop, the crate's `Ok` is all there is to go on); **1** the slot or the lock not had in time, the stop failed, or the leader was STILL ALIVE when the crate's twenty-second wait ended — said as such, and the container then ends with the pod rather than gracefully; **2** host mode, or another namespace's container |
+| repair (`repair_main`) | `__teams-lite-repair-broker` | the existing body — the keyring asked twice, a stop, its poweroff waited out (`POWEROFF_WAIT`), and a start — with the slot taken FIRST, the cgroup made `own`, the watchdog armed and the other-namespace refusal | as on a host (0 / 1 / 2 — **1** among them a container still powering off when that wait ran out, so nothing was started over it), and **2** when another holder has the slot |
+| portal (`portal_main`) | `__teams-lite-intune-portal` | a SIGTERM handler first; refuse read-only and host mode; the slot; the other-namespace refusal; the container must be RUNNING (an enrollment never boots one); `ops::portal_open_headless`; up to 90 s for it to appear; held until it closes, a SIGTERM, or 30 min | **0** it ran and ended; **3** `PORTAL_TIMED_OUT` — this helper closed it at its deadline; **1** could not open, never appeared, the container was down, or another helper had the slot; **2** refused |
+
+Six rules hold them, and each is pinned by a test in `src/intune_embedded.rs`, `src/intune.rs` or
+`src/bin/server.rs`:
+
+- **THE STOP TAKES THE SLOT BEFORE IT LOOKS** (`the_stop_takes_the_slot_before_the_lifecycle_lock`).
+  At shutdown the launcher SIGKILLs the backend, but a boot helper it spawned lives on in its own
+  session — and a stop that took only the lifecycle lock could find "not running" in the moment
+  before that boot took the lock, exit 0, and let the boot start the container a moment before the
+  runtime SIGKILLed everything in it. Holding the slot, a boot spawned after the stop leaves
+  (`BOOT_SLOT_TAKEN`) and one already at work is waited out. It refuses nothing else — read-only
+  included: a read-only pod never booted a container, so there is nothing a stop could take from it.
+  **AND ITS EXIT 0 IS NOT THE CRATE'S `Ok`** (`the_stop_answers_by_the_leader_it_stopped_not_by_the_crates_ok`).
+  `backend::stop` sends the poweroff, waits at most twenty seconds, then clears the runtime state
+  and answers `Ok` WHETHER OR NOT the leader went — so a poweroff slower than that (a unit at
+  systemd's ninety-second stop timeout) used to log "stopped", exit 0, and let the pod's end
+  SIGKILL the inner systemd, broker and keyring mid-write: the outcome the entrypoint's trap
+  exists to prevent, reported as its success. The leader is recorded before the stop and checked
+  again after it (`intune::leader_is_live_here`, against that very process, so a recycled pid is
+  never read as it); still alive is exit 1 with that sentence, and the entrypoint warns.
+- **THE VOLUME BELONGS TO ONE CONTAINER, and the crate's `supervisor.lock` is asked before anything
+  can delete state** (`refuse_a_container_running_elsewhere`,
+  `a_container_running_from_another_namespace_is_never_touched`). The slot is a `flock` on a FILE of
+  the volume, so it serializes helpers across pid namespaces — but it cannot make two containers
+  mounting one volume safe: in a SECOND container the leader pid in `rootless.json` is no container
+  init at all, and the first `running_leader` reached there (`backend::is_running`, `ops::restore`,
+  the stop, the portal probes) DELETES that state as stale — the first container's app signed out
+  for good, and a second container booted onto a rootfs in use. So every helper reads the crate's
+  supervisor lock with a shared try-lock on a READ-ONLY open (the crate's own `File::create` would
+  empty it, and it is never taken from the supervisor), and a lock HELD whose state names a leader
+  that is not live in this namespace — watched for 10 s first, since a supervisor of ours whose
+  leader has just exited still holds it a moment — is refused with exit 2, touching nothing. **A
+  held lock with NO state named is never that refusal**: it is OUR container in transit — between
+  its supervisor taking the lock and publishing its leader, or between the crate's stop clearing
+  the state after its twenty seconds and a slow poweroff really ending — and read as somebody
+  else's it told the operator to give the container a volume of its own, which is a fresh volume
+  and a re-enrollment. The boot WAITS for that instead (`await_our_container_to_settle`, up to
+  `POWEROFF_WAIT`, 120 s, longer than systemd's own ninety-second stop timeout), and says it as a
+  failure in true words — the container is still powering off — rather than as a refusal
+  (`a_boot_waits_for_its_own_poweroff_before_it_reads_the_display`).
+- **A `:99` ALREADY SERVED IS ANOTHER INTUNE CONTAINER, and a boot refuses to start beside it**
+  (`display_taken_by_another_container`, `a_boot_beside_another_intune_display_is_refused`). Asked
+  only before starting a container that is NOT running, which is what makes the answer mean
+  something: with ours down, nothing of ours serves `:99`, so a LISTENER on its abstract socket
+  (`__SO_ACCEPTCON` in `/proc/net/unix`; an accepted connection carries the name too) is another
+  container sharing this network namespace — the host user's own, under `--network host`. The inner
+  container keeps the outer one's network namespace, and whichever of two Xvfbs starts second takes
+  the display, and with it the other's broker. Watched for 10 s first, and asked only once a
+  container of ours that was asked to power off has really gone (the rule above): its Xvfb is
+  killed only at the END of its poweroff, so read any earlier it was our own display taken for
+  somebody else's, refused with a sentence about `--network host` that was false. This is the
+  LAST line rather than the first: the image's entrypoint refuses the host's network namespace
+  itself before anything starts — recognised by the kernel's fixed number for its initial one, on a
+  kernel that fixes one (a microVM runtime, whose initial namespace is the guest's, is declared
+  past it) — and the host's IPC namespace on every kernel, plus a `:99` already bound (§ Running
+  teams-lite in a container image); and the chart refuses `hostNetwork` in this mode. What is left
+  for this check is a namespace shared in a way none of those can see, at the moment of a boot.
+- **A LEADER WITH NO BUS IS RESTARTED, never read as running**
+  (`the_boot_restarts_a_container_whose_bus_never_appeared`). `backend::is_running` looks at the
+  leader alone, so a container whose session setup never created its bus — an exec that failed, or a
+  helper killed between its supervisor and its setup — read as running for ever: every boot a no-op
+  on it, the keyring `NotRunning`, the repair refusing on a guess, and sign-in down until somebody
+  restarted the pod by hand. The boot now asks the one definition of "up" the app reads
+  (`intune::container_is_up`: a live leader AND its bus), waits `BUS_GRACE` (90 s) for a bus on its
+  way, then STOPS and starts the container, and says so as a restart; it exits 0 only when the bus is
+  there. The health check names "leader up, bus missing" apart in its own line.
+- **A BOOT THAT LOST THE SLOT IS FOLLOWED AS WHOEVER WON IT**
+  (`a_boot_that_lost_the_slot_follows_the_holder_instead_of_claiming_success`). Exit 3 used to be
+  exit 0, so the follower announced "it is running" while another holder was still at work, and the
+  machine-wide floor had already been spent on a boot that never ran.
+- **A REPAIR PRESS AGAINST OTHER WORK IS REFUSED IN WORDS**
+  (`a_repair_press_against_other_work_is_refused_never_answered_started`). `started: true` is
+  reserved for a repair that really is under way: a press while a boot, a portal or the stop held
+  the slot is answered with a sentence naming which (`busy_refusal`), and an automatic trigger with
+  `reason: "busy"` and the holder.
+
+**WHO STARTS A BOOT, and the floor it takes** (`Ctx::start_container_boot`, over `BootTrigger`):
+the backend coming UP (a send-capable one, after the store opens and BEFORE the first sign-in, so
+the broker is on its way while the rest of the boot happens — no floor, since a boot is a no-op on a
+running container); the HEALTH CHECK, every fifteen minutes after its first look at five, when the
+container is not running or not set up and no helper holds the slot — and the broker observer's
+repair path on the same finding — under the SAME machine-wide floor an automatic repair takes (one
+every twenty minutes), because a boot and a repair are the same act on the same container and one
+that will not stay up must not be re-pulled every fifteen minutes for ever; and a PRESS of Repair
+sign-in on a container that is down, which always claims. The floor is ASKED before the spawn and
+CLAIMED only once a helper really was spawned, so a boot refused as already running spends nothing;
+and a backend already following a boot of its own starts no second one automatically
+(`BOOTS_FOLLOWED`, which also lets the greeting say "Starting…" in the moment between the spawn and
+the helper taking the slot). `broker_status` carries the whole embedded state as `intune` — `null`
+in host mode — `{mode, helper, initialized, registered, running, can_enroll, can_portal_sign_in}`,
+built from CHEAP READS ONLY (`intune_embedded::status`: no `backend::is_running`, which cleans state,
+no D-Bus, no exec), because it is built in every greeting.
+
+**WHAT IS VERIFIED IN THIS MODE, AND WHAT IS NOT.** Measured 2026-11-03, in the REAL image
+(`teams-lite:local`) on this CachyOS workstation under Docker 29.9, with `seccomp`, `systempaths`
+and `apparmor` unconfined and no volume, through the image's own self-test
+(`teams-lite-intune-selftest`): the root stage delegated the container's cgroup through the nested
+cgroup2 mount (the direct chown answered EROFS); the boot helper (`server __teams-lite-intune-boot`)
+pulled `ghcr.io/magicabdel/intune-container:latest` (digest `sha256:5ebedb75…`), set it up and
+booted it with no user manager anywhere — 75 s on the first run, about 15 s on two later ones of the
+same digest; teams-lite's own diagnostic found the leader from the crate's state, read the login
+keyring UNLOCKED over D-Bus and saw the broker's bus; and the stop helper powered the container off
+gracefully in about a second, the self-test confirming the leader gone — PASS, exit 0, three times.
+**Those runs were of the image as built BEFORE the fixes of the second review**, and what those
+fixes changed has not been run in an image since: the stop's own check of the leader it powered off, the
+boot's wait for its own poweroff and the narrowed other-namespace refusal, the entrypoint's refusal
+of the host's network and IPC namespaces, the self-test's own IPC and `/dev/shm` refusals, and a
+read-only run taking over a fresh store root. Each is pinned by a test; none is a measurement.
+NOT measured either: any of this under a running BACKEND (the startup boot, the health check, a press,
+the followers), the repair helper against a really locked keyring, an import of a real backup, an
+enrollment through the served portal, a token minted through an embedded broker, and Kubernetes at
+all. Two live copies of one enrolled device — a backup imported here while the machine it came
+from keeps running it — are unmeasured too, which is why the import says so every time.
 
 **WHAT WAS RETIRED, and why each piece existed.** Every one of them existed because the broker's
 bus address was frozen into the backend's environment at exec, or because the repair was an
@@ -10151,7 +10475,8 @@ installed unit running the `intune-container` binary:
   refusal whatever is restarted, because the installed repair unit it starts is retired. The
   update heals both for good; a restart holds only until the container's next one.
 
-**WHAT IS VERIFIED, AND WHAT IS NOT.** Verified live on this workstation, through the code that
+**WHAT IS VERIFIED IN HOST MODE, AND WHAT IS NOT** (the embedded mode's own measurement is above).
+Verified live on this workstation, through the code that
 ships: `cargo run --example intune_status` found the running container (leader 6415) from the
 crate's own state and read its keyring as unlocked, and `cargo run --example broker_token`
 reached the real broker the same way — both with nothing exported into the environment. So
@@ -10293,118 +10618,824 @@ answer itself still arrives, because the backend EDITS the Teams message and bot
 that. **Narrating a run to both installs would mean publishing the transcript through the shared
 store** — a deliberate feature with a real cost, never a quiet addition.
 
-## Running teams-lite in a container image (packaging, never isolation)
+## Running teams-lite in a container image (packaging — and, by default, its OWN Intune container)
 
 `packaging/docker/` builds the single `teams` binary CI publishes — from THIS checkout, in a
 Debian build stage — and runs it with no browser to open: `docker compose -f
 packaging/docker/compose.yaml build`, then the user's own `up -d`, then
-`http://127.0.0.1:19443`. The Dockerfile's header carries the whole argument in short; the
-facts it rests on, and each is pinned by
-`intune::tests::the_image_is_built_to_reach_the_broker_and_to_stay_its_own_install`:
+`http://127.0.0.1:19443`. It runs in one of TWO MODES, DECLARED by `TEAMS_LITE_INTUNE_MODE` and
+never detected (§ The Intune container is a LIBRARY, which has the lifecycle), and the image's own
+`ENV` declares the first:
 
-- **THE BROKER IS REACHED THROUGH THE HOST'S PROCESS TABLE, and nothing about that changed
-  for the image.** `intune::broker_bus` reads intune-container's runtime state and opens
-  `/proc/<leader>/root/run/user/0/bus` on every connection (§ The Intune container is a
-  LIBRARY), so the image needs three things to run that unchanged code: the host's PID
-  namespace (`pid: host` — without it there is no such `/proc` entry), a READ-ONLY view of
-  `~/.local/share/intune-container` (the DIRECTORY, never the one file: the state is rewritten
-  and removed as the container comes and goes, and a file bind mount keeps showing the inode
-  it was mounted from), and the HOST USER's uid. That last one is not hygiene: `/proc/<pid>/root`
-  is opened under the same-uid rule, and the container's dbus-daemon authenticates the uid the
-  kernel reports — so root in the image is refused twice. Measured 2026-11-02 from a stock image
-  with `--pid=host --user 1000:1000`: the socket opened and `AUTH EXTERNAL` as uid 0 answered
-  `OK`, the handshake `auth::connect_bus` makes. So UID and GID are BUILD arguments, and the
-  image is built for one person — it is a local build, never a published one.
-- **THE HOST'S NETWORK NAMESPACE, for two reasons that are both safety.** The web front stays
-  on 127.0.0.1, the launcher's own default — in a bridge network it would have to bind
-  `0.0.0.0` inside the container, and the only thing keeping the write token it serves off the
-  LAN would be the `127.0.0.1:` prefix on a published port, one typo from gone. And the broker's
-  sign-in window is drawn on an Xvfb whose socket is ABSTRACT (§ Signing in again), which a
-  bridge network cannot see. The cost is the next rule.
-- **PORTS OF ITS OWN: 19423 and 19443** (`packaging/docker/entrypoint.sh`). In the host's
-  network namespace the launcher would otherwise ATTACH to whatever listens on 19420
-  (`ensureBackend`) — the always-on service, whose token the image cannot see, so every send
-  would be refused while reads worked. And a store shared with a host install keeps its live
-  feed: the trouter endpoint id is keyed by the store AND the port (`endpoint_id_path`), and a
-  second registration of one id takes the feed from the first. A READ-ONLY run keeps 19430,
-  which is why the entrypoint fills in a port only when the caller left it unset and never when
-  `TEAMS_LITE_READ_ONLY=1`.
-- **THE REPAIR IS NOT THE IMAGE'S TO MAKE, and it says so** (`intune::CONTAINER_IMAGE_ENV`,
-  set by the Dockerfile — DECLARED, the shape `TEAMS_LITE_LAUNCHER` already has). The repair is
-  the host's systemd running THIS binary by path, and that path exists only inside the image,
-  so the unit would fail at exec or run whatever the host keeps under that name.
-  `repair_available` therefore answers no in the image although it sees the intune-container
-  state (that is exactly why "is it set up" alone would offer the button), and
-  `broker_status.repair_blocker` carries the sentence the banner shows in place of its fallback
-  — which says a restart will NOT fix the failure, and is false here. What repairs it is the
-  host: the user's own `intune-container stop && intune-container start`, or a teams-lite
-  installed on the host, whose health check repairs a locked keyring with nobody asking — the
-  keyring is the container's, so one repair on the machine mends every install on it. **An
-  image alone does not repair the ~18-hourly lock**, and that is the real cost of this shape.
-- **THE IN-APP UPDATE IS NOT EITHER, with no code saying so.** The binary is installed where
-  the runtime user cannot write, so `update::self_install` answers no on its own and the
-  button stays the link every install updated where it came from shows. An image is updated
-  by building a new one; `TEAMS_BUILD_REV` is a build argument for whoever wants the app to say
-  when `latest` moved on, and empty — which build.rs reads as a build from source — otherwise.
-- **tini is a SUBREAPER, not PID 1** (`tini -s`). The launcher spawns the backend and the
-  backend spawns agent CLIs, so something has to reap them, and `docker stop` has to reach the
-  launcher, whose exit takes its backend down with it (`killChildOnExit`). In the host's pid
-  namespace PID 1 is the host's init, so plain `tini` warned on the first run that no zombie
-  would ever be re-parented to it.
-- **The backend's output goes to `docker logs`** (`TEAMS_LITE_BACKEND_LOG=-`, set by the
-  entrypoint, read by `backendLogsInherited` in launcher/src/backend.ts). The launcher's own
-  rule — one appended FILE per port in `/tmp` — is right on a host and wrong in an image: the
-  first run's `docker logs` held three launcher lines and none of the backend's, so which bus it
-  found and why sign-in failed were inside a container's `/tmp` that nobody reads.
+- **EMBEDDED — the default, `compose.yaml`.** The image boots an Intune container OF ITS OWN,
+  inside itself, through the crate the backend links: the identity broker, its keyring and the
+  device's enrollment live on a volume of the container's own, nothing on the host is read or
+  touched, and the device is enrolled ONCE — imported from a backup of an existing enrollment, or
+  enrolled from the app (§ Signing in again, under `Kind::Enroll`). This is what the user asked
+  for in as many words: "the intune-container runs inside the container not on the host".
+- **HOST — `compose.host-broker.yaml`.** The image reaches the identity broker of the MACHINE it
+  runs on, through the host's process table — the shape this image had first, kept for a machine
+  that already has an enrollment and should not carry a second one. The two files are one compose
+  project and one container (`teams-lite`), so only one of them runs at a time, and a switch
+  between them keeps the store (both mount the `data` volume).
 
-**THE LOCAL AGENT HAS NO CLI IN THE IMAGE.** `claude` and `opencode` are the user's own
-installs, signed in to the user's own providers, and baking either into a local image would
-copy credentials into it — so the backend says each is "on no PATH entry" at startup and
-Settings › AI providers states it, as on any machine that lacks one. A user who wants `@claude`
-answered from the image extends it with their CLI; the release poll, push, calling and every
-read are unchanged.
+The Dockerfile's header carries the whole argument in short. The facts it rests on are pinned by
+`intune::tests::the_image_is_built_to_reach_the_broker_and_to_stay_its_own_install` (which reads
+the Dockerfile, the entrypoint and both compose files at run time), by the chart's own render tests
+for what the chart shares with them, and by the guard's tests for every refusal.
 
-**IT IS NOT A SANDBOX, and nothing here pretends it is.** The host's PID and network
-namespaces and the host user's uid are what reaching the broker takes, so a process in the
-image can do what any process of that user can — read another one's `/proc/<pid>/environ`
-included. What the image buys is the build and the runtime in one artifact: no Rust, Bun or
-units on the host. The store is a volume of its own by default; the compose file shows the
-bind that brings an existing install's history along, and sharing one store with a running
-host install is a shape this app already has (above, and every push and `@claude` answer is
-claimed once per machine).
+**THE EMBEDDED MODE, and what booting a systemd inside a container takes:**
 
-**A CLASSIC Intune host** (the broker on the session bus, no intune-container) swaps the
-state mount for the session bus and `TEAMS_LITE_BROKER_BUS` — commented in the compose file,
-because that bus is the user's whole desktop session and the default must not hand it over.
-That shape is UNVERIFIED: this machine has no classic broker to dial.
+- **THE ENTRYPOINT STARTS AS ROOT, in TWO STAGES of one script** (`packaging/docker/entrypoint.sh`;
+  the image has no `USER` line, and the test refuses one). Stage 1, as ROOT, does the few things
+  only root can do and nothing else — and only in EMBEDDED mode: host mode does nothing there, and
+  a read-only run one thing alone (it takes over a fresh STORE root, below). For a send-capable
+  start it refuses the HOST's network and IPC namespaces and a network namespace that already holds
+  `:99` (below), says which kernel settings would refuse the boot, gives a FRESH volume's root to
+  the runtime user, delegates the cgroup, checks the id mappers — then drops with `setpriv --reuid --regid
+  --init-groups --inh-caps=-all` and runs the same script again as stage 2
+  (`TEAMS_LITE_CONTAINER_STAGE=user` marks it; any other value is refused, and stage 2 refuses to
+  run as root). Deliberately NOT `--no-new-privs`: it would make the kernel ignore the id
+  mappers' file capabilities. Stage 2, as the runtime user `teams`, runs the launcher in the BACKGROUND behind a TERM trap, which is the graceful stop below. A
+  process that is not root skips stage 1 with one line — and in embedded mode warns when nobody
+  delegated its cgroup, because without that the boot cannot work and nothing else would say why.
+- **THE CGROUP IS DELEGATED, two ways, tried in order** (`delegate_cgroup`). The crate makes the
+  Intune container's scope a CHILD of the cgroup this container runs in
+  (`INTUNE_CONTAINER_CGROUP=own`), which the runtime user can do only once root has given it that cgroup's directory and its
+  `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control` — never more: the parent is the
+  platform's. DIRECTLY where `/sys/fs/cgroup` is writable (a privileged container or pod); and where
+  Docker mounts it read-only and root-owned (a direct chown answers EROFS), through a cgroup2 mount
+  of OUR OWN in a nested `unshare --user --map-users=0:0:1 --map-users=<uid>:<uid>:1 … --mount
+  --cgroup`: read-only is a property of the MOUNT, not of the files, so root in a fresh user, mount
+  and cgroup namespace mounts cgroup2 again — rooted at this very cgroup — and the chown lands on
+  the same files. Measured on Docker 29.9 (runc, cgroup v2) through this function: non-privileged
+  under a private cgroup namespace and under `--cgroupns=host`, the nested line delegated it;
+  `--privileged`, the direct chown did; and in every case the runtime user then made a child scope
+  and moved a process into it.
+- **THE ID MAPPERS CARRY FILE CAPABILITIES, never setuid** (the Dockerfile; `check_id_mapping`
+  says what undoes it). The inner container maps 65 536 ids through `newuidmap` / `newgidmap`, and
+  inside a Docker container the SETUID-root form is refused — measured, EPERM, because a setuid
+  helper needs `CAP_SYS_ADMIN` in a bounding set Docker withholds. With the setuid bit removed and
+  `cap_setuid=ep` / `cap_setgid=ep` set, they work. `no_new_privs` defeats BOTH forms — Docker's
+  `no-new-privileges`, Kubernetes' `allowPrivilegeEscalation: false` — which is why neither compose
+  file nor the chart sets it, and the entrypoint warns when it finds it.
+- **THE SUBORDINATE RANGE IS WRITTEN AT BUILD** (`/etc/subuid` and `/etc/subgid` hold
+  `teams:${SUBID_START}:65536`, `SUBID_START=100000`): WRITTEN rather than appended to, because
+  `useradd` adds a line of its own and two lines for one user are two answers to which ids the inner
+  container may use; and the build ASSERTS that the runtime uid and gid lie outside the range, since
+  an id mapped twice is a map the kernel refuses.
+- **DEBIAN TRIXIE, because the nested `unshare` needs util-linux 2.39** — the colon form of
+  `--map-users`. Measured: it delegates on trixie's 2.41.5, and bookworm's 2.38.1 refuses it
+  (`could not parse ID: '0:0:1'`). The build asserts the version, and the build stage is the SAME
+  release, because the Rust binary links that stage's glibc.
+- **THE HOST'S KERNEL HAS TO PERMIT UNPRIVILEGED USER NAMESPACES, and Ubuntu's does not by
+  default.** The crate's `runtime::preflight` refuses every setup and every start while
+  `user.max_user_namespaces` is 0, Debian's `kernel.unprivileged_userns_clone` is 0, or
+  `kernel.apparmor_restrict_unprivileged_userns` is 1 — which is how Ubuntu 23.10 and later ship,
+  24.04 LTS included, the distribution Intune supports. It refuses on the sysctl's VALUE, so nothing
+  about the container helps — not `apparmor=unconfined`, not privileged, not a profile allowing
+  `userns` — and the only remedy is that sysctl at 0 on the host. The entrypoint says so at every
+  start (`check_user_namespaces`) rather than leaving it to the boot helper's failure a minute
+  later, and the compose header, the chart and the README say it where a reader meets "any node".
+  **The same preflight refuses three more things, and only the last is the host's.** A subordinate
+  range of at least 65 535 ids for the runtime user in `/etc/subuid` and `/etc/subgid`, and
+  `newuidmap` / `newgidmap` on the `PATH` — the image carries both (above). And **cgroup v2**: the
+  unified hierarchy mounted at `/sys/fs/cgroup`, which a container sees only where its HOST (or
+  node) runs it — a host still on cgroup v1 or the hybrid layout, the default of older distributions
+  (Ubuntu 20.04 and RHEL 8 among them), boots no Intune container, every retry failing with
+  `cgroup v2 (unified hierarchy) is not mounted at /sys/fs/cgroup`. The entrypoint warns at start
+  only where it finds no `0::` line in `/proc/self/cgroup` at all; a hybrid host has one, so there
+  the boot helper's failure is what says it. Two more host conditions are the image's own:
+  it is **linux/amd64 alone**, because Microsoft's identity broker ships for x86_64 only, and the
+  first setup needs the registry (below) and some 8 GiB of disk for the volume.
+- **A BRIDGE NETWORK, NEVER THE HOST'S, and the port prefix is the token's boundary.** The inner
+  container keeps this container's network namespace, and its Xvfb `:99` binds the ABSTRACT socket
+  `@/tmp/.X11-unix/X99`: in the host's namespace that is the very `:99` of the user's own Intune
+  container, and whichever of the two starts second loses its display — and with it its broker. So
+  compose gives it a network of its own, and the host's namespace is REFUSED BY PROOF where the
+  kernel gives one: the entrypoint compares its own `/proc/self/ns/net` with the kernel's fixed
+  inode number for its INITIAL network namespace (`NET_NS_INIT_INO`, `refuse_the_hosts_namespaces`)
+  — the host's wherever the container shares the host's kernel — and exits 2 at every start,
+  however early the daemon brings the container up. A check for a bound
+  `:99` cannot do that: at boot (`restart: unless-stopped`) the container usually starts BEFORE the
+  user's session has brought their own `:99` up, so `network_mode: host` would pass it and take the
+  display from under the user's Intune container. That number is fixed only on recent kernels (this
+  machine's 7.3 fixes it); on an older one the host's namespace is numbered like any other, and what
+  remains is a `:99` ALREADY bound, refused four times over: by the entrypoint
+  (`refuse_a_shared_display`), by the boot helper before it starts a container that is not running
+  (§ The Intune container is a LIBRARY), by the self-test, and by the guard for a self-test run with
+  `--network host`. So host networking is UNSUPPORTED in this mode whatever the kernel, and refused
+  outright only where the kernel makes it provable. **The host's IPC namespace is refused on every
+  kernel** (`IPC_NS_INIT_INO`, fixed since Linux 3.8), for the same reason one layer down: under
+  `--ipc host` the container's `/dev/shm` is the host's, the crate binds it into the Intune
+  container, and it holds the semaphores of the user's own broker's OneAuth and MSAL locks — which
+  the inner session setup's stale-lock cleanup deletes whenever no process of ITS pid namespace maps
+  them. Measured 2026-11-03 on this machine's 7.3 kernel with throwaway `debian:trixie-slim`
+  containers: `--network host` reads 4026531833 and `--ipc host` 4026531839, while a bridge network
+  and a private IPC namespace read numbers from 4026531840 up.
+  **A MATCH PROVES THE KERNEL'S INITIAL NAMESPACE, which is the host's only on the host's kernel —
+  so a microVM runtime is DECLARED, never detected** (`TEAMS_LITE_NETNS_IS_OWN=1`,
+  `netns_is_declared_own`; the chart's `broker.embedded.vmIsolated`). Under Kata Containers or
+  Firecracker the container runs on a GUEST kernel of the sandbox's own, and Kata drops the network
+  namespace from the spec it hands that guest ("already handled on the host by virtcontainers"), so
+  every container of the sandbox runs in the GUEST's initial network namespace — on no host network,
+  reading 4026531833 on a guest kernel new enough to fix that number. Undeclared, the refusal ended
+  every start of such a container (a StatefulSet in CrashLoopBackOff) with a sentence blaming a
+  `--network host` nobody set, offering two ways out of which neither applied, and it hid whatever
+  else would decide the boot there, because it runs before the id-mapping and user-namespace
+  warnings. Five rules, each pinned by `packaging/helm/chart.test.ts`:
+  - **It relaxes the NETWORK proof and nothing else.** The IPC refusal does not read it — Kata's
+    agent makes a fresh IPC namespace per sandbox, so that number never matches there — and the
+    `:99` check runs as before; a container in the guest's namespace still sees only its own sandbox.
+  - **It is a declaration and the start says what it cost.** Nothing in the container can tell a
+    guest kernel from the host's, so it is the operator's word: let through on it, the start logs
+    that this is the host's network on any runtime that shares the host's kernel, and declared where
+    the namespace is not the initial one it logs that it changes nothing.
+  - **`1` declares it, unset, empty and `0` do not, and anything else is REFUSED (exit 2)**, read in
+    both namespaces: `true` read as no would refuse with the wrong sentence, and read as yes would be
+    a guess about the one check that keeps this image off the user's own display.
+  - **The refusal names it**, in both its spellings, behind "ONLY if — it runs under a microVM
+    runtime", so a reader under Kata is not sent to drop a host network they never had. The
+    self-test reads the same function and refuses with its own words.
+  - **The chart writes it only where the pod BOOTS**, refuses it in a host mode (which checks no
+    namespace and could not reach a node's broker from a VM anyway), refuses `extraEnv` setting the
+    variable behind it, and does not mark it `required` — a new required key is exactly what a
+    `--reuse-values` upgrade from an older chart trips on (§ Running teams-lite on Kubernetes). It
+    does not pick the runtime: that is a cluster whose default handler is a microVM one, or a
+    `runtimeClassName` from a post-renderer. The guard still refuses a self-test handed
+    `--network host` by its command line, declaration or not.
+  UNVERIFIED: no microVM runtime has run this image, so whether its Intune container boots in one at
+  all — nested user namespaces and a delegated cgroup inside a guest — is unmeasured; what Kata does
+  to the network namespace is read from its code, not from a run. The cost of a network of its own is
+  the one the host mode was built to avoid: inside its own namespace
+  the web front has to listen beyond the container's loopback (`TEAMS_WEB_HOST=0.0.0.0`), and since
+  it hands the WRITE TOKEN to every page it serves, what keeps that token off the LAN is the
+  `127.0.0.1:` prefix on the one published port, `127.0.0.1:19443:19443` — never drop it, and the
+  test refuses a publish without it. In exchange the served sign-in needs no host networking at all:
+  the broker's `:99` is in the container's own namespace.
+- **THREE SECURITY OPTIONS, said rather than hidden**: `seccomp=unconfined` (the default profile
+  refuses `unshare` of a user namespace and the mounts after it), `systempaths=unconfined` (Docker's
+  masked and read-only `/proc` paths are in the way of the inner container's own `/proc`) and
+  `apparmor=unconfined` (the default profile, where a host enforces one, refuses `mount`). They are a
+  real widening — root in this container would reach `/proc` files Docker normally hides — which is
+  why the entrypoint is root only for the lines above. The container stays UNPRIVILEGED: no
+  capability is added, and the Intune container's own root is the runtime user, never the host's.
+- **THE `intune` VOLUME IS THE ENROLLMENT, and its UID must not change** (a named volume, read-write,
+  on `/home/teams/.local/share/intune-container` — size it 8 GiB). It holds the Intune container's
+  rootfs (about 1.7 GB, owned by the inner container's SUBORDINATE ids, and pulled from the image
+  named below) and `persist/`: the device
+  registration and the keyring. Deleting it unenrolls this install — which is why the guard refuses
+  `down -v` and a `volume rm` of it. The runtime uid IS the inner container's root (the crate maps
+  one onto the other), so everything in it is written under that uid: an image rebuilt for another
+  `TEAMS_LITE_UID` finds the volume owned by the old one, and the Intune container does not boot
+  again until the uid is put back. So in this mode UID and GID decide who OWNS state, not only who
+  the process is — and they must be stable from the first start.
+- **A FRESH VOLUME'S ROOT IS TAKEN OVER, and nothing else ever is** (`own_dir`, only in stage 1 of
+  an embedded start). A fresh PVC is a root-owned, empty directory (a filesystem made for
+  it may hold a root-owned `lost+found` and nothing else), and the runtime user cannot write to it
+  until its ROOT is theirs; a Docker named volume starts as a copy of the image's own directory,
+  already theirs. Anything else is somebody's — and container root IS host root under Docker's
+  defaults, so a chown here lands on the HOST: a host store bound in to bring its history along
+  would be re-owned, and its own install could no longer create its SQLite `-wal` and `-shm`. So any
+  other owner is LEFT AS IT IS with a warning naming the fix (an image built for that uid), a
+  directory's contents are never touched (the rootfs below is subordinate ids, and a recursive chown
+  would break that container for good — the test refuses `chown -R`), and host mode takes over
+  nothing at all. **A READ-ONLY run takes over ONE directory, the STORE root, and only a fresh one**
+  — never the cache and never the Intune state, which is the enrollment and which a read-only run
+  never writes. It boots nothing, so it delegates nothing and checks no namespace; but its backend
+  creates and migrates its store on open whatever the mode (`prepare_store`, deliberately ungated),
+  so a read-only run handed a fresh, root-owned store volume — the claim a NEW Kubernetes release
+  gets, on any block-backed storage class (`root:root 0755`) — could not create its database and
+  exited at every start: a pod in CrashLoopBackOff where a read-only view was offered. A fresh root
+  holds nothing, so nobody's data is touched, and a directory somebody already owns is left exactly
+  as before — so the guard's sanctioned read-only `docker run` still re-owns nothing anybody
+  handed it. `chart.test.ts` runs the root stage sourced as a library and pins
+  that a read-only run's ONLY act is `own_dir` of the store; the chart's read-only pod carries the
+  `CHOWN` and `DAC_OVERRIDE` that act needs (§ Running teams-lite on Kubernetes).
+- **AN IMPORT IS ONCE, AND A MOVE** (`TEAMS_LITE_INTUNE_IMPORT`, an absolute path to the archive
+  `intune-container backup -o FILE` made on the machine that enrolled). The boot helper imports it
+  only while the container holds NO device registration, so the first start imports it and every
+  later one ignores it — a backup must never replace a registration that works. It is BRACKETED by a
+  marker (`teams-lite-import.pending`, fsynced, written before `ops::restore` and removed only once
+  it returned; `an_interrupted_import_is_retried_rather_than_kept_as_a_registration`): the crate's
+  restore copies the archive's members in order and the Workplace Join keys come before the keyring,
+  so an import killed half-way left a container that READ as registered and held no keyring — never
+  imported again, and never offered an enrollment. With the marker, it is imported again over its
+  own partial write. The compose bind is the LONG syntax with `create_host_path: false`: the short
+  one creates a missing archive as an empty DIRECTORY, the boot then finds nothing to import, and
+  the app offers a fresh enrollment beside the device the backup was meant to move. And the archive
+  IS the device — its keys and its keyring — so `.gitignore` and `.dockerignore` both exclude one
+  left beside compose.yaml (the build stage is `COPY . .`, and a layer in the build cache outlives
+  the file), and the bind reads `TEAMS_LITE_INTUNE_BACKUP` so it can live outside the checkout. Then
+  the same enrollment must NOT keep running on the machine it came from: two live copies of one
+  device are unmeasured, and every import says so in the log.
+- **WHAT THE FIRST START DOWNLOADS IS THE intune-container PROJECT'S IMAGE, NOT MICROSOFT'S:
+  `ghcr.io/magicabdel/intune-container:latest`.** It is the crate's own `DEFAULT_IMAGE`
+  (`backend.rs`), because the boot calls `ops::init(false, None, "")` and teams-lite names no image
+  anywhere. That project's Dockerfile, at the commit teams-lite pins, describes it as a third-party
+  Ubuntu base that carries Microsoft's Intune agent and identity broker
+  (`ghcr.io/frostyard/ubuntu-intune:latest`) plus an Xvfb for `:99` — Microsoft's SOFTWARE, in an
+  image Microsoft did not publish; that the tag on the registry was built from that file is the
+  project's word, not something checked here. It is a MOVING tag: a first setup gets whatever
+  `latest` names that day, the crate stamps the rootfs with the digest it was extracted from and
+  records the reference in the volume's config, and nothing in teams-lite compares that digest
+  with anything (the self-test's runs pulled `sha256:5ebedb75…`). That root filesystem BECOMES this
+  install's identity broker and the keyring holding its enrollment, so a reader approving a
+  privileged pod is approving that supply chain — which is why every surface that names the
+  download (the README, compose.yaml, the Dockerfile, the chart) must say whose it is, and never
+  "Microsoft's image".
+- **THE INTUNE IMAGE IS NEVER UPDATED BY A BOOT.** Every boot of the inner container runs from a
+  config CLONE with `auto_update = false` that is never saved (`intune::boot_headless`, the repair's
+  own boot): with updates on, a start whose registry tag has moved deletes the rootfs and pulls
+  1.7 GB again, under the boot's own bound, in the middle of a pod start. What that costs is stated
+  rather than hidden: nothing in this mode updates that image at all — the rootfs stays the one the
+  first setup pulled, at whatever digest `latest` named that day, until the `intune` volume is set up
+  again (and a security fix in Microsoft's software reaches this install only that way).
+- **THE REPAIR IS THE IMAGE'S OWN**, which is the opposite of the host mode: the container, its
+  state and this binary are all inside, so `repair_available` answers yes once it is set up and
+  `repair_blocker` is empty — the locked keyring is repaired by a HELPER of this binary, the boot is
+  kept up by the health check, and an enrollment is the app's own button.
+- **THE STOP IS GRACEFUL, and only ONE copy of the entrypoint may make it.** The trap's FIRST signal
+  stops the launcher (which takes its backend down with it); every later one is SAID and changes
+  nothing, so a second Ctrl+C can never cut the poweroff short; then the stop helper
+  (`server __teams-lite-intune-stop`, run as every helper is: its own session, an environment from
+  scratch) powers the Intune container off — up to 25 s for a setup or a start holding the lock,
+  then up to 20 s for its systemd — which is why compose grants `stop_grace_period: 60s` and the
+  chart 90 s. Without it the inner systemd, broker and keyring are SIGKILLed mid-write in the volume
+  that holds the enrollment. Twenty seconds is the CRATE's wait, and a poweroff can outlast it (a
+  unit at systemd's ninety-second stop timeout): the stop helper then exits 1 saying the container
+  is still powering off, and the entrypoint warns that it ends with the container — the one case
+  the trap cannot make graceful, said rather than reported as "stopped". A launcher that exits on
+  its own is answered with the same stop. And
+  the script is ONE PER CONTAINER (`take_instance_lock`): before anything acts it takes an exclusive,
+  non-blocking `flock` on `/tmp/teams-lite-container.lock` (fd 9, crossing the setpriv exec on the
+  same open file description, and closed — `9>&-` — on every child, so the lock means "this script is
+  running"), and a second copy exits 2 with a sentence before it touches anything. That was a real
+  hole: `docker exec teams-lite teams-lite-container` — even `--help` — landed as root, started a
+  second launcher that found the ports taken or printed its usage and exited, and then reached the
+  end of stage 2: the graceful stop of the RUNNING Intune container, holding the enrollment. A PPID
+  test was no substitute — in host mode tini is a subreaper rather than PID 1. The stop is reached
+  only from the copy that holds the lock, never in host mode (the container is the user's) and never
+  read-only (a read-only run never booted one, so the only container a stop could reach is somebody
+  else's). **A KNOWN GAP, a separate change:** the launcher SIGKILLs its backend on TERM
+  (`killChildOnExit` in launcher/src/backend.ts) and the backend has no TERM handler of its own, so
+  at a container stop the CALLING registration is not handed back (`stop_calling` runs on the idle
+  shutdown and on a restart the app asked for, never on a signal) — Teams keeps offering the account's calls to an endpoint that is gone until the
+  registration's TTL, an hour, runs out. Mending it takes both halves: a backend that answers TERM
+  with `stop_calling`, and a launcher that sends TERM and waits before it KILLs.
+- **THE DIAGNOSTIC DROPS A ROOT CALLER TO `teams`** (`packaging/docker/teams-lite-intune-status`,
+  wrapping `examples/intune_status.rs`). The image starts as root, so a plain `docker exec` and
+  `kubectl exec` land as root — and root is the one id that cannot answer: the Intune container's
+  user namespace maps only the runtime user (to its root) and the subordinate range, so an outer root
+  is unmapped there, its bus refuses root's `AUTH EXTERNAL`, and the keyring would read as
+  unanswered — a diagnostic reporting a failure it caused. It prints the mode, whether the container
+  is set up and registered (and whether an import did not finish), whether it is up — naming apart a
+  leader with no bus — which holder has the helper slot, and whether the volume's container runs in
+  ANOTHER container or pod, all without touching anything.
+- **THE SELF-TEST PROVES THE EMBEDDED BOOT IN THE REAL IMAGE, and can never touch an enrollment**
+  (`packaging/docker/teams-lite-intune-selftest`):
 
-**STARTING IT IS THE USER'S**, like every send-capable backend here, and rule 3d of the
-automation guard refuses it — compose `up`/`start`/`restart`/`create`, a `docker|podman
-run|create` of the image, a `start|restart|unpause` of the container — however the project is
-named: by its file, by a `cd` into `packaging/docker`, or by a shell already standing there,
-where a bare `up` finds the file on its own. Building, `logs`, `ps`, `exec` and every stop
-stay open, and so do TWO runs that state their proof in the command: `-e
-TEAMS_LITE_READ_ONLY=1`, which reaches the CONTAINER (the same variable in front of `docker`
-sets it for the CLI alone — rule 3's systemd-run lesson again), and `--entrypoint
-teams-lite-intune-status`, the read-only diagnostic the image ships (`examples/intune_status.rs`,
-which now also names the broker's display and whether this is the image).
+      docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined \
+        --security-opt apparmor=unconfined --entrypoint teams-lite-intune-selftest teams-lite:local
 
-**What is VERIFIED, and what is not.** Verified on this workstation on 2026-11-02, through
-the image itself and READ-ONLY. The diagnostic inside it found the Intune container (leader
-6415) from the mounted state, read its keyring over D-Bus as unlocked, named the broker's `:99`
-as served with the host's network namespace and as NOT served in a bridge network (which is
-the rule above, measured), and said the repair is the host's. A read-only run (`-e
-TEAMS_LITE_READ_ONLY=1`, a throwaway store, removed afterwards) resolved the broker's bus
-through the host's `/proc`, reached the broker and got AAD's own answer back through it, and
-served the app on 127.0.0.1:19443 (HTTP 200), with tini silent and the backend's own lines in
-`docker logs` once the two rules above were added. That answer was a REFUSAL —
-`interaction_required` / `token_expired` for the Teams scope — and the host's own broker gave
-the identical one the same minute: the account's state, which a read-only backend deliberately
-does not try to mend (it never runs the interactive rescue). So nothing has SIGNED IN from the
-image yet. UNVERIFIED: a token minted through it, a send-capable run — the user's own `up` —
-and therefore a send, a call and a push from the image; the served sign-in window from inside
-it (the display check is measured, no window was opened); and podman, whose rootless mode maps
-the container's root to the host user and would need `--userns=keep-id` rather than `--user`.
+  It SOURCES the entrypoint as a library (`TEAMS_LITE_CONTAINER_LIBRARY=1`), so the root stage it
+  proves is the one a real start runs rather than a copy; drops to `teams`; runs the boot helper,
+  the diagnostic, a wait of up to three minutes for the broker's bus socket, and the stop helper —
+  whose exit 0 it does not take on trust: the leader the bus was found under must really be gone,
+  or the run FAILS — and says PASS or FAIL in one line (exit 0 / 1, 2 for a run it refuses). SIX
+  refusals make "never an enrollment, and never the user's own Intune container" structural: the
+  Intune data directory must be EMPTY or absent (an enrolled one always holds its rootfs and
+  `persist/`); `TEAMS_LITE_INTUNE_IMPORT` is refused (a backup booted here would be a second live
+  copy of a real device); host mode and read-only are refused; the HOST's network namespace
+  (recognised by its number, on a kernel that fixes one) and a `:99` already held are refused; the
+  host's IPC namespace (by its number, on every kernel) and a `/dev/shm` that already holds ANYTHING
+  are refused — a container's own `/dev/shm` is a fresh, empty tmpfs, so one holding a file is
+  somebody else's, whose broker's locks the boot's stale-lock cleanup would clear; and the
+  entrypoint's own instance lock refuses it beside a running entrypoint, because it ends with a
+  stop. It sets nothing that makes a send-capable process — no port, no token, no launcher. What it
+  CANNOT see, and the guard must: an IPC namespace shared with another container whose `/dev/shm`
+  is still empty, and `--network host` on a kernel that does not fix that namespace's number while
+  the host's `:99` is not bound yet. The guard allows exactly the shape above and nothing near it:
+  the self-test as the SOLE `--entrypoint` (Docker and Podman keep the LAST of two, so a second one
+  runs the real stack), with no volume on the Intune data directory or above it and no
+  `--volumes-from`, on a network AND an IPC namespace of its own (`--network host|container:|ns:`
+  and `--ipc host|container:|ns:` are refused beside it) — and refuses it RUN behind an `exec` into a
+  running install, where it would act on that install's own volume (reading the file stays open).
+
+**THE HOST MODE** (`compose.host-broker.yaml`, `TEAMS_LITE_INTUNE_MODE: host`) keeps everything the
+image was before, and each fact still holds:
+
+- **THE BROKER IS REACHED THROUGH THE HOST'S PROCESS TABLE.** `intune::broker_bus` reads
+  intune-container's runtime state and opens `/proc/<leader>/root/run/user/0/bus` on every
+  connection, so the image needs the host's PID namespace (`pid: host` — without it there is no such
+  `/proc` entry), a READ-ONLY view of `~/.local/share/intune-container` (the DIRECTORY, never the one
+  file: the state is rewritten and removed as the container comes and goes, and a file bind mount
+  keeps showing the inode it was mounted from; `create_host_path: false`, so a missing one is an
+  error), and the HOST USER's uid (`user:`). That last one is not hygiene: `/proc/<pid>/root` is
+  opened under the same-uid rule, and the container's dbus-daemon authenticates the uid the kernel
+  reports — so root is refused twice. Measured 2026-11-02 from a stock image with `--pid=host
+  --user 1000:1000`: the socket opened and `AUTH EXTERNAL` as uid 0 answered `OK`, the handshake
+  `auth::connect_bus` makes. Not root, the entrypoint skips stage 1 with one line, as it always does.
+- **THE HOST'S NETWORK NAMESPACE, for two reasons that are both safety.** The web front stays on
+  127.0.0.1, the launcher's own default, so the write token never leaves loopback and no port is
+  published (the test refuses `TEAMS_WEB_HOST` and `ports:` there); and the broker's sign-in window is
+  drawn on an Xvfb whose socket is ABSTRACT (§ Signing in again), which a bridge network cannot see.
+- **THE REPAIR IS NOT THE IMAGE'S TO MAKE, and it says so** (`intune::CONTAINER_IMAGE_ENV`, set by the
+  Dockerfile — DECLARED, the shape `TEAMS_LITE_LAUNCHER` already has). The repair is the host's
+  systemd running THIS binary by path, and that path exists only inside the image, so
+  `repair_available` answers no in the host-mode image although it sees the intune-container state,
+  and `broker_status.repair_blocker` carries the sentence the banner shows in place of its fallback.
+  What repairs it is the host: the user's own `intune-container stop && intune-container start`, or a
+  teams-lite installed on the host, whose health check repairs a locked keyring with nobody asking —
+  the keyring is the container's, so one repair on the machine mends every install on it. **A
+  host-mode image alone does not repair the ~18-hourly lock**, and that is the real cost of this
+  shape. (`TEAMS_LITE_CONTAINER_IMAGE` blocks nothing in embedded mode.)
+- **A CLASSIC Intune host** (the broker on the session bus, no intune-container) swaps the state
+  mount for the session bus and `TEAMS_LITE_BROKER_BUS` — commented in the file, because that bus is
+  the user's whole desktop session and the default must not hand it over. UNVERIFIED: this machine
+  has no classic broker to dial.
+
+**IN BOTH MODES:**
+
+- **IT IS PUBLISHED, built for one uid.** It was a local build only at first; the user asked for an
+  image on GHCR, and nothing in it is anybody's — no credential, no store, no enrollment, no machine —
+  but the uid it was built for. CI builds it for the default 1000:1000 (`.github/workflows/build.yml`).
+  UID and GID are BUILD arguments, and in both modes they decide something real: in host mode they
+  must BE the host user's (the broker answers that uid), and in embedded mode they OWN the Intune
+  state (above) and must be the owner of any host store bound in. A host user who is not 1000 builds
+  their own, which is what the compose files do unless `TEAMS_LITE_IMAGE` names the published one.
+- **PORTS OF ITS OWN: 19423 and 19443** (`packaging/docker/entrypoint.sh`). In host mode the
+  launcher would otherwise ATTACH to whatever listens on 19420 (`ensureBackend`) — the always-on
+  service, whose token the image cannot see, so every send would be refused while reads worked. And
+  a store shared with a host install keeps its live feed: the trouter endpoint id is keyed by the
+  store AND the port (`endpoint_id_path`). A READ-ONLY run keeps 19430, which is why the entrypoint
+  fills in a port only when the caller left it unset and never when `TEAMS_LITE_READ_ONLY=1`; and a
+  `TEAMS_LITE_PORT` that is not a number — the `tcp://…` a Kubernetes service link writes into that
+  very name — is dropped, and the drop is said.
+- **tini is PID 1 in embedded mode and a SUBREAPER in host mode** (`ENTRYPOINT ["/usr/bin/tini",
+  "-s", "--", …]`). The launcher spawns the backend, the backend spawns helpers and agent CLIs, and
+  the crate's supervisor detaches from whoever started it, so something has to reap them all and
+  forward the stop. `-s` is for host mode, whose PID 1 is the host's init; and an `--entrypoint`
+  override or a pod `command:` that dropped tini gets it back from the entrypoint itself
+  (`supervise_as_pid1`).
+- **THE IN-APP UPDATE IS NOT THE IMAGE'S, with no code saying so.** The binary is installed where
+  the runtime user cannot write, so `update::self_install` answers no on its own and the button stays
+  the link every install updated where it came from shows. An image is updated by building a new
+  one; `TEAMS_BUILD_REV` is a build argument for whoever wants the app to say when `latest` moved on.
+- **The backend's output goes to `docker logs`** (`TEAMS_LITE_BACKEND_LOG=-`, set by the entrypoint,
+  read by `backendLogsInherited` in launcher/src/backend.ts), and so do the helpers' own lines: the
+  launcher's rule — one appended FILE per port in `/tmp` — is right on a host and wrong in an image,
+  where nobody reads a container's `/tmp`.
+
+**THE LOCAL AGENT HAS NO CLI IN THE IMAGE.** `claude` and `opencode` are the user's own installs,
+signed in to the user's own providers, and baking either into a local image would copy credentials
+into it — so the backend says each is "on no PATH entry" at startup and Settings › AI providers
+states it, as on any machine that lacks one. A user who wants `@claude` answered from the image
+extends it with their CLI.
+
+**IT IS NOT A SANDBOX, in either mode, and nothing here pretends it is.** The host mode shares the
+host's PID and network namespaces and the host user's uid, because that is what reaching the broker
+takes, so a process in it can do what any process of that user can. The embedded mode shares
+neither, but runs with seccomp, the masked `/proc` paths and AppArmor all unconfined, because that
+is what booting a systemd in a user namespace takes. What the image buys is the build, the runtime
+and — by default — the enrollment in one artifact: no Rust, Bun, units or intune-container on the
+host.
+
+**STARTING IT IS THE USER'S, AND NOW SO IS STOPPING IT.** Rule 3d of the automation guard refuses
+compose `up`/`start`/`restart`/`create`/`run`, a `docker|podman run|create` of the image (by its
+bare name or under a registry, any tag), a `start|restart|unpause` of the container — however the
+project is named: by its file, by a `cd` into `packaging/docker`, or by a shell already standing
+there. And because the embedded image IS that install's sign-in, it refuses a `stop|kill|rm|pause`
+of the container named `teams-lite`, a compose `stop|kill|down|rm|pause` of the project, a signal
+sent INSIDE it through an `exec` (rule 3d-ii: `kill 1` is `docker stop` by other means), a container
+JOINED to its pid namespace (rule 3d-iii: `docker run --pid container:teams-lite busybox kill 1`, a
+`kubectl debug --target` of the chart's pod — the same signal from a tools image, which is how one
+would bring a `kill` in, since the image has none), and — irreversible — a `down -v`, a `docker
+volume rm` of its volumes, any `docker volume prune`, `docker system prune --volumes` and `podman
+system reset`. **And a SECOND STACK inside it** (rule 3c-ii): the launcher (`teams`) or the backend
+(`/usr/local/lib/teams-lite/server`, or the launcher's unpacked copy) exec'd into the running
+install, with any arguments and whatever an `-e` says. An exec inherits the container's environment
+but not the ports its entrypoint chose, so that backend binds 19420 in the container's own network
+namespace, finds it free, and comes up SEND-CAPABLE — run as `teams`, signed in through the very
+broker the install uses: a second calling endpoint, a second presence publisher, a second claimant
+for every `@claude` run. The exec'd command is read for the PROGRAM it runs — past `--`, `sh -c`,
+`env`, `setpriv`, `timeout` and their like — never for a word it is handed, so an exec that READS
+one of these files (`cat`, `sha256sum` of the entrypoint or the backend) stays open. Building,
+`logs`, `ps`, `inspect`, an `exec` that runs none of those programs, and a stop of a container of
+ANOTHER name stay open, and so do THREE runs that state their proof in the command: `-e
+TEAMS_LITE_READ_ONLY=1` (which reaches the CONTAINER — the same variable in front of `docker` sets it
+for the CLI alone), `--entrypoint teams-lite-intune-status`, and the self-test above. A proof counts
+only as a flag BEFORE the image, only as the SOLE `--entrypoint`, and only while the LAST word naming
+`TEAMS_LITE_READ_ONLY` sets it to 1 — `-e TEAMS_LITE_READ_ONLY=1 -e TEAMS_LITE_READ_ONLY=0` is a
+send-capable run.
+
+**What is VERIFIED, and what is not.** In EMBEDDED mode, measured 2026-11-03 in the real image
+(`teams-lite:local`, built from this checkout) on this CachyOS workstation under Docker 29.9, with
+`seccomp`, `systempaths` and `apparmor` unconfined and no volume, through the self-test, three
+times: the root stage delegated the cgroup through the nested cgroup2 mount (the direct chown
+answered EROFS), the boot helper pulled `ghcr.io/magicabdel/intune-container:latest` and set it up
+(75 s the first time, about 15 s after) and booted it with NO user manager, teams-lite's own
+diagnostic read its login keyring UNLOCKED over D-Bus and saw the broker's bus, and the stop helper
+powered it off gracefully in about a second, its leader confirmed gone — PASS. That image was built
+before the fixes of the second review, and what they changed (listed under § The Intune container
+is a LIBRARY) has not been run in an image since. This machine does not enforce AppArmor, so a
+host that does has not been tried either.
+
+**THE HOST MODE IS UNVERIFIED IN TODAY'S IMAGE.** Its measurements, taken 2026-11-02 and READ-ONLY,
+were of the HOST-ONLY image that preceded the embedded mode — the one master shipped, which ended
+on `USER teams`, declared no `TEAMS_LITE_INTUNE_MODE` and had an entrypoint with no root stage, no
+`setpriv` and no instance lock. In it, the diagnostic found the host's Intune container (leader
+6415) from the mounted state, read its keyring as unlocked, named the broker's `:99` as served with
+the host's network namespace and as NOT served in a bridge network, and said the repair is the
+host's; and a read-only run resolved the broker's bus through the host's `/proc`, reached the broker
+and got AAD's own answer back through it — a REFUSAL, `interaction_required` / `token_expired`,
+identical to the host's own broker's that minute — and served the app on 127.0.0.1:19443. **What
+carries over is the MECHANISM**, because it is a fact about the kernel, the broker and a read path
+this change left as it was in host mode: a process of the host user's uid in the host's pid
+namespace reaches `/proc/<leader>/root/run/user/0/bus` and is answered there, the abstract `:99`
+lives in the host's network namespace and nowhere else, and `intune::broker_bus` finds the bus from
+the crate's state. **What does NOT carry over is the IMAGE**: today's host mode runs through the
+two-stage entrypoint (started as the host user, so its root stage is skipped with one line), its
+instance lock, the `TEAMS_LITE_INTUNE_MODE=host` that must now be declared because the image's
+default is embedded, the new `compose.host-broker.yaml`, and a `src/intune.rs` that decides per
+mode — and the guard's own host-mode diagnostic (`docker run --rm --pid=host --user … -e
+TEAMS_LITE_INTUNE_MODE=host --entrypoint teams-lite-intune-status …`) has never been run. Until the
+read-only diagnostic and a read-only run are repeated on today's image, the host mode is a shape
+pinned by tests, not a measurement.
+
+UNVERIFIED, in either mode: a send-capable run (the user's own `up`), and therefore a send, a call
+and a push from the image; a token minted through either broker from the image — so nothing has
+SIGNED IN from it yet; an enrollment, an import of a real backup, and the served portal or sign-in
+window from inside it; the graceful stop under a running launcher; and podman, whose rootless mode
+maps the container's root to the host user and would need `--userns=keep-id` rather than `--user`,
+and whose embedded shape nobody has tried.
+
+## Running teams-lite on Kubernetes (the image, one pod — its own Intune container by default)
+
+`packaging/helm/teams-lite` runs the image above as a one-pod StatefulSet with its store on a
+persistent volume, and CI publishes both from every push to master (`.github/workflows/build.yml`:
+the `image` job pushes `ghcr.io/theophile-wallez/teams-lite:build-<shortsha>` and `:latest`, `chart-check`
+gates the chart and `chart` pushes `oci://ghcr.io/theophile-wallez/charts/teams-lite` at version
+`MAJOR.MINOR.<run number>`, whose `appVersion` is that image tag — so a chart version runs exactly
+the image built beside it). The tag is spelled ONCE, by the `build` job, as the name of that
+commit's GitHub release (`git rev-parse --short=7`, which grows past seven characters on a
+collision — cutting the sha in the image job could name the image differently from its release).
+**Every name CI publishes under is the repository it RUNS in, never a spelling in the tree**,
+because this project is developed in forks: a fork's master runs the same workflow and publishes
+`ghcr.io/<owner>/<repo>` and `oci://ghcr.io/<owner>/charts/teams-lite`. The chart in the tree names
+upstream (`theophile-wallez/teams-lite`, the repository install.sh and `update::REPO` name, which
+`chart.test.ts` reads out of install.sh), so `packaging/helm/package.sh` stamps a COPY with the
+publisher's image, home and sources before `helm package` — without it a fork's published chart
+would run upstream's image under the fork's version number — and it fails rather than publish
+unstamped when a default it rewrites has been renamed. The image's own source label comes from
+docker/metadata-action, which overrides the Dockerfile's `LABEL` with the running repository.
+
+**CONCURRENCY IS PER JOB.** A newer push cancels an older `build` (its release is superseded), but a
+publish that has STARTED finishes (`publish-image` and `publish-chart`, `cancel-in-progress: false`):
+the workflow-wide cancel this file used to have would have cancelled most image and chart publishes
+at this project's push rate, leaving a commit with a `build-<sha>` release and nothing else. A
+publish queued behind a running one is replaced by the newest, so the order stays serial and an
+older build never overwrites `latest`.
+
+`packaging/helm/check.sh` is the chart's whole gate — `helm lint --strict`, the render tests in
+`packaging/helm/chart.test.ts` (through the real `helm`, and reading `build.yml`, the Dockerfile,
+compose.yaml, entrypoint.sh, install.sh and the launcher so the chart cannot drift from them), and
+every variant validated against the Kubernetes API schemas by kubeconform in strict mode, for the
+oldest version `Chart.yaml` claims (1.25) and a current one (1.33, where the shapes only 1.30 and
+later accept are validated) — and ci.yml and build.yml both run that one script. The rules below
+hold it, and the render tests pin every one of them but three halves, which rest on a measurement
+or on nothing and say so: the read-only-root run, the build-from-source reasoning (the tests pin
+the job's Dockerfile, platform and uid, not why), and everything about a cluster, which nothing has
+measured.
+
+**`broker.mode` DECIDES THE WHOLE POD, and it defaults to `embedded`** — the image's own default,
+and the shape the user asked for: the pod boots ITS OWN Intune container, inside itself, exactly as
+the image's compose.yaml does (§ Running teams-lite in a container image). The two HOST modes keep
+the shape the chart had first: `intuneContainer` reaches the broker of the user's intune-container on
+the NODE, `sessionBus` a classic Intune host's session bus. The chart writes `TEAMS_LITE_INTUNE_MODE`
+from it — `embedded`, or `host` for both host modes, which must say so because the image's default
+is embedded — and refuses an `extraEnv` that sets it, since the pod's whole shape follows the mode.
+Moving a release between `embedded` and a host mode changes the StatefulSet's volume claims, which
+Kubernetes refuses to change in place: uninstall first (the claims are kept), then install.
+
+**THE EMBEDDED MODE:**
+
+- **IT RUNS ON ANY amd64 NODE ON cgroup v2 WHOSE KERNEL PERMITS UNPRIVILEGED USER NAMESPACES, of a
+  cluster that admits privileged pods — and an Ubuntu 23.10+ node does not by default.** No `hostPID`, no hostPath of
+  the node's, nothing on the node read or touched, and not pinned to an enrolled node: the device is
+  enrolled into the pod's own claim, and with a node-local storage class (k3s's `local-path`) that
+  claim is what pins the pod. The kernel condition is the image's own (`runtime::preflight`), and
+  the chart says it wherever a reader meets "any node" — values.yaml, the chart's README, NOTES:
+  Ubuntu ships `kernel.apparmor_restrict_unprivileged_userns=1`, the runtime refuses on that VALUE,
+  and neither `privileged` nor an AppArmor profile gets past it, so the remedy is the sysctl at 0 on
+  the NODE (it is not a namespaced sysctl). The same preflight refuses a node still on cgroup v1 or
+  the hybrid layout (`cgroup v2 (unified hierarchy) is not mounted at /sys/fs/cgroup`, on every
+  retry); the entrypoint warns at start only where the pod is on no cgroup-v2 hierarchy at all, so
+  on a hybrid node the boot's own failure is what says it. The image is
+  linux/amd64 only, so a mixed cluster pins `kubernetes.io/arch: amd64`.
+- **PRIVILEGED BY DEFAULT, STARTED AS ROOT, AND NO `fsGroup` — the last two refused if a value asks
+  otherwise.** The container is `privileged: true` (it delegates its own cgroup, maps a subordinate id range and boots
+  a systemd inside itself) with `readOnlyRootFilesystem: true` kept, the pod's seccomp profile
+  `Unconfined`, and no `allowPrivilegeEscalation: false` and no dropped capabilities: the id
+  mappers run on FILE capabilities, which `no_new_privs` defeats, and Kubernetes rejects that flag
+  beside a privileged container anyway. The pod has NO `runAsUser` / `runAsNonRoot`, because the
+  entrypoint must start as root to delegate the cgroup and give a fresh claim's root to `teams` —
+  started as anybody else it skips all of that and the Intune container cannot boot — and NO
+  `fsGroup`, because the kubelet re-groups a volume RECURSIVELY and adds group read-write: on the
+  Intune claim that is every file of a rootfs owned by the pod's subordinate ids and the device's
+  `0600` keyring, the enrollment changed hands and broken. `teams-lite.validate` refuses all three in
+  `podSecurityContext` (and `runAsUser` / `runAsNonRoot` in `securityContext`) rather than render a
+  pod that cannot boot or a claim that gets re-grouped. A namespace enforcing the `baseline` or
+  `restricted` Pod Security level refuses the pod.
+- **A SECOND CLAIM IS THE ENROLLMENT** (`intune-<name>-0`, `broker.embedded.persistence`: 8 GiB,
+  ReadWriteOnce, mounted read-write on `/home/teams/.local/share/intune-container` — where the image
+  creates the directory and where compose.yaml mounts its own `intune` volume). It holds the ~1.7 GB
+  rootfs the first start downloads — from `ghcr.io/magicabdel/intune-container:latest`, the
+  intune-container project's image and not Microsoft's (§ Running teams-lite in a container image) —
+  and `persist/`. LOSING IT IS LOSING THE ENROLLMENT, so it is a
+  claim even with `persistence.enabled: false` (which moves only the STORE to an emptyDir), it
+  outlives `helm uninstall`, and it needs a LOCAL filesystem that keeps ownership and modes — never
+  NFS or an RWX class (the schema refuses a `ReadWriteMany` access mode, here as for the store).
+- **AN EXISTING ENROLLMENT COMES IN AS A SECRET, imported once, and the Secret is REQUIRED while it
+  is named** (`broker.embedded.import`: the archive `intune-container backup -o FILE` made on the
+  machine that enrolled, `kubectl create secret generic … --from-file=…`). It is mounted read-only
+  at `/run/teams-lite/intune-import/enrollment-backup.tar.gz` — the path compose.yaml's own
+  (commented) bind uses — and `TEAMS_LITE_INTUNE_IMPORT` is set only when one is given; the boot
+  imports it only while the claim holds no registration (§ Running teams-lite in a container image).
+  Not `optional`: a mistyped name or key is a pod that does not start, rather than a second device
+  enrolled beside the one the user meant to move. The archive IS the device, so the chart says to
+  drop the value and delete the Secret once the pod has imported it, and that this is a MOVE: the
+  same enrollment must stop on the machine it came from. A Secret holds at most 1 MiB, and how large
+  a real backup is has not been measured; a larger one comes in through `extraVolumes` with the
+  variable in `extraEnv` — never beside the Secret, which the chart refuses (two answers to which
+  enrollment to import). **To a release ALREADY INSTALLED it is an UPGRADE**
+  (`helm upgrade … --version "${version:?}" --reuse-values --set broker.embedded.import.secretName=…`):
+  a second `helm install` of the same name is refused (`cannot re-use a name that is still in use`),
+  and both READMEs once told a reader who had followed their own quick start to do exactly that.
+  The Secret is a volume of the pod template, so the upgrade replaces the pod and the new one
+  imports at boot — which works only while the claim holds NO registration, so it comes BEFORE
+  enrolling from the app, never after; a pod that already holds one ignores the archive and says
+  so. Importing from the very first start is the same `--set` on the `helm install` itself, with
+  the Secret made first.
+- **AN UPGRADE THAT REUSES VALUES IS PINNED TO THE CHART THE RELEASE RUNS**, everywhere one is
+  advised — both READMEs, values.yaml and NOTES (`version=$(helm -n <ns> get metadata <release> -o
+  json | jq -r .version)`, then `--version "${version:?}"`). The first fix of the import above said
+  `--reuse-values` with no `--version`, and that is a trap two ways: an `oci://` reference with no
+  version is the NEWEST chart, which CI publishes on every push, and Helm's `--reuse-values`
+  REPLACES that chart's own values with the OLD release's coalesced tree (`Upgrade.reuseValues`:
+  `chart.Values = CoalesceValues(current.Chart, current.Config)` — the defect
+  `--reset-then-reuse-values` exists for). Against this chart's strict schema — every fixed-shape
+  level `additionalProperties: false`, nested `required` lists — a key a later chart renamed,
+  removed or made required is an error that has nothing to do with the import; a key a later
+  template reads directly is a nil-pointer; and where it renders, `image.tag: ""` resolves to the
+  NEW chart's `appVersion`, so the app moves to a new image in the middle of an enrollment move.
+  Pinned, the chart and its defaults are the ones already installed and the upgrade changes one
+  value. `${version:?}` is load-bearing too: an empty `--version` (no release, no `jq`) is read by
+  helm as "the newest", which is the trap again, so the shell refuses to run the command instead.
+  A move to a NEWER chart is the other flag, said in the chart's README: `--reset-then-reuse-values`
+  (Helm 3.14+) or the reader's own values file. A NEW chart key is therefore never `required`
+  (`broker.embedded.vmIsolated` is the first one added under this rule). `chart.test.ts` scans the
+  five files for any `helm … upgrade` that reuses values without a `--version`. Verified against
+  Helm's own source (v3.21.4: `get metadata`'s JSON names the chart version `version`, and the two
+  reuse paths are as described) — no upgrade has been run, by the rule below.
+- **POD USER NAMESPACES INSTEAD OF PRIVILEGED: AN OPT-IN, AND UNVERIFIED**
+  (`broker.embedded.userNamespaces`). `hostUsers: false` — the pod's root is an unprivileged id range
+  on the node — and a container that is NOT privileged: `SYS_ADMIN`, `SETUID` and `SETGID` added,
+  `procMount: Unmasked`, `appArmorProfile: Unconfined`. Nothing about it has been run anywhere, and
+  values.yaml, the chart's README and NOTES say so beside what it needs: Kubernetes 1.30 or later
+  with the `UserNamespacesSupport` and `ProcMountType` feature gates (the chart refuses the opt-in
+  below 1.30), containerd 2.1 or later with writable cgroups for the pod and volumes on filesystems
+  that support idmapped mounts, a kubelet `userNamespaces.idsPerPod` large enough for uid 1000 AND the
+  65 536 subordinate ids from 100000 (at least 165 536, which the kubelet counts in blocks of 65 536 —
+  196 608), and a seccomp profile that allows `unshare`, `mount` and `setns`.
+- **NINETY SECONDS TO POWER OFF** (`terminationGracePeriodSeconds`, unset = 90 where the pod boots
+  its own container, 30 otherwise). It is a CEILING, not a delay: the entrypoint forwards TERM to the
+  launcher and then runs the graceful stop (up to ~25 s for a boot to release the lifecycle lock,
+  ~20 s for the poweroff); killed before that, the inner systemd, the broker and the keyring die
+  mid-write. The twenty seconds are the crate's own wait, so a longer grace period does not lengthen
+  the poweroff: one that outlasts it is SAID (the stop helper exits 1, the entrypoint warns) and the
+  container ends with the pod. The same TERM does NOT hand the calling registration back — the launcher SIGKILLs its
+  backend — so Teams offers the account's calls to the pod's gone endpoint until the registration's
+  TTL (an hour) runs out; values.yaml and the chart's README say so, and a chart test pins the words
+  to the launcher's own code. A longer grace period would not change it.
+- **`hostNetwork: true` IS REFUSED in this mode, and not needed.** The pod's Intune container shares
+  the pod's network namespace, and its `:99` binds an ABSTRACT socket: in the node's namespace it
+  would collide with the `:99` of an Intune container already running there, and whichever starts
+  second loses its display and its broker. In the pod's own namespace the sign-in and enrollment
+  windows are served into the app with no host networking. The web front listens on the pod's own
+  interface (`web.listenAddress`, `0.0.0.0` — the pod network and nothing more). A pod under a
+  microVM runtime, which is on no node network but reads the number the image refuses the node's
+  by, is DECLARED with `broker.embedded.vmIsolated` (§ Running teams-lite in a container image).
+- **A VALUE OF ONE MODE IS NEVER QUIETLY IGNORED BY THE OTHER.** `broker.embedded.userNamespaces`,
+  `broker.embedded.vmIsolated` and `broker.embedded.import.secretName` are refused in a host mode;
+  and — the sharper half, since
+  embedded is the DEFAULT — `broker.intuneContainer.stateDir` or `broker.sessionBus.socket` without
+  `broker.mode` beside it is refused too: it is a host install that forgot to say so, and rendered as
+  the default it would ignore the node's enrollment and offer "Enroll this device", registering a
+  second device for the account. That was the README's own host command before this (the
+  repository's, and the chart's), and the chart test that renders every command the CHART's README
+  hands a reader now leads with the embedded default and spells each host mode out; the repository
+  README now gives the host command with `--set broker.mode=intuneContainer`.
+
+**THE HOST MODES** keep every rule they had. Their own two:
+
+- **THEY RUN WHERE THE INTUNE ENROLLMENT IS, and nowhere else.** The pod signs in through the
+  identity broker of its NODE exactly as the image does under compose.host-broker.yaml: the node's
+  PID namespace (`hostPID`, for `/proc/<leader>/root/run/user/0/bus`), the intune-container state as
+  a READ-ONLY hostPath of type `Directory` (a missing one is a pod that does not start and says why,
+  the `create_host_path: false` of compose.host-broker.yaml), and the node user's uid and gid
+  (`hostUser`, `runAsNonRoot` — not root, the entrypoint skips its root stage, which a host mode never
+  needs). So it is a single-node deployment
+  by nature, on a Kubernetes that runs DIRECTLY on the enrolled workstation — k3s, k0s, kubeadm — and
+  a cluster on another machine has no broker to reach. **kind, k3d and minikube's docker driver
+  cannot work either**: their nodes are containers with a PID namespace and a filesystem of their own,
+  so `hostPID` is the node container's process table (where the leader pid in rootless.json is
+  nothing, or somebody else) and the hostPath is the node container's path. Bridging the broker's bus
+  to another machine was considered and is not offered: that socket mints tokens as the user, and a
+  network path to it is the account on the network.
+- **`hostNetwork` IS A TRADE in a host mode, and the chart refuses the half that cannot work.** Off,
+  the web front listens on the pod's own interface (`TEAMS_WEB_HOST=0.0.0.0`, which is the pod network and
+  nothing more) and a Service reaches it — but the broker's sign-in WINDOW cannot be served into
+  the app, because its X socket is abstract and lives in the node's network namespace (§ Signing in
+  again); the app states that, and the automatic re-sign-in needs no window. On, the front stays on
+  the NODE's 127.0.0.1 and the window works — and since no Service reaches loopback, the chart
+  `fail`s on an Ingress or a non-ClusterIP Service in that mode, renders no NetworkPolicy (none
+  applies to a host-network pod), and its probes knock on 127.0.0.1. Its ports are then the node's:
+  19423 / 19443, which no host install uses but either compose file's container does (the embedded
+  one publishes 19443 on the host's loopback), so a hostNetwork pod and that container cannot run on
+  one machine at once.
+
+**IN EVERY MODE:**
+
+- **A STATEFULSET, AND `replicas: 1` IS NOT A VALUE.** One account, one SQLite store on a local
+  volume, one send-capable backend: a second copy is a second device posting and ringing as the
+  same person, and SQLite cannot share a volume across nodes. What the StatefulSet buys over a
+  Deployment is the "one" holding during an UPGRADE — its rolling update terminates the old pod
+  before it starts the new one (a pod's name is unique, so the controller waits for the deletion),
+  where a Deployment needs `strategy: Recreate` and is one override from losing it — and a PVC
+  (`data-teams-lite-0` for a release named teams-lite; `data-<release>-teams-lite-0` otherwise) that
+  outlives `helm uninstall`, which is the user's whole history. What it costs is stated in the
+  chart's README: a volume claim template cannot be resized through `helm upgrade`.
+- **`podManagementPolicy: Parallel`, and it is a bug fix rather than a preference.** With one
+  replica it orders nothing; what it changes is that the controller REPLACES a pod that never became
+  Ready. Under the default `OrderedReady` the controller stops at a pod that is not Running and Ready
+  before it reaches the update — Kubernetes' documented "forced rollback" limitation — so a release
+  installed with a mistyped state directory (stuck in `ContainerCreating`) or a crashing image was
+  never mended by the `helm upgrade` or `helm rollback` that fixed it, and the guard refuses tooling
+  the pod deletion that would have. The field is immutable once a StatefulSet exists, which is why
+  it was settled before the first publish.
+- **A TYPO IS AN ERROR AT EVERY LEVEL THE CHART DEFINES.** `additionalProperties: false` on the
+  schema's root and on every fixed-shape object below it (free-form maps — annotations, selectors,
+  resources, the security contexts — stay open). It was on the root alone at first, and review
+  measured what that cost: `--set networkPolicy.enable=true` rendered no policy at all and
+  `hostUser.uidd` deployed as uid 1000, both silently. The root also accepts `enabled`, which a
+  parent chart's `condition: teams-lite.enabled` hands down. A `ReadWriteMany` access mode is refused
+  with the rest.
+- **SERVICE LINKS ARE OFF, and that is load-bearing** (`enableServiceLinks: false`). Kubernetes
+  hands every pod `<SERVICE>_PORT=tcp://<ip>:<port>` for every Service in its namespace, and a
+  Service named `teams-lite` makes that `TEAMS_LITE_PORT` — the variable the launcher and the
+  backend both read as the backend's port. The entrypoint keeps a port that is set, so the backend
+  would have been handed `tcp://10.x.x.x:19443`. A manifest written by hand may not turn the links
+  off, so `packaging/docker/entrypoint.sh` also drops a `TEAMS_LITE_PORT` that is not a number, and
+  says so on stderr.
+- **A READ-ONLY ROOT FILESYSTEM, and the cache must allow EXEC.** Every path the app writes is a
+  volume — the store (the PVC, where compose keeps it), `~/.cache` (an emptyDir), `/tmp`, and in
+  embedded mode the Intune claim — in every mode, beside every capability dropped and no privilege
+  escalation in the host modes and `privileged` in embedded. **Measured on the HOST-ONLY image that
+  preceded the embedded mode, and on no image since**: on 2026-11-03, that image (which ended on
+  `USER teams`) run `--read-only --user 1001:1001` with those three as tmpfs, read-only and with no
+  broker, served the app (HTTP 200). And measured the other way first: with a `noexec` tmpfs on
+  `~/.cache` it died with `EACCES … posix_spawn '/home/teams/.cache/teams-lite/server'`, because the
+  launcher unpacks the backend there and runs it — a fact about the launcher, which carries over. An
+  emptyDir allows exec; a Docker `--tmpfs` does not unless told. What does NOT carry over is the
+  rest: today's image starts as ROOT, takes its one-copy lock in `/tmp` before anything else, runs a
+  root stage, drops with `setpriv`, and in embedded mode boots an Intune container — and none of
+  that has run on a read-only root, as root or as any other uid. That every path it writes is a
+  volume is the chart's reading of the entrypoint and the crate, not a measurement.
+- **THE WEB PORT IS THE ACCOUNT, so the defaults keep it to the pod.** The web front hands the
+  write token to every page it serves, so the Service is `ClusterIP`, no Ingress is drawn, and a
+  NetworkPolicy is ON BY DEFAULT and lets no other pod in — without it every pod in the cluster
+  could collect the token. The ways in are a `kubectl port-forward` onto 19443 or the Tailscale
+  operator (`ingressClassName: tailscale` plus `networkPolicy.allowNamespaces: [tailscale]`, the
+  shape `tailscale serve` already gives the always-on service: tailnet-only, behind Tailscale's own
+  HTTPS). The chart REFUSES an Ingress with no class — the cluster's default controller (Traefik on
+  k3s) would take it and publish the account — and an Ingress the policy would let nothing reach.
+  **What no policy can keep out is the pod's own NODE**: Kubernetes always lets a node's traffic
+  reach its own pods (k3s's kube-router accepts it explicitly), so every process of every account
+  on the machine and every hostNetwork pod there can still reach the port — which is also how the
+  probes and `kubectl port-forward` work. An earlier draft said the policy "lets nobody in"; review
+  corrected it. Host-level isolation is the node's firewall, or `hostNetwork`. The ports are the
+  image's own (19423 / 19443), left to its entrypoint rather than restated, so a read-only release
+  keeps 19430.
+- **`readOnly: true` HAS THE LAST WORD.** It writes `TEAMS_LITE_READ_ONLY=1` AFTER `extraEnv`, so
+  nothing a value adds can turn a release installed read-only into one that sends: with Helm 3's
+  client-side apply a container's later entry for a name wins, and Helm 4's server-side apply
+  refuses the duplicate outright. That is also what makes `--set readOnly=true` a proof the
+  automation guard can accept on an install (below).
+- **A READ-ONLY EMBEDDED RELEASE IS RENDERED WITHOUT WHAT BOOTING COSTS, and KEEPS its claims.** It
+  boots nothing, so it is NOT privileged: every capability dropped but the FIVE its entrypoint uses
+  as root — `CHOWN` and `DAC_OVERRIDE` to take over a fresh STORE claim's root (its one act as root:
+  the backend creates and migrates its store whatever the mode, and `/home/teams` above the claim is
+  `0700`), `SETUID` and `SETGID` to drop to `teams`, `KILL` for tini to forward the stop — all five in
+  the `baseline` Pod Security level, with no privilege escalation, a `RuntimeDefault` seccomp
+  profile, no user-namespace opt-in, no import Secret mounted, the Intune claim mounted READ-ONLY,
+  the 30 s grace period, and NOTES that say only what such a release can do. The CLAIM stays: a
+  StatefulSet's claim templates cannot change in place, so one that came and went with `readOnly`
+  would turn the upgrade that switches it off into a refusal. **WHAT IT IS WORTH is a store that
+  already holds a history, and nothing else**: it never boots its Intune container, so it never
+  signs in and nothing new ever arrives. So it shows something only on the release's OWN store,
+  switched with `helm upgrade … --version "${version:?}" --reuse-values --set readOnly=true` (pinned
+  to the chart it runs, above — a read-only switch is aimed at a long-lived install, which is where
+  an unpinned one meets the most chart versions), or on a store claim owned by
+  uid 1000 named by `persistence.existingClaim`. A NEW read-only release — the shape the guard lets
+  tooling install — gets a claim of its own, fresh and EMPTY: before the store takeover it could not
+  even create its database on a block-backed class (`root:root 0755`) and crash-looped; now it
+  starts, and shows nothing. The five capabilities were measured under Docker with a stand-in for
+  the image's user (a stock trixie, a read-only root, `no_new_privs`, those five over a root-owned
+  empty volume: the store root was taken over and `teams` wrote to it, and without `DAC_OVERRIDE`
+  root could not even reach it) — never on a cluster, and never with the image itself.
+- **THE ONE SECRET IS THE ENROLLMENT, and the PVCs are the rest.** In host modes the Microsoft
+  sign-in is the node's broker's; in embedded mode it is the Intune claim, and an import Secret while
+  one is named. Everything else sensitive the app holds — every message, the GitLab and Linear
+  tokens, the push key, sealed chats' passphrases — is in the store. CI publishes TWO packages, and a
+  new GHCR package starts out private: the chart needs `helm registry login` (or to be made public)
+  and the image an `imagePullSecrets` entry (or the same). Seeding the tracker tokens from a Secret
+  was considered and not built: it would put a credential in the environment of a process whose agent
+  child inherits that environment (only `TEAMS_LITE_WRITE_TOKEN` is stripped), so it is a feature
+  with its own design rather than a chart value.
+- **THE IMAGE IS BUILT FROM SOURCE IN CI, for linux/amd64 alone.** Not from the binary the release
+  job compiled: that one links the runner's glibc while the image's runtime is Debian's, and the
+  Dockerfile's two stages share one release by construction. The cost is a cold cargo build per
+  push (BuildKit's cache mounts do not survive between runs), which is why it runs after the gate
+  rather than beside it. amd64 only, because Microsoft's identity broker ships for x86_64 alone.
+
+A CLASSIC Intune host is `broker.mode: sessionBus`, and its socket is mounted through its PARENT:
+`/run/user/<uid>` is a tmpfs made at login and unmounted at the last logout, so a bind of the socket
+(or of that directory) keeps showing a bus that died. The chart mounts `/run/user` with
+`mountPropagation: HostToContainer`, so the bus of the session running now is the one dialled, and it
+refuses a socket outside `/run/user/<uid>/` or one whose uid is not `hostUser.uid`. UNVERIFIED, like
+the compose file's classic shape: no classic broker was available.
+
+**THE AUTOMATION GUARD KNOWS IT** (rule 3e in `.claude/hooks/guard-live-automation.sh`), because a
+chart install is rule 3c's live stack started by the cluster — and the kubeconfig on this machine
+names real clusters, so `helm install` from here deploys to whichever is current. It refuses
+`helm install|upgrade|rollback` of the chart (by release, path, OCI reference with or without a
+`:version` or digest, package, or `.` from the chart's own directory, which the shell may stand in or
+the line may `cd` into), `helmfile apply|sync` of it, the rendered manifests applied (piped in, the
+image named on the command, or a local `-f` file or directory whose contents name the image or the
+chart's labels), a scale above 0, a rollout restart, undo or resume, a delete of its POD (the
+StatefulSet recreates it at once, so that is a restart and never a stop), a spec change, and a
+`kubectl run` of the image — by name, or by `--all`, a nameless kind or `-A` in its namespace, and
+inside a subshell or a `$( … )` too, since `commands_matching` now reads the executable view. **AND
+IN THE EMBEDDED MODE THE POD IS THE USER'S SIGN-IN, so its STOPS are refused as well**: `helm
+uninstall` of a release named after the chart, a scale to 0, a delete of its StatefulSet (or `all` of
+its kinds, or `-f` of its manifests) — each powers the Intune container off and signs the install
+out. **Two deletes are IRREVERSIBLE and refused harder**: `kubectl delete pvc` of the chart's claims
+(`data-*teams-lite*`, `intune-*teams-lite*`, by the chart's label, or `--all` / `-A` in ANY namespace,
+since a claim names no release the hook could check — which is also why a read-only release's own
+claims are refused), and `kubectl delete namespace` of ANY namespace, because deleting a namespace
+deletes every claim in it, on whichever real cluster is current. A release of ANOTHER name — such as
+a read-only one tooling installed itself — is its own to uninstall. It leaves rendering, `helm diff`,
+`--dry-run` and every read open, plus `--set readOnly=true` on an INSTALL when it is the LAST word on
+that value — never on an upgrade, which restarts the release the user is using. Helm merges its
+value flags in a fixed order (-f, `--set-json`, `--set`, `--set-string`, `--set-file`,
+`--set-literal`), so only the last three outrank `--set`, and one of them voids the proof only when
+its OWN value names readOnly. A PORT-FORWARD is reading and stays open only onto a loopback port the
+browser guard knows as live (by number or by the port's name, quoted or not): that guard recognizes
+the live app by its port and its tailnet name, so `8080:19443` or `8080:web` would be the live app
+under a port it reads as anything, and `--address 0.0.0.0` would put the account on the LAN. An
+`exec` into the pod RUNNING a hidden argument, the self-test or the entrypoint is rule 3b's (reading
+those files is not), the launcher or the backend exec'd into it — a second send-capable stack
+signed in through the pod's own broker — is rule 3c-ii's, a signal sent inside it is rule 3d-ii's,
+a `kubectl debug --target` of it (a tools container in its pid namespace) is rule 3d-iii's, and a
+`kubectl debug --copy-to` (a second copy of the live pod, on the same claims) is 3e's own. Publishing the image also widened rule 3d: the image is named under a
+registry (`ghcr.io/…/teams-lite:tag`, `…@sha256:…`) as well as bare, and its tag is whatever the
+shell will put there (`:$TAG`) — a first version of that widening narrowed the tag and let
+`teams-lite:$TAG` through, which review caught. What it CANNOT see: a manifest applied from a URL or a
+kustomization (`-k`), a helmfile it cannot read, a release with another name upgraded, scaled or
+uninstalled by that name alone, a claim of such a release deleted by its own name, a `kubectl drain`
+of the node, a delete of the PersistentVolume under a claim, and an Ingress, NodePort or
+LoadBalancer on a hostname or port of the user's own — a live front neither guard can recognize,
+while a `*.ts.net` one is, which is one more reason the Tailscale operator is the recommended way in.
+
+**What is VERIFIED, and what is not.** Verified on this workstation, offline: the chart renders,
+lints strict, passes its render tests, and every variant — the embedded default, its read-only
+release, the import Secret, the user-namespace opt-in, both host modes — validates against the
+Kubernetes 1.25 and 1.33 schemas (the opt-in against 1.33 alone: the chart refuses it below 1.30);
+a fork's package is stamped with the fork's image; the host-only image that preceded the embedded
+mode ran read-only-rooted as another uid (above — today's image has not); the read-only release's
+five capabilities took a fresh store root over a stand-in under Docker (above); the entrypoint's
+port drop was exercised in `sh`; and the embedded boot itself is measured — in the real image,
+under DOCKER, before the second review's fixes (§ Running teams-lite in a container image). **KUBERNETES IS ENTIRELY UNVERIFIED, in every mode**: the chart has never been
+INSTALLED on a cluster — this work deployed nothing, by the rule above. So the embedded pod booting
+under a real kubelet (privileged, its cgroup delegated directly, its seccomp unconfined, its two
+claims on a real storage class), the user-namespace opt-in, an import from a Secret, an enrollment
+from the pod, a host-mode pod reaching the broker through `hostPID` (whose kubelet's seccomp,
+AppArmor or SELinux profile may refuse the ptrace-read `/proc/<pid>/root` takes; the chart's README
+gives the AppArmor setting for 1.30+ and the annotation before it), the NetworkPolicy under a real CNI
+and the Tailscale Ingress are all unexercised; and the publishing jobs have not run yet, so the GHCR
+packages' visibility and the chart package's link to its repository (through `sources[0]`, which
+`helm push` writes as the OCI source annotation) are what the first push to master will show.
 
 ## A broken sign-in costs the LIVE feed, never the history
 
@@ -10478,7 +11509,11 @@ and `the_store_opens_before_sign_in_and_a_broken_sign_in_is_not_fatal` pins it.
   read-only backend never have; `Refused` is now answered by the app itself — the banner
   offers a sign-in in the browser instead (see § Signing in again) — and `NoAccount` still
   needs the user to sign in to Intune again, which is the one remedy on this banner that is
-  theirs to carry out. None of that is read while a repair RUNS: the failure recorded then is
+  theirs to carry out. (In the image's EMBEDDED mode that last sentence is never reached: the
+  container is the app's own, `NoAccount` is answered with the Intune portal — "Enroll this
+  device", or a sign-in through it on an enrolled one — and every embedded state has a sentence
+  of its own, so nothing falls through to a command the image does not have.) None of that is
+  read while a repair RUNS: the failure recorded then is
   the container being down, which no restart fixes, so the banner keeps `Repairing…` until the
   backend says the repair has ended (§ The always-on service). The button stays visible and
   inert — a missing one would read as "nothing can be done" without saying so — and the
@@ -10539,7 +11574,8 @@ Nine rules hold it, and each is pinned by a test:
   open". Never the root window: the display it lives on held six other windows when this was
   measured, and forty on the container's own.
 - **The display is READ from the broker, never chosen** (`/proc/<pid>/environ`, measured
-  `DISPLAY=:77`). The broker is D-Bus activated and its environment is frozen at activation, so
+  `DISPLAY=:77`; an enrollment's portal is the one exception, named because it is launched by us —
+  below). The broker is D-Bus activated and its environment is frozen at activation, so
   a display chosen here would either be ignored or, worse, strand it — `intune-container` ships
   a whole script for that bug. A display the broker names and nothing serves is a stated state
   with a remedy, not a mystery — and "serves" is the ABSTRACT socket first, then the file, the
@@ -10558,7 +11594,24 @@ Nine rules hold it, and each is pinned by a test:
   window ends the pending call as a named cancellation (`status: 7`) and the broker stays
   up. **Cancel also STOPS THE RUN**, because during `starting` there is no window yet: closing
   alone made Cancel a silent no-op in the phase most sign-ins live in, and left the session live,
-  so no new sign-in could be started for ten minutes.
+  so no new sign-in could be started for ten minutes. **And the close is BEST EFFORT, the stop is
+  not** (`close_best_effort`, `a_close_that_fails_never_keeps_the_stop_from_the_run`). The window a
+  Cancel closes is the one last SEEN, and the broker destroys and replaces its window between steps
+  — so a Cancel pressed while the page was blank between the password and the number answered
+  `BadWindow`, and that error returned before the run was told, with the session already marked
+  closing: "Closing…" with no Cancel button, nothing served, and the session slot held for the full
+  ten minutes — in host mode too. A failed close is now said and nothing more; the run is told on
+  every path, and its own take-back closes whatever window is current. **And where NONE is current,
+  the run keeps the turn and waits for the next one** (`CANCEL_SETTLE`, 15 s,
+  `close_a_window_on_its_way`). The failed close is exactly the case with no window up — the broker
+  has destroyed the password page and not drawn the number-matching one, and a Cancel during
+  `starting` has the same shape — so a take-back that ran once found nothing, and dropping the
+  D-Bus call tells the broker nothing: it could go on to draw the number page and send the
+  Authenticator prompt with nobody watching and the turn already released, and the next "Sign in
+  here" would serve that stale flow. So after a Cancel that dropped the call and closed nothing,
+  the first window that appears within the settle is closed, and only then is the turn released.
+  What is promised is that bound, and no more — a page drawn later is left — which is what the
+  cancel's own doc and SIGN-IN.md § 3 now say, rather than that a failed close costs nothing.
 - **The window is looked for only while THIS session's own call is out** (`auth::InteractiveTurn`,
   taken as a value rather than hidden inside the call). Promoted on any viewable broker window, a
   session drew the one the automatic rescue had put up and was about to close — the reader typing
@@ -10580,7 +11633,8 @@ Nine rules hold it, and each is pinned by a test:
   page and `signin_input` presses keys into it — so `signin_frame` is gated as hard as the
   rest, because a read whose answer is somebody's password field is not a read. `signin_status`
   publishes no pixels and no keys, so it stays open like `write_lock_status`. The automation
-  hook blocks all four against a live port.
+  hook blocks all four against a live port — and `intune_enroll`, the fifth, which starts the
+  same surface pointed at an enrollment (below).
 - **The banner offers exactly ONE remedy** (`brokerRemedy`, pure and unit-tested): the container
   restart where a restart is the cause, the sign-in where a human is, and where a sign-in is
   what is needed and the machine cannot serve one, the button stays visible and inert with the
@@ -10589,7 +11643,10 @@ Nine rules hold it, and each is pinned by a test:
   thing they opened the app to be told.
 - **`NoAccount` is deliberately NOT offered a sign-in**, though it reads like the case that
   needs one most: with no account the interactive request has nobody to name, and what is gone
-  is the device's enrolment — `intune-container`'s business rather than a token's.
+  is the device's enrolment — `intune-container`'s business rather than a token's. In the image's
+  EMBEDDED mode that business is the app's own, and it is answered by the PORTAL rather than by a
+  sign-in (below): an unenrolled container is offered "Enroll this device", and an enrolled one
+  whose broker holds no account is offered the portal to sign one in again.
 - **The state is the APP's, not the panel's**, and it rides the greeting. A sign-in is exactly
   when a reader changes device — press it on the laptop, pick the phone up for the
   Authenticator — so a page that connects mid-flow draws the panel it never started. The FRAMES
@@ -10600,6 +11657,108 @@ The scope a sign-in acquires is the backend's choice and never the caller's
 for. The panel is bounded and scrolls, because the content is a picture 675 px tall and the
 Cancel button was off the screen below it — the spec caught that by not being able to click it.
 
+### The same surface ENROLLS the image's own Intune container (`Kind::Enroll`, `intune_enroll`)
+
+In the image's EMBEDDED mode (§ Running teams-lite in a container image) teams-lite runs an Intune
+container of its OWN, and one nobody has enrolled holds no device registration: nothing the broker
+does can sign anybody in on it. What enrolls a device is the Intune PORTAL, so a sign-in session
+gained a KIND (`signin::Kind`, `"kind"` on `signin_status`): `Signin` is everything above, and
+`Enroll` starts the PORTAL helper (`server __teams-lite-intune-portal`, § The Intune container is a
+LIBRARY), which opens `intune-portal` inside the container, and serves its window through the very
+same four methods. SIGN-IN.md § 5 is the map. Ten rules hold it, and each is pinned by a test in
+`src/signin.rs`, `src/bin/server.rs`, `web/src/lib/signin.test.ts` or
+`web/e2e/intune-embedded.spec.ts`:
+
+- **`intune_enroll` is a `MACHINE_METHODS` entry, and more than a sign-in is one.** An enrollment
+  registers a DEVICE in the user's organization, made as them, and nothing in this app takes a
+  registration back. Three gates before anything starts, in the order of what being wrong costs
+  (`Ctx::start_enroll`): read-only, embedded mode (in host mode the container is the user's own,
+  enrolled with their own `intune-container`), and a portal session that can really happen
+  (`portal_purpose`) — and `Signin::enroll` asks the first two again itself, so no caller skips
+  them. The automation hook blocks it against a live port.
+- **WHAT THE PORTAL IS OPENED FOR IS THE BACKEND'S DECISION, never the client's**
+  (`signin::PortalPurpose`). To ENROLL wherever `intune_embedded::can_enroll` says so — a
+  send-capable backend, a container that is UP, a FREE helper slot, and NO registration (enrolling an
+  enrolled device would replace a registration that works). To sign an ACCOUNT in again on a
+  container that IS registered and whose broker answers `NoAccount` — an imported backup whose
+  account did not come along, or an account removed in the portal — with every other gate of an
+  enrollment. `broker_status.intune` carries both answers (`can_enroll`, `can_portal_sign_in`) and a
+  press is decided by the same function from the same state, so the offer drawn and the press made
+  cannot disagree.
+- **The display is NAMED — `:99`, `ops::CONTAINER_DISPLAY` — and that is the one exception to "read
+  from the broker"** (`xwindow::container_display`): the portal is launched BY US on exactly that
+  display (`ops::portal_open_headless`, no restart), and there is nothing to read it out of before
+  it exists. Its abstract socket is in teams-lite's own network namespace, because the inner
+  container keeps it. The crate draws it at `1280x800x24` now: `SigninWindow::capture` reads four
+  bytes a pixel and refuses anything else, so the `640x480x16` it had before would have been refused
+  frame by frame.
+- **Two window classes, and the TOPMOST viewable one is served** (`xwindow::ENROLL_WM_CLASSES`,
+  `SigninWindow::find_any`): the broker draws its sign-in dialog OVER the portal, and with no window
+  manager there the window mapped later is stacked higher. An override-redirect window (a menu, a
+  tooltip) wins only when nothing else matches. Nothing outside those two programs is ever served.
+- **The interactive TURN is held for the session's whole life**, so the automatic rescue stands
+  down and every broker dialog on that display is one the PORTAL asked for. **And so the account
+  check is made UNDER that turn** (`account_answers`,
+  `what_the_portal_was_opened_for_decides_how_it_ended`): after an account sign-in the silent call
+  can refuse — a fresh account has no refresh token for this client and resource yet, and the
+  silent path never redeems the PRT (SIGN-IN.md § 2) — and its refusal goes to `auth::rescue`,
+  which only TRIES for the turn. Asked through the ordinary funnel while this session held it, the
+  rescue stood down, the panel said "sign-in is still broken", and seconds later the enrollment's
+  own follow-up — the turn released by then — minted the token and took the banner down under the
+  panel. So the session makes the rescue's own call itself (`auth::interactive_token`, bounded at
+  30 s), takes back any window it raised, releases the turn, and only then asks the funnel.
+- **A CANCEL is carried out by the helper, and the session waits for it.** The helper lives in a
+  session of its own, and during `starting` there is no window to close: a Cancel there used to
+  settle the session while the helper went on to open the portal with nobody behind it, holding the
+  helper slot — every enrollment, repair and boot refused — for half an hour. So a Cancel marks the
+  session CLOSING at once (`stopping` on the wire; nothing is served, and the page says so with
+  nothing to press), the run SIGTERMs the portal helper (`HelperTerminator::terminate` — the portal
+  helper alone; a boot or a repair has no handler and would die mid-work), the helper closes the
+  portal the crate's own way, and the session settles only once the helper has EXITED (up to
+  `PORTAL_STOP_WAIT`, 45 s) and the leftover broker dialogs are closed under the turn. Settling
+  only then is what makes the one `broker_status` sent at the end true: the slot is free when it says
+  so. A helper that outlives the wait — or the session's own `ENROLL_DEADLINE` — is said as what it
+  is, and `Ctx::follow_a_portal_left_running` announces its end, since nothing else would.
+  **A portal helper with NO session behind it is asked to close at once**
+  (`Ctx::follow_running_work`, `a_portal_helper_no_session_owns_is_asked_to_close_and_followed_to_its_end`).
+  The helper lives in a session of its own, so it survives a backend restart (Settings › Restart
+  the backend, or the launcher re-spawning one that crashed), while the sign-in session that served
+  it does not: the new backend can serve neither its window nor a Cancel, and nothing would have
+  announced its end — every page kept "the portal is still open" and no Enroll offer for up to half
+  an hour, and until it reconnected after that (days, on a phone). So a backend that finds a portal
+  helper holding the slot and owns no live enrollment session SIGTERMs it — by the pid read when it
+  was found, re-checked against that pid's own command line as the stop helper does
+  (`intune_embedded::ask_portal_helper_to_close`) — and follows it to its end, once however many
+  triggers found it (`PORTALS_FOLLOWED`), with one `broker_status` when the slot is free.
+- **A Cancel is never lost** (`Notify::notify_one`, armed before the turn is raced): a Cancel that
+  landed while the run still waited for the turn used to wake nobody — `notify_waiters` stores no
+  permit — and the session went on to serve the window the reader had just cancelled. That held for
+  a sign-in too, and is fixed for both.
+- **How it ended is the HELPER's word, then the purpose's** (`portal_outcome`): exit 0 is the portal
+  closed, `PORTAL_TIMED_OUT` (3) is the helper's own 30-minute deadline — told apart by the helper,
+  because the session's clock starts before the portal appears — and then an enrollment WORKED when
+  the container holds a registration, an account sign-in when the broker answers for the scope the
+  app is broken on, whatever closed the portal. The registration lands mid-portal, so the panel says
+  it as soon as it exists and the control becomes "Close the portal": the READER closes it, and the
+  portal's later steps are never cut off.
+- **The banner's embedded states never fall through to the host-mode sentence** (`brokerRemedy`):
+  `starting` (the boot helper at work, with the first start's 1.7 GB named), `enrolling` (a portal
+  session under way, or this page's own one still closing), `enroll`, `portal_signin`, `stopped`
+  (down and nothing starting it — the app tries again on its own) and `embedded_other` (up, and
+  nothing here mends it). "Sign in to Intune again" names a command the image does not have, and it
+  was exactly where an embedded failure used to land. A host-mode status — `intune: null` — draws
+  exactly what it always drew.
+- **The state rides the greeting, as a sign-in's does** — a page that connects mid-enrollment draws
+  the panel, and an enrollment the reader put away can be shown again.
+
+`web/mock/server.ts` mirrors it (a `{kind:"intune"}` hook that sets the embedded status, and an
+enroll flow in the `{kind:"signin"}` hook that draws a portal of its own — a spec MUST reset both),
+and keeps `helper: "portal"` for a moment after a Cancel before a second `broker_status` frees it,
+because the backend really does: a mock that freed the slot at once let the spec pass over a stale
+banner. **What is UNVERIFIED is all of it against the tenant**: the portal has never been driven
+through these frames, no registration and no account sign-in has been made through it, and whether
+the portal QUITS when asked to close is unmeasured — the helper's own deadline bounds it if not.
+
 `web/mock/server.ts` reproduces the whole flow with no broker, no X display and no tenant: it
 DRAWS its own sign-in page as a real PNG (`mockSigninFrame`, over the same `pngChunk` writer the
 inline-picture fixtures use), with a number to match and one dot per character typed — which is
@@ -10609,9 +11768,14 @@ does (`window`, `immediate`, `refuse`, `fail`) and **a spec MUST reset it**: one
 serves the whole run, and a sign-in left running puts a dialog over every later spec.
 `cd web && bun run preview -- --out /tmp/si --signin` captures the offer in both themes, the
 sign-in that needed nobody, the window in both themes, the words typed into it, a phone's width,
-the cancel and the machine that cannot serve one; `web/e2e/signin.spec.ts` pins every rule
-above, and `examples/signin_window_recon.rs` re-measures the window against the real broker,
-read-only.
+the cancel and the machine that cannot serve one — and the EMBEDDED states after them: the
+container being set up in both themes (`-embedded-starting-*`), the "Enroll this device" offer in
+both (`-embedded-enroll-*`), the portal served in the panel, the panel once the pretend portal has
+registered the container, the panel CLOSING with nothing to press, the enrollment done, and the
+portal offered to sign an account in again on an enrolled container in both themes with its own
+window (`-embedded-account-*`, `-account-window-dark`). `web/e2e/signin.spec.ts` and
+`web/e2e/intune-embedded.spec.ts` pin every rule above, and `examples/signin_window_recon.rs`
+re-measures the broker's window against the real broker, read-only.
 
 **What is UNVERIFIED against the tenant is the pairing.** The automatic half is measured end to
 end on a real outage (above). Of the served half, every piece is measured through this crate's
@@ -10697,6 +11861,10 @@ its reader has the code open. A commit subject has a second reader who does not.
     alongside it when you touch the browser-MCP guard, and `python3
     .claude/hooks/sync-service-to-master.test.py` when you touch the service
     auto-update hook or `teams-lite-service.sh`.
+  - The Helm chart (`packaging/helm/`): `packaging/helm/check.sh` — lint, the render
+    tests and strict schema validation; it needs `helm` and `bun`, and the network to
+    fetch kubeconform and the API schemas. Run `cargo test` too when you touch
+    `packaging/docker/`, whose files `intune::tests` reads.
   - A change that only touches a frontend does not need `cargo test`, and a
     backend-only change does not need the frontend suites. When a change spans
     both (e.g. a protocol or WebSocket contract), run the suites on both sides.

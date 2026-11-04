@@ -1,0 +1,48 @@
+{{- include "teams-lite.validate" . -}}
+{{- if .Values.ingress.enabled }}
+{{- $fullname := include "teams-lite.fullname" . -}}
+# PUBLISHING THE APP IS PUBLISHING THE ACCOUNT: every page this Ingress serves is handed the write
+# token. With the Tailscale operator (className: tailscale) that is the user's own tailnet, behind
+# Tailscale's authenticated HTTPS; with any other controller it is whatever can reach it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "teams-lite.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if .Values.ingress.hosts }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range (default (list "/") .paths) }}
+          - path: {{ . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}
+                port:
+                  name: web
+          {{- end }}
+    {{- end }}
+  {{- else }}
+  defaultBackend:
+    service:
+      name: {{ $fullname }}
+      port:
+        name: web
+  {{- end }}
+{{- end }}

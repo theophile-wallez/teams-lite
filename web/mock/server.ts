@@ -6982,7 +6982,63 @@ let mockBrokerStatus: {
   can_sign_in?: boolean;
   signin_blocker?: string;
   repair_blocker?: string;
+  /** An EMBEDDED backend's own Intune container (`intune_status_payload` in src/bin/server.rs),
+   *  or null for a host-mode backend — which is what every spec that never arms it sees, so the
+   *  banner draws exactly what it always drew. Armed by the `{kind:"intune"}` hook. */
+  intune?: MockIntune | null;
 } | null = null;
+
+/** The embedded container's state, in the backend's own shape (`EmbeddedIntune` in
+ *  web/src/lib/protocol.ts). */
+type MockIntune = {
+  mode: "embedded";
+  helper: "boot" | "repair" | "portal" | null;
+  initialized: boolean;
+  registered: boolean;
+  running: boolean;
+  can_enroll: boolean;
+  can_portal_sign_in: boolean;
+};
+
+/** The words this mock gives a broker that holds no account, which is what a container nobody
+ *  has enrolled answers with — so `{kind:"intune"}` on a mock with no broken status yet still
+ *  raises the banner it is about. */
+const MOCK_NO_ACCOUNT_MESSAGE =
+  "The identity broker holds no account — this device is not enrolled.";
+
+/** Recompute the two portal offers exactly as the backend does (`portal_purpose` in
+ *  src/bin/server.rs): `can_enroll` is a send-capable backend (this mock always is), a container
+ *  that is up, no helper at work, and no registration yet; `can_portal_sign_in` is the same gates
+ *  on a container that IS registered and whose broker holds no account (`signature`). Derived
+ *  rather than armed, so a spec cannot put the mock in a state the backend could never be in — an
+ *  enrollment offered over a registration that works. */
+function withOffers(
+  intune: Omit<MockIntune, "can_enroll" | "can_portal_sign_in">,
+  signature: string,
+): MockIntune {
+  const free = intune.running && intune.helper === null;
+  return {
+    ...intune,
+    can_enroll: free && !intune.registered,
+    can_portal_sign_in: free && intune.registered && signature === "no_account",
+  };
+}
+
+/** Bumped by every `{kind:"intune"}` hook call — the start of a spec's own embedded state — so a
+ *  timer a previous spec's portal session left behind (the helper outliving its session, below)
+ *  never moves the state a later spec armed. One mock process serves the whole run. */
+let mockIntuneGeneration = 0;
+
+/** Move the embedded container's state and tell every page, the way the backend's follower and
+ *  its enrollment do: a `broker_status` carrying the new `intune`. */
+function setMockIntune(next: Partial<Omit<MockIntune, "mode" | "can_enroll" | "can_portal_sign_in">>) {
+  if (!mockBrokerStatus?.intune) return;
+  mockBrokerStatus = {
+    ...mockBrokerStatus,
+    intune: withOffers({ ...mockBrokerStatus.intune, ...next }, mockBrokerStatus.signature),
+  };
+  broadcast("broker_status", mockBrokerStatus);
+}
 
 /** What the NEXT press of Repair sign-in does, armed by the `{kind:"broker"}` hook's `repair`
  *  field. `start` (the default) is the repair that works; `refuse` answers the refusal the real
@@ -7038,6 +7094,24 @@ const MOCK_SIGNIN_NUMBER = "42";
 const MOCK_SIGNIN_WINDOW_DELAY_MS = 300;
 
 type MockSignin = {
+  /** Which session this is, so a timer one session armed never acts on the next. */
+  id: number;
+  /** A sign-in serves the broker's window; an ENROLLMENT serves the Intune portal's, on an
+   *  embedded backend's own container (`Kind` in src/signin.rs). */
+  kind: "signin" | "enroll";
+  /** A portal session only: what the portal is open for (`PortalPurpose` in src/signin.rs). */
+  purpose: "enroll" | "account";
+  /** A portal session only: whether the pretend container holds a registration yet. For an
+   *  enrollment it is set by the pretend portal's own Enroll button, and the portal STAYS OPEN
+   *  after it — which is what the real one does, and why the reader closes it with "Close the
+   *  portal". For an account sign-in it is true from the start. */
+  registered: boolean;
+  /** An ACCOUNT sign-in only: whether the pretend portal's button has signed the account in —
+   *  what the backend asks the broker for once the portal closes. */
+  signedIn: boolean;
+  /** A Cancel being carried out: the real backend asks the portal's helper to close the portal
+   *  and settles only once it has, so for that moment the session says it is closing. */
+  stopping: boolean;
   phase: "starting" | "waiting" | "done" | "cancelled" | "failed";
   detail: string;
   started: number;
@@ -7052,6 +7126,80 @@ let mockSignin: MockSignin | null = null;
  *  in real life), refuse to start, or fail after the window is up. Armed through the
  *  `{kind:"signin"}` hook, and a spec MUST reset it — one mock process serves the whole run. */
 let mockSigninOutcome: "window" | "immediate" | "refuse" | "fail" | "hold" = "window";
+
+/** Counter behind `MockSignin.id`. */
+let mockSigninSeq = 0;
+
+/** What the pretend broker's SILENT call answers for the broken scope once an account has been
+ *  signed in through the portal — the one half of the backend's account probe (`account_answers`
+ *  in src/signin.rs) a spec can arm. `answers` (the default) mints at once. `refuses` is the shape
+ *  SIGN-IN.md's model of the broker gives a FRESH account: no refresh token exists yet for this
+ *  client and resource, so the silent call refuses and only an INTERACTIVE one mints, from the
+ *  PRT, with nobody in front of it — and an interactive call needs the interactive turn, which the
+ *  portal session holds for its whole life. A probe that asked the funnel while it still held the
+ *  turn had its rescue stand down, and called a sign-in that worked "still broken"; armed, this
+ *  makes that ordering fail a spec. Set by EVERY `{kind:"intune"}` call from its own body
+ *  (`account_probe`), so the reset a spec already owes puts it back. */
+let mockSilentAfterAccount: "answers" | "refuses" = "answers";
+
+/** The pretend interactive turn (`auth::interactive_turn`): the portal session holding it — taken
+ *  when the session starts and released when it settles, as the backend's is — or nobody. */
+let mockTurnHolder: number | null = null;
+
+/** Whether an interactive acquisition has minted the broken scope since the account came back,
+ *  leaving the fresh refresh token the silent call then answers from. */
+let mockFreshRefreshToken = false;
+
+/** The pretend broker's silent call (`acquireTokenSilently`): no account, no token; an account
+ *  answers unless armed to refuse (above) and no interactive call has minted yet. */
+function mockSilentToken(session: MockSignin): boolean {
+  return session.signedIn && (mockSilentAfterAccount === "answers" || mockFreshRefreshToken);
+}
+
+/** The pretend interactive call (`auth::interactive_token`), which takes the turn as a parameter:
+ *  only the session holding it may make one. Mints from the PRT whenever an account is there. */
+function mockInteractiveToken(session: MockSignin): boolean {
+  if (mockTurnHolder !== session.id || !session.signedIn) return false;
+  mockFreshRefreshToken = true;
+  return true;
+}
+
+/** The pretend funnel (`auth::get_token`): the silent call, and on its refusal the automatic
+ *  rescue — which only TRIES for the turn, and stands down while anybody holds it. A broker with
+ *  no account is refused before any of that (`NoAccount`), with no rescue at all. */
+function mockGetToken(session: MockSignin): boolean {
+  if (mockSilentToken(session)) return true;
+  if (!session.signedIn || mockTurnHolder !== null) return false;
+  mockFreshRefreshToken = true;
+  return true;
+}
+
+/** Release the pretend turn, if `session` holds it. */
+function mockReleaseTurn(session: MockSignin) {
+  if (mockTurnHolder === session.id) mockTurnHolder = null;
+}
+
+/** The backend's account probe (`account_answers` in src/signin.rs), in the backend's ORDER: the
+ *  interactive call under the turn the session holds, the turn released, and only then the funnel
+ *  that records the broker as healthy. Asked the other way round, the rescue behind the funnel
+ *  stands down on the held turn and an account that came back reads as one that did not. */
+function mockAccountAnswers(session: MockSignin): boolean {
+  const minted = mockInteractiveToken(session);
+  mockReleaseTurn(session);
+  return minted && mockGetToken(session);
+}
+
+/** How long a Cancelled portal session stays `stopping` before it settles — the seconds the real
+ *  portal helper takes to close the portal. Long enough for a spec to see the panel say so. */
+const MOCK_PORTAL_CLOSE_MS = 600;
+
+/** How long the pretend portal helper keeps the slot AFTER its session has settled, before a
+ *  second `broadcast` frees it. The real backend settles a session only once its helper has
+ *  exited, so it usually sends one status with the slot already free — but a helper it gave up on
+ *  (its deadline, a stop it did not answer in time) is followed and freed later by a status of
+ *  its own. The mock always takes the later path, so a page that read the slot as free at the
+ *  moment a session settled would fail a spec rather than ship. */
+const MOCK_PORTAL_EXIT_MS = 900;
 
 /** Where the pretend Sign in button is, in window pixels. */
 const MOCK_SIGNIN_BUTTON = { x: 362, y: 278, width: 110, height: 30 };
@@ -7080,7 +7228,7 @@ const DIGITS: Record<string, string[]> = {
  *  CHANGES as keys are typed. It is not pretending to be Microsoft's page, and a fixture
  *  screenshot could not show the dots appear.
  */
-function mockSigninFrame(typed: number): string {
+function mockSigninFrame(typed: number, kind: MockSignin["kind"] = "signin", registered = false): string {
   const { width, height } = MOCK_SIGNIN_WINDOW;
   const stride = width * 3;
   const rgb = Buffer.alloc(stride * height, 0xff);
@@ -7102,6 +7250,15 @@ function mockSigninFrame(typed: number): string {
   const ink: [number, number, number] = [0x24, 0x24, 0x24];
   const blue: [number, number, number] = [0x00, 0x67, 0xb8];
   const grey: [number, number, number] = [0xd0, 0xd0, 0xd0];
+
+  // The pretend PORTAL is told apart from the pretend broker at a glance: a coloured band down
+  // its left edge, as an app's navigation rail would be, and — once its Enroll button has been
+  // pressed — a green band where the field was, standing for the portal's own "you're set up".
+  // The button stays where the broker's is, so a spec presses the same window coordinates.
+  if (kind === "enroll") {
+    box(0, 0, 36, height, [0x5b, 0x5f, 0xc7]);
+    if (registered) box(60, 140, 410, 24, [0x10, 0x7c, 0x10]);
+  }
 
   // A header band and a couple of text-ish bands, so the page reads as a form.
   box(60, 36, 120, 14, ink);
@@ -7159,25 +7316,85 @@ function mockSigninFrame(typed: number): string {
 /** The `signin_status` payload, in the backend's own shape. */
 function mockSigninPayload(): Record<string, unknown> {
   if (!mockSignin) {
-    return { phase: "idle", detail: "", scope: "", display: "", waited_ms: 0, window: null };
+    return {
+      kind: "signin",
+      phase: "idle",
+      detail: "",
+      scope: "",
+      display: "",
+      waited_ms: 0,
+      window: null,
+    };
   }
+  const enroll = mockSignin.kind === "enroll";
+  const live = mockSignin.phase === "starting" || mockSignin.phase === "waiting";
+  // An enrollment acquires nothing itself; an account sign-in asks the broker for the scope the
+  // app is broken on once the portal closes, as a sign-in does.
+  const acquires = !enroll || mockSignin.purpose === "account";
   return {
+    kind: mockSignin.kind,
     phase: mockSignin.phase,
     detail: mockSignin.detail,
-    scope: "https://api.spaces.skype.com/.default",
-    display: ":77",
+    scope: acquires ? "https://api.spaces.skype.com/.default" : "",
+    // A portal session is drawn on the container's own display.
+    display: enroll ? ":99" : ":77",
     waited_ms: Date.now() - mockSignin.started,
-    window: mockSignin.phase === "waiting" ? mockSignin.window : null,
+    // Nothing is served while a Cancel is being carried out, so there is no window to size.
+    window: mockSignin.phase === "waiting" && !mockSignin.stopping ? mockSignin.window : null,
+    stopping: live && mockSignin.stopping,
+    ...(enroll ? { purpose: mockSignin.purpose, registered: mockSignin.registered } : {}),
   };
+}
+
+/** Has the pretend portal done what it was opened for — registered the container, or signed the
+ *  account in? What its own page draws (the green band) once it has. How the SESSION ended is
+ *  decided in `settleMockSignin` by the backend's own rules: the registration for an enrollment,
+ *  and for an account sign-in the broker answering (`mockAccountAnswers`). */
+function mockPortalDidItsJob(session: MockSignin): boolean {
+  return session.purpose === "account" ? session.signedIn : session.registered;
 }
 
 /** Settle a mock sign-in and tell every page, the way the backend does. */
 function settleMockSignin(phase: MockSignin["phase"], detail = "") {
   if (!mockSignin) return;
-  mockSignin = { ...mockSignin, phase, detail };
+  // What the portal was opened FOR decides a portal session last, exactly as the backend's run
+  // does: a reader who enrolled (or signed their account in) and then closed the portal has done
+  // it, not cancelled it.
+  const enroll = mockSignin.kind === "enroll";
+  let worked = false;
+  if (enroll) {
+    if (mockSignin.purpose === "account") {
+      worked = mockAccountAnswers(mockSignin);
+    } else {
+      worked = mockSignin.registered;
+      mockReleaseTurn(mockSignin);
+    }
+  }
+  const outcome = worked ? "done" : phase;
+  mockSignin = {
+    ...mockSignin,
+    phase: outcome,
+    stopping: false,
+    detail: outcome === "done" ? "" : detail,
+  };
   broadcast("signin_status", mockSigninPayload());
-  // A sign-in that worked puts the broker right, which is what makes the banner go away.
-  if (phase === "done") {
+  if (enroll) {
+    // The registration is the container's own fact the moment it lands, and is said at once.
+    const registered = mockSignin.registered;
+    if (mockBrokerStatus?.intune && mockBrokerStatus.intune.registered !== registered) {
+      setMockIntune({ registered });
+    }
+    // The portal helper's slot is freed by a status of its OWN, a moment later (see
+    // `MOCK_PORTAL_EXIT_MS`) — never by this one — so a page that read the slot as free at the
+    // instant the session settled fails a spec here.
+    const generation = mockIntuneGeneration;
+    setTimeout(() => {
+      if (generation === mockIntuneGeneration) setMockIntune({ helper: null });
+    }, MOCK_PORTAL_EXIT_MS);
+  }
+  // A sign-in that worked puts the broker right, which is what makes the banner go away — and so
+  // does an enrollment, whose re-read of the broker finds an account at last.
+  if (outcome === "done") {
     mockBrokerStatus = {
       ok: true,
       signature: "",
@@ -7187,9 +7404,30 @@ function settleMockSignin(phase: MockSignin["phase"], detail = "") {
       can_repair: false,
       repairing: false,
       can_sign_in: false,
+      // The container's own state survives the broker coming right: it is still embedded, and
+      // now enrolled.
+      intune: mockBrokerStatus?.intune ?? null,
     };
     broadcast("broker_status", mockBrokerStatus);
   }
+}
+
+/** The pretend page's own button (or Enter in it). A SIGN-IN is finished by it; an ENROLLMENT
+ *  registers the container and goes on showing the portal — the real portal carries on after the
+ *  registration lands, so the reader is the one who closes it ("Close the portal"), and the
+ *  session settles `done` then. An ACCOUNT sign-in signs the account in and goes on showing the
+ *  portal the same way: the backend asks the broker only once the portal has closed. */
+function submitMockSignin() {
+  if (!mockSignin) return;
+  if (mockSignin.kind === "signin") {
+    settleMockSignin("done");
+    return;
+  }
+  mockSignin =
+    mockSignin.purpose === "account"
+      ? { ...mockSignin, signedIn: true }
+      : { ...mockSignin, registered: true };
+  broadcast("signin_status", mockSigninPayload());
 }
 
 // ---- a pending update (see src/update.rs, and update-button.tsx) ---------------
@@ -8328,6 +8566,12 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         );
       }
       mockSignin = {
+        id: (mockSigninSeq += 1),
+        kind: "signin",
+        purpose: "enroll",
+        registered: false,
+        signedIn: false,
+        stopping: false,
         phase: "starting",
         detail: "",
         started: Date.now(),
@@ -8354,21 +8598,100 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return { started: true, signin: first };
     }
 
+    // Open the pretend Intune portal in an embedded backend's own container (`Ctx::start_enroll`)
+    // — to ENROLL it, or to sign an ACCOUNT in again on a registered container whose broker holds
+    // none, which the mock decides exactly as the backend does: from the offers it states, never
+    // from the client. Refused in the backend's own words wherever it refuses — host mode, and
+    // wherever neither can happen right now — and otherwise the SAME session as a sign-in, drawing
+    // the pretend portal: it opens, takes keys, does what it was opened for when its own button is
+    // pressed, and stays open until the reader closes it.
+    case "intune_enroll": {
+      const intune = mockBrokerStatus?.intune;
+      if (!intune) {
+        throw new Error(
+          "refused: only teams-lite's self-contained image enrolls its own Intune container — in " +
+            "host mode the Intune container is the user's own, and is enrolled with " +
+            "`intune-container` on that machine",
+        );
+      }
+      if (mockSignin && (mockSignin.phase === "starting" || mockSignin.phase === "waiting")) {
+        return { started: false, reason: "already_running", signin: mockSigninPayload() };
+      }
+      const purpose = intune.can_enroll ? "enroll" : intune.can_portal_sign_in ? "account" : null;
+      if (!purpose) {
+        throw new Error(
+          intune.registered
+            ? "Not enrolling: this container already holds a device registration. Enrolling " +
+                "again would replace a registration that works."
+            : "Not enrolling now: the Intune container is busy or not running. Try again once it " +
+                "is up.",
+        );
+      }
+      if (mockSigninOutcome === "refuse") {
+        throw new Error(
+          "The Intune container is busy — a repair of the container is at work on it — so the " +
+            "portal cannot be opened now. Try again once it has finished.",
+        );
+      }
+      mockSignin = {
+        id: (mockSigninSeq += 1),
+        kind: "enroll",
+        purpose,
+        registered: intune.registered,
+        signedIn: false,
+        stopping: false,
+        phase: "starting",
+        detail: "",
+        started: Date.now(),
+        typed: 0,
+        window: { ...MOCK_SIGNIN_WINDOW },
+      };
+      // A portal session takes the interactive turn for its whole life, as the backend's does.
+      mockTurnHolder = mockSignin.id;
+      // The portal helper holds the slot from here, which takes the offer off every banner.
+      setMockIntune({ helper: "portal" });
+      const first = mockSigninPayload();
+      broadcast("signin_status", first);
+      setTimeout(() => {
+        if (!mockSignin || mockSignin.kind !== "enroll" || mockSignin.phase !== "starting") return;
+        if (mockSigninOutcome === "fail") {
+          settleMockSignin(
+            "failed",
+            "The Intune portal could not be opened (its helper ended with exit 1). This " +
+              "container's log says why, in lines starting teams-lite(intune-portal).",
+          );
+        } else if (mockSigninOutcome === "hold") {
+          return;
+        } else if (mockSigninOutcome === "immediate") {
+          // There is no enrollment that needs nobody; `immediate` stands for a portal that was
+          // already through its steps — done and closed — by the time it was looked at.
+          mockSignin = { ...mockSignin, registered: true, signedIn: true };
+          settleMockSignin("done");
+        } else {
+          mockSignin = { ...mockSignin, phase: "waiting" };
+          broadcast("signin_status", mockSigninPayload());
+        }
+      }, MOCK_SIGNIN_WINDOW_DELAY_MS);
+      return { started: true, signin: first };
+    }
+
     case "signin_status":
       return mockSigninPayload();
 
     case "signin_frame": {
+      if (mockSignin?.stopping) throw new Error("this sign-in is being closed");
       if (!mockSignin || mockSignin.phase !== "waiting") {
         throw new Error("no sign-in is running — press Sign in again to start one");
       }
       return {
         width: MOCK_SIGNIN_WINDOW.width,
         height: MOCK_SIGNIN_WINDOW.height,
-        png: mockSigninFrame(mockSignin.typed),
+        png: mockSigninFrame(mockSignin.typed, mockSignin.kind, mockPortalDidItsJob(mockSignin)),
       };
     }
 
     case "signin_input": {
+      if (mockSignin?.stopping) throw new Error("this sign-in is being closed");
       if (!mockSignin || mockSignin.phase !== "waiting") {
         throw new Error("no sign-in is running — press Sign in again to start one");
       }
@@ -8387,7 +8710,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         }
         // Enter submits the pretend page, exactly as pressing its button does.
         if (p.key === "Enter") {
-          settleMockSignin("done");
+          submitMockSignin();
           return { sent: true };
         }
         return { sent: true };
@@ -8401,7 +8724,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         // Pressing the page's own Sign in button is what finishes the flow — which is what
         // makes the click path really testable: a tap that landed somewhere else does nothing,
         // exactly as it would on the real page.
-        if (onButton) settleMockSignin("done");
+        if (onButton) submitMockSignin();
         return { sent: true };
       }
       throw new Error("send either `char` (one character) or `key` (a key name)");
@@ -8416,7 +8739,22 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // (`Signin::cancel`). The mock answers both halves the way the backend does: reporting
       // `closed: true` from `starting` would hide the one thing this state is about.
       const closed = mockSignin.phase === "waiting";
-      settleMockSignin("cancelled");
+      if (mockSignin.kind === "signin") {
+        settleMockSignin("cancelled");
+        return { closed };
+      }
+      // A PORTAL session is not settled by the press: the backend asks the portal's helper to
+      // close the portal and settles once it has, saying meanwhile that it is closing — and only
+      // then what it was opened for decides how it ended (see `settleMockSignin`): "Close the
+      // portal" on a registered container is an enrollment that worked. A second press finds it
+      // closing already.
+      if (mockSignin.stopping) return { closed: false };
+      const id = mockSignin.id;
+      mockSignin = { ...mockSignin, stopping: true };
+      broadcast("signin_status", mockSigninPayload());
+      setTimeout(() => {
+        if (mockSignin?.id === id) settleMockSignin("cancelled");
+      }, MOCK_PORTAL_CLOSE_MS);
       return { closed };
     }
 
@@ -8431,6 +8769,24 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // own `broker_status` once a token call succeeds. Here both arrive as ONE event, which is
       // the repair that worked; `hold` is the one that has not ended, and a spec stands for its
       // end — working or not — by emitting the status it ended in.
+      // An embedded container with another helper at work refuses a press in the backend's own
+      // words (`busy_refusal` in src/bin/server.rs) rather than starting anything: the slot holds
+      // one helper at a time, and a mock that answered `started: true` here would let a banner
+      // that offered a repair mid-boot pass every test.
+      const busy = mockBrokerStatus?.intune?.helper;
+      if (busy === "boot") {
+        throw new Error(
+          "Not restarting the Intune container: the app is starting it right now, and a start " +
+            "unlocks the keyring on its own. Its first start downloads about 1.7 GB, so it can " +
+            "take a while — wait for it to finish.",
+        );
+      }
+      if (busy === "portal") {
+        throw new Error(
+          "Not restarting the Intune container: an enrollment has the Intune portal open in it, " +
+            "and a restart would close it. Finish or cancel the enrollment first.",
+        );
+      }
       if (mockRepairOutcome === "refuse") throw new Error(MOCK_REPAIR_NOT_LOCKED);
       if (mockRepairOutcome === "refuse_late") {
         await new Promise<void>((resolve) => {
@@ -12606,6 +12962,61 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       lateRefusal?.();
       return Response.json({ ok: true, broker: mockBrokerStatus }, { status: 200 });
     }
+    // The EMBEDDED backend's own Intune container, as `broker_status.intune` states it. Merged
+    // into the current broker status — one with no failure yet is given the "no account" one an
+    // unenrolled container answers with, so the banner this is about is raised — and
+    // `can_enroll` and `can_portal_sign_in` are DERIVED, as the backend derives them (the latter
+    // from the status's own signature: the account offer is for a broker that holds no account).
+    // `account_probe: "refuses"` arms the broker a fresh account really has (see
+    // `mockSilentAfterAccount`). `{kind:"intune", reset:true}` takes it back to null (host mode),
+    // and the probe back to `answers`. A spec MUST reset it, and
+    // `{kind:"signin", reset:true}` does too
+    // (it puts the whole broker status back to null): one mock process serves the whole run, and
+    // an embedded status left armed changes what every later spec's banner offers.
+    if (body.kind === "intune") {
+      mockIntuneGeneration += 1;
+      // What the broker's silent call answers once an account is signed in through the portal —
+      // from EVERY call, so the reset a spec already owes puts it back.
+      mockSilentAfterAccount = body.account_probe === "refuses" ? "refuses" : "answers";
+      mockFreshRefreshToken = false;
+      if (body.reset === true) {
+        if (mockBrokerStatus) {
+          mockBrokerStatus = { ...mockBrokerStatus, intune: null };
+          broadcast("broker_status", mockBrokerStatus);
+        }
+        return Response.json({ ok: true, intune: null }, { status: 200 });
+      }
+      const helper =
+        body.helper === "boot" || body.helper === "repair" || body.helper === "portal"
+          ? body.helper
+          : null;
+      const current = mockBrokerStatus?.intune ?? null;
+      const base = mockBrokerStatus ?? {
+        ok: false,
+        signature: "no_account",
+        message: MOCK_NO_ACCOUNT_MESSAGE,
+        detail: "",
+        consecutive_failures: 3,
+        can_repair: false,
+        repairing: false,
+        can_sign_in: false,
+      };
+      const intune = withOffers(
+        {
+          mode: "embedded",
+          helper,
+          initialized:
+            typeof body.initialized === "boolean" ? body.initialized : (current?.initialized ?? true),
+          registered:
+            typeof body.registered === "boolean" ? body.registered : (current?.registered ?? false),
+          running: typeof body.running === "boolean" ? body.running : (current?.running ?? true),
+        },
+        base.signature,
+      );
+      mockBrokerStatus = { ...base, intune };
+      broadcast("broker_status", mockBrokerStatus);
+      return Response.json({ ok: true, intune }, { status: 200 });
+    }
     // What the NEXT sign-in does. `window` (the default) puts a window up and waits for the
     // reader; `immediate` finishes with nobody typing, which is the common case against the
     // real broker; `refuse` answers the refusal a machine with no display gives; `fail` ends
@@ -12616,6 +13027,9 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       if (body.reset === true) {
         mockSigninOutcome = "window";
         mockSignin = null;
+        // The turn goes with the session it belonged to, and the broker's fresh token with it.
+        mockTurnHolder = null;
+        mockFreshRefreshToken = false;
         // Back to NULL, not to a healthy object: a sign-in that finished sets `mockBrokerStatus`
         // so the banner goes away, and a non-null status is then announced in the greeting of
         // every later connection — which makes the banner's own "null means silence" rule

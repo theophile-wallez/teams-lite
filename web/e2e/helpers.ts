@@ -678,6 +678,34 @@ export async function armSignin(
   expect(res.ok()).toBeTruthy();
 }
 
+/** Arm an EMBEDDED backend's own Intune container, as `broker_status.intune` states it — or
+ *  reset it to host mode (`{ reset: true }`).
+ *
+ *  Merged into the mock's current broker status (one with no failure yet is given the "no
+ *  account" failure an unenrolled container answers with, so the banner is raised), with
+ *  `can_enroll` DERIVED as the backend derives it — up, no helper at work, no registration — and
+ *  `can_portal_sign_in` beside it: the same, on a REGISTERED container whose broker holds no
+ *  account. A spec MUST reset it — `armSignin(page, { reset: true })` does too — because one mock
+ *  process serves the whole run. */
+export async function armIntune(
+  page: Page,
+  body: {
+    helper?: "boot" | "repair" | "portal" | null;
+    initialized?: boolean;
+    registered?: boolean;
+    running?: boolean;
+    /** What the broker's silent call answers once an account is signed in through the portal:
+     *  `refuses` is the fresh account's shape, where only an interactive call mints. */
+    account_probe?: "answers" | "refuses";
+    reset?: boolean;
+  },
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "intune", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 /** Move a member's read position ("seen by") through the mock's gated test hook,
  *  then the mock broadcasts a `read_receipt` event. Defaults anchor the reader to
  *  the conversation's newest message (avatars land at the bottom). */

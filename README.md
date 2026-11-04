@@ -89,6 +89,16 @@ Linux machine — through the **Microsoft Identity Broker** — so it needs:
       [`intune-container`](https://github.com/magicabdel/intune-container) crate), so
       it follows the container across a restart with nothing to configure. No `sudo`,
       no privileges.
+    - **Neither, in the container image** — the image boots an Intune container of its
+      own and enrolls it from the app (or imports an existing enrollment), so the host
+      needs no Intune install. It does need: an **x86_64** machine (or node); Docker (or
+      Kubernetes) on **cgroup v2** — the unified hierarchy, which older distributions'
+      defaults such as Ubuntu 20.04 and RHEL 8 do not use; a kernel that permits
+      **unprivileged user namespaces** (Ubuntu 23.10 and later restrict them by default —
+      [one sysctl](#in-a-container-docker) lifts that); a container allowed to run a systemd
+      (three security options unconfined, or a privileged pod) and never under
+      `no-new-privileges`; and, for the first start, about 1.7 GB from `ghcr.io` and 8 GiB of
+      disk. See [In a container](#in-a-container-docker).
 - **A browser.** Any current Chrome, Edge or Firefox renders the app; the same page
   installs as a web app, which is what lets a phone be notified while it is closed.
 
@@ -340,28 +350,188 @@ short-circuits and never re-runs the session setup that unlocks the keyring.
 
 ### In a container (Docker)
 
-The same app, built from this checkout into one image — no Rust, Bun or systemd units on the
-host:
+The same app, built from this checkout into one image — no Rust, Bun, systemd units or
+intune-container on the host. **By default the container is self-contained**: it boots its own
+Intune container inside itself, and the device's enrollment lives in a volume of its own.
 
 ```bash
-export TEAMS_LITE_UID=$(id -u) TEAMS_LITE_GID=$(id -g)   # the image is built for you
 docker compose -f packaging/docker/compose.yaml build
 docker compose -f packaging/docker/compose.yaml up -d
 ```
 
-Then open <http://127.0.0.1:19443>. It runs beside any other install on its own ports
-(backend 19423, web 19443), keeps its store in a volume of its own, and is always on until you
-`docker compose … down` it. Read where it stands with
-`docker compose -f packaging/docker/compose.yaml exec teams-lite teams-lite-intune-status`.
+Or skip the build: every push to `master` publishes the image to
+`ghcr.io/theophile-wallez/teams-lite` (`latest`, and `build-<sha>` per commit), built for uid
+1000 — `export TEAMS_LITE_IMAGE=ghcr.io/theophile-wallez/teams-lite:latest`, then
+`docker compose -f packaging/docker/compose.yaml pull` instead of `build`. (A fork's CI publishes
+under the fork's own owner instead.)
 
-It is **packaging, not a sandbox**: to reach the identity broker it shares the host's PID and
-network namespaces, runs as your uid, and mounts `~/.local/share/intune-container` read-only.
-Two things it cannot do from inside an image, and says so: **repair a locked Intune keyring**
-(run `intune-container stop && intune-container start` on the host, or keep a teams-lite
-installed on the host, which repairs it on its own), and **update itself** (rebuild the image).
-The `@claude` agent's CLIs are not in it either: extend the image with yours if you want one.
-On a classic Intune host, swap the intune-container mount for your session bus as the compose
-file's comments show. See AGENTS.md § Running teams-lite in a container image.
+Then open <http://127.0.0.1:19443>. The **first start downloads the Intune container's image,
+`ghcr.io/magicabdel/intune-container:latest`** (about 1.7 GB, into the `intune` volume — leave it
+8 GiB of disk), and the app says "Setting up the Intune container…" while it runs. That image is the
+[intune-container](https://github.com/magicabdel/intune-container) project's, **not Microsoft's** —
+by that project's own Dockerfile, a third-party Ubuntu base carrying Microsoft's Intune agent and
+identity broker, plus a virtual display. It becomes this install's identity broker and the keyring holding its enrollment, so it is
+worth knowing that it is a moving `latest` tag, taken as it stands on the day of the first start
+and never updated after that. It runs beside any other install on its own ports (backend 19423, web
+19443, published on `127.0.0.1` only), and is always on. Read where it stands with
+`docker compose -f packaging/docker/compose.yaml exec teams-lite teams-lite-intune-status`, and its
+log with `… logs -f`.
+
+**Enroll it — once.** Either:
+
+- **From the app.** Once the container is up, the sidebar's banner offers **Enroll this device**,
+  and the Intune portal's own window opens in the page: sign in with your work account and follow
+  its steps (if it shows a number, enter it in your Authenticator app). Close the portal once it
+  says the device is registered.
+- **Import an existing enrollment.** On the machine that is already enrolled, make a backup —
+  this stops that machine's Intune container and starts it again, about a minute:
+
+  ```bash
+  intune-container backup -o enrollment-backup.tar.gz
+  ```
+
+  Keep the archive **outside this checkout** (it holds the device's keys) and point compose at it,
+  then uncomment the import bind and the `TEAMS_LITE_INTUNE_IMPORT` line in
+  `packaging/docker/compose.yaml` and start it:
+
+  ```bash
+  export TEAMS_LITE_INTUNE_BACKUP=/path/to/enrollment-backup.tar.gz
+  docker compose -f packaging/docker/compose.yaml up -d
+  ```
+
+  It is imported once, on the first start that finds no device registration, and never over one.
+  **Then stop using that enrollment on the machine it came from** (`intune-container stop`, and
+  leave it stopped): this is a move, not a copy — two live copies of one device are untested, and
+  Intune may revoke both. Once it is imported, delete the archive and comment the bind out again.
+
+**On Ubuntu 23.10 or later (24.04 LTS included)** the host has to allow unprivileged user
+namespaces, which Ubuntu restricts by default — the Intune container cannot boot otherwise, and the
+container's log says so at every start until it is done:
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+echo 'kernel.apparmor_restrict_unprivileged_userns = 0' | sudo tee /etc/sysctl.d/60-teams-lite-userns.conf
+```
+
+Things to know:
+
+- **The `intune` volume is the enrollment.** `docker compose … down -v` (or a `docker volume rm`)
+  deletes it, and only a new enrollment or a backup brings it back. A plain stop is safe: the
+  container powers its Intune container off cleanly first, and in the rare case that poweroff takes
+  longer than its twenty seconds, the log says so rather than claiming a clean stop.
+- **Pick its uid once.** The image is built for uid 1000 unless you say otherwise, and in this mode
+  that uid owns the Intune state: an image rebuilt for another uid finds the volume owned by the old
+  one and cannot boot it. To bring your existing history along by binding your host store (the
+  compose file shows how), build for your own uid first — `export TEAMS_LITE_UID=$(id -u)
+  TEAMS_LITE_GID=$(id -g)` — since the container never re-owns a host directory.
+- **It is packaging, not a sandbox.** Booting a systemd inside a container takes three security
+  options (`seccomp`, `systempaths` and `apparmor` unconfined); the container stays unprivileged and
+  gains no capability. It needs a network and an IPC namespace of its own: it refuses to start in
+  the host's IPC namespace (`--ipc host`), in the host's network namespace where the kernel lets it
+  tell (`--network host`, on a recent kernel), and wherever another Intune container already holds
+  its display. Host networking is unsupported in this mode either way — use the host-broker file
+  below instead. (The host's network is recognised as the kernel's INITIAL network namespace,
+  which under a microVM runtime such as Kata is the guest's own: there, and only there, declare it
+  with `TEAMS_LITE_NETNS_IS_OWN=1` — the compose file shows where. Untested.)
+- **Repairs itself, does not update itself.** A locked Intune keyring is repaired by the container
+  on its own; a new teams-lite version is a rebuilt image. The `@claude` agent's CLIs are not in it:
+  extend the image with yours if you want one.
+
+**Already enrolled on this machine?** `packaging/docker/compose.host-broker.yaml` reaches the
+host's own identity broker instead, the way the image first worked:
+
+```bash
+export TEAMS_LITE_UID=$(id -u) TEAMS_LITE_GID=$(id -g)   # it must run as you
+docker compose -f packaging/docker/compose.host-broker.yaml build
+docker compose -f packaging/docker/compose.host-broker.yaml up -d
+```
+
+That one shares the host's PID and network namespaces, runs as your uid and mounts
+`~/.local/share/intune-container` read-only — and it cannot repair a locked keyring itself (run
+`intune-container stop && intune-container start` on the host, or keep a teams-lite installed on the
+host, which repairs it on its own). On a classic Intune host, swap that mount for your session bus
+as the file's comments show. The two files are one container: run one at a time, and a switch keeps
+the store.
+
+To check that the self-contained boot works on your machine without enrolling anything — a
+throwaway container that boots an Intune container, waits for its identity broker and stops it:
+
+```bash
+docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined \
+  --security-opt apparmor=unconfined --entrypoint teams-lite-intune-selftest teams-lite:local
+```
+
+See AGENTS.md § Running teams-lite in a container image.
+
+### On Kubernetes (Helm)
+
+The same image, as a one-pod StatefulSet with its store and its Intune state on persistent
+volumes. **Untested on a real cluster**: the chart renders, lints and validates against the
+Kubernetes API schemas, and the self-contained boot was proven under Docker, but no pod has run on
+Kubernetes yet.
+
+**By default the pod is self-contained** (`broker.mode=embedded`): it boots its own Intune
+container, so it runs on any **x86_64 node on cgroup v2** whose kernel permits unprivileged user
+namespaces (on an Ubuntu 23.10+ node, the sysctl above, set on the node), of a cluster that admits
+privileged pods:
+
+```bash
+kubectl create namespace teams-lite
+kubectl label namespace teams-lite pod-security.kubernetes.io/enforce=privileged   # the pod is privileged
+helm install teams-lite oci://ghcr.io/theophile-wallez/charts/teams-lite -n teams-lite
+kubectl -n teams-lite logs -f teams-lite-0                       # the first start downloads ~1.7 GB
+kubectl -n teams-lite port-forward svc/teams-lite 19443:19443     # then http://127.0.0.1:19443
+```
+
+Then enroll it from the app (**Enroll this device**) — or, **before** enrolling it, import an
+existing enrollment from a Secret, handed to the release you just installed with an **upgrade** (a
+second `helm install` of the same name is refused):
+
+```bash
+intune-container backup -o enrollment-backup.tar.gz     # on the enrolled machine
+kubectl -n teams-lite create secret generic teams-lite-enrollment --from-file=enrollment-backup.tar.gz
+version=$(helm -n teams-lite get metadata teams-lite -o json | jq -r .version)   # the chart it runs
+helm upgrade teams-lite oci://ghcr.io/theophile-wallez/charts/teams-lite -n teams-lite \
+  --version "${version:?no installed chart version}" \
+  --reuse-values --set broker.embedded.import.secretName=teams-lite-enrollment
+```
+
+**Keep the `--version`**: with none, `oci://…` is the NEWEST chart (CI publishes one on every push),
+and `--reuse-values` renders it against the OLD chart's defaults rather than its own — an error that
+has nothing to do with the import as soon as a key moved, and a new image in the middle of the
+move where it renders. Pinned to the version the release runs, the upgrade changes that one value.
+`${version:?…}` stops the command when the version could not be read, rather than run it with an
+empty `--version` (which helm reads as "the newest"); `helm get metadata` is Helm 3.13 or later.
+
+The upgrade replaces the pod, and the new one imports the archive at boot — **only while it holds
+no device registration**, so a pod you already enrolled from the app ignores it (its logs say so).
+To import from the very first start instead, create the Secret first and pass the same `--set` to
+the `helm install` itself. Then stop that enrollment on the machine it came from: this is a move,
+not a copy. Once it is imported, drop it (`--set broker.embedded.import.secretName=""` on the next
+upgrade, pinned the same way) and delete the Secret: it is the device's keys.
+
+**To reach the enrolled machine's own broker instead** (a host mode), the cluster must run
+directly on that machine — k3s (or k0s, kubeadm) on your workstation; not kind, k3d or minikube's
+docker driver, whose nodes are containers of their own — and the mode has to be named:
+
+```bash
+helm install teams-lite oci://ghcr.io/theophile-wallez/charts/teams-lite -n teams-lite \
+  --set broker.mode=intuneContainer \
+  --set hostUser.uid=$(id -u) --set hostUser.gid=$(id -g) \
+  --set broker.intuneContainer.stateDir=$HOME/.local/share/intune-container
+```
+
+Anything that can reach the web port can send as you, so it ships as a ClusterIP Service, no
+Ingress, and a NetworkPolicy that lets no other pod in. To reach it from your phone, use the
+Tailscale operator: `--set ingress.enabled=true --set ingress.className=tailscale
+--set 'ingress.tls[0].hosts[0]=teams-lite' --set 'networkPolicy.allowNamespaces[0]=tailscale'`.
+`helm uninstall` keeps both volume claims; deleting the `intune-…` one unenrolls the pod. Every
+value — the user-namespace opt-in instead of privileged, the microVM-runtime declaration
+(`broker.embedded.vmIsolated`), the classic Intune `sessionBus` mode, the trade-offs `hostNetwork`
+makes in a host mode — is in
+[the chart's README](packaging/helm/teams-lite/README.md). CI publishes two GHCR packages, the image
+and the chart, and a new package starts out private: make both public once in their package
+settings, or `helm registry login ghcr.io` and add an `imagePullSecrets` entry.
 
 ### Dev mode (`teams --dev`)
 

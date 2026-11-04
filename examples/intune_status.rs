@@ -13,9 +13,15 @@
 //!
 //! It also says where the broker draws its sign-in window, read the way the app reads it
 //! (`xwindow::broker_display` — the broker's own environment, and whether anything serves that
-//! display here), and whether this is teams-lite's container image, which follows the broker
-//! and never restarts the container. Inside the image it is installed as
-//! `teams-lite-intune-status`:
+//! display here), whether this is teams-lite's container image, and which Intune MODE this
+//! process is in (`TEAMS_LITE_INTUNE_MODE`). In embedded mode — the image's default, where the
+//! app runs its OWN Intune container — it adds whether that container has been set up, whether it
+//! holds a device registration (and whether an import of one did not finish), whether it is up —
+//! naming apart a leader that is up with no broker's bus, which only a restart mends — which
+//! holder (boot, repair, portal, or the stop) has the helper slot, and whether the volume's
+//! container runs in ANOTHER container or pod. All read without touching anything: the helper
+//! slot and the crate's supervisor lock are asked with shared try-locks on files it never creates,
+//! and no state is cleaned. Inside the image it is installed as `teams-lite-intune-status`:
 //!
 //!     docker compose -f packaging/docker/compose.yaml exec teams-lite teams-lite-intune-status
 //!
@@ -23,10 +29,17 @@
 //! right: 0 = unlocked, 1 = LOCKED, 2 = cannot tell (no container, one not running, or no answer).
 
 use teams_lite::intune::{self, KeyringCheck};
+use teams_lite::intune_embedded::{self, Mode};
 use teams_lite::xwindow::{self, DisplayState};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    let mode = intune_embedded::mode();
+    match &mode {
+        Ok(Mode::Embedded) => println!("intune mode       : embedded — this process runs its own Intune container"),
+        Ok(Mode::Host) => println!("intune mode       : host — the Intune container is the machine's own"),
+        Err(e) => println!("intune mode       : REFUSED — {e:#}"),
+    }
     let bus = intune::broker_bus();
     println!("broker bus        : {}", bus.describe());
     match bus.address() {
@@ -37,8 +50,47 @@ async fn main() {
         "container image   : {}",
         if intune::in_container_image() { "yes — teams-lite's own" } else { "no" }
     );
+    if matches!(mode, Ok(Mode::Embedded)) {
+        // `boot_followed` is the backend's own knowledge of a boot it spawned; this process
+        // spawned none, so only the slot itself answers which helper is at work.
+        let status = intune_embedded::status(false);
+        println!(
+            "set up            : {}",
+            if status.initialized { "yes" } else { "no — the first start downloads about 1.7 GB" }
+        );
+        println!(
+            "registered        : {}",
+            match (status.registered, intune_embedded::import_pending()) {
+                (_, true) => "an IMPORT DID NOT FINISH — the next boot imports the backup again",
+                (true, false) => "yes",
+                (false, false) => "no",
+            }
+        );
+        let running = if status.running {
+            "yes".to_string()
+        } else if let Some(leader) = intune::container_leader() {
+            format!("NO — its leader ({leader}) is up but its broker's bus is missing; the next boot restarts it")
+        } else {
+            "no".to_string()
+        };
+        println!("running           : {running}");
+        println!(
+            "slot held by      : {}",
+            intune_embedded::slot_holder().map_or("nobody", intune_embedded::SlotHolder::tag)
+        );
+        if intune_embedded::container_runs_elsewhere() {
+            println!(
+                "volume            : SHARED — a container supervisor holds it and the runtime state \
+                 names a leader that is not in this namespace: another container or pod runs its \
+                 Intune container from this volume"
+            );
+        }
+    }
     let repair = if intune::repair_available() {
-        "yes — intune-container is set up here".to_string()
+        match mode {
+            Ok(Mode::Embedded) => "yes — this container's own, as a helper".to_string(),
+            _ => "yes — intune-container is set up here".to_string(),
+        }
     } else if let Some(blocker) = intune::repair_blocker() {
         format!("no — {blocker}")
     } else {

@@ -9,11 +9,18 @@
 // pixels, send keys and clicks back.
 //
 // WHAT IT IS DELIBERATELY NOT. Not a remote desktop. Every operation here is scoped to one
-// window, found by the broker's own `WM_CLASS`, and this module refuses to work at all when
+// window, found by its program's own `WM_CLASS`, and this module refuses to work at all when
 // that window is absent. The display it lives on carried six other windows when this was
 // measured — leftover `intune-portal` frames — and on the container's own display, forty.
 // Serving "the screen" would put whatever else is there in front of the reader, and typing
 // a password would send it wherever the focus happened to be.
+//
+// TWO PROGRAMS, AND NEVER A THIRD. A sign-in serves the broker's window alone
+// ([`SIGNIN_WM_CLASS`]). An ENROLLMENT of the self-contained image's own Intune container
+// (src/intune_embedded.rs) serves the Intune portal ([`PORTAL_WM_CLASS`]) AND the broker's
+// sign-in dialog the portal asks for, which the broker draws OVER the portal on the same
+// display — so a search may name both classes ([`ENROLL_WM_CLASSES`]) and answers the TOPMOST
+// match, because that is the window the reader is being asked to look at.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -36,6 +43,17 @@ use crate::png;
 /// writes into the page's own frame and it changes between steps, while the class is the
 /// program's.
 pub const SIGNIN_WM_CLASS: &str = "microsoft-identity-broker";
+
+/// The `WM_CLASS` of the Intune portal's own window (`intune-portal`, `Intune-portal`) — the
+/// program an enrollment is done in. The class these leftover frames carried on the measured
+/// display, which is why [`SIGNIN_WM_CLASS`] is matched segment by segment and never as a
+/// substring: the two must never be mistaken for each other.
+pub const PORTAL_WM_CLASS: &str = "intune-portal";
+
+/// What an ENROLLMENT may serve: the portal, and the broker's sign-in dialog the portal opens on
+/// top of it. Nothing else on that display — a leftover frame of another program, a terminal a
+/// container image happened to start — is ever a match.
+pub const ENROLL_WM_CLASSES: &[&str] = &[SIGNIN_WM_CLASS, PORTAL_WM_CLASS];
 
 /// How deep to look for it under the root. The window was a direct child of root on the
 /// measured display (no window manager runs there); one more level covers a display that
@@ -206,6 +224,28 @@ pub fn broker_display() -> DisplayState {
     }
 }
 
+/// The Intune container's OWN display (`ops::CONTAINER_DISPLAY`, `:99`), where an enrollment's
+/// portal is drawn — and whether anything serves it here.
+///
+/// Named rather than read, and that is the one place this module does not follow
+/// [`broker_display`]'s rule, for a reason that is the crate's: `ops::portal_open_headless`
+/// launches the portal on exactly that display, and the session the container publishes to its
+/// broker says the same one, so the broker's dialogs land beside it. There is nothing to read it
+/// out of before the portal exists, and nothing else it could be. It is reached through its
+/// ABSTRACT socket — the inner container's `/tmp` is not this process's — which is in this
+/// process's network namespace only in EMBEDDED mode, where the Intune container is teams-lite's
+/// own; a host-mode backend never asks this (an enrollment is refused there before it gets here).
+/// Its Xvfb is `1280x800x24` at the pinned crate, the 32-bit-pixel visual [`SigninWindow::capture`]
+/// needs; the 640x480x16 one before it would have been refused frame by frame.
+pub fn container_display() -> DisplayState {
+    let display = intune_container::ops::CONTAINER_DISPLAY.to_string();
+    if display_is_served(&display) {
+        DisplayState::Ready { display }
+    } else {
+        DisplayState::Missing { display }
+    }
+}
+
 /// Is anything serving `display` where a connection from here would reach it?
 ///
 /// TWO places, because the X server is in another container. On a containerized-Intune host the
@@ -216,8 +256,11 @@ pub fn broker_display() -> DisplayState {
 /// `/tmp/.X11-unix/X99` on the host, `@/tmp/.X11-unix/X99` in `/proc/net/unix` — and the served
 /// sign-in was refused on the very machine it was built for. The connection itself never had
 /// this problem: x11rb tries the abstract name first and the file second, which is the order
-/// asked in here too. A teams-lite inside its container image sees the same abstract socket
-/// because it runs in the host's network namespace (packaging/docker/compose.yaml).
+/// asked in here too. A teams-lite inside its container image in HOST mode sees the same
+/// abstract socket because it runs in the host's network namespace
+/// (packaging/docker/compose.host-broker.yaml); in EMBEDDED mode the Intune container is its own
+/// and shares teams-lite's network namespace, so its display's abstract socket is in this
+/// process's table from the start (see [`container_display`]).
 fn display_is_served(display: &str) -> bool {
     let Some(path) = display_socket(display) else { return false };
     let abstract_socket = || {
@@ -300,7 +343,32 @@ pub fn close_open_signin_window() -> bool {
     }
 }
 
-/// The broker's sign-in window, open for reading and driving.
+/// Ask EVERY viewable window of `classes` on `display` to close, topmost first, and say how
+/// many were asked. Blocking, like everything here.
+///
+/// Every one rather than the topmost, and that is what an enrollment's Cancel needs: the
+/// topmost window is often the broker's dialog, and closing that alone cancels one sign-in step
+/// while the portal behind it — the program whose exit ends the enrollment — stays open. Closed
+/// the way a person would ([`SigninWindow::close`]'s `WM_DELETE_WINDOW`), never killed. A window
+/// that will not close is left to its program; a failure on one does not stop the others.
+pub fn close_windows(display: &str, classes: &[&str]) -> Result<usize> {
+    let (conn, screen) = RustConnection::connect(Some(display))
+        .with_context(|| format!("open X display {display}"))?;
+    let root = conn.setup().roots[screen].root;
+    let _turn = x_turn();
+    let mut found = Vec::new();
+    collect_by_class(&conn, root, classes, SEARCH_DEPTH, &mut found)?;
+    let mut asked = 0;
+    for candidate in found {
+        if close_window(&conn, candidate.window).is_ok() {
+            asked += 1;
+        }
+    }
+    Ok(asked)
+}
+
+/// The broker's sign-in window — or, during an enrollment, the Intune portal's — open for
+/// reading and driving. One window, whichever program drew it: nothing here reaches past it.
 pub struct SigninWindow {
     conn: RustConnection,
     root: Window,
@@ -343,12 +411,29 @@ impl SigninWindow {
     /// Absent is the ordinary case, not an error state: the broker only draws when it needs
     /// a human, so this answers `None` every time a token was minted from the PRT.
     pub fn find(display: &str) -> Result<Option<Self>> {
+        Self::find_any(display, &[SIGNIN_WM_CLASS])
+    }
+
+    /// Find the topmost viewable window of any of `classes` on `display` — the broker's sign-in
+    /// dialog over the Intune portal it was opened for, during an enrollment
+    /// ([`ENROLL_WM_CLASSES`]).
+    ///
+    /// TOPMOST, because the reader is shown ONE window and it has to be the one being asked for
+    /// something: with no window manager on the display, a window mapped later is stacked
+    /// higher, so the broker's dialog is above the portal while it is up and the portal is the
+    /// answer again once the dialog goes. A window that is OVERRIDE-REDIRECT — a GTK menu, a
+    /// tooltip, a completion popup, each carrying its program's class — is a match only when
+    /// nothing else is: it is part of a page rather than a page, and serving a tooltip as the
+    /// window would hand the reader a 200-pixel strip to type their password at. On a display
+    /// that offers only such a window (nothing measured has) it is still served, so a broker
+    /// that drew its dialog that way is never refused.
+    pub fn find_any(display: &str, classes: &[&str]) -> Result<Option<Self>> {
         let (conn, screen) = RustConnection::connect(Some(display))
             .with_context(|| format!("open X display {display}"))?;
         let root = conn.setup().roots[screen].root;
-        let class_atom = Atom::from(AtomEnum::WM_CLASS);
-        let Some(window) = find_by_class(&conn, root, class_atom, SIGNIN_WM_CLASS, SEARCH_DEPTH)?
-        else {
+        let mut found = Vec::new();
+        collect_by_class(&conn, root, classes, SEARCH_DEPTH, &mut found)?;
+        let Some(window) = pick_window(&found) else {
             return Ok(None);
         };
         let (layout, spare) = read_layout(&conn)?;
@@ -519,47 +604,87 @@ impl SigninWindow {
     /// broker's X connection, which is a way to take the broker down rather than the flow.
     pub fn close(&self) -> Result<()> {
         let _turn = x_turn();
-        let protocols = self.intern("WM_PROTOCOLS")?;
-        let delete = self.intern("WM_DELETE_WINDOW")?;
-        let event = ClientMessageEvent::new(32, self.window, protocols, [delete, CURRENT_TIME, 0, 0, 0]);
-        self.conn.send_event(false, self.window, EventMask::NO_EVENT, event)?.check()?;
-        self.conn.flush()?;
-        Ok(())
-    }
-
-    fn intern(&self, name: &str) -> Result<Atom> {
-        Ok(self.conn.intern_atom(false, name.as_bytes())?.reply()?.atom)
+        close_window(&self.conn, self.window)
     }
 }
 
-/// Walk down from `root` for a window whose `WM_CLASS` holds `class`.
-fn find_by_class(
+/// Send `window` the `WM_DELETE_WINDOW` a person closing it would (see [`SigninWindow::close`]
+/// for why this and nothing harsher). Takes no turn of its own: both callers already hold it,
+/// and the lock is not reentrant.
+fn close_window(conn: &RustConnection, window: Window) -> Result<()> {
+    let intern = |name: &str| -> Result<Atom> {
+        Ok(conn.intern_atom(false, name.as_bytes())?.reply()?.atom)
+    };
+    let protocols = intern("WM_PROTOCOLS")?;
+    let delete = intern("WM_DELETE_WINDOW")?;
+    let event = ClientMessageEvent::new(32, window, protocols, [delete, CURRENT_TIME, 0, 0, 0]);
+    conn.send_event(false, window, EventMask::NO_EVENT, event)?.check()?;
+    conn.flush()?;
+    Ok(())
+}
+
+/// One window a search matched, in the order the search met it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Candidate {
+    window: Window,
+    /// Set on a window the program placed itself (a menu, a tooltip): see
+    /// [`SigninWindow::find_any`] for why that ranks it last.
+    override_redirect: bool,
+}
+
+/// Walk down from `from` and record every viewable window whose `WM_CLASS` holds one of
+/// `classes`, TOPMOST FIRST.
+///
+/// Every match rather than the first, because the ranking in [`pick_window`] needs them all and
+/// a Cancel closes them all. On the displays measured (six windows on the broker's, forty on the
+/// container's own) that is a few dozen round trips on a local socket per pass.
+///
+/// `QueryTree` answers children in stacking order, bottom to top, so they are walked in
+/// reverse; and each child is checked before its own children, depth first, so a window
+/// manager's frame — which sits above the program's window and carries no class of its own —
+/// is descended into in the frame's own place in the stack. The order in `out` is therefore the
+/// order a reader would see the windows in, which is what [`pick_window`] reads.
+fn collect_by_class(
     conn: &RustConnection,
     from: Window,
-    class_atom: Atom,
-    class: &str,
+    classes: &[&str],
     depth: u32,
-) -> Result<Option<Window>> {
+    out: &mut Vec<Candidate>,
+) -> Result<()> {
     if depth == 0 {
-        return Ok(None);
+        return Ok(());
     }
-    let children = conn.query_tree(from)?.reply()?.children;
-    // The window's own class first, breadth-first: a manager's frame sits above it and
-    // carries no class of its own.
-    for &child in &children {
-        if is_signin_window(conn, child, class_atom, class)? {
-            return Ok(Some(child));
+    let class_atom = Atom::from(AtomEnum::WM_CLASS);
+    let children = match conn.query_tree(from)?.reply() {
+        Ok(tree) => tree.children,
+        // The window went away between the walk that met it and this read (`BadWindow`): it has
+        // no tree, and it is simply not there. Only an X error is read that way — a connection
+        // that broke is a failure of the whole search, and says so.
+        Err(x11rb::errors::ReplyError::X11Error(_)) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for &child in children.iter().rev() {
+        if let Some(override_redirect) = matching_window(conn, child, class_atom, classes)? {
+            out.push(Candidate { window: child, override_redirect });
         }
+        collect_by_class(conn, child, classes, depth - 1, out)?;
     }
-    for &child in &children {
-        if let Some(found) = find_by_class(conn, child, class_atom, class, depth - 1)? {
-            return Ok(Some(found));
-        }
-    }
-    Ok(None)
+    Ok(())
 }
 
-/// Is this window the broker's sign-in window, drawn and readable right now?
+/// The window a search answers with: the topmost one that is a real window, and an
+/// override-redirect one only when there is nothing else. Pure, so the ranking is tested
+/// without a display.
+fn pick_window(found: &[Candidate]) -> Option<Window> {
+    found
+        .iter()
+        .find(|c| !c.override_redirect)
+        .or_else(|| found.first())
+        .map(|c| c.window)
+}
+
+/// Is this window one of `classes`, drawn and readable right now? `Some(override_redirect)`
+/// when it is, `None` when it is not.
 ///
 /// The class is not enough, and that took the real thing to find out: the broker leaves an
 /// UNMAPPED 10x10 window behind, carrying the very same `WM_CLASS`, after a flow ends.
@@ -567,29 +692,29 @@ fn find_by_class(
 /// window is a `BadMatch`, so the frame read failed with an X error code where the honest
 /// answer was "no sign-in window is open". So the map state is part of the identity: a
 /// window that is not viewable cannot be read and cannot be typed into.
-fn is_signin_window(
+fn matching_window(
     conn: &RustConnection,
     window: Window,
     class_atom: Atom,
-    class: &str,
-) -> Result<bool> {
+    classes: &[&str],
+) -> Result<Option<bool>> {
     let Some(reply) = conn
         .get_property(false, window, class_atom, Atom::from(AtomEnum::STRING), 0, 256)
         .ok()
         .and_then(|c| c.reply().ok())
     else {
         // A window that went away between the tree walk and this read is simply not it.
-        return Ok(false);
+        return Ok(None);
     };
-    if !wm_class_holds(&reply.value, class) {
-        return Ok(false);
+    if !classes.iter().any(|class| wm_class_holds(&reply.value, class)) {
+        return Ok(None);
     }
     let Some(attributes) =
         conn.get_window_attributes(window).ok().and_then(|c| c.reply().ok())
     else {
-        return Ok(false);
+        return Ok(None);
     };
-    Ok(attributes.map_state == MapState::VIEWABLE)
+    Ok((attributes.map_state == MapState::VIEWABLE).then_some(attributes.override_redirect))
 }
 
 /// Does a raw `WM_CLASS` property hold `class`?
@@ -704,6 +829,65 @@ mod tests {
         // would accept a browser tab titled after the broker.
         assert!(!wm_class_holds(b"not-microsoft-identity-broker-either\0", SIGNIN_WM_CLASS));
         assert!(!wm_class_holds(b"", SIGNIN_WM_CLASS));
+    }
+
+    #[test]
+    fn an_enrollment_serves_the_portal_and_the_broker_and_nothing_else() {
+        let portal = b"intune-portal\0Intune-portal\0";
+        let broker = b"microsoft-identity-broker\0Microsoft-identity-broker\0";
+        let holds_any =
+            |value: &[u8]| ENROLL_WM_CLASSES.iter().any(|class| wm_class_holds(value, class));
+        assert!(holds_any(portal), "the portal is what an enrollment is done in");
+        assert!(holds_any(broker), "and the broker's dialog it opens over the portal");
+        // Anything else on that display is never served — a terminal, a leftover frame of a
+        // program nobody asked for, a window that merely contains the name.
+        assert!(!holds_any(b"xterm\0XTerm\0"));
+        assert!(!holds_any(b"intune-portal-helper\0"));
+        // And a SIGN-IN still serves the broker alone: the portal is not the broker.
+        assert!(!wm_class_holds(portal, SIGNIN_WM_CLASS));
+    }
+
+    #[test]
+    fn the_topmost_real_window_is_served_and_a_popup_only_when_nothing_else_is() {
+        // In the order a search meets them: topmost first.
+        let menu = Candidate { window: 4, override_redirect: true };
+        let dialog = Candidate { window: 3, override_redirect: false };
+        let portal = Candidate { window: 2, override_redirect: false };
+        // The broker's dialog over the portal is the window the reader is being asked about —
+        // and a GTK menu above both is part of a page, not a page.
+        assert_eq!(pick_window(&[menu, dialog, portal]), Some(3));
+        // Once the dialog goes, the portal is the answer again.
+        assert_eq!(pick_window(&[portal]), Some(2));
+        // A display offering only a popup still serves it, rather than refusing a broker that
+        // drew its window that way.
+        assert_eq!(pick_window(&[menu]), Some(4));
+        assert_eq!(pick_window(&[]), None);
+    }
+
+    #[test]
+    fn the_stack_is_walked_topmost_first() {
+        // `QueryTree` answers bottom to top, so the search reads it backwards — the half of
+        // "topmost" a unit test with no display can only pin on the code.
+        let whole = include_str!("xwindow.rs");
+        let source = &whole[..whole.find("\n#[cfg(test)]").unwrap_or(whole.len())];
+        let walk = source.find("fn collect_by_class(").expect("collect_by_class");
+        let body = &source[walk..walk + source[walk..].find("\n}\n").unwrap()];
+        assert!(body.contains("children.iter().rev()"), "{body}");
+        // And the broker's own search is the same one, narrowed to its class.
+        let find = source.find("pub fn find(display: &str)").expect("find");
+        let find_body = &source[find..find + source[find..].find("\n    }").unwrap()];
+        assert!(find_body.contains("Self::find_any(display, &[SIGNIN_WM_CLASS])"), "{find_body}");
+    }
+
+    #[test]
+    fn an_enrollment_is_drawn_on_the_containers_own_display() {
+        // Named by the crate, never read out of a process: the portal does not exist yet when
+        // the question is asked.
+        assert_eq!(container_display().display(), Some(intune_container::ops::CONTAINER_DISPLAY));
+        assert_eq!(
+            display_socket(intune_container::ops::CONTAINER_DISPLAY).as_deref(),
+            Some("/tmp/.X11-unix/X99")
+        );
     }
 
     #[test]

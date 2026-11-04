@@ -1,0 +1,26 @@
+apiVersion: v2
+name: teams-lite
+description: >-
+  teams-lite — a Microsoft Teams client for Linux — on Kubernetes, with an Intune container of its
+  own inside the pod, or beside the identity broker of the machine it runs on. One pod, one store,
+  one signed-in user.
+type: application
+# MAJOR.MINOR is kept by hand and bumped when a value changes meaning. CI publishes every build of
+# master as MAJOR.MINOR.<run number> (.github/workflows/build.yml), so `helm upgrade` always has a
+# newer chart to move to, and the patch says nothing a reader needs.
+version: 0.1.0
+# The image this chart runs when `image.tag` is unset. CI stamps the build's own tag here
+# (`build-<shortsha>`, the name of the GitHub release built from the same commit), so a chart
+# version pins one image. Packaged from a checkout by hand, it is the rolling `latest`.
+appVersion: "latest"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/theophile-wallez/teams-lite
+icon: https://raw.githubusercontent.com/theophile-wallez/teams-lite/master/web/public/icons/icon-192.png
+# `helm push` turns the first source into the OCI manifest's `org.opencontainers.image.source`,
+# which is what links the chart's GHCR package to this repository.
+sources:
+  - https://github.com/theophile-wallez/teams-lite
+keywords:
+  - microsoft-teams
+  - intune
+  - chat

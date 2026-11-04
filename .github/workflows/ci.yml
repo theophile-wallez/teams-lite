@@ -3,7 +3,9 @@ name: ci
 # Validation pipeline for pull requests and feature branches. The release
 # pipeline (build.yml) runs on master and publishes the binary; this workflow
 # is the pre-merge gate: Rust, the `teams` launcher, web unit tests, typecheck,
-# and the full Playwright E2E suite (browser-driven, against the mock backend).
+# the full Playwright E2E suite (browser-driven, against the mock backend), and the
+# Helm chart (packaging/helm/check.sh — the same script the release runs before it
+# publishes one).
 
 on:
   pull_request: {}
@@ -58,6 +60,19 @@ jobs:
       - name: Web typecheck
         working-directory: web
         run: bun run typecheck
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.2.2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Lint, test and validate the chart
+        run: packaging/helm/check.sh
 
   e2e:
     runs-on: ubuntu-latest

@@ -23,3 +23,8 @@ node_modules
 # from the REPO ROOT rather than from `web/` leaves the directory HERE — untracked, and
 # one `git add -A` away from committing somebody's screenshots and traces.
 test-results/
+
+# An Intune enrollment backup (`intune-container backup`) holds the device's registration keys and
+# its keyring; packaging/docker/compose.yaml's import bind points at one beside it. Never commit it.
+packaging/docker/*.tar.gz
+enrollment-backup*.tar.gz

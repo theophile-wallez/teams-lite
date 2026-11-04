@@ -21,11 +21,24 @@
 //!   manager for over D-Bus ([`start_repair_unit`]). It replaced `systemctl` starting an
 //!   installed unit whose `ExecStart=` was the `intune-container` binary.
 //!
+//! TWO MODES, and this module is still the ONE place that decides
+//! ([`crate::intune_embedded::Mode`], declared by `TEAMS_LITE_INTUNE_MODE`). In `host` mode —
+//! unset, and every install outside teams-lite's own image — the container is the USER'S and
+//! everything above holds as written. In `embedded` mode the container is THIS POD'S: the image
+//! boots its own, and every lifecycle act (the boot, the stop, the repair, the enrollment's
+//! portal) is a HELPER — this binary re-executed in a session of its own, spawned by
+//! `intune_embedded::spawn_helper` — because there is no systemd manager to ask for a unit, and
+//! the reasons a repair was a unit (it must outlive the backend, and its environment must not be
+//! the backend's) hold for a helper just the same. [`start_repair`] is the one entry point the
+//! backend calls for either. The spawn lives in that module, so this one keeps its promise —
+//! pinned by its own test — that it never starts a process.
+//!
 //! WHAT THE CRATE IS AND IS NOT ASKED. It is asked for its runtime state
-//! (`runtime::load_runtime_state`, a pure read), for whether that leader is alive
-//! (`runtime::is_running`), and — inside the repair unit only — for `backend::stop` and
-//! `backend::start`. Three things it offers are refused on purpose, and each would break
-//! something real:
+//! (`runtime::load_runtime_state`, a pure read), for whether that state is still live
+//! (`runtime::state_is_live`, as pure — the leader is a container init, and the very process the
+//! state recorded), and — inside the repair (and, in embedded mode, the boot helper) only — for
+//! `backend::stop` and `backend::start`. Three things it offers are refused on purpose, and
+//! each would break something real:
 //!
 //! - **`runtime::running_leader()`** DELETES a stale `rootless.json` as a side effect. This
 //!   module reads on every token call, from read-only backends included, and a read that
@@ -38,12 +51,15 @@
 //!   device registration across one, so a repair through it would unenroll the machine. The
 //!   dependency is pinned to the commit that fixed both (see Cargo.toml).
 //!
-//! IN TEAMS-LITE'S OWN CONTAINER IMAGE the first two answers hold unchanged and the third does
-//! not ([`CONTAINER_IMAGE_ENV`]). With the host's pid namespace and a read-only view of the
-//! intune-container state (packaging/docker/compose.yaml), [`broker_bus`] reads the same file
-//! and opens the same `/proc/<leader>/root/…` socket — measured from an image: `AUTH EXTERNAL`
-//! as uid 0 answered OK. The repair is the host systemd running THIS binary, and its path is
-//! the image's, so the image offers none and says why ([`repair_blocker`]).
+//! IN TEAMS-LITE'S OWN CONTAINER IMAGE, in HOST mode, the first two answers hold unchanged and
+//! the third does not ([`CONTAINER_IMAGE_ENV`]). With the host's pid namespace and a read-only
+//! view of the intune-container state (packaging/docker/compose.host-broker.yaml),
+//! [`broker_bus`] reads the same file and opens the same `/proc/<leader>/root/…` socket —
+//! measured from an image: `AUTH EXTERNAL` as uid 0 answered OK. The repair is the host systemd
+//! running THIS binary, and its path is the image's, so that image offers none and says why
+//! ([`repair_blocker`]). In EMBEDDED mode — the image's default — all three answers hold again:
+//! the container, its state and this binary are all inside the pod, so the bus is followed the
+//! same way and the repair is this pod's own helper.
 //!
 //! WHY THIS BINARY MUST ROUTE THE CRATE'S OWN SUBCOMMANDS. `backend::start` boots the
 //! container from a detached supervisor it spawns by re-executing `exe::stable_exe()` with a
@@ -137,8 +153,8 @@ pub const IMAGE_REPAIR_BLOCKER: &str = "teams-lite is running in its container i
 /// caused one.
 pub const SETTING_REPAIR_STARTED_MS: &str = "broker_repair_started_ms";
 
-/// How long a repair may run. A stop waits up to 20 s for the container's systemd to power
-/// off, a start up to 20 s for the supervisor to publish its leader, and the in-container
+/// How long a repair's own WORK may run. A stop waits up to 20 s for the container's systemd to
+/// power off, a start up to 20 s for the supervisor to publish its leader, and the in-container
 /// session setup that unlocks the keyring then waits on its own (boot, the user bus, the
 /// keyring, the display) — about two and a half minutes at its worst. Five minutes is the
 /// bound the installed unit carried, and a repair that needs more is one a person should
@@ -149,11 +165,32 @@ pub const SETTING_REPAIR_STARTED_MS: &str = "broker_repair_started_ms";
 /// start whose registry tag has moved deletes the rootfs and pulls the whole image again, over
 /// a registry call with no timeout, AFTER the stop; a repair killed by this bound in the middle
 /// of that would leave no container at all, and a half-extracted tree the next start adopts.
-pub const REPAIR_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const REPAIR_WORK: Duration = Duration::from_secs(300);
+
+/// How long a repair may run: its work ([`REPAIR_WORK`]) plus the wait for the container it
+/// stopped to have finished powering off ([`crate::intune_embedded::POWEROFF_WAIT`]) — which the
+/// crate's own twenty-second stop does not wait out, and which [`restart_container`] does before
+/// it starts anything. It is the embedded repair helper's watchdog, the host unit's
+/// `TimeoutStartUSec`, and what every follower of a repair is bounded by; a bound that left the
+/// poweroff wait out would kill a repair in the middle of the one step that keeps it honest.
+pub const REPAIR_TIMEOUT: Duration =
+    Duration::from_secs(REPAIR_WORK.as_secs() + crate::intune_embedded::POWEROFF_WAIT.as_secs());
 
 /// The journal identifier a repair logs under, which is what `journalctl --user -t` finds it
 /// by. The installed unit used the same one.
 const REPAIR_LOG_ID: &str = "teams-lite-broker-repair";
+
+/// Where a repair's own account of itself can be read, in the words a journal line names it.
+/// A host repair is a unit of the user's manager and logs to their journal; an embedded one is a
+/// helper whose stderr IS the container's log — there is no journal in a pod, and naming
+/// `journalctl` there sends the reader to a command that answers nothing.
+pub fn repair_log_hint() -> &'static str {
+    if crate::intune_embedded::embedded() {
+        "this container's own log (docker logs / kubectl logs)"
+    } else {
+        "journalctl --user -t teams-lite-broker-repair"
+    }
+}
 
 const SECRETS_NAME: &str = "org.freedesktop.secrets";
 const SECRETS_PATH: &str = "/org/freedesktop/secrets/collection/login";
@@ -246,23 +283,52 @@ fn choose_broker_bus(override_address: Option<String>, container: Option<(i32, P
 /// Three checks, each against a way the answer has been wrong:
 /// - **the state is READ, never cleaned** — `load_runtime_state`, not `running_leader`, which
 ///   deletes a stale file (see the module header);
-/// - **the leader is a container init** — the crate's `is_running` only checks that
-///   `/proc/<pid>/ns/pid` exists, which every live process satisfies, so a recycled pid would
-///   pass it. A container's PID 1 lives in a pid namespace of its own; a recycled pid of ours
-///   lives in ours;
+/// - **the state is LIVE and its leader is a container init** — `runtime::state_is_live` (pure:
+///   the leader is PID 1 of a nested pid namespace, and, where the state recorded one, the very
+///   process that was started), plus this module's own check that its pid namespace is not
+///   ours. The second is kept beside the first rather than dropped: it was the rule before the
+///   crate had one, and in a pod the pid namespace starts again at 1 on every restart while the
+///   saved state survives on a volume, which is exactly the recycled pid both exist to refuse;
 /// - **the socket is there** — a container that is booting has a leader before its user bus.
 ///
 /// A state file torn mid-write (the crate writes it in place) reads as an error and therefore
 /// as "no container" for this one call, which costs one unreachable broker call and is retried
 /// by whoever asked.
 fn running_container() -> Option<(i32, PathBuf)> {
-    let state = intune_container::runtime::load_runtime_state().ok().flatten()?;
-    let leader = state.leader;
-    if !intune_container::runtime::is_running(leader) || !is_container_init(leader) {
-        return None;
-    }
+    let leader = container_leader()?;
     let socket = container_bus_socket(leader);
     is_socket(&socket).then_some((leader, socket))
+}
+
+/// The running container's LEADER — the first two checks of [`running_container`], without the
+/// third: a live leader whose broker's bus may not be there (yet, or ever). A pure read, like
+/// everything here.
+///
+/// Told apart from [`container_is_up`] because the two halves of "up" fail differently: a leader
+/// with no bus is a container that booted and never set its session up — booting it again is a
+/// no-op on it, and only a stop and a start mends it (`intune_embedded::boot_main`) — while no
+/// leader at all is a container to start. It is also what says a container is OURS: a leader live
+/// in this namespace is one no other container or pod on the volume could have
+/// (`intune_embedded::refuse_a_container_running_elsewhere`).
+pub fn container_leader() -> Option<i32> {
+    let state = intune_container::runtime::load_runtime_state().ok().flatten()?;
+    leader_is_live_here(&state).then_some(state.leader)
+}
+
+/// Does `state` name a leader that is live, and a container init, in THIS namespace? The two
+/// checks [`container_leader`] makes, on a state the caller already holds — so a caller that
+/// has to tell "no state at all" from "a state naming a leader that is not ours" reads the file
+/// once (`intune_embedded::runs_elsewhere`), and one that recorded a state before a stop can
+/// ask afterwards whether THAT process has gone (`intune_embedded::leader_exited_within`) — the
+/// crate's stop clears the file whether or not it did, so it cannot be read again to say. Pure.
+pub fn leader_is_live_here(state: &intune_container::runtime::RuntimeState) -> bool {
+    intune_container::runtime::state_is_live(state) && is_container_init(state.leader)
+}
+
+/// Is the Intune container up — a live leader AND its broker's bus? A pure read, for a status
+/// built on every greeting (`intune_embedded::status`): no state is cleaned, nothing is asked.
+pub fn container_is_up() -> bool {
+    running_container().is_some()
 }
 
 /// The host-side path of the broker's bus inside the container led by `leader`.
@@ -379,22 +445,37 @@ pub async fn container_keyring() -> KeyringCheck {
 /// about. The installed unit answered the second half with `ConditionFileIsExecutable=` on the
 /// binary; the crate's own "is it initialized" is the same question asked of the real thing.
 ///
-/// And never from teams-lite's container image ([`CONTAINER_IMAGE_ENV`]): the repair is THIS
-/// binary run by the host's systemd, and this binary's path exists only inside the image. The
-/// image still sees the intune-container state — it is mounted there so the broker's bus can be
-/// followed live — which is exactly why "is it initialized" alone would offer the button.
+/// And never from teams-lite's container image in HOST mode ([`CONTAINER_IMAGE_ENV`]): the
+/// repair is THIS binary run by the host's systemd, and this binary's path exists only inside
+/// the image. That image still sees the intune-container state — it is mounted there so the
+/// broker's bus can be followed live — which is exactly why "is it initialized" alone would
+/// offer the button.
+///
+/// In EMBEDDED mode the container is this pod's own and the repair is this pod's own helper, so
+/// the image is no reason to refuse: a send-capable backend whose container has been set up may
+/// repair it. Before the first boot has set it up there is nothing to restart, and the boot is
+/// what comes next.
 pub fn repair_available() -> bool {
-    repair_may_run(crate::read_only(), in_container_image(), intune_container::ops::is_initialized())
+    repair_may_run(
+        crate::intune_embedded::embedded(),
+        crate::read_only(),
+        in_container_image(),
+        intune_container::ops::is_initialized(),
+    )
 }
 
 /// Why a repair is not offered where one WOULD be the cure, or `None` when there is nothing
-/// worth saying. Only the image has a sentence: a read-only backend refuses by design and says
-/// so where it is pressed, and a host with no intune-container has no container to restart.
+/// worth saying. Only the host-mode image has a sentence: a read-only backend refuses by design
+/// and says so where it is pressed, a host with no intune-container has no container to
+/// restart, and an embedded container is this pod's to repair.
 pub fn repair_blocker() -> Option<&'static str> {
-    let blocked = !crate::read_only()
-        && in_container_image()
-        && intune_container::ops::is_initialized();
-    blocked.then_some(IMAGE_REPAIR_BLOCKER)
+    repair_is_blocked(
+        crate::intune_embedded::embedded(),
+        crate::read_only(),
+        in_container_image(),
+        intune_container::ops::is_initialized(),
+    )
+    .then_some(IMAGE_REPAIR_BLOCKER)
 }
 
 /// Is this process running from teams-lite's own container image?
@@ -402,24 +483,47 @@ pub fn in_container_image() -> bool {
     std::env::var_os(CONTAINER_IMAGE_ENV).is_some_and(|v| v == "1")
 }
 
-/// The decision of [`repair_available`], with its three inputs handed in so it is tested
-/// without a container, an image or a read-only process.
-fn repair_may_run(read_only: bool, in_image: bool, initialized: bool) -> bool {
-    !read_only && !in_image && initialized
+/// The decision of [`repair_available`], with its inputs handed in so it is tested without a
+/// container, an image, a mode or a read-only process.
+fn repair_may_run(embedded: bool, read_only: bool, in_image: bool, initialized: bool) -> bool {
+    if embedded {
+        !read_only && initialized
+    } else {
+        !read_only && !in_image && initialized
+    }
+}
+
+/// The decision of [`repair_blocker`]: the host-mode image, which sees a container it may not
+/// restart.
+fn repair_is_blocked(embedded: bool, read_only: bool, in_image: bool, initialized: bool) -> bool {
+    !embedded && !read_only && in_image && initialized
 }
 
 // ---- asking systemd for the repair ---------------------------------------------------------
 
 /// What asking for a repair did.
 pub enum RepairStart {
-    /// systemd took the job; [`RepairJob::finished`] says how it ended.
+    /// The repair was started; [`RepairJob::finished`] says how it ended.
     Started(RepairJob),
-    /// A repair is already running on this machine (the unit exists).
+    /// A repair is already running on this machine (the unit exists) — or, in embedded mode,
+    /// something already holds the helper slot, which `intune_embedded::slot_holder` names: a
+    /// repair, or other work (a boot, a portal, the stop) a request is answered as busy beside.
     AlreadyRunning,
 }
 
+/// A repair this process started, and what will say when it ends: systemd's own job signal for
+/// a host repair, the helper's exit for an embedded one.
+pub struct RepairJob(Job);
+
+enum Job {
+    // Boxed: a signal stream and a proxy are some hundreds of bytes, a helper's handle a few
+    // words, and every `RepairStart` and follower carries whichever it is.
+    Unit(Box<UnitJob>),
+    Helper(crate::intune_embedded::HelperChild),
+}
+
 /// A repair systemd is running, and the signal stream that will say when it ends.
-pub struct RepairJob {
+struct UnitJob {
     job: OwnedObjectPath,
     stream: zbus::proxy::SignalStream<'static>,
     // Held so the subscription — and the connection the stream reads from — outlives the job.
@@ -427,22 +531,53 @@ pub struct RepairJob {
 }
 
 impl RepairJob {
-    /// Wait for the repair to end, and answer systemd's own word for how: `done` when the
-    /// repair exited 0, `failed`, `timeout`, `canceled`.
-    pub async fn finished(mut self) -> Result<String> {
+    /// Wait for the repair to end, and answer one word for how: `done` when the repair exited 0,
+    /// and otherwise systemd's own word (`failed`, `timeout`, `canceled`) for a unit, or
+    /// `failed (exit N)` for a helper — whose codes are `repair_main`'s.
+    pub async fn finished(self) -> Result<String> {
         let bound = REPAIR_TIMEOUT + Duration::from_secs(30);
-        tokio::time::timeout(bound, async {
-            while let Some(signal) = self.stream.next().await {
-                let (_id, job, _unit, result): (u32, OwnedObjectPath, String, String) =
-                    signal.body().deserialize().context("read a JobRemoved signal")?;
-                if job == self.job {
-                    return Ok(result);
-                }
+        let ended = match self.0 {
+            Job::Unit(unit) => {
+                // `_manager` is bound for the length of this arm, so the subscription and its
+                // connection outlive the wait below.
+                let UnitJob { job, mut stream, _manager } = *unit;
+                tokio::time::timeout(bound, async move {
+                    while let Some(signal) = stream.next().await {
+                        let (_id, removed, _unit, result): (u32, OwnedObjectPath, String, String) =
+                            signal.body().deserialize().context("read a JobRemoved signal")?;
+                        if removed == job {
+                            return Ok(result);
+                        }
+                    }
+                    bail!("systemd's signal stream closed before the repair finished")
+                })
+                .await
             }
-            bail!("systemd's signal stream closed before the repair finished")
-        })
-        .await
-        .map_err(|_| anyhow!("the repair did not finish within {} s", bound.as_secs()))?
+            Job::Helper(child) => {
+                tokio::time::timeout(bound, async move {
+                    Ok(match child.finished().await? {
+                        0 => "done".to_string(),
+                        code => format!("failed (exit {code})"),
+                    })
+                })
+                .await
+            }
+        };
+        ended.map_err(|_| anyhow!("the repair did not finish within {} s", bound.as_secs()))?
+    }
+}
+
+/// Start the broker repair, in whichever shape this process's mode takes — the ONE entry point
+/// the backend calls. Embedded: a repair HELPER (`intune_embedded::spawn_helper`), because there
+/// is no manager in a pod to ask for a unit. Host: the transient unit ([`start_repair_unit`]).
+pub async fn start_repair() -> Result<RepairStart> {
+    use crate::intune_embedded::{self, Helper, HelperStart, Mode};
+    match intune_embedded::mode()? {
+        Mode::Embedded => Ok(match intune_embedded::spawn_helper(Helper::Repair)? {
+            HelperStart::Started(child) => RepairStart::Started(RepairJob(Job::Helper(child))),
+            HelperStart::AlreadyRunning => RepairStart::AlreadyRunning,
+        }),
+        Mode::Host => start_repair_unit().await,
     }
 }
 
@@ -503,7 +638,7 @@ async fn start_transient_oneshot(
         .call("StartTransientUnit", &(name, "fail", properties, aux))
         .await;
     match started {
-        Ok(job) => Ok(RepairStart::Started(RepairJob { job, stream, _manager: manager })),
+        Ok(job) => Ok(RepairStart::Started(RepairJob(Job::Unit(Box::new(UnitJob { job, stream, _manager: manager }))))),
         Err(zbus::Error::MethodError(error, _, _))
             if error.as_str() == "org.freedesktop.systemd1.UnitExists" =>
         {
@@ -521,7 +656,16 @@ async fn start_transient_oneshot(
 /// was claimed by whichever backend started it. Without this a press during a repair was told
 /// "this machine runs no Intune container", and the other backend's pages never learnt a repair
 /// was going on.
+///
+/// In embedded mode the question is wider, deliberately: ANYTHING holding the helper slot on this
+/// pod's volume (a boot, a repair, an enrollment's portal, or the stop the pod runs on its way
+/// out) has the container in hand, and a repair started beside one would wait on the lifecycle
+/// lock and then restart a container somebody is booting, enrolling or powering off. The caller
+/// asks `intune_embedded::slot_holder` for which one.
 pub async fn repair_running() -> Result<bool> {
+    if crate::intune_embedded::embedded() {
+        return Ok(crate::intune_embedded::slot_held());
+    }
     let manager = systemd_manager().await?;
     for unit in [REPAIR_UNIT, LEGACY_REPAIR_UNIT] {
         if unit_is_running(&manager, unit).await? {
@@ -536,6 +680,9 @@ pub async fn repair_running() -> Result<bool> {
 /// to. It cannot say how that repair ended; the backend that started it logs that.
 pub async fn wait_for_repair_to_end() -> Result<()> {
     let bound = REPAIR_TIMEOUT + Duration::from_secs(30);
+    if crate::intune_embedded::embedded() {
+        return crate::intune_embedded::wait_for_helper_to_end(bound).await;
+    }
     tokio::time::timeout(bound, async {
         while repair_running().await? {
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -688,9 +835,24 @@ pub enum Reexec {
     Supervise { display: bool },
     /// The crate's in-container exec waiter.
     Exec { leader: i32, uid: u32, script: String, env: Vec<(String, String)> },
-    /// The broker repair, run inside its transient unit.
+    /// The broker repair, run inside its transient unit (host) or as a helper (embedded).
     RepairBroker,
+    /// The embedded container's boot helper (`intune_embedded::boot_main`).
+    IntuneBoot,
+    /// The embedded container's graceful stop (`intune_embedded::stop_main`).
+    IntuneStop,
+    /// The embedded container's portal, for an enrollment (`intune_embedded::portal_main`).
+    IntunePortal,
 }
+
+/// The hidden arguments that take no arguments of their own, and what each one is. Every one of
+/// them is teams-lite's (the crate's two have shapes of their own, parsed below).
+const BARE_SUBCOMMANDS: &[(&str, Reexec)] = &[
+    (REPAIR_SUBCOMMAND, Reexec::RepairBroker),
+    (crate::intune_embedded::BOOT_SUBCOMMAND, Reexec::IntuneBoot),
+    (crate::intune_embedded::STOP_SUBCOMMAND, Reexec::IntuneStop),
+    (crate::intune_embedded::PORTAL_SUBCOMMAND, Reexec::IntunePortal),
+];
 
 /// Read the hidden subcommand out of `argv`, or `None` when this is an ordinary start.
 ///
@@ -703,11 +865,18 @@ pub fn parse_reexec(args: &[OsString]) -> Option<Result<Reexec, String>> {
     let rest: Vec<&str> = match args[2..].iter().map(|a| a.to_str()).collect::<Option<Vec<_>>>() {
         Some(rest) => rest,
         None => {
-            return [SUPERVISE_SUBCOMMAND, EXEC_SUBCOMMAND, REPAIR_SUBCOMMAND]
-                .contains(&first)
-                .then(|| Err(format!("{first}: an argument is not valid UTF-8")));
+            let ours = [SUPERVISE_SUBCOMMAND, EXEC_SUBCOMMAND].contains(&first)
+                || BARE_SUBCOMMANDS.iter().any(|(name, _)| *name == first);
+            return ours.then(|| Err(format!("{first}: an argument is not valid UTF-8")));
         }
     };
+    if let Some((name, reexec)) = BARE_SUBCOMMANDS.iter().find(|(name, _)| *name == first) {
+        return Some(if rest.is_empty() {
+            Ok(reexec.clone())
+        } else {
+            Err(format!("{name} takes no arguments"))
+        });
+    }
     match first {
         SUPERVISE_SUBCOMMAND => Some(match rest.as_slice() {
             [] => Ok(Reexec::Supervise { display: false }),
@@ -715,11 +884,6 @@ pub fn parse_reexec(args: &[OsString]) -> Option<Result<Reexec, String>> {
             other => Err(format!("{SUPERVISE_SUBCOMMAND}: unexpected arguments {other:?}")),
         }),
         EXEC_SUBCOMMAND => Some(parse_exec(&rest)),
-        REPAIR_SUBCOMMAND => Some(if rest.is_empty() {
-            Ok(Reexec::RepairBroker)
-        } else {
-            Err(format!("{REPAIR_SUBCOMMAND} takes no arguments"))
-        }),
         _ => None,
     }
 }
@@ -771,12 +935,15 @@ pub fn dispatch_reexec(args: impl IntoIterator<Item = OsString>) -> Option<i32> 
             })
         }
         Ok(Reexec::RepairBroker) => repair_main(),
+        Ok(Reexec::IntuneBoot) => crate::intune_embedded::boot_main(),
+        Ok(Reexec::IntuneStop) => crate::intune_embedded::stop_main(),
+        Ok(Reexec::IntunePortal) => crate::intune_embedded::portal_main(),
     })
 }
 
 /// The crate logs through `tracing`; without a subscriber every word it says is dropped, and a
 /// failed boot would leave nothing to read. Its own `main` installs this same subscriber.
-fn init_tracing() {
+pub(crate) fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
@@ -798,6 +965,15 @@ fn init_tracing() {
 /// - **2** — nothing was restarted because nothing could be told: the container is not running
 ///   or not set up, or the keyring did not answer. The old unit's `ExecCondition=` skipped on
 ///   the same states; this says so in the job's result rather than reporting success.
+///
+/// IN EMBEDDED MODE it is a helper rather than a unit, and three things systemd did for the unit
+/// are done here instead: it takes the helper SLOT first (one boot, repair or portal at a time on
+/// this pod's volume — held by another is exit 2, nothing restarted), it makes the container's
+/// cgroup this pod's own when nothing said otherwise, and it BOUNDS itself at
+/// [`REPAIR_TIMEOUT`], the unit's own `TimeoutStartUSec`. And one thing a unit never needed: it
+/// refuses (exit 2) a container running from this volume in ANOTHER container or pod, before the
+/// restart's `backend::is_running` could delete that container's state as stale
+/// (`intune_embedded::refuse_a_container_running_elsewhere`).
 fn repair_main() -> i32 {
     init_tracing();
     let say = |line: &str| eprintln!("teams-lite(broker-repair): {line}");
@@ -805,6 +981,36 @@ fn repair_main() -> i32 {
         say("refused: TEAMS_LITE_READ_ONLY=1 — a read-only process never restarts the container");
         return 2;
     }
+    let embedded = match crate::intune_embedded::mode() {
+        Ok(mode) => mode == crate::intune_embedded::Mode::Embedded,
+        Err(e) => {
+            say(&format!("refused: {e:#}"));
+            return 2;
+        }
+    };
+    // Held until this function returns: the slot is the helper's for its whole life.
+    let _slot = if embedded {
+        crate::intune_embedded::own_cgroup_by_default();
+        match crate::intune_embedded::take_helper_slot(crate::intune_embedded::Helper::Repair) {
+            Ok(Some(slot)) => {
+                if let Some(code) = crate::intune_embedded::refuse_a_container_running_elsewhere(&say) {
+                    return code;
+                }
+                crate::intune_embedded::arm_watchdog("broker-repair", "the repair", REPAIR_TIMEOUT);
+                Some(slot)
+            }
+            Ok(None) => {
+                say("another container helper is at work on this volume — not restarting beside it");
+                return 2;
+            }
+            Err(e) => {
+                say(&format!("could not take the helper slot: {e:#}"));
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
 
     // The condition the installed unit carried as ExecCondition=, and the one no trigger can
     // skip: the backend checked before asking, but the keyring may have been unlocked since,
@@ -892,21 +1098,23 @@ enum Restart {
 /// ("container already running") and never re-runs the session setup that unlocks the keyring,
 /// which is the whole repair.
 ///
-/// THE BOOT NEVER UPDATES THE IMAGE. `backend::start` checks the registry and, when the tag has
-/// moved, deletes the rootfs and pulls the whole image before it boots — with `auto_update` on,
-/// which is the crate's default. Here that would happen with the container already stopped,
-/// under [`REPAIR_TIMEOUT`], over a registry call with no deadline: a repair killed in the
-/// middle leaves no container at all. So the boot is handed a COPY of the configuration with
-/// updates off, and the user's own setting is never written back changed; the next ordinary
-/// `intune-container start` updates as it always did.
+/// AND THE POWEROFF IS WAITED FOR BETWEEN THE TWO, the rule the embedded boot's own restart holds
+/// (`intune_embedded::POWEROFF_WAIT`). The crate's `backend::stop` waits twenty seconds for the
+/// leader and then clears the runtime state WHETHER OR NOT it went — and a poweroff that takes
+/// longer (a unit at systemd's own ninety-second stop timeout) leaves the old supervisor holding
+/// its lock with no leader named. A start over that boots nothing: the crate's second supervisor
+/// finds the lock held, logs "not booting a duplicate" and exits, the start gives up at twenty
+/// seconds, and the old container then finishes powering off with nothing running — while the
+/// repair floor this repair claimed keeps the automatic boot away for twenty minutes. So the
+/// leader is recorded BEFORE the stop (afterwards nothing on the volume names it), the stop is
+/// waited out, and a container still going down past the wait is said as what it is: a failure
+/// that started nothing, rather than a start that boots nothing.
 ///
-/// The display is a fixed headless one rather than `DisplayInfo::detect()`: `backend::start`
-/// does not read it, and detection would spawn `xauth` when the manager's environment carries
-/// a `DISPLAY`. Headless is also what `ops::start` boots, so `display_forwarding` is cleared the
-/// same way it does — on the original configuration, so the copy's `auto_update` never reaches
-/// the disk.
+/// The boot itself is [`boot_headless`], which the embedded boot helper shares — so "a boot
+/// never updates the image" is one rule, kept in one place.
 fn restart_container() -> Result<Restart> {
-    use intune_container::{backend, config::Config, display::DisplayInfo, lock::LifecycleLock};
+    use crate::intune_embedded::{POWEROFF_WAIT, await_our_container_to_settle, live_leader_state};
+    use intune_container::{backend, config::Config, lock::LifecycleLock};
 
     let _lock = LifecycleLock::acquire().context("take intune-container's lifecycle lock")?;
     match keyring_now()? {
@@ -915,9 +1123,52 @@ fn restart_container() -> Result<Restart> {
     }
 
     let mut config = Config::load().context("load intune-container's configuration")?;
+    // The leader this repair asks to power off, recorded before the stop clears its state.
+    let mut stopped = None;
     if backend::is_running(&config) {
+        stopped = live_leader_state();
         backend::stop(&config).context("stop the container")?;
     }
+    if !await_our_container_to_settle(stopped.as_ref(), POWEROFF_WAIT) {
+        let what = if stopped.is_some() {
+            format!("was asked to power off and was still powering off {} s later", POWEROFF_WAIT.as_secs())
+        } else {
+            format!(
+                "was still going down after a wait of {} s — its supervisor holds the volume with \
+                 no leader named",
+                POWEROFF_WAIT.as_secs()
+            )
+        };
+        bail!(
+            "the Intune container {what}. Not starting another over it, which would boot nothing; \
+             it can be started once it has gone"
+        );
+    }
+    boot_headless(&mut config)?;
+    Ok(Restart::Done)
+}
+
+/// Boot the container headless, through the crate, WITHOUT updating its image. The caller holds
+/// the lifecycle lock; this is the container half of `ops::start` without the browser half (see
+/// the module header), shared by the repair and the embedded boot helper.
+///
+/// THE BOOT NEVER UPDATES THE IMAGE. `backend::start` checks the registry and, when the tag has
+/// moved, deletes the rootfs and pulls the whole image before it boots — with `auto_update` on,
+/// which is the crate's default. In a repair that would happen with the container already
+/// stopped, under [`REPAIR_TIMEOUT`], over a registry call with no deadline: a repair killed in
+/// the middle leaves no container at all. In an embedded boot it would be a 1.7 GB pull on every
+/// pod start the image tag had moved since, under the boot's own bound. So the boot is handed a
+/// COPY of the configuration with updates off, and the user's own setting is never written back
+/// changed; the next ordinary `intune-container start` updates as it always did.
+///
+/// The display is a fixed headless one rather than `DisplayInfo::detect()`: `backend::start`
+/// does not read it, and detection would spawn `xauth` when the manager's environment carries
+/// a `DISPLAY`. Headless is also what `ops::start` boots, so `display_forwarding` is cleared the
+/// same way it does — on the original configuration, so the copy's `auto_update` never reaches
+/// the disk.
+pub(crate) fn boot_headless(config: &mut intune_container::config::Config) -> Result<()> {
+    use intune_container::{backend, display::DisplayInfo};
+
     let headless = DisplayInfo {
         wayland_socket: None,
         x11_display: None,
@@ -931,7 +1182,7 @@ fn restart_container() -> Result<Restart> {
         config.display_forwarding = false;
         config.save().context("record the container as headless")?;
     }
-    Ok(Restart::Done)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1009,6 +1260,13 @@ mod tests {
             parse_reexec(&args(&["__teams-lite-repair-broker"])),
             Some(Ok(Reexec::RepairBroker))
         );
+        // The embedded container's own three, spelled as the image and the guard spell them.
+        assert_eq!(parse_reexec(&args(&["__teams-lite-intune-boot"])), Some(Ok(Reexec::IntuneBoot)));
+        assert_eq!(parse_reexec(&args(&["__teams-lite-intune-stop"])), Some(Ok(Reexec::IntuneStop)));
+        assert_eq!(
+            parse_reexec(&args(&["__teams-lite-intune-portal"])),
+            Some(Ok(Reexec::IntunePortal))
+        );
     }
 
     #[test]
@@ -1020,6 +1278,61 @@ mod tests {
             parse_reexec(&args(&["__teams-lite-repair-broker", "--now"])),
             Some(Err(_))
         ));
+        for bare in ["__teams-lite-intune-boot", "__teams-lite-intune-stop", "__teams-lite-intune-portal"] {
+            assert!(matches!(parse_reexec(&args(&[bare, "--force"])), Some(Err(_))), "{bare}");
+            assert!(matches!(parse_reexec(&args(&[bare, ""])), Some(Err(_))), "{bare} with an empty one");
+        }
+    }
+
+    // A helper's argument that is not UTF-8 is a refusal of THAT helper, never an ordinary
+    // start — which would boot a whole second backend.
+    #[test]
+    fn a_helper_with_an_argument_that_is_not_utf8_is_refused_not_started_as_a_backend() {
+        use std::os::unix::ffi::OsStringExt;
+        for bare in ["__teams-lite-intune-boot", "__teams-lite-intune-stop", "__teams-lite-intune-portal"] {
+            let argv = vec![OsString::from("server"), OsString::from(bare), OsString::from_vec(vec![0xff])];
+            assert!(matches!(parse_reexec(&argv), Some(Err(_))), "{bare}");
+        }
+    }
+
+    // A refusal of an embedded helper body happens before it touches anything, and this test
+    // process is in host mode (nothing here sets TEAMS_LITE_INTUNE_MODE), so each answers 2 —
+    // the exit code that says "refused, nothing done" — without reaching the crate.
+    #[test]
+    fn the_embedded_helpers_refuse_to_act_outside_embedded_mode() {
+        assert!(!crate::intune_embedded::embedded(), "the test process declares no mode");
+        assert_eq!(crate::intune_embedded::boot_main(), 2);
+        assert_eq!(crate::intune_embedded::stop_main(), 2);
+        assert_eq!(crate::intune_embedded::portal_main(), 2);
+    }
+
+    // The boot and the portal act as the user's device; a read-only process never runs either.
+    // Run in a child process with the mode and the read-only flag set, because both are read
+    // once per process and a test that set them here would race every other test.
+    #[test]
+    fn the_boot_and_the_portal_refuse_a_read_only_process() {
+        if std::env::var_os("TEAMS_LITE_HELPER_READ_ONLY_TEST").is_some() {
+            assert!(crate::intune_embedded::embedded() && crate::read_only());
+            assert_eq!(crate::intune_embedded::boot_main(), 2, "the boot refuses read-only");
+            assert_eq!(crate::intune_embedded::portal_main(), 2, "the portal refuses read-only");
+            return;
+        }
+        // A throwaway data dir, so that even a refusal that regressed could only ever reach an
+        // empty one — never the user's own intune-container state.
+        let dir = std::env::temp_dir().join(format!("teams-lite-ro-helper-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "intune::tests::the_boot_and_the_portal_refuse_a_read_only_process", "--nocapture"])
+            .env("TEAMS_LITE_HELPER_READ_ONLY_TEST", "1")
+            .env("TEAMS_LITE_READ_ONLY", "1")
+            .env(crate::intune_embedded::MODE_ENV, "embedded")
+            .env("XDG_DATA_HOME", &dir)
+            .status()
+            .unwrap();
+        let untouched = std::fs::read_dir(&dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(status.success(), "the read-only refusals failed in their child process");
+        assert!(untouched, "a refused helper wrote nothing to the data dir");
     }
 
     // The repair's unit must carry the user bus, never an inherited one, and run THIS binary's
@@ -1133,92 +1446,303 @@ mod tests {
         }
     }
 
-    // The two halves of "a repair never pulls the image": the boot gets a copy with updates
-    // off, and the copy is never what is saved.
+    // The two halves of "a boot never pulls the image": the boot gets a copy with updates off,
+    // and the copy is never what is saved — in ONE function, which the repair and the embedded
+    // boot helper both call (the helper's own test checks it calls it rather than a copy).
     #[test]
     fn a_repair_boots_without_an_image_update_and_never_saves_that() {
         let source = include_str!("intune.rs");
-        let body = source
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let fn_body = |signature: &str| {
+            code.split(signature)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{signature}"))
+                .split("\n}\n")
+                .next()
+                .expect("the function ends")
+                .to_string()
+        };
+        let repair = fn_body("fn restart_container() -> Result<Restart> {");
+        let lock = repair.find("LifecycleLock::acquire()").expect("takes the lock");
+        let recheck = repair.find("keyring_now()").expect("asks the keyring again");
+        let stop = repair.find("backend::stop(").expect("stops");
+        let boot = repair.find("boot_headless(&mut config)").expect("boots through the shared boot");
+        assert!(
+            lock < recheck && recheck < stop && stop < boot,
+            "the keyring is asked again inside the lock, before the stop, and the boot comes last"
+        );
+        assert!(!repair.contains("backend::start("), "the boot is never re-spelled in the repair");
+
+        let shared =
+            fn_body("pub(crate) fn boot_headless(config: &mut intune_container::config::Config) -> Result<()> {");
+        assert!(shared.contains("boot.auto_update = false;"));
+        assert!(shared.contains("backend::start(&mut boot,"), "the boot runs from the copy");
+        assert!(!shared.contains("boot.save("), "the copy with updates off is never saved");
+        assert_eq!(code.matches("backend::start(").count(), 1, "one boot in this module");
+    }
+
+    // The crate's `backend::stop` answers Ok after twenty seconds whether or not the leader went,
+    // and a start over a container still powering off boots nothing — the old supervisor holds its
+    // lock, the new one refuses to boot a duplicate, the start gives up, and the old container then
+    // goes down with nothing running behind it. The embedded boot's own restart waits that poweroff
+    // out; the repair's identical stop-then-start must too, with the leader recorded BEFORE the
+    // stop (the crate clears its state after), the wait between the stop and the boot, and a
+    // container still going down said as a failure that started nothing. And the bound every
+    // repair runs under has room for that wait.
+    #[test]
+    fn a_repair_waits_for_its_own_poweroff_before_it_starts() {
+        let source = include_str!("intune.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let body = code
             .split("fn restart_container() -> Result<Restart> {")
             .nth(1)
             .expect("restart_container")
             .split("\n}\n")
             .next()
-            .expect("restart_container ends");
-        let lock = body.find("LifecycleLock::acquire()").expect("takes the lock");
-        let recheck = body.find("keyring_now()").expect("asks the keyring again");
-        let stop = body.find("backend::stop(").expect("stops");
-        assert!(lock < recheck && recheck < stop, "the keyring is asked again inside the lock, before the stop");
-        assert!(body.contains("boot.auto_update = false;"));
-        assert!(body.contains("backend::start(&mut boot,"), "the boot runs from the copy");
-        assert!(!body.contains("boot.save("), "the copy with updates off is never saved");
+            .expect("the function ends");
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing `{needle}`"));
+        let running = at("if backend::is_running(&config) {");
+        let recorded = at("stopped = live_leader_state();");
+        let stop = at("backend::stop(&config)");
+        let settle = at("if !await_our_container_to_settle(stopped.as_ref(), POWEROFF_WAIT) {");
+        let boot = at("boot_headless(&mut config)?");
+        assert!(
+            running < recorded && recorded < stop && stop < settle && settle < boot,
+            "recorded before the stop, the stop waited out, and only then the boot"
+        );
+        let refused = &body[settle..boot];
+        assert!(refused.contains("bail!("), "a container still going down ends the repair before the boot");
+        assert!(refused.contains("still powering off") && refused.contains("still going down"), "and says what is true");
+        assert_eq!(body.matches("boot_headless(").count(), 1, "one boot, after the wait");
+
+        // The one settle, shared with the embedded boot rather than re-spelled here.
+        assert!(!body.contains("std::thread::sleep"), "the wait is intune_embedded's own");
+        assert_eq!(
+            REPAIR_TIMEOUT,
+            REPAIR_WORK + crate::intune_embedded::POWEROFF_WAIT,
+            "the repair's bound holds its work and the poweroff wait"
+        );
+        let repair = code
+            .split("fn repair_main() -> i32 {")
+            .nth(1)
+            .expect("repair_main")
+            .split("\n}\n")
+            .next()
+            .expect("the function ends");
+        assert!(
+            repair.contains("arm_watchdog(\"broker-repair\", \"the repair\", REPAIR_TIMEOUT)"),
+            "the embedded repair's watchdog is that bound"
+        );
+        let props = oneshot_properties(&["/opt/teams/server", REPAIR_SUBCOMMAND], "unix:path=/run/user/1000/bus");
+        let timeout = props.iter().find(|(key, _)| *key == "TimeoutStartUSec").expect("a start timeout");
+        assert!(
+            timeout.1.to_string().contains(&REPAIR_TIMEOUT.as_micros().to_string()),
+            "and so is the host unit's TimeoutStartUSec"
+        );
     }
 
-    // The image sees the intune-container state (it follows the bus from it) and still must not
-    // offer a repair: the repair is the host's systemd running a path only the image holds.
+    // HOST mode in the image: it sees the intune-container state (it follows the bus from it)
+    // and still must not offer a repair — the repair is the host's systemd running a path only
+    // the image holds.
     #[test]
-    fn the_image_offers_no_repair_and_says_what_to_do_instead() {
-        assert!(repair_may_run(false, false, true), "a host install that may repair, does");
-        assert!(!repair_may_run(false, true, true), "the image never does, though it sees the state");
-        assert!(!repair_may_run(true, false, true), "nor does a read-only backend");
-        assert!(!repair_may_run(false, false, false), "nor a host with nothing to restart");
+    fn the_host_mode_image_offers_no_repair_and_says_what_to_do_instead() {
+        let host = false;
+        assert!(repair_may_run(host, false, false, true), "a host install that may repair, does");
+        assert!(!repair_may_run(host, false, true, true), "the image never does, though it sees the state");
+        assert!(!repair_may_run(host, true, false, true), "nor does a read-only backend");
+        assert!(!repair_may_run(host, false, false, false), "nor a host with nothing to restart");
+        assert!(repair_is_blocked(host, false, true, true), "the image says why");
+        assert!(!repair_is_blocked(host, false, false, true), "a host install has nothing to say");
+        assert!(!repair_is_blocked(host, true, true, true), "a read-only backend refuses by design");
         // The sentence is the remedy, so it has to name both of the real ones.
         assert!(IMAGE_REPAIR_BLOCKER.contains("intune-container stop && intune-container start"));
         assert!(IMAGE_REPAIR_BLOCKER.contains("installed on the host"));
     }
 
-    // Everything the image needs to reach the broker is a line in a file nothing else reads, and
-    // each one fails SILENTLY when it goes: no pid namespace and the bus is not there, root and
-    // the handshake is refused, a file mount and the leader goes stale — the app then shows no
-    // chats with nothing to say why. So the files are held to the rules here, beside the code
-    // they serve.
+    // EMBEDDED mode in the image: the container is the pod's own and so is the repair — the
+    // image is no reason to refuse, and there is no blocker sentence to show.
+    #[test]
+    fn the_embedded_image_repairs_its_own_container() {
+        let embedded = true;
+        assert!(repair_may_run(embedded, false, true, true), "the image repairs its own container");
+        assert!(repair_may_run(embedded, false, false, true), "and so would any embedded install");
+        assert!(!repair_may_run(embedded, true, true, true), "never read-only");
+        assert!(!repair_may_run(embedded, false, true, false), "nothing to restart before the first boot");
+        for read_only in [false, true] {
+            for in_image in [false, true] {
+                for initialized in [false, true] {
+                    assert!(!repair_is_blocked(embedded, read_only, in_image, initialized));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_repair_names_the_log_it_writes_to() {
+        assert!(!crate::intune_embedded::embedded(), "the test process declares no mode");
+        assert!(repair_log_hint().contains(REPAIR_LOG_ID), "the host journal identifier");
+    }
+
+    /// A packaging file, read at RUN time rather than with `include_str!`: these are written by
+    /// another part of the tree, and a file that is missing or renamed must fail this one test
+    /// with its name, not stop every test in the crate from compiling.
+    fn packaging(relative: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/docker").join(relative);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The lines of a file that are not comments, trimmed.
+    fn live(text: &str) -> Vec<&str> {
+        text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect()
+    }
+
+    /// The compose list entry — its `- …` line and every line indented under it — that mentions
+    /// `needle`, in the long syntax (`- type: volume` / `source:` / `target:`) or the short one
+    /// (`- source:target[:ro]`). Comments are not entries.
+    fn compose_entry(compose: &str, needle: &str) -> Option<String> {
+        let lines: Vec<&str> = compose
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+            .collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("- ") {
+                continue;
+            }
+            let base = indent(line);
+            let entry: Vec<&str> = std::iter::once(*line)
+                .chain(lines[i + 1..].iter().copied().take_while(|l| indent(l) > base))
+                .collect();
+            let entry = entry.join("\n");
+            if entry.contains(needle) {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
+    const INTUNE_STATE: &str = "/home/teams/.local/share/intune-container";
+
+    // Everything the image needs is a line in a file nothing else reads, and each one fails
+    // SILENTLY when it goes: in embedded mode a missing id mapper or an undelegated cgroup and
+    // the inner container never boots, a host network and its `:99` collides with the user's
+    // own; in host mode no pid namespace and the bus is not there, root and the handshake is
+    // refused, a file mount and the leader goes stale — the app then shows no chats with nothing
+    // to say why. So the files are held to the rules here, beside the code they serve.
     #[test]
     fn the_image_is_built_to_reach_the_broker_and_to_stay_its_own_install() {
-        let dockerfile = include_str!("../packaging/docker/Dockerfile");
-        let compose = include_str!("../packaging/docker/compose.yaml");
-        let entrypoint = include_str!("../packaging/docker/entrypoint.sh");
-        let live = |text: &'static str| -> Vec<&'static str> {
-            text.lines().map(str::trim).filter(|l| !l.starts_with('#')).collect()
-        };
+        let dockerfile = packaging("Dockerfile");
+        let entrypoint = packaging("entrypoint.sh");
+        let docker = live(&dockerfile);
+        let entry = live(&entrypoint);
 
-        // The image declares itself under the name this module reads.
+        // THE IMAGE: embedded by default, declared under the names this crate reads.
+        let mode = crate::intune_embedded::MODE_ENV;
+        assert!(docker.iter().any(|l| l.contains(&format!("{mode}=embedded"))), "the Dockerfile sets {mode}=embedded");
         assert!(
-            live(dockerfile).iter().any(|l| l.contains(&format!("{CONTAINER_IMAGE_ENV}=1"))),
-            "the Dockerfile must set {CONTAINER_IMAGE_ENV}=1"
+            docker.iter().any(|l| l.contains(&format!("{CONTAINER_IMAGE_ENV}=1"))),
+            "the Dockerfile sets {CONTAINER_IMAGE_ENV}=1"
         );
-        // It runs as the host user it was built for, never as root.
-        let user = live(dockerfile).into_iter().rfind(|l| l.starts_with("USER ")).expect("a USER");
-        assert_ne!(user, "USER root");
-        assert!(dockerfile.contains("ARG UID=") && dockerfile.contains("useradd -o -u \"${UID}\""));
+        // The rootless runtime's id range: the mappers, with FILE capabilities (setuid ones are
+        // refused under Docker — measured), and a subordinate range for the runtime user.
+        assert!(docker.iter().any(|l| l.contains("uidmap")), "the id mappers are installed");
+        assert!(docker.iter().any(|l| l.contains("setcap cap_setuid=ep")), "newuidmap carries a file capability");
+        assert!(docker.iter().any(|l| l.contains("/etc/subuid")), "the runtime user has a subordinate range");
+        // The backend itself at a fixed path, for the entrypoint's stop and the self-test's boot.
+        assert!(docker.iter().any(|l| l.contains("/usr/local/lib/teams-lite/server")));
+        // Built for one host user's uid still (host mode needs it; embedded needs the volumes').
+        assert!(docker.iter().any(|l| l.starts_with("ARG UID")), "the UID build argument stays");
+        // The entrypoint starts as ROOT and drops: a `USER` the final stage ends on would stop
+        // it from delegating the cgroup at all.
+        let user = docker.iter().rfind(|l| l.starts_with("USER "));
+        assert!(user.is_none_or(|u| *u == "USER root"), "the image must not end on {user:?}");
 
-        // The host pid namespace (the bus is a /proc path) and network namespace (the web front
-        // stays on loopback, and the broker's display is an abstract socket).
-        let compose_lines = live(compose);
-        assert!(compose_lines.contains(&"pid: host"));
-        assert!(compose_lines.contains(&"network_mode: host"));
+        // THE ENTRYPOINT: delegate as root, drop with setpriv — never with no-new-privs, which
+        // would void the mappers' file capabilities — and stop the inner container on the way out.
+        assert!(entry.iter().any(|l| l.contains("setpriv")), "the entrypoint drops with setpriv");
+        assert!(!entry.iter().any(|l| l.contains("--no-new-privs")), "no-new-privs defeats the file capabilities");
+        assert!(entry.iter().any(|l| l.contains("cgroup.procs")), "the cgroup is delegated");
+        assert!(entry.iter().any(|l| l.contains("trap")), "TERM is trapped");
         assert!(
-            !compose_lines.iter().any(|l| l.contains("TEAMS_WEB_HOST") || l.starts_with("ports:")),
-            "the web front serves the write token, so it stays on 127.0.0.1 and is never published"
+            entry.iter().any(|l| l.contains(crate::intune_embedded::STOP_SUBCOMMAND)),
+            "the trap powers the inner container off"
         );
-        // The intune-container state is a READ-ONLY DIRECTORY that must already exist.
-        let mount = compose
-            .split("target: /home/teams/.local/share/intune-container")
-            .nth(1)
-            .expect("the intune-container state is mounted")
-            .split("- type:")
-            .next()
-            .unwrap();
-        assert!(mount.contains("read_only: true"));
-        assert!(mount.contains("create_host_path: false"));
-
-        // Ports of its own: in the host's network namespace the launcher would otherwise ATTACH
-        // to the always-on service on 19420, and share its live feed's endpoint id on one store.
-        assert!(entrypoint.contains("TEAMS_LITE_PORT=\"${TEAMS_LITE_PORT:-19423}\""));
-        assert!(entrypoint.contains("TEAMS_WEB_PORT=\"${TEAMS_WEB_PORT:-19443}\""));
+        // The intune volume holds a rootfs owned by SUBORDINATE ids: a recursive chown would
+        // hand every file in it to one uid and the container would never boot again.
+        assert!(!entry.iter().any(|l| l.contains("chown -R")), "never a recursive chown");
+        // Ports of its own: the launcher would otherwise ATTACH to an install already listening,
+        // and share its live feed's endpoint id on one store. A read-only run keeps 19430.
+        assert!(entrypoint.contains("19423") && entrypoint.contains("19443"));
         for taken in ["19420", "19421", "19422", "19430", "19440", "19441", "19442"] {
             assert!(!entrypoint.contains(&format!(":-{taken}}}")), "{taken} belongs to another install");
         }
-        // A read-only run keeps the read-only backend's own port.
-        assert!(entrypoint.contains("if [ \"${TEAMS_LITE_READ_ONLY:-}\" != 1 ]; then"));
+        assert!(entrypoint.contains("TEAMS_LITE_READ_ONLY"), "a read-only run keeps the read-only port");
+
+        // EMBEDDED COMPOSE (the default): its own namespaces, unconfined enough to boot systemd.
+        let compose = packaging("compose.yaml");
+        let embedded = live(&compose);
+        assert!(
+            !embedded.iter().any(|l| (l.starts_with("pid:") || l.starts_with("network_mode:")) && l.contains("host")),
+            "the embedded container runs in namespaces of its own — in the host's network its `:99` \
+             collides with the user's own Intune container"
+        );
+        for option in ["seccomp=unconfined", "systempaths=unconfined"] {
+            assert!(embedded.iter().any(|l| l.contains(option)), "compose.yaml carries {option}");
+        }
+        // A bridge network: the front binds 0.0.0.0 inside, and the published port's 127.0.0.1
+        // prefix is what keeps the write token it serves off the LAN.
+        assert!(embedded.iter().any(|l| l.contains("TEAMS_WEB_HOST")));
+        assert!(embedded.iter().any(|l| l.contains("127.0.0.1:19443:19443")));
+        assert!(
+            !embedded.iter().any(|l| l.contains("19443:19443") && !l.contains("127.0.0.1:19443:19443")),
+            "the web port is published on loopback only"
+        );
+        assert!(embedded.iter().any(|l| l.starts_with("stop_grace_period")), "time for the graceful stop");
+        // The container's state is a READ-WRITE named volume of its own.
+        let intune = compose_entry(&compose, INTUNE_STATE).expect("compose.yaml mounts the intune state");
+        assert!(
+            intune.contains("source: intune") || intune.trim_start().starts_with("- intune:"),
+            "the intune state is the `intune` volume: {intune}"
+        );
+        assert!(
+            !intune.contains("read_only: true") && !intune.trim_end().ends_with(":ro"),
+            "the embedded container writes its own state: {intune}"
+        );
+        assert!(
+            embedded.iter().any(|l| *l == "intune:" || l.starts_with("intune: ")),
+            "the `intune` volume is declared"
+        );
+
+        // HOST-BROKER COMPOSE: today's shape, declared as host mode.
+        let host = packaging("compose.host-broker.yaml");
+        let host_lines = live(&host);
+        assert!(host_lines.contains(&"pid: host"), "the bus is a /proc path of the host's");
+        assert!(host_lines.contains(&"network_mode: host"), "loopback front, abstract display socket");
+        assert!(
+            host_lines.iter().any(|l| (l.starts_with(&format!("{mode}:")) || l.starts_with(&format!("- {mode}=")))
+                && l.contains("host")),
+            "compose.host-broker.yaml declares {mode}: host"
+        );
+        assert!(
+            !host_lines.iter().any(|l| l.contains("TEAMS_WEB_HOST") || l.starts_with("ports:")),
+            "in the host's network the front stays on 127.0.0.1 and is never published"
+        );
+        // The intune-container state is a READ-ONLY DIRECTORY that must already exist.
+        let state = compose_entry(&host, INTUNE_STATE).expect("compose.host-broker.yaml mounts the state");
+        assert!(state.contains("read_only: true"), "the user's state is read, never written: {state}");
+        assert!(state.contains("create_host_path: false"), "a missing state is an error: {state}");
+    }
+
+    #[test]
+    fn a_compose_entry_is_found_in_either_syntax() {
+        let long = "volumes:\n  - type: volume\n    source: intune\n    target: /x\n  - type: bind\n    source: /y\n    target: /z\n";
+        assert_eq!(
+            compose_entry(long, "/x").as_deref(),
+            Some("  - type: volume\n    source: intune\n    target: /x")
+        );
+        assert_eq!(compose_entry(long, "/z").as_deref(), Some("  - type: bind\n    source: /y\n    target: /z"));
+        let short = "volumes:\n  # - nope:/x\n  - intune:/x:ro\n";
+        assert_eq!(compose_entry(short, "/x").as_deref(), Some("  - intune:/x:ro"));
+        assert_eq!(compose_entry(short, "/absent"), None);
     }
 }

@@ -139,8 +139,18 @@ It appeared **within 2 s** of the call. Four facts follow, and each is a rule in
   `/proc/net/unix` listed a listening `@/tmp/.X11-unix/X99`, because the container, its broker
   and the host all report one `net:[…]` namespace. So the abstract socket is the one both sides
   reach whatever the container's mount layout is this week, and it is also why teams-lite's
-  container image runs in the host's network namespace (packaging/docker/compose.yaml): in a
-  bridge network an abstract socket of the host's does not exist.
+  container image runs in the host's network namespace in its HOST mode
+  (packaging/docker/compose.host-broker.yaml): in a bridge network an abstract socket of the
+  host's does not exist. The image's default EMBEDDED mode is the mirror image of the same fact
+  (§ 5): there the Intune container is teams-lite's own and shares teams-lite's network
+  namespace, so its `:99` is in that namespace from the start — and a bridge network is not a
+  cost but a requirement, because in the host's the two `:99`s would collide. A check for a
+  `:99` already bound cannot enforce that alone (at boot the container usually starts before the
+  user's own `:99` is up), so the image's entrypoint refuses the host's network namespace ITSELF,
+  by the kernel's fixed inode number for its INITIAL one — on a kernel that fixes one, as this
+  machine's 7.3 does; under a microVM runtime that namespace is the guest's own, which
+  `TEAMS_LITE_NETNS_IS_OWN=1` declares — and AGENTS.md § Running teams-lite in a container image
+  has the rest.
 
 ### The pending call, and how to end it
 
@@ -164,6 +174,30 @@ It appeared **within 2 s** of the call. Four facts follow, and each is a rule in
   and the session stayed live for the whole deadline, so no new sign-in could be started for ten
   minutes. So the run is also TOLD to stop, which drops the D-Bus call — the way `agent_stop`
   drops an agent run.
+- **The close is best effort; the stop is not.** The window a Cancel closes is the one the
+  session last SAW, and the broker destroys and replaces its window between steps — so a Cancel
+  pressed while the page was blank between the password and the number sent `WM_DELETE_WINDOW`
+  to a window that no longer existed, and X answered `BadWindow`. That error used to return before
+  the run was told, with the session already marked as closing: a spinner with no Cancel, nothing
+  served, and no new sign-in for the full ten minutes. A failed close is now said and nothing more
+  (`close_best_effort`), the run is told on every path, and its own take-back closes whichever
+  window is current. `a_close_that_fails_never_keeps_the_stop_from_the_run` pins it.
+- **A close that did not land is NOT free, and the take-back alone does not make it so.** It was
+  written here that it was, because the run closes "whichever window is current" — which holds only
+  if one IS current, and the failed close is exactly the case where none is: the broker has
+  destroyed the password page and not yet drawn the number-matching one. The take-back runs once,
+  finds nothing, and dropping the D-Bus call tells the broker nothing (there is no safe cancel,
+  above, and its window was seen left standing when the call that asked for it went away). So the
+  broker could go on to draw the number page — and send the Authenticator prompt — with nobody
+  watching it and the turn already released, and the next "Sign in here" would serve that stale
+  flow whose reply nobody awaits. The same holds for a Cancel during `starting`, call out and no
+  window yet. So after a Cancel that DROPPED the call and closed nothing, the run KEEPS the turn
+  and watches the broker's display for `CANCEL_SETTLE` (15 s — the first window appeared within
+  2 s of the call, above, and it is the portal helper's own settle for a portal on its way),
+  closes the first window that appears, and only then releases the turn. What is promised is that
+  bound and no more: a page the broker draws later than that is left, and what the settle costs is
+  a session that says it is closing for up to that long. How long the broker takes between two of
+  its pages is NOT measured; the bound rests on the first window's 2 s.
 - **A closed window ends the pending call as a NAMED cancellation**, which is what lets the
   app tell "the reader gave up" from "the sign-in failed":
 
@@ -229,3 +263,111 @@ Said plainly, because the parts that are measured are measured hard:
 - **The long deadline has not been hit in anger.** `SIGNIN_DEADLINE` is ours and generous;
   whether the bus daemon cuts a pending reply before it is a question about the daemon's
   `reply_timeout`, whose default this machine's `session.conf` does not state.
+- **Everything in § 5 is unverified against the tenant**, and that section says so item by item.
+
+## 5. The same window ENROLLS the self-contained image's own Intune container
+
+teams-lite's container image boots an Intune container of its OWN by default
+(`TEAMS_LITE_INTUNE_MODE=embedded`, `src/intune_embedded.rs`; AGENTS.md § Running teams-lite in a
+container image). A container nobody has enrolled holds no device registration, and then nothing
+the broker does can sign anybody in on it: the sign-in above needs an account to name, and there
+is none. What enrolls a device is the **Intune portal** (`intune-portal`), so the served sign-in
+gained a second KIND of session (`signin::Kind::Enroll`), started by its own RPC
+(`intune_enroll`, a `MACHINE_METHODS` entry) and served through the same four
+(`signin_status` / `signin_frame` / `signin_input` / `signin_cancel`). Nothing in this section has
+been run against the tenant; what it rests on is the crate's own portal launch and the facts of
+§ 3, which carry over unchanged.
+
+**The display is NAMED, not read — the one place the rule of § 3 does not hold, and why.** The
+broker's display is read out of its environment because the broker chose it at activation. The
+portal is launched BY US (`ops::portal_open_headless`, a crate call added for an embedding app: it
+launches `intune-portal` on the container's own `:99` with no restart and no host display), on
+`ops::CONTAINER_DISPLAY`, and the session the container publishes to its broker names that same
+display — so the broker's dialogs land beside the portal, and there is nothing to read it out of
+before the portal exists (`xwindow::container_display`). It is reached through its ABSTRACT socket,
+which is in teams-lite's own network namespace because the inner container keeps the outer one's —
+which is exactly why the image must never run in the host's (§ 3, last bullet).
+
+**`:99` is `1280x800x24` at the crate teams-lite pins, and the capture is why.** The crate's
+container display used to be `640x480x16`. `SigninWindow::capture` reads `Z_PIXMAP` at four bytes a
+pixel — what every 24- and 32-bit visual hands over — and refuses anything else, so a 16-bit
+display would have been refused frame by frame; and Entra keeps its desktop layout only from about
+1280x800 (the crate commit's own words). Both moved in the same crate commit (`98f23b7`, on the
+branch teams-lite pins — see Cargo.toml).
+
+**TWO window classes, the topmost wins** (`xwindow::ENROLL_WM_CLASSES` = the broker's
+`microsoft-identity-broker` and the portal's `intune-portal`, through `SigninWindow::find_any`).
+The portal asks the broker for a sign-in, and the broker draws that dialog OVER the portal on the
+same display. There is no window manager there, so a window mapped later is stacked higher, and the
+reader is shown the topmost VIEWABLE match — the dialog while it is up, the portal again once it
+goes. An override-redirect window (a menu, a tooltip, carrying its program's class) is a match only
+when nothing else is. Every other rule of § 3 holds: one window, by class AND map state, never the
+screen.
+
+**The interactive TURN is held for the session's whole life.** A sign-in takes it for one call; a
+portal session takes it before it looks for any window and keeps it until the portal is gone, so the
+automatic rescue (§ 2) stands down meanwhile and every broker dialog on that display is one the
+portal asked for — never the rescue's own window about to be taken back.
+
+**And that is why the account check is made under the turn, interactively.** After an account is
+signed in through the portal, the silent call can still refuse: § 2's measured shape is that the
+silent path only refreshes a resource's own refresh token, and a freshly added account holds none
+for this client yet. That refusal is handed to the rescue, which only TRIES for the turn — and with
+this session holding it, the rescue stood down, the panel said "sign-in is still broken", and
+seconds later the enrollment's follow-up (the turn released by then) minted the token and took the
+banner down under a panel that said the opposite. So the session makes the rescue's own call itself
+— `acquireTokenInteractively`, which redeems the PRT with nobody in front of it, bounded at 30 s —
+takes back any window that call raised, releases the turn, and only then asks the ordinary funnel,
+which records the broker as healthy. Whether a fresh account really does refuse the silent call is
+not measured; the order is right either way.
+
+**A CANCEL IS CARRIED OUT BY THE PORTAL'S HELPER, and the session waits for it.** The portal
+belongs to a helper process in a session of its own (`server __teams-lite-intune-portal`), so the
+`WM_DELETE_WINDOW` of § 3 is not enough: during `starting` there is no window yet, and a Cancel that
+only closed one left the helper to open the portal a moment later with nobody behind it, holding
+the one helper slot — every enrollment, repair and boot refused — for half an hour. So:
+
+- a Cancel marks the session as closing at once (nothing is served from then on, and the page says
+  "Closing the Intune portal…"), and is delivered with `Notify::notify_one`, never
+  `notify_waiters` — the run may still be waiting for the turn, and `notify_waiters` stores nothing
+  for a waiter that does not exist yet;
+- the run sends the helper SIGTERM (`HelperTerminator::terminate`, which re-checks the pid's own
+  command line first and refuses any helper but the portal's — a boot or a repair has no handler,
+  and would die mid-work), and the helper answers by closing the portal the crate's own way
+  (`ops::portal_stop`, a TERM), watching for up to 15 s to close one that was still on its way;
+- the session waits up to 45 s for the helper to EXIT, then — under the turn — closes whatever
+  broker dialog is left, and only then settles. A helper still running after 45 s is said as what it
+  is ("asked to close and has not finished closing yet"), and the backend follows it to its end;
+- a helper whose SESSION is gone — the backend restarted under it, which the helper survives by
+  design — can be served and cancelled by nobody, so a backend that finds one holding the slot with
+  no enrollment session of its own asks it to close at once (by the pid it read, re-checked against
+  that pid's own command line) and follows it to its end, rather than leaving every page on "the
+  portal is still open" for half an hour.
+
+**How it ended is the helper's word, then the purpose's.** The portal helper exits `0` when the
+portal ran and ended (closed by the reader or on request), `3` when IT closed the portal at its own
+30-minute deadline (`PORTAL_TIMED_OUT` — told apart by the helper, because the session's clock
+starts before the portal appears), `1` when it could not be opened, `2` when it refused to act.
+Then what the session was FOR decides over how the portal closed: an enrollment worked when the
+container holds a registration (`backup::has_device_registration`), whatever button closed it. The
+registration lands in the middle of the portal's steps, so the page is told as soon as it exists
+and the control becomes "Close the portal" — the READER closes it, so the portal's later steps (a
+compliance check, the policies) are never cut off.
+
+**An enrolled container whose broker holds NO account is the other purpose**
+(`signin::PortalPurpose::Account`). An imported backup whose account did not come along, or an
+account removed in the portal, leaves a device that is registered and signs nobody in — the
+host's remedy ("sign in to Intune again") names a tool the image does not have, and the banner used
+to fall through to exactly that. The portal is how an account is added on an enrolled device, so
+the same session opens it for that (`broker_status.intune.can_portal_sign_in`, decided by the
+backend's `portal_purpose`), and the BROKER answering for the scope the app is broken on — asked
+once the portal has closed, under the session's turn as above, bounded at 30 s — is what says it
+worked.
+
+What is UNVERIFIED, all of it: the portal has never been driven through these frames; nobody has
+watched the broker's dialog land over it on `:99` inside a container; whether the portal QUITS when
+asked to close (rather than staying resident) is unmeasured — the helper's own deadline is what
+bounds it if not; an enrollment carried through to a registration, and an account signed in through
+the portal, have never been done; and the 1280x800 layout claim is the crate commit's, not a
+measurement here. The mock (`web/mock/server.ts`) draws the whole flow, and
+`cd web && bun run preview -- --out /tmp/si --signin` captures it.

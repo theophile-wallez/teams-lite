@@ -1,0 +1,276 @@
+#!/bin/sh
+# Prove the EMBEDDED Intune boot inside the real image — with no backend, no sign-in, no
+# enrollment, and nothing that can send:
+#
+#     docker run --rm \
+#       --security-opt seccomp=unconfined --security-opt systempaths=unconfined \
+#       --security-opt apparmor=unconfined \
+#       --entrypoint teams-lite-intune-selftest teams-lite:local
+#
+# It runs the entrypoint's OWN root stage (it sources packaging/docker/entrypoint.sh for it, so
+# what is proved is what a real start does rather than a copy of it), drops to the runtime user,
+# and then does exactly what the backend's boot helper is for: `server __teams-lite-intune-boot`
+# (set up — the first run downloads about 1.7 GB — then start), `teams-lite-intune-status`, a
+# wait for the identity broker's bus socket, and `server __teams-lite-intune-stop`. One summary
+# line says how it went; the exit status is 0 or 1, and 2 for a run it refuses to make.
+#
+# IT CAN NEVER TOUCH A REAL ENROLLMENT, OR THE USER'S OWN INTUNE CONTAINER, and these refusals
+# make that structural rather than hoped for:
+#
+#   • the Intune data directory must be EMPTY or ABSENT — a throwaway volume or none at all. An
+#     enrolled container's directory always holds its rootfs and its persist/, so a run with the
+#     user's own volume mounted refuses before it writes a byte. (The automation guard allows
+#     this command only with no volume on that directory, and refuses the same run with one.)
+#   • TEAMS_LITE_INTUNE_IMPORT is refused: importing an enrollment backup here would boot a
+#     second live copy of a real device, which is exactly what a backup must never become.
+#   • host mode and a read-only run are refused: the one has no container of this image's own to
+#     boot, and the other never boots one.
+#   • the HOST's network namespace (`--network host`) is refused, recognised by the kernel's own
+#     fixed number for its INITIAL one (the entrypoint's `network_is_the_hosts`, on a kernel recent
+#     enough to fix it), and so is any network namespace that already holds display :99 — that is
+#     the host's own Intune container's display, or another container's, and the one this test
+#     boots would fight it for the socket: a keyring repair restarting the host's container inside
+#     the test's window could leave the user's broker with no display at all. Under a microVM
+#     runtime (Kata Containers, Firecracker) the initial network namespace is the GUEST kernel's,
+#     the sandbox's own, and TEAMS_LITE_NETNS_IS_OWN=1 declares that — read exactly as the
+#     entrypoint reads it, relaxing that one proof and never the :99 or the IPC checks. Nothing
+#     here can tell such a runtime from the host: the declaration is the operator's, and on a
+#     container that shares the host's kernel it is the very `--network host` this refuses.
+#   • the HOST's IPC namespace (`--ipc host`) is refused, by its number too (fixed on every kernel
+#     since 3.8), and so is a /dev/shm that already holds ANYTHING: the crate binds /dev/shm into
+#     the Intune container, it is where the identity broker keeps the semaphores of its OneAuth and
+#     MSAL locks, and the boot's session setup deletes every held one it sees no process of its
+#     own holding. A container's own /dev/shm is a fresh, EMPTY tmpfs (measured), so one that holds
+#     a file is somebody else's — `--ipc container:<it>`, podman's `--ipc ns:…`, a bind of the
+#     host's — whose broker's locks this test would clear.
+#   • a container where the entrypoint (or another self-test) already runs is refused, by the
+#     entrypoint's own one-copy lock: the test ends with a stop, and beside a live entrypoint that
+#     stop would be of the live Intune container.
+#
+# What it CANNOT see, and the automation guard (which reads the command line) must: an IPC
+# namespace shared with another container — `--ipc container:<it>` or `--ipc ns:…` — whose
+# /dev/shm happens to be empty at the moment the test starts (a broker that has not taken a lock
+# yet), `--network host` on a kernel that does not fix the network namespace's number while the
+# host's :99 is not bound yet, and `--network host` beside a TEAMS_LITE_NETNS_IS_OWN=1 that was
+# declared on a container sharing the host's kernel. None of them leaves anything in this
+# container to tell it from a namespace of its own; the guard refuses a self-test handed
+# `--network host` whatever else the command line says.
+#
+# What it sets is the helper's own environment (`helper_env` in src/intune_embedded.rs, rebuilt
+# from nothing) and nothing more: no port, no token, no launcher — the boot and the stop are the
+# backend binary's hidden subcommands, which open no socket and post nothing.
+set -eu
+
+# The entrypoint, as a library: its functions, none of its `main`. ME is read by its `say`.
+# shellcheck disable=SC2034
+TEAMS_LITE_CONTAINER_LIBRARY=1
+# shellcheck source=packaging/docker/entrypoint.sh
+. /usr/local/bin/teams-lite-container
+# shellcheck disable=SC2034
+ME=teams-lite-intune-selftest
+# The broker's bus appears within seconds of a start on a working container; three minutes is the
+# budget for the slow case (the boot returns once the leader is up, and the session that brings
+# the bus up follows it).
+BUS_WAIT_SECONDS=180
+# The directory the crate binds into the Intune container as its /dev/shm — this container's own.
+SHM_DIR=/dev/shm
+
+# The summary, and the exit status that goes with it.
+pass() { say "PASS — $*"; exit 0; }
+fail() { say "FAIL — $*"; exit 1; }
+refuse() { say "refused: $*"; exit 2; }
+
+# The Intune data directory must hold nothing. `ls -A` lists dot files too, so even a lone
+# lock file left by a container helper counts as a directory in use.
+require_empty_intune_dir() {
+  _dir=$(data_home)/intune-container
+  if [ -e "$_dir" ] && [ ! -d "$_dir" ]; then
+    refuse "$_dir exists and is not a directory"
+  fi
+  if [ -d "$_dir" ] && [ -n "$(ls -A "$_dir" 2>/dev/null)" ]; then
+    refuse "$_dir is not empty — the self-test runs on a throwaway volume or none, so it can never touch an enrollment; run it with no volume on that directory"
+  fi
+}
+
+refuse_what_it_must_not_do() {
+  resolve_mode
+  [ "$INTUNE_MODE" = embedded ] ||
+    refuse "TEAMS_LITE_INTUNE_MODE=${TEAMS_LITE_INTUNE_MODE:-} — the self-test proves the EMBEDDED boot, and host mode has no Intune container of this image's own"
+  if is_read_only; then
+    refuse "TEAMS_LITE_READ_ONLY=1 — a read-only run never boots an Intune container, which is all this test does"
+  fi
+  if [ -n "${TEAMS_LITE_INTUNE_IMPORT:-}" ]; then
+    refuse "TEAMS_LITE_INTUNE_IMPORT is set — the self-test never imports an enrollment: a backup booted here would be a second live copy of a real device"
+  fi
+  if network_is_the_hosts; then
+    refuse "this container runs in the kernel's INITIAL network namespace — the HOST's (--network host) wherever the container shares the host's kernel — and the Intune container this test boots would take the display :99 of the user's own, an abstract socket of that namespace; run the self-test on a network of its own (no --network host). Only under a microVM runtime (Kata Containers, Firecracker), whose guest kernel's initial namespace is the sandbox's own, declare that with TEAMS_LITE_NETNS_IS_OWN=1"
+  fi
+  if display_99_is_held; then
+    refuse "this container's network namespace already holds display :99 ($CONTAINER_DISPLAY_SOCKET in /proc/net/unix) — another Intune container's (the host's under --network host, or another container's under --network container:…), and the one this test boots would fight it for that display; run the self-test on a network of its own"
+  fi
+  if ipc_is_the_hosts; then
+    refuse "this container runs in the HOST's IPC namespace (--ipc host), so its /dev/shm is the host's — where the user's own identity broker keeps the semaphores of its OneAuth and MSAL locks, which the boot would clear as stale; run the self-test with an IPC namespace of its own (no --ipc host)"
+  fi
+  require_private_shm
+  require_empty_intune_dir
+}
+
+# /dev/shm must hold nothing: a container's own is a fresh tmpfs, empty when it starts (measured
+# 2026-11-03 under Docker 29.9: 0 entries in a private and in a `shareable` IPC namespace, the
+# host's own 18 under --ipc host, and the other container's files under --ipc container:<it>). One
+# that holds anything is shared with something else — and the boot binds it into the Intune
+# container, whose session setup clears the identity broker's held lock semaphores it sees no
+# process of its own map. Absent is empty too.
+require_private_shm() {
+  [ -d "$SHM_DIR" ] || return 0
+  if [ -n "$(ls -A "$SHM_DIR" 2>/dev/null)" ]; then
+    refuse "$SHM_DIR already holds files — a container's own /dev/shm is a fresh, empty tmpfs, so this one is shared (--ipc container:…, --ipc ns:…, or a bind of the host's), and the boot would clear the lock semaphores of the identity broker it belongs to; run the self-test with an IPC namespace of its own and no /dev/shm bind"
+  fi
+}
+
+# The leader of the inner container, from the crate's own runtime state (`rootless.json`, pretty-
+# printed JSON, one field per line). Printed empty while there is none.
+inner_leader() {
+  sed -n 's/^[[:space:]]*"leader"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    "$(data_home)/intune-container/rootless.json" 2>/dev/null | head -n 1
+}
+
+# The broker's bus, where the backend dials it (`intune::broker_bus`): the container's root
+# user's session bus, through the leader's own root. A SOCKET, not merely a path: a booting
+# container has a leader before it has a bus.
+wait_for_broker_bus() {
+  _waited=0
+  while [ "$_waited" -lt "$BUS_WAIT_SECONDS" ]; do
+    _leader=$(inner_leader)
+    if [ -n "$_leader" ] && [ -S "/proc/$_leader/root/run/user/0/bus" ]; then
+      BUS_PATH=/proc/$_leader/root/run/user/0/bus
+      return 0
+    fi
+    [ -z "$INTERRUPTED" ] || return 1
+    sleep 2
+    _waited=$((_waited + 2))
+  done
+  return 1
+}
+
+# A signal stops the boot (a throwaway container has nothing worth finishing a download for) and
+# NEVER the stop; either way the stop runs, so the inner container is powered off gracefully
+# before this container goes.
+# shellcheck disable=SC2317 # reached through the trap
+on_selftest_signal() {
+  if [ -n "$INTERRUPTED" ]; then
+    say "$1 while stopping — ignored; the Intune container's graceful stop is not cut short"
+    return 0
+  fi
+  INTERRUPTED=$1
+  say "$1 — abandoning the self-test"
+  if [ -n "$BOOT_PID" ]; then
+    kill -TERM "$BOOT_PID" 2>/dev/null || :
+  fi
+}
+
+# Everything after the root stage, as the runtime user.
+selftest_as_runtime_user() {
+  if [ "$(id -u)" = 0 ]; then
+    refuse "still root after the root stage — the boot runs as $RUNTIME_USER, never as root"
+  fi
+  # The lock the root stage took, inherited on descriptor 9 across the setpriv exec.
+  take_instance_lock
+  refuse_what_it_must_not_do
+  [ -x "$SERVER" ] || fail "$SERVER is missing from this image"
+
+  INTERRUPTED=
+  BOOT_PID=
+  BUS_PATH=
+  trap 'on_selftest_signal TERM' TERM
+  trap 'on_selftest_signal INT' INT
+  # The crate logs through `tracing`; its progress through a 1.7 GB setup is the useful half of a
+  # run that takes minutes, so it is on unless the caller chose otherwise.
+  RUST_LOG=${RUST_LOG:-info}
+  export RUST_LOG
+
+  _started=$(date +%s)
+  say "booting the Intune container ($SERVER $BOOT_SUBCOMMAND) — the first start downloads about 1.7 GB"
+  (exec_helper "$BOOT_SUBCOMMAND") 9>&- &
+  BOOT_PID=$!
+  _boot=0
+  wait_for "$BOOT_PID" || _boot=$?
+  BOOT_PID=
+  _booted=$(date +%s)
+
+  _verdict=
+  if [ -n "$INTERRUPTED" ]; then
+    _verdict="interrupted by $INTERRUPTED during the boot"
+  elif [ "$_boot" != 0 ]; then
+    _verdict="the boot exited $_boot (its reason is above)"
+  else
+    _status=0
+    /usr/local/bin/teams-lite-intune-status 9>&- || _status=$?
+    say "teams-lite-intune-status exited $_status"
+    if wait_for_broker_bus; then
+      say "the identity broker's bus is up: $BUS_PATH"
+      if [ "$_status" != 0 ]; then
+        _status=0
+        /usr/local/bin/teams-lite-intune-status 9>&- || _status=$?
+        say "teams-lite-intune-status exited $_status, now that the bus is up"
+      fi
+    elif [ -n "$INTERRUPTED" ]; then
+      _verdict="interrupted by $INTERRUPTED while waiting for the broker's bus"
+    else
+      _verdict="the container booted, but the identity broker's bus did not appear within ${BUS_WAIT_SECONDS} s"
+    fi
+  fi
+
+  say "stopping the Intune container ($SERVER $STOP_SUBCOMMAND)"
+  _stopping=$(date +%s)
+  (exec_helper "$STOP_SUBCOMMAND") 9>&- &
+  _stop_pid=$!
+  _stop=0
+  wait_for "$_stop_pid" || _stop=$?
+  _stopped=$(date +%s)
+
+  if [ -n "$_verdict" ]; then
+    if [ "$_stop" != 0 ]; then
+      _verdict="$_verdict; the stop exited $_stop too"
+    fi
+    fail "$_verdict"
+  fi
+  [ "$_stop" = 0 ] || fail "the container booted and its broker's bus appeared, but the stop exited $_stop"
+  # The stop's own exit is not the proof: the crate's stop clears the runtime state after its
+  # 20 s wait whether or not the leader went. So the leader the bus was found under must really be
+  # gone — no process left at that pid, or one that is no longer the Intune container's init.
+  _gone_leader=${BUS_PATH#/proc/}
+  _gone_leader=${_gone_leader%%/*}
+  if [ -n "$_gone_leader" ] && [ -d "/proc/$_gone_leader" ] && [ -S "$BUS_PATH" ]; then
+    fail "the stop exited 0, but the Intune container's leader (pid $_gone_leader) is still running"
+  fi
+  pass "the embedded Intune container booted in $((_booted - _started)) s (setup included), its identity broker's bus appeared, and it stopped gracefully in $((_stopped - _stopping)) s"
+}
+
+selftest_main() {
+  case "${TEAMS_LITE_CONTAINER_STAGE:-}" in
+    '') ;;
+    user)
+      unset TEAMS_LITE_CONTAINER_STAGE
+      selftest_as_runtime_user
+      ;;
+    *) refuse "TEAMS_LITE_CONTAINER_STAGE=${TEAMS_LITE_CONTAINER_STAGE} is the entrypoint's own marker, not a setting" ;;
+  esac
+  [ "$#" = 0 ] || refuse "it takes no arguments (given: $*)"
+  supervise_as_pid1
+  # Before anything else, as the entrypoint does: one copy of either script per container.
+  take_instance_lock
+  if [ "$(id -u)" = 0 ]; then
+    # Root's HOME is not where the runtime user's Intune state lives: the refusals below look in
+    # the directory the boot would really use.
+    adopt_runtime_user_env
+    refuse_what_it_must_not_do
+    root_stage
+    drop_to_runtime_user
+  fi
+  refuse_what_it_must_not_do
+  not_root_stage
+  selftest_as_runtime_user
+}
+
+selftest_main "$@"

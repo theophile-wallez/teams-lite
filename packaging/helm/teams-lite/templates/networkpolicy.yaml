@@ -1,0 +1,42 @@
+{{- include "teams-lite.validate" . -}}
+{{- if include "teams-lite.networkPolicyApplies" . }}
+# ON BY DEFAULT: without it every pod in the cluster can reach the web port, and that port hands
+# out the write token. Only the namespaces in `allowNamespaces` and the peers in `from` may reach
+# it; with neither, no other pod may.
+#
+# What no NetworkPolicy can do, said rather than left to be found: traffic from the pod's OWN
+# NODE is always let in — every process of every account on that machine, and every hostNetwork
+# pod running there (Kubernetes documents it, and k3s's kube-router accepts it explicitly). That is
+# also why the kubelet's probes and `kubectl port-forward` still work. Host-level isolation is the
+# node's firewall, or hostNetwork, where the front stays on 127.0.0.1.
+#
+# Egress is left open — the app talks to Microsoft and to the trackers the user configured, and
+# the embedded mode's own Intune container downloads its image and enrolls through the same door.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "teams-lite.fullname" . }}
+  labels:
+    {{- include "teams-lite.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "teams-lite.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  {{- $peers := list }}
+  {{- range .Values.networkPolicy.allowNamespaces }}
+  {{- $peers = append $peers (dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" .))) }}
+  {{- end }}
+  {{- $peers = concat $peers .Values.networkPolicy.from }}
+  {{- if $peers }}
+  ingress:
+    - from:
+        {{- toYaml $peers | nindent 8 }}
+      ports:
+        - port: web
+          protocol: TCP
+  {{- else }}
+  ingress: []
+  {{- end }}
+{{- end }}

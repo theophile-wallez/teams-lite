@@ -836,6 +836,17 @@ export class Backend {
     return this.writeRequest("signin_cancel", {});
   }
 
+  /** Open the Intune portal in an embedded backend's own Intune container: the sign-in methods
+   *  above then serve the portal's window (see `Kind` in src/signin.rs). The BACKEND decides what
+   *  for — to ENROLL a container that holds no registration, or to sign an ACCOUNT in again on one
+   *  that does but whose broker holds none — and the answer's `signin.purpose` says which. A WRITE
+   *  request — it registers a device in the user's organization, or signs their account in, as
+   *  them — answered, like `startSignin`, with the first state rather than the outcome. Refused in
+   *  words outside embedded mode and wherever neither can happen right now. */
+  intuneEnroll(): Promise<{ started: boolean; reason?: string; signin: SigninState }> {
+    return this.writeRequest("intune_enroll", {});
+  }
+
   /** Ask GitHub, now, whether a newer build than this one has been published — Settings ›
    *  This app, rather than waiting up to two minutes for the poll.
    *

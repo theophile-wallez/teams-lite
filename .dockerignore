@@ -17,3 +17,12 @@ captures
 .playwright-mcp
 .worktrees
 .atl
+
+# An Intune ENROLLMENT BACKUP (`intune-container backup -o …`) holds the device's registration keys
+# and its keyring, and packaging/docker/compose.yaml's import bind looks for one beside it — inside
+# this build context, which the build stage copies whole (`COPY . .`). Sent to the daemon it would
+# be kept in that stage's layer in the build cache after the file itself is gone, and leave the
+# machine with any cache export. The same two patterns as .gitignore: it is never committed, and
+# never built in.
+packaging/docker/*.tar.gz
+**/enrollment-backup*.tar.gz

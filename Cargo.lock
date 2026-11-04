@@ -1347,7 +1347,7 @@ dependencies = [
 [[package]]
 name = "intune-container"
 version = "0.2.3"
-source = "git+https://github.com/magicabdel/intune-container?rev=760500409562b35995ac7e67b8a0ce121a17aa6a#760500409562b35995ac7e67b8a0ce121a17aa6a"
+source = "git+https://github.com/magicabdel/intune-container?rev=0f5fe0d7f94144e15127c2c38f519b2ff04d3cdd#0f5fe0d7f94144e15127c2c38f519b2ff04d3cdd"
 dependencies = [
  "anyhow",
  "clap",

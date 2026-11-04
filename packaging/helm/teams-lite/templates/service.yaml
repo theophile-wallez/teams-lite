@@ -1,0 +1,43 @@
+{{- include "teams-lite.validate" . -}}
+{{- $fullname := include "teams-lite.fullname" . -}}
+{{- if not .Values.hostNetwork }}
+# The web front, inside the cluster. ClusterIP by default, because whatever reaches this port is
+# handed the write token and can post as the user (web/write-token.ts).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "teams-lite.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "teams-lite.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: web
+      port: {{ .Values.service.port }}
+      targetPort: web
+      protocol: TCP
+---
+{{- end }}
+# The StatefulSet's governing Service. Nothing connects through it; a StatefulSet names one.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-headless
+  labels:
+    {{- include "teams-lite.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "teams-lite.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: web
+      port: {{ include "teams-lite.webPort" . }}
+      targetPort: web
+      protocol: TCP
