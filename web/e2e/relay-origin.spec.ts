@@ -14,11 +14,11 @@ import { expect, test } from "./helpers";
 type Answer = { status: number; body: string };
 
 /** One raw request to the app's server, with headers a browser API would not let us set. */
-function raw(baseURL: string, headers: Record<string, string>): Promise<Answer> {
+function raw(baseURL: string, headers: Record<string, string>, path = "/__backend"): Promise<Answer> {
   const url = new URL(baseURL);
   return new Promise((resolve, reject) => {
     const req = httpRequest(
-      { host: url.hostname, port: url.port, path: "/__backend", method: "GET", headers },
+      { host: url.hostname, port: url.port, path, method: "GET", headers },
       (res) => {
         let body = "";
         res.setEncoding("utf8");
@@ -60,6 +60,23 @@ test.describe("the production server's address and origin checks", () => {
     const host = new URL(baseURL!).host;
     const answer = await raw(baseURL!, { ...UPGRADE, Host: host, Origin: new URL(baseURL!).origin });
     expect(answer.status).toBe(101);
+  });
+
+  test("relays a socket on the backend's route and on no other path", async ({ baseURL }) => {
+    // The paths the chart's sign-in lets through with no session (the manifest, an icon, the
+    // favicon — `--skip-auth-route` in templates/statefulset.yaml), plus the root. oauth2-proxy
+    // matches those by method and path and forwards an upgrade, so a relay that took a socket on
+    // any path handed a read socket to anybody who could reach the hostname. No Origin, because
+    // that is what a script sends — and the allowed Host, because that is what reaches the relay.
+    const host = new URL(baseURL!).host;
+    for (const path of ["/manifest.webmanifest", "/icons/icon-192.png", "/favicon.ico", "/", "/__backend/"]) {
+      const answer = await raw(baseURL!, { ...UPGRADE, Host: host }, path);
+      expect(answer.status, path).toBe(404);
+      expect(answer.body, path).toContain("/__backend");
+    }
+    // The control: the same request on the route itself is relayed, so the 404s above are the path
+    // and nothing else.
+    expect((await raw(baseURL!, { ...UPGRADE, Host: host })).status).toBe(101);
   });
 
   test("refuses the handshake while the backend is down, rather than opening a socket and dropping it", async () => {

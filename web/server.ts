@@ -20,6 +20,7 @@ import { CHESS_SOUND_ROUTE, chessSoundFileResponse } from "./chess-sound-file";
 import { ENGINE_ROUTE, engineFileResponse } from "./engine-file";
 import { bundleWasReplaced, readBuildInfo, refuseToServeReason } from "./build-info";
 import { ALLOWED_HOSTS_ENV, hostVerdict, policyFromEnv, upgradeVerdict } from "./request-origin";
+import { BACKEND_WS_ROUTE } from "./src/lib/backend-route";
 
 const here = import.meta.dir;
 const distDir = join(here, "dist");
@@ -305,13 +306,26 @@ export const server = Bun.serve<Relay>({
     // path). Relaying it is what lets the app work from another device — a phone's own
     // 127.0.0.1 is not this machine's backend, and an https: page may not open a plaintext
     // ws:// at all — and what makes it reach THIS server's backend from this machine too,
-    // while the backend itself stays bound to loopback. Any path is accepted:
-    // this server has no other socket to confuse it with, and matching loosely
-    // keeps it working if the route ever moves.
+    // while the backend itself stays bound to loopback.
+    //
+    // ONLY on that route, and an upgrade anywhere else is refused. It used to be any path, which
+    // opened the sign-in wall: the chart's oauth2-proxy lets the manifest and the icons through
+    // with no session (a browser fetches them without one to install the app), it matches a
+    // request by its method and path alone, and it forwards an upgrade. So an upgrade on
+    // `/manifest.webmanifest` reached this relay with no sign-in, and the backend's reads need no
+    // token — every chat, readable by anybody who could reach the hostname. The route is one
+    // constant on both sides of the socket (src/lib/backend-route.ts), so it cannot move apart.
     //
     // It is also the one request a page on ANOTHER site can make here and read the answer of —
     // WebSockets are outside the same-origin policy — so the page that asked has to be this app's.
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      if (url.pathname !== BACKEND_WS_ROUTE) {
+        // No path in the line: it is the caller's to choose, and one per request would flood the log.
+        reportOnce(`refused a WebSocket that did not ask for ${BACKEND_WS_ROUTE}`);
+        return new Response(`no socket is served on this path; the backend's is ${BACKEND_WS_ROUTE}`, {
+          status: 404,
+        });
+      }
       const verdict = upgradeVerdict(header, originPolicy);
       if (!verdict.ok) {
         reportOnce(`refused a WebSocket: ${verdict.reason}`);
