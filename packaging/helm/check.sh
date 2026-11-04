@@ -65,6 +65,9 @@ variants=(
   "$signin $route"
   "$signin $route --set httpRoute.timeouts.request=0s --set httpRoute.filters[0].type=ResponseHeaderModifier --set httpRoute.filters[0].responseHeaderModifier.set[0].name=Strict-Transport-Security --set httpRoute.filters[0].responseHeaderModifier.set[0].value=max-age=31536000"
   "$route --set auth.external=true"
+  # Cilium's own Gateway (its proxy is in no namespace: a CiliumNetworkPolicy admits it), in front
+  # of a PUBLIC client — PKCE alone, no client secret.
+  "$signin --set auth.oauth2Proxy.publicClient=true --set httpRoute.enabled=true --set httpRoute.parentRefs[0].name=shared --set httpRoute.parentRefs[0].namespace=gateway-system --set httpRoute.parentRefs[0].sectionName=https --set httpRoute.hostnames[0]=teams.example.com --set httpRoute.timeouts.request=0s --set networkPolicy.allowCiliumIngress=true"
   "$signin --set ingress.enabled=true --set ingress.className=tailscale --set ingress.annotations.tailscale\\.com/funnel=true --set ingress.tls[0].hosts[0]=teams-lite --set networkPolicy.allowNamespaces[0]=tailscale --set auth.oauth2Proxy.redirectUrl=https://teams-lite.tail1.ts.net/oauth2/callback"
   "--set networkPolicy.enabled=false"
   "--set networkPolicy.from[0].namespaceSelector.matchLabels.team=tailscale --set networkPolicy.allowNamespaces[0]=tailscale"

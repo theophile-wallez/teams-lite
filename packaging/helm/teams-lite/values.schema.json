@@ -373,6 +373,9 @@
             "clientId": {
               "type": "string"
             },
+            "publicClient": {
+              "type": "boolean"
+            },
             "existingSecret": {
               "type": "string",
               "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
@@ -528,6 +531,9 @@
             "type": "string",
             "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
           }
+        },
+        "allowCiliumIngress": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

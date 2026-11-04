@@ -26,3 +26,6 @@ captures
 # never built in.
 packaging/docker/*.tar.gz
 **/enrollment-backup*.tar.gz
+
+# A real cluster's deployment values (.gitignore says why): never built into the image either.
+packaging/helm/environments

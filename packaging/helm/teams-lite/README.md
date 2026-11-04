@@ -327,6 +327,11 @@ provider you already use, and **only the addresses you list get in**.
      --from-literal=cookie-secret="$(openssl rand -base64 32 | tr -- '+/' '-_')"
    ```
 
+   A **public** client — registered with no secret, PKCE alone (Zitadel's "PKCE" authentication
+   method) — takes `auth.oauth2Proxy.publicClient: true` and a Secret holding only `cookie-secret`.
+   oauth2-proxy refuses an OpenID Connect provider with no client secret at all, so the chart hands
+   it the empty one (`--client-secret-file=/dev/null`); the PKCE verifier is what proves the exchange.
+
 3. **Install** with a values file:
 
    <!-- public-values: the chart's tests render this block -->
@@ -368,6 +373,11 @@ What the chart does with it, and why:
 - **Let the Gateway's proxies through the NetworkPolicy** (`networkPolicy.allowNamespaces`):
   `envoy-gateway-system` for Envoy Gateway, the Gateway's own namespace for Istio and kgateway. The
   chart refuses a route the policy would let nothing reach.
+- **Cilium's own Gateway is in no namespace**: its proxy reaches a backend under Cilium's reserved
+  `ingress` identity, which no NetworkPolicy peer can name, so with only `allowNamespaces` the route
+  answers 503 (measured on Cilium 1.20, with `kube-system` named). `networkPolicy.allowCiliumIngress:
+  true` adds a CiliumNetworkPolicy admitting that identity on the same one port; Cilium admits the
+  union of the two, and the NetworkPolicy still keeps every pod out.
 - **Only the listed addresses**: `--authenticated-emails-file`, never `--email-domain`, and only an
   address the provider says it has verified. The list is a ConfigMap oauth2-proxy watches, so a
   change reaches it without restarting the pod (which would power the Intune container off) — and
@@ -462,6 +472,7 @@ at the same time. No NetworkPolicy applies to a host-network pod, so none is ren
 | `httpRoute.parentRefs` / `.hostnames` / `.filters` / `.timeouts` | — | as written in an HTTPRoute |
 | `auth.oauth2Proxy.enabled` | `false` | oauth2-proxy beside the app; the web front moves to the pod's loopback |
 | `auth.oauth2Proxy.issuerUrl` / `.clientId` / `.existingSecret` / `.emails` | — | required with it |
+| `auth.oauth2Proxy.publicClient` | `false` | a client with no secret (PKCE alone): the Secret holds only `cookie-secret` |
 | `auth.oauth2Proxy.redirectUrl` | `https://<first route hostname>/oauth2/callback` | |
 | `auth.oauth2Proxy.cookieExpire` / `.cookieRefresh` | `168h` / off | refresh needs a refresh token from the provider |
 | `auth.oauth2Proxy.image.tag` | `v7.15.5` | |
@@ -469,6 +480,7 @@ at the same time. No NetworkPolicy applies to a host-network pod, so none is ren
 | `web.allowedHosts` | `[]` | names the app answers to beyond loopback, IPs, `*.ts.net` and the route hostnames |
 | `networkPolicy.enabled` | `true` | no other pod may reach the web port |
 | `networkPolicy.allowNamespaces` / `.from` | `[]` / `[]` | who may (e.g. `[tailscale]`) |
+| `networkPolicy.allowCiliumIngress` | `false` | admit Cilium's own Gateway/Ingress proxy, which is in no namespace |
 | `persistence.enabled` | `true` | `false` keeps the store in an emptyDir, lost with the pod (the Intune claim stays) |
 | `persistence.existingClaim` | — | a PVC you made |
 | `persistence.storageClassName` / `.size` | cluster default / `2Gi` | |

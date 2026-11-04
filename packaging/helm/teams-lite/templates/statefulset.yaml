@@ -355,6 +355,12 @@ spec:
             - --provider=oidc
             - --oidc-issuer-url={{ $o.issuerUrl }}
             - --client-id={{ $o.clientId }}
+            {{- if $o.publicClient }}
+            # A PUBLIC client (auth.oauth2Proxy.publicClient): registered with no secret. oauth2-proxy
+            # refuses an OIDC provider with none at all, and reads an empty file as the empty secret
+            # — so the token exchange carries the client id and the PKCE verifier, and nothing else.
+            - --client-secret-file=/dev/null
+            {{- end }}
             - --redirect-url={{ include "teams-lite.redirectUrl" . }}
             - --scope={{ $o.scope }}
             # Who may sign in: the listed addresses and nobody else — no --email-domain, which would
@@ -387,11 +393,13 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
+            {{- if not $o.publicClient }}
             - name: OAUTH2_PROXY_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ $o.existingSecret | quote }}
                   key: {{ $o.clientSecretKey | quote }}
+            {{- end }}
             - name: OAUTH2_PROXY_COOKIE_SECRET
               valueFrom:
                 secretKeyRef:

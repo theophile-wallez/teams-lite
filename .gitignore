@@ -28,3 +28,8 @@ test-results/
 # its keyring; packaging/docker/compose.yaml's import bind points at one beside it. Never commit it.
 packaging/docker/*.tar.gz
 enrollment-backup*.tar.gz
+
+# A real cluster's deployment of the Helm chart (its hostname, the account's address, its Gateway's
+# names): the operator's own, never committed. `packaging/helm/environments/<cluster>/` is where
+# one lives on the workstation that deploys it; the chart itself never reads it.
+/packaging/helm/environments/

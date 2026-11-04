@@ -282,8 +282,9 @@ ingress:
 # annotation on the Gateway is the usual way), and it must admit routes from this namespace
 # (`allowedRoutes.namespaces`). Its data plane has to be let through the NetworkPolicy — name the
 # namespace its proxies run in (`networkPolicy.allowNamespaces`: envoy-gateway-system for Envoy
-# Gateway, the Gateway's own namespace for Istio and kgateway) — and the chart refuses a route the
-# policy would let nothing reach.
+# Gateway, the Gateway's own namespace for Istio and kgateway), or for CILIUM's Gateway set
+# `networkPolicy.allowCiliumIngress`, since its proxy is in no namespace — and the chart refuses a
+# route the policy would let nothing reach.
 httpRoute:
   enabled: false
   # REQUIRED: the Gateway (and listener) this route attaches to, as written in an HTTPRoute.
@@ -342,10 +343,19 @@ auth:
     # REQUIRED: the client you registered for this app at the provider, with
     # <redirectUrl> (https://<host>/oauth2/callback) as its redirect URI.
     clientId: ""
+    # A PUBLIC client: one registered with no secret, PKCE alone (Zitadel's "PKCE" authentication
+    # method; a "public" client in Pocket ID, Authentik and Keycloak). oauth2-proxy refuses an
+    # OpenID Connect provider with no client secret at all, so the chart hands it the EMPTY one
+    # (`--client-secret-file=/dev/null`) and the Secret below then needs only `cookie-secret`. What
+    # proves the exchange is the PKCE verifier the chart always sends (S256). Leave it false for a
+    # client the provider gave a secret: a forgotten key must fail at the provider, never quietly
+    # turn a confidential client into a public one.
+    publicClient: false
     # REQUIRED: a Secret you create, holding the client's secret and a cookie secret:
     #   kubectl -n <namespace> create secret generic teams-lite-oauth2-proxy \
     #     --from-literal=client-secret='<from your provider>' \
     #     --from-literal=cookie-secret="$(openssl rand -base64 32 | tr -- '+/' '-_')"
+    # With `publicClient: true` there is no client secret: leave out the client-secret line.
     # The cookie secret encrypts every session: whoever holds it can mint one, so treat the Secret
     # like the store.
     existingSecret: ""
@@ -479,6 +489,13 @@ networkPolicy:
 #   - podSelector:
 #       matchLabels:
 #         app: my-proxy
+  # CILIUM'S OWN Gateway (and Ingress): its proxy reaches a backend under Cilium's reserved
+  # `ingress` identity, which belongs to no namespace — so neither `allowNamespaces` nor `from` can
+  # name it, and the policy above drops every request the Gateway sends (measured on Cilium 1.20:
+  # the route answered 503 until this was set). `true` adds a CiliumNetworkPolicy admitting that
+  # identity on the same one port, and nothing else; Cilium admits the union of the two. Needs
+  # Cilium's CRDs, and `enabled: true`.
+  allowCiliumIngress: false
 
 podAnnotations: {}
 podLabels: {}

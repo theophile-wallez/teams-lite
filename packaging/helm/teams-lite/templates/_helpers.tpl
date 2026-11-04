@@ -259,13 +259,16 @@ file of a rootfs owned by the pod's subordinate ids and the device's 0600 keyrin
 {{- $o := .Values.auth.oauth2Proxy -}}
 {{- $_ := required "auth.oauth2Proxy.issuerUrl is required: your OpenID Connect provider's issuer, https://… (e.g. https://accounts.google.com)" $o.issuerUrl -}}
 {{- $_ := required "auth.oauth2Proxy.clientId is required: the client you registered for this app at your provider" $o.clientId -}}
-{{- $_ := required "auth.oauth2Proxy.existingSecret is required: a Secret holding the client's secret and a cookie secret (the chart's README says how to create it)" $o.existingSecret -}}
+{{- $_ := required "auth.oauth2Proxy.existingSecret is required: a Secret holding the client's secret (none with auth.oauth2Proxy.publicClient) and a cookie secret (the chart's README says how to create it)" $o.existingSecret -}}
 {{- if not $o.emails -}}
 {{- fail "auth.oauth2Proxy.emails is required: who may sign in, one address each. A sign-in that lets every account at the provider in is not a wall in front of one person's Teams account." -}}
 {{- end -}}
 {{- if not (include "teams-lite.redirectUrl" .) -}}
 {{- fail "auth.oauth2Proxy needs a redirect URL: set auth.oauth2Proxy.redirectUrl (https://<host>/oauth2/callback), or give httpRoute.hostnames or ingress.hosts a name it can be derived from." -}}
 {{- end -}}
+{{- end -}}
+{{- if and .Values.networkPolicy.allowCiliumIngress (not (include "teams-lite.networkPolicyApplies" .)) -}}
+{{- fail "networkPolicy.allowCiliumIngress adds a way in to the NetworkPolicy, and this release renders none (networkPolicy.enabled=false, or hostNetwork, where no policy applies). Rendered alone, a CiliumNetworkPolicy would turn the pod deny-by-default for everything else instead. Set networkPolicy.enabled=true, or drop allowCiliumIngress." -}}
 {{- end -}}
 {{- if .Values.httpRoute.enabled -}}
 {{- if .Values.hostNetwork -}}
@@ -274,8 +277,8 @@ file of a rootfs owned by the pod's subordinate ids and the device's 0600 keyrin
 {{- if not .Values.httpRoute.parentRefs -}}
 {{- fail "httpRoute.enabled needs httpRoute.parentRefs: the Gateway (and listener) the route attaches to, e.g. --set 'httpRoute.parentRefs[0].name=public' --set 'httpRoute.parentRefs[0].namespace=gateway-system'." -}}
 {{- end -}}
-{{- if and (include "teams-lite.networkPolicyApplies" .) (not .Values.networkPolicy.from) (not .Values.networkPolicy.allowNamespaces) -}}
-{{- fail "httpRoute.enabled with a NetworkPolicy that lets nothing in: the Gateway's proxies could not reach the app. Name the namespace they run in, in networkPolicy.allowNamespaces (envoy-gateway-system for Envoy Gateway; the Gateway's own namespace for Istio and kgateway), or describe them in networkPolicy.from." -}}
+{{- if and (include "teams-lite.networkPolicyAdmitsNobody" .) -}}
+{{- fail "httpRoute.enabled with a NetworkPolicy that lets nothing in: the Gateway's proxies could not reach the app. Name the namespace they run in, in networkPolicy.allowNamespaces (envoy-gateway-system for Envoy Gateway; the Gateway's own namespace for Istio and kgateway), set networkPolicy.allowCiliumIngress=true for Cilium's own Gateway (its proxy is in no namespace), or describe them in networkPolicy.from." -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.hostNetwork .Values.ingress.enabled -}}
@@ -287,8 +290,8 @@ file of a rootfs owned by the pod's subordinate ids and the device's 0600 keyrin
 {{- if and .Values.ingress.enabled (not .Values.ingress.className) -}}
 {{- fail "ingress.enabled needs ingress.className: an Ingress with no class is taken by the cluster's DEFAULT controller (Traefik on k3s), which publishes the account to whatever reaches the node. Name the controller you mean — `tailscale` for the Tailscale operator." -}}
 {{- end -}}
-{{- if and .Values.ingress.enabled (include "teams-lite.networkPolicyApplies" .) (not .Values.networkPolicy.from) (not .Values.networkPolicy.allowNamespaces) -}}
-{{- fail "ingress.enabled with a NetworkPolicy that lets nothing in: the Ingress controller could not reach the app. Name its namespace in networkPolicy.allowNamespaces (`tailscale` for the Tailscale operator), or describe it in networkPolicy.from." -}}
+{{- if and .Values.ingress.enabled (include "teams-lite.networkPolicyAdmitsNobody" .) -}}
+{{- fail "ingress.enabled with a NetworkPolicy that lets nothing in: the Ingress controller could not reach the app. Name its namespace in networkPolicy.allowNamespaces (`tailscale` for the Tailscale operator), set networkPolicy.allowCiliumIngress=true for Cilium's own Ingress, or describe it in networkPolicy.from." -}}
 {{- end -}}
 {{- if and (include "teams-lite.publishedBeyondTailnet" .) (not $oauth2Proxy) (not .Values.auth.external) -}}
 {{- fail "this release publishes the app beyond your tailnet — an HTTPRoute, a NodePort or LoadBalancer Service, or an Ingress other than the Tailscale operator's — with no sign-in in front of it, and whatever reaches the web port is handed the write token and can post as you. Enable auth.oauth2Proxy (a sign-in inside the pod), or, if something in front of the route already authenticates every request (an ingress controller's auth annotations, a Gateway SecurityPolicy, Cloudflare Access), say so with auth.external=true. The Tailscale operator's Ingress (ingress.className=tailscale, without Funnel) needs neither." -}}
@@ -310,4 +313,12 @@ applies to (the web front is then on the node's loopback instead).
 */}}
 {{- define "teams-lite.networkPolicyApplies" -}}
 {{- if and .Values.networkPolicy.enabled (not .Values.hostNetwork) -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Whether the rendered policy lets nothing in: no namespace, no peer, and not Cilium's own proxy
+either. A route or an Ingress behind one would answer nothing, so the chart refuses the pair.
+*/}}
+{{- define "teams-lite.networkPolicyAdmitsNobody" -}}
+{{- if and (include "teams-lite.networkPolicyApplies" .) (not .Values.networkPolicy.from) (not .Values.networkPolicy.allowNamespaces) (not .Values.networkPolicy.allowCiliumIngress) -}}true{{- end -}}
 {{- end -}}

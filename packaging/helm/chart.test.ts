@@ -1244,6 +1244,65 @@ describe("the Gateway API route", () => {
   });
 });
 
+describe("Cilium's own Gateway, whose proxy is in no namespace", () => {
+  // The Cilium shape: Cilium's Gateway, so no namespace of proxies to name.
+  const { "networkPolicy.allowNamespaces[0]": _p, ...CILIUM_ROUTE } = { ...ROUTE, "networkPolicy.allowCiliumIngress": "true" };
+  const cnp = (docs: Doc[]) => of(docs, "CiliumNetworkPolicy");
+
+  test("is admitted by a CiliumNetworkPolicy on the sign-in's one port, and by nothing wider", () => {
+    const docs = render({ ...SIGN_IN, ...CILIUM_ROUTE });
+    const [policy] = cnp(docs);
+    expect(policy.apiVersion).toBe("cilium.io/v2");
+    expect(policy.metadata.name).toBe("teams-lite-cilium-ingress");
+    // The same pods the NetworkPolicy selects — and the StatefulSet's own selector.
+    const [netpol] = of(docs, "NetworkPolicy");
+    expect(policy.spec.endpointSelector).toEqual({ matchLabels: netpol.spec.podSelector.matchLabels });
+    expect(policy.spec.endpointSelector.matchLabels).toEqual(statefulSet(docs).spec.selector.matchLabels);
+    expect(policy.spec.ingress).toEqual([{ fromEntities: ["ingress"], toPorts: [{ ports: [{ port: "auth", protocol: "TCP" }] }] }]);
+    expect(policy.spec.egress).toBeUndefined();
+    // The NetworkPolicy beside it still admits no other pod.
+    expect(netpol.spec.ingress).toEqual([]);
+  });
+
+  test("opens the web front's port when there is no sign-in in front (auth.external)", () => {
+    const [policy] = cnp(render({ ...CILIUM_ROUTE, "auth.external": "true" }));
+    expect(policy.spec.ingress[0].toPorts).toEqual([{ ports: [{ port: "web", protocol: "TCP" }] }]);
+  });
+
+  test("is not rendered unless asked for", () => {
+    expect(cnp(render())).toEqual([]);
+    expect(cnp(render({ ...SIGN_IN, ...ROUTE }))).toEqual([]);
+  });
+
+  test("is a way in for a route and for an Ingress, so neither is refused as unreachable", () => {
+    expect(of(render({ ...SIGN_IN, ...CILIUM_ROUTE }), "HTTPRoute")).toHaveLength(1);
+    const docs = render({
+      ...SIGN_IN,
+      "ingress.enabled": "true",
+      "ingress.className": "cilium",
+      "ingress.hosts[0].host": "teams.example.com",
+      "networkPolicy.allowCiliumIngress": "true",
+    });
+    expect(of(docs, "Ingress")).toHaveLength(1);
+    expect(cnp(docs)).toHaveLength(1);
+  });
+
+  test("names itself in the refusal a closed policy earns", () => {
+    const { "networkPolicy.allowCiliumIngress": _c, ...closed } = CILIUM_ROUTE;
+    expect(refusal({ ...SIGN_IN, ...closed })).toContain("networkPolicy.allowCiliumIngress=true for Cilium's own Gateway");
+  });
+
+  test("is refused where no NetworkPolicy is rendered: alone it would make the pod deny-by-default", () => {
+    expect(refusal({ ...SIGN_IN, ...CILIUM_ROUTE, "networkPolicy.enabled": "false" })).toContain(
+      "networkPolicy.allowCiliumIngress adds a way in to the NetworkPolicy, and this release renders none",
+    );
+    expect(refusal({ ...HOST, "hostNetwork": "true", "networkPolicy.allowCiliumIngress": "true" })).toContain(
+      "networkPolicy.allowCiliumIngress adds a way in",
+    );
+    expect(refusal({ "networkPolicy.allowCiliumIngress": "on" })).toContain("allowCiliumIngress");
+  });
+});
+
 describe("the sign-in in front of the app (oauth2-proxy)", () => {
   test("puts the web front on the pod's loopback, so the sign-in is the only way to it", () => {
     const docs = render({ ...SIGN_IN, ...ROUTE });
@@ -1297,6 +1356,20 @@ describe("the sign-in in front of the app (oauth2-proxy)", () => {
       { name: "OAUTH2_PROXY_COOKIE_SECRET", valueFrom: { secretKeyRef: { name: "teams-lite-oauth2-proxy", key: "cookie-secret" } } },
     ]);
     expect(proxy.args.some((a: string) => /secret/i.test(a))).toBe(false);
+  });
+
+  test("a PUBLIC client gets the empty secret oauth2-proxy insists on, and no key of the Secret for one", () => {
+    const proxy = sidecar(render({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.publicClient": "true" }));
+    // oauth2-proxy v7.15.5 refuses an OIDC provider with no client secret (providerRequiresClientSecret),
+    // and reads an empty file as the empty one: the exchange is then the client id and the verifier.
+    expect(proxy.args.filter((a: string) => /secret/i.test(a))).toEqual(["--client-secret-file=/dev/null"]);
+    expect(proxy.args).toContain("--code-challenge-method=S256");
+    expect(proxy.env).toEqual([
+      { name: "OAUTH2_PROXY_COOKIE_SECRET", valueFrom: { secretKeyRef: { name: "teams-lite-oauth2-proxy", key: "cookie-secret" } } },
+    ]);
+    // The flag sits right after the client id, before anything extraArgs could add.
+    expect(proxy.args.indexOf("--client-secret-file=/dev/null")).toBe(proxy.args.indexOf("--client-id=client") + 1);
+    expect(refusal({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.publicClient": "yes" })).toContain("publicClient");
   });
 
   test("sets a cookie no sibling name can plant, that the provider's redirect back still carries", () => {

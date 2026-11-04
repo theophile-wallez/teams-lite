@@ -11458,7 +11458,7 @@ Option 1 is the Tailscale operator's Ingress, above. Option 2 is the internet, a
 it as two values that are meant to be used together: **`auth.oauth2Proxy`** runs oauth2-proxy as a
 SIDECAR in the pod, and **`httpRoute`** publishes the Service through a Gateway the cluster already
 runs (`gateway.networking.k8s.io/v1`, `templates/httproute.yaml`). An Ingress takes the same sidecar.
-Ten rules hold it, and `packaging/helm/chart.test.ts` pins each:
+Twelve rules hold it, and `packaging/helm/chart.test.ts` pins each:
 
 - **A SIDECAR, never a separate proxy, because of the node.** With the sign-in in front, the web
   front listens on the POD's 127.0.0.1 (`TEAMS_WEB_HOST`, which extraEnv may no longer set), the
@@ -11513,11 +11513,35 @@ Ten rules hold it, and `packaging/helm/chart.test.ts` pins each:
   and why extraEnv may not write it.
 - **An HTTPRoute is one rule for every path**, to the Service. It is refused without `parentRefs`,
   on `hostNetwork`, and behind a NetworkPolicy that lets nothing in (the Gateway's proxies have to be
-  named: envoy-gateway-system for Envoy Gateway, the Gateway's own namespace for Istio and kgateway).
-  WebSockets are an implementation's business in Gateway API; the common ones proxy an Upgrade on an
+  named: envoy-gateway-system for Envoy Gateway, the Gateway's own namespace for Istio and kgateway;
+  Cilium's proxy is in none, so it is the rule below). WebSockets are an implementation's business in Gateway API; the common ones proxy an Upgrade on an
   HTTPRoute as they are, and `httpRoute.timeouts` (`request: "0s"`) is for one that applies a request
   timeout to it. `httpRoute.filters` carries HSTS where the Extended ResponseHeaderModifier is
   supported.
+- **CILIUM'S OWN GATEWAY IS IN NO NAMESPACE, and a NetworkPolicy cannot let it in**
+  (`networkPolicy.allowCiliumIngress`, `templates/ciliumnetworkpolicy.yaml`). Cilium's proxy reaches a
+  backend under the reserved `ingress` identity, which belongs to no namespace, so no NetworkPolicy
+  peer can name it. MEASURED on a real cluster (Cilium 1.20, a shared Gateway), with
+  a throwaway nginx pod and an HTTPRoute on a dummy hostname: 200 with no policy, **503** behind a
+  NetworkPolicy admitting `kube-system` (where cilium-envoy runs), 200 once a CiliumNetworkPolicy
+  admitted `fromEntities: [ingress]`, and 503 again with it removed — so the chart's default policy
+  black-holed that Gateway with nothing on screen saying why. The value adds that one
+  CiliumNetworkPolicy on the same one port, by NAME (measured too: a named port admits, a wrong name
+  admits nothing); Cilium admits the union of every policy selecting a pod, so the NetworkPolicy still
+  keeps every pod out. It is REFUSED where no NetworkPolicy is rendered: alone, a CiliumNetworkPolicy
+  turns the pod deny-by-default rather than widening anything. And it counts as a way in, so a route
+  or an Ingress behind it is not refused as unreachable (`teams-lite.networkPolicyAdmitsNobody`).
+- **A PUBLIC client takes the EMPTY secret** (`auth.oauth2Proxy.publicClient`), because oauth2-proxy
+  v7.15.5 refuses an OpenID Connect provider with no client secret at all
+  (`providerRequiresClientSecret` exempts only login.gov and a federated Entra ID) and reads an empty
+  file as the empty secret: `--client-secret-file=/dev/null`, no `OAUTH2_PROXY_CLIENT_SECRET`, and a
+  Secret holding only the cookie secret. The S256 verifier the chart always sends is what proves the
+  exchange. It is an explicit value rather than an empty `clientSecretKey`, so a key forgotten on a
+  confidential client fails at the provider instead of quietly making it public. Measured against
+  Zitadel with a bogus code: Basic auth with an empty password and the client id
+  in the body both PASS client authentication (the refusal names the code, `Errors.User.Code.Invalid`)
+  while an unknown client gets `invalid_client` — which covers both shapes golang.org/x/oauth2's
+  auto-detected client authentication tries.
 - **Every annotation value is rendered as a STRING** (`teams-lite.annotations`). kubeconform caught
   it on the new Funnel variant: `--set ingress.annotations.tailscale\.com/funnel=true` reads as a
   boolean and `proxy-read-timeout=3600` as a number, and either renders a manifest the API server
