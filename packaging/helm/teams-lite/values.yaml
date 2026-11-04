@@ -361,11 +361,23 @@ auth:
     existingSecret: ""
     clientSecretKey: client-secret
     cookieSecretKey: cookie-secret
-    # REQUIRED: who may sign in, one address each — the address the provider asserts and has
-    # VERIFIED (oauth2-proxy refuses an unverified one). Never a domain and never "everyone": this is
-    # one person's Teams account. Read from a ConfigMap oauth2-proxy watches, so a change takes
-    # effect without restarting the pod.
+    # REQUIRED: who may sign in, one address each — the address the provider ASSERTS (oauth2-proxy
+    # refuses one the provider marks unverified, and accepts one it says nothing about). Never a
+    # domain and never "everyone": this is one person's Teams account. Read from a ConfigMap
+    # oauth2-proxy watches, so a change takes effect without restarting the pod.
     emails: []
+    # Who may sign in, by the provider's own USER ID (the ID token's `sub`), checked AS WELL AS
+    # `emails` — at sign-in and on every request. Set it whenever somebody other than you can make
+    # your provider assert your address: a Zitadel, Keycloak or Authentik instance where anybody may
+    # register an organization or an account, or where another organization's admin can create a
+    # user with any address and mark it verified; and Microsoft Entra, whose `email` claim the
+    # user's own tenant sets. A `sub` is minted by the provider, and no other organization's admin
+    # can choose one. Where to read yours: Zitadel shows it as the user's ID in the console; or
+    # sign in with a wrong one here and read `user:<sub>` off the line refusing you in
+    # `kubectl logs <pod> -c oauth2-proxy`. QUOTE IT: a Zitadel id is all digits, which YAML (and
+    # `--set`) reads as a number — refused by the schema rather than rounded.
+    #   subjects: ["312345678901234567"]
+    subjects: []
     # Where the provider sends the browser back. Empty: https://<the first hostname of httpRoute,
     # else of ingress>/oauth2/callback.
     redirectUrl: ""

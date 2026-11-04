@@ -66,8 +66,9 @@ variants=(
   "$signin $route --set httpRoute.timeouts.request=0s --set httpRoute.filters[0].type=ResponseHeaderModifier --set httpRoute.filters[0].responseHeaderModifier.set[0].name=Strict-Transport-Security --set httpRoute.filters[0].responseHeaderModifier.set[0].value=max-age=31536000"
   "$route --set auth.external=true"
   # Cilium's own Gateway (its proxy is in no namespace: a CiliumNetworkPolicy admits it), in front
-  # of a PUBLIC client — PKCE alone, no client secret.
-  "$signin --set auth.oauth2Proxy.publicClient=true --set httpRoute.enabled=true --set httpRoute.parentRefs[0].name=shared --set httpRoute.parentRefs[0].namespace=gateway-system --set httpRoute.parentRefs[0].sectionName=https --set httpRoute.hostnames[0]=teams.example.com --set httpRoute.timeouts.request=0s --set networkPolicy.allowCiliumIngress=true"
+  # of a PUBLIC client — PKCE alone, no client secret — pinned to one user id (a Zitadel id is
+  # all digits, so it is given as a string).
+  "$signin --set auth.oauth2Proxy.publicClient=true --set httpRoute.enabled=true --set httpRoute.parentRefs[0].name=shared --set httpRoute.parentRefs[0].namespace=gateway-system --set httpRoute.parentRefs[0].sectionName=https --set httpRoute.hostnames[0]=teams.example.com --set httpRoute.timeouts.request=0s --set networkPolicy.allowCiliumIngress=true --set-string auth.oauth2Proxy.subjects[0]=312345678901234567"
   "$signin --set ingress.enabled=true --set ingress.className=tailscale --set ingress.annotations.tailscale\\.com/funnel=true --set ingress.tls[0].hosts[0]=teams-lite --set networkPolicy.allowNamespaces[0]=tailscale --set auth.oauth2Proxy.redirectUrl=https://teams-lite.tail1.ts.net/oauth2/callback"
   "--set networkPolicy.enabled=false"
   "--set networkPolicy.from[0].namespaceSelector.matchLabels.team=tailscale --set networkPolicy.allowNamespaces[0]=tailscale"

@@ -1372,6 +1372,72 @@ describe("the sign-in in front of the app (oauth2-proxy)", () => {
     expect(refusal({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.publicClient": "yes" })).toContain("publicClient");
   });
 
+  // On a provider shared between organizations, an address is something another organization's
+  // admin can give a user — measured: its Zitadel instance serves its public "Organization
+  // Registration" form, and Zitadel lets an org owner create a user with any address marked
+  // verified. A `sub` is the one value only the provider mints. Given in a values FILE, the way a
+  // reader writes them: `--set` would read a Zitadel id (all digits) as a number.
+  const withSubjects = <T,>(yaml: string, fn: (file: string) => T): T => {
+    const dir = mkdtempSync(join(tmpdir(), "teams-lite-subjects-"));
+    try {
+      const file = join(dir, "values.yaml");
+      writeFileSync(file, `auth:\n  oauth2Proxy:\n${yaml}`);
+      return fn(file);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test("SUBJECTS pin who may sign in by the provider's own user id, as well as by address", () => {
+    const a = withSubjects('    subjects: ["312345678901234567", "abc-123"]\n', (file) =>
+      args(render({ ...SIGN_IN, ...ROUTE }, { valuesFile: file })),
+    );
+    // oauth2-proxy v7.15.5 coerces the string `sub` into a list of one (util.toStringSlice), and
+    // ANDs Authorize (the groups) with the address check at the callback and on every request.
+    const pinned = ["--oidc-groups-claim=sub", "--allowed-group=312345678901234567", "--allowed-group=abc-123"];
+    const from = a.indexOf("--oidc-groups-claim=sub");
+    expect(a.slice(from, from + 3)).toEqual(pinned);
+    // Beside the address check, never instead of it.
+    expect(a.indexOf("--authenticated-emails-file=/etc/oauth2-proxy/authenticated-emails")).toBe(from - 1);
+    // None of it without subjects: a groups claim with no allowed group would be noise.
+    const plain = args(render({ ...SIGN_IN, ...ROUTE }));
+    expect(plain.some((x) => x.startsWith("--oidc-groups-claim") || x.startsWith("--allowed-group"))).toBe(false);
+  });
+
+  test("…and refuse extraArgs that would undo them", () => {
+    // --oidc-groups-claim is a String flag (the last one wins), so a later one replaces `sub`.
+    for (const flag of ["--oidc-groups-claim=groups", "--allowed-group=admins"]) {
+      const err = withSubjects(`    subjects: ["312345678901234567"]\n    extraArgs: ["${flag}"]\n`, (file) => {
+        const { ok, err } = helm(templateArgs({ ...SIGN_IN, ...ROUTE }, { valuesFile: file }));
+        expect(ok).toBe(false);
+        return err;
+      });
+      expect(err).toContain(`must not hold ${flag} beside auth.oauth2Proxy.subjects`);
+    }
+    // Without subjects a groups check of one's own is still extraArgs' to make.
+    const groups = args(render({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.extraArgs[0]": "--allowed-group=admins" }));
+    expect(groups).toContain("--allowed-group=admins");
+  });
+
+  test("…and the schema refuses a subject oauth2-proxy would split or misread — an UNQUOTED id too", () => {
+    // --allowed-group is a StringSlice: pflag reads it as CSV, so a comma is two groups. And a
+    // Zitadel id written without quotes is a YAML number — refused, never rounded to 3.12e+17.
+    for (const bad of ['["a,b"]', '["a b"]', "['a\"b']", '[""]', "[312345678901234567]"]) {
+      const { ok, err } = withSubjects(`    subjects: ${bad}\n`, (file) =>
+        helm(templateArgs({ ...SIGN_IN, ...ROUTE }, { valuesFile: file })),
+      );
+      expect(ok).toBe(false);
+      expect(err).toContain("/auth/oauth2Proxy/subjects/0");
+    }
+  });
+
+  test("NOTES says when only the address is checked, and names the subjects when they are", () => {
+    expect(notes({ ...SIGN_IN, ...ROUTE })).toContain("ONLY THE ADDRESS IS CHECKED");
+    const pinned = notes({ ...SIGN_IN, ...ROUTE, "auth.oauth2Proxy.subjects[0]": "zitadel-312345678901234567" });
+    expect(pinned).not.toContain("ONLY THE ADDRESS IS CHECKED");
+    expect(pinned).toContain("Each must also be one of 1\nuser id at the provider (zitadel-312345678901234567)");
+  });
+
   test("sets a cookie no sibling name can plant, that the provider's redirect back still carries", () => {
     const a = args(render({ ...SIGN_IN, ...ROUTE }));
     for (const flag of [

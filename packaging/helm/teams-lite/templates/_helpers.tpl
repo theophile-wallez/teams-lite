@@ -263,6 +263,13 @@ file of a rootfs owned by the pod's subordinate ids and the device's 0600 keyrin
 {{- if not $o.emails -}}
 {{- fail "auth.oauth2Proxy.emails is required: who may sign in, one address each. A sign-in that lets every account at the provider in is not a wall in front of one person's Teams account." -}}
 {{- end -}}
+{{- if $o.subjects -}}
+{{- range $o.extraArgs -}}
+{{- if or (hasPrefix "--oidc-groups-claim" .) (hasPrefix "--allowed-group" .) -}}
+{{- fail (printf "auth.oauth2Proxy.extraArgs must not hold %s beside auth.oauth2Proxy.subjects: the subjects ARE oauth2-proxy's groups check (--oidc-groups-claim=sub and one --allowed-group each), so a groups claim of your own would replace the user id it compares, and a group of your own would let its members in whatever their id. Pin people with subjects, or groups with extraArgs — not both." .) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if not (include "teams-lite.redirectUrl" .) -}}
 {{- fail "auth.oauth2Proxy needs a redirect URL: set auth.oauth2Proxy.redirectUrl (https://<host>/oauth2/callback), or give httpRoute.hostnames or ingress.hosts a name it can be derived from." -}}
 {{- end -}}

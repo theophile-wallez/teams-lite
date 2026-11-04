@@ -366,6 +366,15 @@ spec:
             # Who may sign in: the listed addresses and nobody else — no --email-domain, which would
             # widen it to a whole domain (`*` to every account at the provider).
             - --authenticated-emails-file=/etc/oauth2-proxy/authenticated-emails
+            {{- with $o.subjects }}
+            # AND by the provider's own user id (auth.oauth2Proxy.subjects): oauth2-proxy reads the
+            # `sub` claim as a list of one, and it has to be one of these. Another organization's
+            # admin can give a user any address, never a `sub`.
+            - --oidc-groups-claim=sub
+            {{- range . }}
+            - --allowed-group={{ . }}
+            {{- end }}
+            {{- end }}
             # Straight to the provider, with PKCE.
             - --skip-provider-button=true
             - --code-challenge-method=S256

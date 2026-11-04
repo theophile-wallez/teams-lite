@@ -397,6 +397,15 @@
                 "pattern": "^[^@\\s*,]+@[^@\\s*,]+\\.[^@\\s*,]+$"
               }
             },
+            "subjects": {
+              "description": "Who may sign in, by the provider's own user id (the ID token's sub), checked as well as emails. No comma, quote or space: oauth2-proxy reads --allowed-group as a comma-separated list.",
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[^\\s,\"]+$"
+              }
+            },
             "redirectUrl": {
               "type": "string",
               "pattern": "^(https://[^\\s/]+/[^\\s]*)?$"

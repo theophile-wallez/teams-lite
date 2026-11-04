@@ -31,7 +31,15 @@ Whatever can open its web port is handed the write token and can post as them.
 {{- $emails := .Values.auth.oauth2Proxy.emails }}
 
 In front of it, oauth2-proxy signs in against {{ .Values.auth.oauth2Proxy.issuerUrl }} and lets in
-{{ len $emails }} address{{ if gt (len $emails) 1 }}es{{ end }} and nobody else ({{ join ", " $emails }}). The web front listens on the
+{{ len $emails }} address{{ if gt (len $emails) 1 }}es{{ end }} and nobody else ({{ join ", " $emails }}).
+{{- with .Values.auth.oauth2Proxy.subjects }} Each must also be one of {{ len . }}
+user id{{ if gt (len .) 1 }}s{{ end }} at the provider ({{ join ", " . }}), which nobody but the provider can mint.
+{{- else }}
+ONLY THE ADDRESS IS CHECKED. On a provider where anybody may register an organization or an
+account, or where another organization's admin (or Microsoft Entra's tenant) sets a user's
+address, somebody else can be given yours — pin your own user id with auth.oauth2Proxy.subjects.
+{{- end }}
+The web front listens on the
 pod's own loopback, so the sign-in is the only way to it — for the Service, every route, every
 other pod and the node alike. A sign-in lasts {{ .Values.auth.oauth2Proxy.cookieExpire }}; the page signs in again by itself when
 it runs out. Register {{ include "teams-lite.redirectUrl" . }} as the client's redirect URI.

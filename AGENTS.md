@@ -11458,7 +11458,7 @@ Option 1 is the Tailscale operator's Ingress, above. Option 2 is the internet, a
 it as two values that are meant to be used together: **`auth.oauth2Proxy`** runs oauth2-proxy as a
 SIDECAR in the pod, and **`httpRoute`** publishes the Service through a Gateway the cluster already
 runs (`gateway.networking.k8s.io/v1`, `templates/httproute.yaml`). An Ingress takes the same sidecar.
-Twelve rules hold it, and `packaging/helm/chart.test.ts` pins each:
+Thirteen rules hold it, and `packaging/helm/chart.test.ts` pins each:
 
 - **A SIDECAR, never a separate proxy, because of the node.** With the sign-in in front, the web
   front listens on the POD's 127.0.0.1 (`TEAMS_WEB_HOST`, which extraEnv may no longer set), the
@@ -11474,7 +11474,31 @@ Twelve rules hold it, and `packaging/helm/chart.test.ts` pins each:
 - **Only the listed addresses get in**: `auth.oauth2Proxy.emails` (required, one address each — the
   schema refuses `*`, a bare domain and anything that is not an address) in a ConfigMap read by
   `--authenticated-emails-file`, and never `--email-domain`, which would widen it to a domain (`*` to
-  every account at the provider). oauth2-proxy also refuses an address its provider has not verified.
+  every account at the provider). oauth2-proxy refuses an address its provider MARKS unverified —
+  and accepts one it says nothing about (`email_verified` absent), read from v7.15.5's own
+  `buildSessionFromClaims`.
+- **AN ADDRESS IS NOT AN IDENTITY ON A PROVIDER YOU SHARE, so the chart pins the user id too**
+  (`auth.oauth2Proxy.subjects`). Found by the independent review of the first internet deployment
+  and MEASURED there: its Zitadel instance serves its public "Organization Registration"
+  form, and Zitadel lets an organization owner create a user with ANY address marked verified,
+  while a project's apps accept every organization's users until "Check authorization on
+  Authentication" is turned on. So a stranger registers an organization, gives a user the reader's
+  address, signs in — and is handed the write token. Microsoft Entra's `email` claim is the same
+  class (the tenant sets it). The pin is the ID token's `sub`, the one value only the provider
+  mints: `--oidc-groups-claim=sub` and one `--allowed-group` per subject. Read from oauth2-proxy
+  v7.15.5's source: a string claim becomes a list of one (`util.toStringSlice`), the groups check
+  (`Authorize`) is ANDed with the address check at the callback AND on every request, and a refused
+  sign-in logs `Session{email:… user:<sub> …}` — which is where a reader finds their own id on any
+  provider. Three rails: `--allowed-group` is a StringSlice that pflag reads as CSV, so the schema
+  refuses a comma, a quote or a space in a subject; `--oidc-groups-claim` is a String whose LAST
+  value wins, so extraArgs naming either flag beside `subjects` is refused (it would replace the id
+  being compared, or let a group in whatever its members' ids); and a Zitadel id is all digits,
+  which YAML and `--set` read as a NUMBER — refused by the schema rather than rounded (`--set` turns
+  `312345678901234567` into a float that has lost its last digits), so the docs say to quote it.
+  NOTES says `ONLY THE ADDRESS IS CHECKED` whenever a sign-in pins no subject. It is not required,
+  because on a provider nobody else administers (Google, a Pocket ID of one's own) the address is
+  enough; the IdP-side half — Zitadel's role check, a closed registration — is the reader's to set
+  and the chart's README names it.
 - **The cookie is `__Host-teams-lite`, Secure, HttpOnly, SameSite=Lax**: no sibling name under the
   same domain can plant or overwrite it, and Lax rather than Strict because the provider's redirect
   back is a cross-site navigation that must carry it. A sign-in lasts `cookieExpire` (168h, its

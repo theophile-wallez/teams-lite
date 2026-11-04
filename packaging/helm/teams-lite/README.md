@@ -332,6 +332,18 @@ provider you already use, and **only the addresses you list get in**.
    oauth2-proxy refuses an OpenID Connect provider with no client secret at all, so the chart hands
    it the empty one (`--client-secret-file=/dev/null`); the PKCE verifier is what proves the exchange.
 
+   **An address is not an identity on a provider you share.** Where anybody may register an
+   organization or an account — a Zitadel, Keycloak or Authentik instance serving other people — or
+   where another organization's admin can create a user with any address and mark it verified (and
+   Microsoft Entra, whose `email` claim the tenant sets), somebody else can be given *your*
+   address. Pin your own user id at the provider as well, which only the provider mints:
+   `auth.oauth2Proxy.subjects: ["<your sub>"]` (quoted — a Zitadel id is all digits). The chart
+   then passes `--oidc-groups-claim=sub` and one `--allowed-group` each, checked beside the
+   addresses at sign-in and on every request. Zitadel shows the id on the user's page in its
+   console; any provider's is on the line refusing you in `kubectl logs <pod> -c oauth2-proxy`
+   (`user:<sub>`). On Zitadel, also turn on **Check authorization on Authentication** for the
+   project and grant a role to you alone, so the provider itself refuses everybody else.
+
 3. **Install** with a values file:
 
    <!-- public-values: the chart's tests render this block -->
@@ -473,6 +485,7 @@ at the same time. No NetworkPolicy applies to a host-network pod, so none is ren
 | `auth.oauth2Proxy.enabled` | `false` | oauth2-proxy beside the app; the web front moves to the pod's loopback |
 | `auth.oauth2Proxy.issuerUrl` / `.clientId` / `.existingSecret` / `.emails` | — | required with it |
 | `auth.oauth2Proxy.publicClient` | `false` | a client with no secret (PKCE alone): the Secret holds only `cookie-secret` |
+| `auth.oauth2Proxy.subjects` | `[]` | the provider's user ids (`sub`, quoted), checked as well as `emails` — set it on any provider you share |
 | `auth.oauth2Proxy.redirectUrl` | `https://<first route hostname>/oauth2/callback` | |
 | `auth.oauth2Proxy.cookieExpire` / `.cookieRefresh` | `168h` / off | refresh needs a refresh token from the provider |
 | `auth.oauth2Proxy.image.tag` | `v7.15.5` | |
