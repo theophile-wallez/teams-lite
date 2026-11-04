@@ -604,10 +604,11 @@ command_line_sans_tracked_paths() {
 SANDBOX_THREAD='19:21d2695ae8ff4e25ace9c662e5c326cb@thread.v2'
 
 # Does this source DRIVE the identity broker's sign-in window — type into it, click in it,
-# focus it or close it? Reading it (`find`, `capture`, `size`) is measurement and stays allowed:
-# `examples/signin_window_recon.rs` is what re-measures SIGN-IN.md § 3.
+# focus it, close it, or MOVE it (`capture_or_place`, the live session's read, which moves a
+# window that hangs off its screen)? Reading it (`find`, `capture`, `size`) is measurement and
+# stays allowed: `examples/signin_window_recon.rs` is what re-measures SIGN-IN.md § 3.
 drives_the_signin_window() {
-  grep -qE '\.(type_key|click|focus|close)\(|close_open_signin_window|signin::Signin::start|interactive_token' "$1"
+  grep -qE '\.(type_key|click|focus|close|capture_or_place)\(|close_open_signin_window|signin::Signin::start|interactive_token' "$1"
 }
 
 # Does this source CYCLE the Intune container — stop it, start it, rebuild it, restore over it,

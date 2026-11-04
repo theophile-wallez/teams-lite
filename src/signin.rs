@@ -274,6 +274,14 @@ pub struct Signin {
     started: Instant,
     /// When the phase last settled, for {@link OUTCOME_KEPT}.
     settled: Arc<Mutex<Option<Instant>>>,
+    /// Why the last frame could not be read, so each reason reaches the journal ONCE.
+    ///
+    /// The page swallows a failed frame on purpose — the broker replaces its window between
+    /// steps, and the next tick finds the new one — so a read that fails EVERY time had no trace
+    /// anywhere: an enrollment whose portal X refused to read drew a placeholder for as long as
+    /// it was open, with nothing in the log saying why. A line per frame would be one a second;
+    /// one per change of reason is the fact a reader of the log needs.
+    frame_failure: Mutex<Option<String>>,
 }
 
 /// What the app is told when a sign-in cannot even be started.
@@ -404,6 +412,7 @@ impl Signin {
             cancel_closed: Arc::new(AtomicBool::new(false)),
             started: Instant::now(),
             settled: Arc::new(Mutex::new(None)),
+            frame_failure: Mutex::new(None),
         };
 
         let run = Run {
@@ -474,14 +483,36 @@ impl Signin {
     /// One frame of the sign-in window, as a PNG.
     pub async fn frame(&self) -> Result<Value> {
         let window = self.open_window()?;
-        let frame = tokio::task::spawn_blocking(move || window.capture())
+        let read = tokio::task::spawn_blocking(move || window.capture_or_place())
             .await
-            .context("read the sign-in window")??;
+            .context("read the sign-in window")
+            .and_then(|read| read);
+        self.note_frame(read.as_ref().err());
+        // The tick that had to move the window onto its screen reads nothing (see
+        // `SigninWindow::capture`): there is no picture yet, and the page holds the one it has.
+        let Some(frame) = read? else {
+            return Ok(json!({ "moved": true }));
+        };
         Ok(json!({
             "width": frame.width,
             "height": frame.height,
             "png": base64::engine::general_purpose::STANDARD.encode(&frame.png),
         }))
+    }
+
+    /// Say in the journal why a frame could not be read — once per reason, and once more when a
+    /// frame can be read again — see [`Signin::frame_failure`].
+    fn note_frame(&self, failure: Option<&anyhow::Error>) {
+        let key = failure.map(frame_failure_key);
+        let Ok(mut last) = self.frame_failure.lock() else { return };
+        if *last == key {
+            return;
+        }
+        match failure {
+            Some(failure) => eprintln!("[signin] the window could not be read: {failure:#}"),
+            None => eprintln!("[signin] the window can be read again"),
+        }
+        *last = key;
     }
 
     /// Type a key into the window.
@@ -765,6 +796,28 @@ async fn run_signin(
     // interactive call — the rescue's included — starts on a display with none of ours.
     drop(turn);
     next
+}
+
+/// What makes two frame failures the SAME reason, for [`Signin::note_frame`].
+///
+/// Not the error's text: an X protocol error prints the SEQUENCE NUMBER of the request it answers
+/// (x11rb's `X11 error X11Error { …, sequence, … }`), which is new on every frame, so keyed on
+/// the text a window X kept refusing — the very failure this exists to report — wrote a line a
+/// second for as long as it lasted. An X error is keyed on what it IS — its kind and the request
+/// it refused — and every other link of the chain on its own words.
+fn frame_failure_key(failure: &anyhow::Error) -> String {
+    failure
+        .chain()
+        .map(|link| match link.downcast_ref::<x11rb::errors::ReplyError>() {
+            Some(x11rb::errors::ReplyError::X11Error(error)) => format!(
+                "X11 {:?} error answering {}",
+                error.error_kind,
+                error.request_name.unwrap_or("a request")
+            ),
+            _ => link.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 /// Watch `display` for up to `bound` for a window of `classes` that a dropped call may still put
@@ -1175,6 +1228,38 @@ fn parse_click(params: &Value) -> Result<(i16, i16, Button)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_failure_is_one_reason_whatever_request_number_it_answered() {
+        let refused = |kind, sequence| -> anyhow::Error {
+            let error = x11rb::x11_utils::X11Error {
+                error_kind: kind,
+                error_code: 8,
+                sequence,
+                bad_value: 0x0060_0003,
+                minor_opcode: 0,
+                major_opcode: 73,
+                extension_name: None,
+                request_name: Some("GetImage"),
+            };
+            anyhow::Error::new(x11rb::errors::ReplyError::X11Error(error))
+                .context("read the sign-in window's pixels")
+        };
+        let first = refused(x11rb::protocol::ErrorKind::Match, 41);
+        let later = refused(x11rb::protocol::ErrorKind::Match, 977);
+        // The text differs — it carries the sequence — and the reason does not.
+        assert_ne!(format!("{first:#}"), format!("{later:#}"));
+        assert_eq!(frame_failure_key(&first), frame_failure_key(&later));
+        assert_eq!(
+            frame_failure_key(&first),
+            "read the sign-in window's pixels: X11 Match error answering GetImage"
+        );
+        // A different kind of refusal is a different reason, and so is a sentence of our own.
+        let gone = refused(x11rb::protocol::ErrorKind::Window, 41);
+        assert_ne!(frame_failure_key(&first), frame_failure_key(&gone));
+        let prose = anyhow::anyhow!("the sign-in window has no size yet");
+        assert_eq!(frame_failure_key(&prose), "the sign-in window has no size yet");
+    }
 
     #[test]
     fn only_a_live_phase_is_served_frames_and_keys() {

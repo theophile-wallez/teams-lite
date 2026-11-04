@@ -11898,7 +11898,7 @@ does can sign anybody in on it. What enrolls a device is the Intune PORTAL, so a
 gained a KIND (`signin::Kind`, `"kind"` on `signin_status`): `Signin` is everything above, and
 `Enroll` starts the PORTAL helper (`server __teams-lite-intune-portal`, § The Intune container is a
 LIBRARY), which opens `intune-portal` inside the container, and serves its window through the very
-same four methods. SIGN-IN.md § 5 is the map. Ten rules hold it, and each is pinned by a test in
+same four methods. SIGN-IN.md § 5 is the map. Eleven rules hold it, and each is pinned by a test in
 `src/signin.rs`, `src/bin/server.rs`, `web/src/lib/signin.test.ts` or
 `web/e2e/intune-embedded.spec.ts`:
 
@@ -11929,6 +11929,20 @@ same four methods. SIGN-IN.md § 5 is the map. Ten rules hold it, and each is pi
   `SigninWindow::find_any`): the broker draws its sign-in dialog OVER the portal, and with no window
   manager there the window mapped later is stacked higher. An override-redirect window (a menu, a
   tooltip) wins only when nothing else matches. Nothing outside those two programs is ever served.
+- **A window that hangs off the screen is MOVED onto it before it is read**
+  (`SigninWindow::capture_or_place`, `a_portal_window_hanging_off_the_screen_is_placed_and_then_read`).
+  No window manager places anything there, and the portal maps its 478x628 window at 615,375 on the
+  1280x800 `:99` — 203 rows past the bottom — while X answers `BadMatch` to a `GetImage` of a window
+  not wholly on its screen. The first real enrollment (a pod on a real cluster, 2026-11-04) found the window
+  and read none of it: the page swallows a failed frame, so the panel drew its placeholder for as
+  long as the portal was open. Now the whole window is asked for first and only a `BadMatch`
+  places it; a top-level window is moved the least that puts it on the screen, and the move counts
+  only where it landed; the tick that moves it reads nothing (`{moved: true}`, and the page marks a
+  held picture stale), because the rows it brought on are not drawn yet; a diagnostic's `capture`
+  never moves anything, and the guard refuses an example that calls `capture_or_place`; and a frame
+  that cannot be read says why in the journal, once per reason — keyed on the X error's kind, since
+  its text carries a sequence number that changes every frame. Measured against a real Xvfb with no
+  window manager; not yet against the portal itself.
 - **The interactive TURN is held for the session's whole life**, so the automatic rescue stands
   down and every broker dialog on that display is one the PORTAL asked for. **And so the account
   check is made UNDER that turn** (`account_answers`,

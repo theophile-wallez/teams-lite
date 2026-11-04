@@ -670,7 +670,13 @@ export async function emitBrokerStatus(
  *  whole run, and a sign-in left running would put a dialog over every later spec. */
 export async function armSignin(
   page: Page,
-  body: { outcome?: "window" | "immediate" | "refuse" | "fail" | "hold"; reset?: boolean },
+  body: {
+    outcome?: "window" | "immediate" | "refuse" | "fail" | "hold";
+    reset?: boolean;
+    /** The next N frame reads answer `{moved: true}`, as the backend does on the tick it moves a
+     *  window that hung off its screen. */
+    moved_frames?: number;
+  },
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "signin", ...body },

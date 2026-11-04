@@ -620,6 +620,13 @@ EXAMPLE_FIXTURES = {
         "use teams_lite::xwindow::SigninWindow;\n"
         "fn main() { SigninWindow::find(\":77\").unwrap().unwrap().close().unwrap(); }\n"
     ),
+    # The live session's read MOVES a window that hangs off its screen before it reads it — an act
+    # on the user's display, not a measurement, so it is the driving half too.
+    "guard-test-signin-place.rs": (
+        "// Moves whatever sign-in window is open onto its screen, then reads it.\n"
+        "use teams_lite::xwindow::SigninWindow;\n"
+        "fn main() { SigninWindow::find(\":77\").unwrap().unwrap().capture_or_place().unwrap(); }\n"
+    ),
     # A send whose target comes from an argument: the shape that must never run.
     "guard-test-loose-send.rs": (
         "// A probe that posts wherever it is told.\n"
@@ -906,6 +913,7 @@ def cases(tmp: Path):
         ("BLOCK", PROJECT, f"bun run {tmp}/emoji-adder.ts"),
         ("BLOCK", PROJECT, "cargo run --example guard-test-signin-type"),
         ("BLOCK", PROJECT, "cargo run --example guard-test-signin-close"),
+        ("BLOCK", PROJECT, "cargo run --example guard-test-signin-place"),
         ("BLOCK", PROJECT, f"bun run {tmp}/signin-starter.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/signin-watcher.ts"),
         ("BLOCK", PROJECT, f"bun run {tmp}/signin-typist.ts"),

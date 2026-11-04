@@ -54,6 +54,7 @@ import {
   type LinearWorkspace,
   type BrokerStatus,
   type PortalPurpose,
+  type SigninFrameAnswer,
   type SigninState,
   INITIAL_SIGNIN,
   type CalendarEvent,
@@ -7045,7 +7046,7 @@ export class TeamsController {
 
   /** One frame of the broker's window. Held by the panel, never by this state: it is a PNG a
    *  second, and the rest of the app has no use for it. */
-  signinFrame(): Promise<{ width: number; height: number; png: string }> {
+  signinFrame(): Promise<SigninFrameAnswer> {
     return this.backend.signinFrame();
   }
 

@@ -7127,6 +7127,11 @@ let mockSignin: MockSignin | null = null;
  *  `{kind:"signin"}` hook, and a spec MUST reset it — one mock process serves the whole run. */
 let mockSigninOutcome: "window" | "immediate" | "refuse" | "fail" | "hold" = "window";
 
+/** How many of the next frame reads answer `{moved: true}` — what the backend answers on the tick
+ *  it had to move a window that hung off its screen (`SigninWindow::capture_or_place`), when there
+ *  is no picture to read yet. Armed by `{kind:"signin", moved_frames: N}`, cleared by the reset. */
+let mockSigninMovedFrames = 0;
+
 /** Counter behind `MockSignin.id`. */
 let mockSigninSeq = 0;
 
@@ -8682,6 +8687,10 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       if (mockSignin?.stopping) throw new Error("this sign-in is being closed");
       if (!mockSignin || mockSignin.phase !== "waiting") {
         throw new Error("no sign-in is running — press Sign in again to start one");
+      }
+      if (mockSigninMovedFrames > 0) {
+        mockSigninMovedFrames -= 1;
+        return { moved: true };
       }
       return {
         width: MOCK_SIGNIN_WINDOW.width,
@@ -13026,6 +13035,7 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     if (body.kind === "signin") {
       if (body.reset === true) {
         mockSigninOutcome = "window";
+        mockSigninMovedFrames = 0;
         mockSignin = null;
         // The turn goes with the session it belonged to, and the broker's fresh token with it.
         mockTurnHolder = null;
@@ -13037,6 +13047,14 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         mockBrokerStatus = null;
         broadcast("signin_status", mockSigninPayload());
         return Response.json({ ok: true, outcome: mockSigninOutcome }, { status: 200 });
+      }
+      if (typeof body.moved_frames === "number") {
+        mockSigninMovedFrames = Math.max(0, Math.floor(body.moved_frames));
+        // Armed on its own it changes nothing else — it is armed mid-flow, over a window the
+        // session is already serving.
+        if (typeof body.outcome !== "string") {
+          return Response.json({ ok: true, moved_frames: mockSigninMovedFrames }, { status: 200 });
+        }
       }
       const outcome = typeof body.outcome === "string" ? body.outcome : "window";
       if (!["window", "immediate", "refuse", "fail", "hold"].includes(outcome)) {

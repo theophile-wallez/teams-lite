@@ -2,8 +2,10 @@
 //!
 //! READ-ONLY, and only read-only: it finds the display the broker draws on, looks for the
 //! broker's sign-in window if one is up, and reports the shapes — the display, the window's
-//! size, and the byte cost of one frame. It never starts a sign-in, never types, and never
-//! closes anything.
+//! size, and the byte cost of one frame. It never starts a sign-in, never types, never
+//! closes anything, and never MOVES the window: its read is `SigninWindow::capture`, which reads a
+//! window that hangs off its screen as far as it is on it, where the live session's
+//! `capture_or_place` would move it.
 //!
 //!     cargo run --example signin_window_recon
 //!     cargo run --example signin_window_recon -- --save /tmp/signin.png

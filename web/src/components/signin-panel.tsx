@@ -97,7 +97,17 @@ export function SigninPanel() {
     const pull = async () => {
       try {
         const next = await controller.signinFrame();
-        if (live && next?.png) setFrame({ ...next, stale: false });
+        if (!live) return;
+        if ("png" in next && next.png) {
+          setFrame({ ...next, stale: false });
+        } else {
+          // No picture this tick: the backend has just moved a window that hung off its screen,
+          // and the rows it brought on are not drawn yet (`SigninWindow::capture_or_place`). The
+          // window this answers for may not be the one in the picture held here — the broker
+          // replaces its window between steps — so the held one is marked stale, exactly as a
+          // failed read marks it, and the next tick brings the fresh one.
+          setFrame((held) => (held ? { ...held, stale: true } : held));
+        }
       } catch {
         // A frame that could not be read is not a failure of the sign-in: the broker REPLACES
         // its window between steps (the password page and the number-matching one are not the

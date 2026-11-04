@@ -304,6 +304,42 @@ goes. An override-redirect window (a menu, a tooltip, carrying its program's cla
 when nothing else is. Every other rule of § 3 holds: one window, by class AND map state, never the
 screen.
 
+**A window that hangs off the screen is MOVED onto it before it is read.** Neither display this app
+reads has a window manager, so nothing places a window — and the portal maps its 478x628 window at
+615,375 on the 1280x800 `:99`, 203 rows past the bottom edge (recorded in intune-container's own
+viewer, `src/xscreen.rs`, which moves the window to the origin for the same reason). X answers
+`BadMatch` to a `GetImage` of any window that is not wholly on its screen. So the first real
+enrollment (2026-11-04, a pod on a real cluster) found the portal's window — the panel's placeholder took
+its 478:628 shape — and could read none of it: every frame failed, the page swallowed each failure
+as it does between broker steps, and the panel drew its loading placeholder for as long as the
+portal was open, with nothing in the log. The live session's read is now
+`SigninWindow::capture_or_place`, and four rules hold it:
+
+- **The whole window is asked for FIRST**, which is every read that ever worked here; only a
+  `BadMatch` places it. A composited display reads a window part of which is off the screen, and
+  that read is left as it was.
+- **A TOP-LEVEL window is moved the least that puts it wholly on the screen** — the clamp a window
+  manager applies — and the move counts only where it LANDED: a client holding SubstructureRedirect
+  on the root may ignore it, and a window that did not move is read where it stands, as far as it
+  is on the screen, from its own origin (so a press on that frame still lands where it was aimed).
+- **The tick that moves the window reads NOTHING** (`{moved: true}` on the wire, and the page marks
+  any picture it holds stale). The rows a move brings on screen are not drawn until the program
+  has handled the `Expose` it sends, so a read in the same breath would serve the background, or
+  rows of the window repeated, as a fresh picture a press could land on. The next tick reads it
+  whole.
+- **A diagnostic never moves anything.** `SigninWindow::capture` reads the part on the screen and
+  leaves the window where it is, so `examples/signin_window_recon.rs` stays read-only; moving is
+  the driving half, and the automation guard refuses an example that calls `capture_or_place`.
+
+Measured against a real Xvfb at 1280x800x24 with no window manager
+(`xwindow::tests::a_portal_window_hanging_off_the_screen_is_placed_and_then_read`, `#[ignore]`d
+because it needs that server): the raw read of a window at 615,375 is refused as `BadMatch`; the
+diagnostic read gets its 478x425 on-screen part and leaves it at 615,375; the session's read moves
+it to 615,172 and answers nothing; and the next read gets it whole at 478x628. And a frame that
+cannot be read now says why in the journal, once per reason — keyed on the X error's kind and the
+request it refused, never on its text, which carries the request's sequence number and so changes
+on every frame (`[signin] the window could not be read: …`).
+
 **The interactive TURN is held for the session's whole life.** A sign-in takes it for one call; a
 portal session takes it before it looks for any window and keeps it until the portal is gone, so the
 automatic rescue (§ 2) stands down meanwhile and every broker dialog on that display is one the

@@ -59,6 +59,7 @@ import type {
   SealSetResult,
   SealStatus,
   SettingsPatch,
+  SigninFrameAnswer,
   SigninState,
   UpdateCheckResult,
   UpdateProgress,
@@ -845,7 +846,7 @@ export class Backend {
    *
    *  A WRITE request even though it reads: its answer is a picture of a sign-in page, which
    *  is not something a client that merely found this socket may have. */
-  signinFrame(): Promise<{ width: number; height: number; png: string }> {
+  signinFrame(): Promise<SigninFrameAnswer> {
     return this.writeRequest("signin_frame", {});
   }
 

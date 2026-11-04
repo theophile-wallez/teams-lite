@@ -29,9 +29,10 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, ImageFormat, ImageOrder,
-    InputFocus, MapState, Window,
+    Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, EventMask,
+    GetGeometryReply, GetImageReply, ImageFormat, ImageOrder, InputFocus, MapState, Window,
 };
+use x11rb::protocol::ErrorKind;
 use x11rb::rust_connection::RustConnection;
 use x11rb::CURRENT_TIME;
 
@@ -372,6 +373,8 @@ pub fn close_windows(display: &str, classes: &[&str]) -> Result<usize> {
 pub struct SigninWindow {
     conn: RustConnection,
     root: Window,
+    /// The root window's size: the screen a window has to be wholly on to be read at all.
+    screen: (u16, u16),
     window: Window,
     /// keysym -> (keycode, needs shift), from the server's own mapping.
     layout: HashMap<u32, (u8, bool)>,
@@ -430,15 +433,25 @@ impl SigninWindow {
     pub fn find_any(display: &str, classes: &[&str]) -> Result<Option<Self>> {
         let (conn, screen) = RustConnection::connect(Some(display))
             .with_context(|| format!("open X display {display}"))?;
-        let root = conn.setup().roots[screen].root;
+        let root_screen = &conn.setup().roots[screen];
+        let (root, size) =
+            (root_screen.root, (root_screen.width_in_pixels, root_screen.height_in_pixels));
         let mut found = Vec::new();
         collect_by_class(&conn, root, classes, SEARCH_DEPTH, &mut found)?;
         let Some(window) = pick_window(&found) else {
             return Ok(None);
         };
-        let (layout, spare) = read_layout(&conn)?;
+        // Under the X turn, because `type_key` LENDS a spare keycode a keysym for the length of a
+        // press: read in that moment, the layout would record the borrowed keycode as the way to
+        // type that character, and the next press of it — on a keycode already handed back —
+        // would type nothing while answering that it had. The watcher runs a find every 300 ms
+        // while the reader is typing, so the moment is not rare.
+        let (layout, spare) = {
+            let _turn = x_turn();
+            read_layout(&conn)?
+        };
         let msb_first = conn.setup().image_byte_order == ImageOrder::MSB_FIRST;
-        Ok(Some(Self { conn, root, window, layout, spare, msb_first }))
+        Ok(Some(Self { conn, root, screen: size, window, layout, spare, msb_first }))
     }
 
     /// The window's size right now, without reading a single pixel.
@@ -452,25 +465,70 @@ impl SigninWindow {
         Ok((geometry.width, geometry.height))
     }
 
-    /// Read the window's pixels as a PNG.
+    /// Read the window's pixels as a PNG, and never move it.
     ///
     /// The WINDOW's own drawable, never the root: the frame must carry that window and
     /// nothing else on the display. Nothing is scaled — the page is 550 px wide and the
     /// number a reader has to match is 13 px type in it.
+    ///
+    /// The whole window is asked for first, which is every read that ever worked here; a window
+    /// X refuses to read whole (`BadMatch`, its answer for a window that is not wholly on its
+    /// screen) is read as far as it IS on the screen, from its own origin. What a live session
+    /// serves goes through [`SigninWindow::capture_or_place`] instead, which moves such a window
+    /// onto its screen; this read is the one a diagnostic may make.
     pub fn capture(&self) -> Result<Frame> {
+        self.read_frame(false)?
+            .ok_or_else(|| anyhow!("the sign-in window was moved by a read that may not move it"))
+    }
+
+    /// Read the window's pixels as a PNG, first moving it onto its screen when X refused to read
+    /// it whole — and `None` on the tick that moved it, when there is nothing worth reading yet.
+    ///
+    /// This is what a live session serves. A composited display can read a window part of which
+    /// is off the screen, and that read is left exactly as it was: only a `BadMatch` places the
+    /// window ([`SigninWindow::place_on_screen`]).
+    ///
+    /// A tick that MOVES the window reads nothing: the rows that were off the screen were never
+    /// drawn, and the program repaints them only once it has handled the `Expose` the move sends —
+    /// which it cannot do inside this call. Read at once, the bottom of the frame would be the
+    /// background, or rows of the window repeated, or whatever else stood on that part of the
+    /// screen, served as a fresh picture a press could land on. The next tick reads the window
+    /// whole. A window that cannot be moved is read as far as it is on the screen, from its own
+    /// origin, so a press on that frame still lands where it was aimed.
+    pub fn capture_or_place(&self) -> Result<Option<Frame>> {
+        self.read_frame(true)
+    }
+
+    /// The read behind [`SigninWindow::capture`] and [`SigninWindow::capture_or_place`]; `place`
+    /// says whether a window X refused to read whole may be moved.
+    fn read_frame(&self, place: bool) -> Result<Option<Frame>> {
         let _turn = x_turn();
         let geometry = self
             .conn
             .get_geometry(self.window)?
             .reply()
             .context("the sign-in window went away while it was being read")?;
-        let (width, height) = (geometry.width, geometry.height);
-        anyhow::ensure!(width > 0 && height > 0, "the sign-in window has no size yet");
-        let image = self
-            .conn
-            .get_image(ImageFormat::Z_PIXMAP, self.window, 0, 0, width, height, !0)?
-            .reply()
-            .context("read the sign-in window's pixels")?;
+        anyhow::ensure!(
+            geometry.width > 0 && geometry.height > 0,
+            "the sign-in window has no size yet"
+        );
+        let mut size = (geometry.width, geometry.height);
+        let image = match self.read_pixels(size) {
+            Err(x11rb::errors::ReplyError::X11Error(error))
+                if error.error_kind == ErrorKind::Match =>
+            {
+                match self.place_on_screen(&geometry, place)? {
+                    Placement::Moved => return Ok(None),
+                    Placement::Read(part) => {
+                        size = (part.width, part.height);
+                        self.read_pixels(size)
+                    }
+                }
+            }
+            read => read,
+        }
+        .context("read the sign-in window's pixels")?;
+        let (width, height) = size;
         let pixels = width as usize * height as usize;
         // Four bytes a pixel is what Z_PIXMAP gives for the 24- and 32-bit visuals every server
         // this runs on uses. Anything else is refused rather than unpacked on a guess: a wrong
@@ -482,7 +540,88 @@ impl SigninWindow {
         );
         let mut rgb = Vec::with_capacity(pixels * 3);
         png::pixels_to_rgb(&image.data[..pixels * 4], self.msb_first, &mut rgb);
-        Ok(Frame { width, height, png: png::encode_rgb(width as u32, height as u32, &rgb)? })
+        let png = png::encode_rgb(width as u32, height as u32, &rgb)?;
+        Ok(Some(Frame { width, height, png }))
+    }
+
+    /// `GetImage` of the window's top-left `size`, with X's own error kept so the caller can
+    /// tell a window off its screen (`BadMatch`) from every other failure. The caller holds the
+    /// X turn.
+    fn read_pixels(
+        &self,
+        (width, height): (u16, u16),
+    ) -> std::result::Result<GetImageReply, x11rb::errors::ReplyError> {
+        self.conn.get_image(ImageFormat::Z_PIXMAP, self.window, 0, 0, width, height, !0)?.reply()
+    }
+
+    /// Move a window X refused to read wholly onto its screen (when `may_move`), or say which part
+    /// of it can be read where it stands.
+    ///
+    /// This is the one thing a window manager would do that nothing does here. Neither display
+    /// this module reads has one, so a program maps its window where it likes — and the Intune
+    /// portal maps its 478x628 window at 615,375 on the container's 1280x800 screen, with its
+    /// bottom 203 rows past the edge (recorded in intune-container's own viewer, src/xscreen.rs,
+    /// which moves it to the origin for the same reason). X refuses every read of such a window,
+    /// so an enrollment showed nothing at all: the panel drew its placeholder for as long as the
+    /// portal was open. So the window is moved the LEAST that puts it on the screen — the clamp a
+    /// window manager applies.
+    ///
+    /// Only a TOP-LEVEL window is moved. Inside another program's window (a manager's frame,
+    /// on a display that has one) the position is that program's to choose; what is read then
+    /// is the part on the screen, and a window whose part on the screen does not start at its own
+    /// origin is refused rather than read with an offset nothing else would know about.
+    ///
+    /// The caller holds the X turn.
+    fn place_on_screen(&self, geometry: &GetGeometryReply, may_move: bool) -> Result<Placement> {
+        let screen = (u32::from(self.screen.0), u32::from(self.screen.1));
+        let border = i32::from(geometry.border_width);
+        let size = (u32::from(geometry.width), u32::from(geometry.height));
+        let parent = self
+            .conn
+            .query_tree(self.window)?
+            .reply()
+            .context("ask where the sign-in window stands")?
+            .parent;
+        if may_move && parent == self.root {
+            let outer = (i32::from(geometry.x), i32::from(geometry.y));
+            let outer_size = (size.0 + 2 * border as u32, size.1 + 2 * border as u32);
+            if let Some((x, y)) = origin_on_screen(outer, outer_size, screen) {
+                self.conn
+                    .configure_window(self.window, &ConfigureWindowAux::new().x(x).y(y))?
+                    .check()
+                    .context("move the sign-in window onto its screen")?;
+                // A client holding SubstructureRedirect on the root (a window manager this module
+                // did not expect) turns the move into a request it may ignore. Answered `Moved`
+                // anyway, every tick would move nothing and read nothing, for ever — so the move
+                // counts only where it landed, and otherwise the window is read where it stands.
+                let now = self
+                    .conn
+                    .get_geometry(self.window)?
+                    .reply()
+                    .context("the sign-in window went away while it was being placed")?;
+                if (i32::from(now.x), i32::from(now.y)) == (x, y) {
+                    return Ok(Placement::Moved);
+                }
+            }
+        }
+        let at = self
+            .conn
+            .translate_coordinates(self.window, self.root, 0, 0)?
+            .reply()
+            .context("ask where the sign-in window stands")?;
+        let inner = (i32::from(at.dst_x), i32::from(at.dst_y));
+        visible_part(inner, size, screen).map(Placement::Read).ok_or_else(|| {
+            anyhow!(
+                "the sign-in window ({}x{} at {},{}) is not wholly on its {}x{} screen and stands \
+                 where this app cannot move it, so it cannot be read",
+                size.0,
+                size.1,
+                inner.0,
+                inner.1,
+                screen.0,
+                screen.1
+            )
+        })
     }
 
     /// Put the keyboard focus on the sign-in window.
@@ -681,6 +820,52 @@ fn pick_window(found: &[Candidate]) -> Option<Window> {
         .find(|c| !c.override_redirect)
         .or_else(|| found.first())
         .map(|c| c.window)
+}
+
+/// The part of a window that is on its screen, in the window's own coordinates: always from its
+/// origin, so a frame of it is addressed exactly as the window is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OnScreen {
+    width: u16,
+    height: u16,
+}
+
+/// What [`SigninWindow::place_on_screen`] did about a window X refused to read.
+enum Placement {
+    /// It was moved wholly onto its screen; read it on the next tick, once it has repainted.
+    Moved,
+    /// It stays where it is, and this much of it, from its origin, is on the screen.
+    Read(OnScreen),
+}
+
+/// Where a top-level window whose outer corner is at `at`, `size` wide and tall, has to be moved
+/// so it is wholly on a `screen`-sized screen — or `None` when it already is. The least move that
+/// does it, the clamp a window manager applies: an axis that fits is left exactly where it was,
+/// and a window larger than the screen goes to that edge's 0, so the corner a reader starts
+/// reading from is the one on screen. Pure, so it is tested without a display.
+fn origin_on_screen(at: (i32, i32), size: (u32, u32), screen: (u32, u32)) -> Option<(i32, i32)> {
+    let clamp = |at: i32, size: u32, screen: u32| {
+        let room = i64::from(screen) - i64::from(size);
+        i64::from(at).clamp(0, room.max(0)) as i32
+    };
+    let placed = (clamp(at.0, size.0, screen.0), clamp(at.1, size.1, screen.1));
+    (placed != at).then_some(placed)
+}
+
+/// The part of a window whose inner origin is at `at` (root coordinates), `size` wide and tall,
+/// that lies on a `screen`-sized screen — `None` when none of it does, or when the part on screen
+/// does not start at the window's own origin (the window hangs off the top or left edge), which a
+/// frame could only carry with an offset the page that maps presses on it does not know about.
+fn visible_part(at: (i32, i32), size: (u32, u32), screen: (u32, u32)) -> Option<OnScreen> {
+    if at.0 < 0 || at.1 < 0 {
+        return None;
+    }
+    let span = |at: i32, size: u32, screen: u32| {
+        let room = i64::from(screen) - i64::from(at);
+        u16::try_from(i64::from(size).min(room).max(0)).unwrap_or(u16::MAX)
+    };
+    let (width, height) = (span(at.0, size.0, screen.0), span(at.1, size.1, screen.1));
+    (width > 0 && height > 0).then_some(OnScreen { width, height })
 }
 
 /// Is this window one of `classes`, drawn and readable right now? `Some(override_redirect)`
@@ -911,5 +1096,138 @@ mod tests {
         assert_eq!(Button::Left.detail(), 1);
         assert_eq!(Button::ScrollUp.detail(), 4);
         assert_eq!(Button::ScrollDown.detail(), 5);
+    }
+
+    #[test]
+    fn a_window_hanging_off_its_screen_is_moved_the_least_that_puts_it_on() {
+        let screen = (1280, 800);
+        // The Intune portal as it really maps itself on the container's display: 203 rows past
+        // the bottom edge. Only the axis that does not fit moves.
+        assert_eq!(origin_on_screen((615, 375), (478, 628), screen), Some((615, 172)));
+        // Wholly on the screen, edges included: left exactly where it is.
+        assert_eq!(origin_on_screen((0, 0), (478, 628), screen), None);
+        assert_eq!(origin_on_screen((802, 172), (478, 628), screen), None);
+        // Off the right, the top and the left, each clamped back to its edge.
+        assert_eq!(origin_on_screen((1000, 10), (478, 628), screen), Some((802, 10)));
+        assert_eq!(origin_on_screen((10, -40), (478, 628), screen), Some((10, 0)));
+        assert_eq!(origin_on_screen((-5, -5), (478, 628), screen), Some((0, 0)));
+        // Larger than the screen: to that edge's 0, so the corner a reader starts from is on it.
+        assert_eq!(origin_on_screen((100, 100), (478, 1000), screen), Some((100, 0)));
+        assert_eq!(origin_on_screen((0, 0), (2000, 1000), screen), None);
+    }
+
+    #[test]
+    fn only_the_part_on_the_screen_is_read_and_it_starts_at_the_windows_origin() {
+        let screen = (1280, 800);
+        let part = |width, height| Some(OnScreen { width, height });
+        assert_eq!(visible_part((615, 172), (478, 628), screen), part(478, 628));
+        // Off the bottom or the right: what is on the screen, from the window's own origin.
+        assert_eq!(visible_part((615, 375), (478, 628), screen), part(478, 425));
+        assert_eq!(visible_part((1000, 0), (478, 628), screen), part(280, 628));
+        assert_eq!(visible_part((0, 0), (2000, 1000), screen), part(1280, 800));
+        // Off the top or the left, the frame would need an offset nothing maps presses with.
+        assert_eq!(visible_part((-1, 0), (478, 628), screen), None);
+        assert_eq!(visible_part((0, -1), (478, 628), screen), None);
+        // Nothing of it on the screen at all.
+        assert_eq!(visible_part((1280, 0), (478, 628), screen), None);
+        assert_eq!(visible_part((0, 900), (478, 628), screen), None);
+    }
+
+    #[test]
+    fn a_window_is_placed_only_after_x_refused_to_read_it_whole() {
+        let source = include_str!("xwindow.rs");
+        let body = &source[source.find("    fn read_frame(&self, place: bool)").expect("read")..];
+        let body = &body[..body.find("\n    }\n").expect("end of the read")];
+        // The whole window first — every read that ever worked here stays exactly as it was.
+        let whole = body.find("let image = match self.read_pixels(size) {").expect("whole read");
+        let refused = body.find("if error.error_kind == ErrorKind::Match =>").expect("BadMatch");
+        let placed = body.find("self.place_on_screen(&geometry, place)?").expect("placement");
+        assert!(whole < refused && refused < placed, "read whole, then place on BadMatch:\n{body}");
+        // A tick that moved the window reads nothing: the rows it brought on screen are not drawn.
+        assert!(body.contains("Placement::Moved => return Ok(None),"), "{body}");
+        // What a window that stays put yields is its part on the screen, never its whole geometry.
+        assert!(body.contains("size = (part.width, part.height);"), "{body}");
+    }
+
+    /// MEASURED against a real X server, which is the only thing that can say what `GetImage`
+    /// refuses: a window that hangs off its screen cannot be read at all, and once this module has
+    /// placed it, it can. Needs a display with no window manager on it (an Xvfb, as both of the
+    /// displays this module reads are); name it in `TEAMS_LITE_TEST_X_DISPLAY`, for example
+    /// `docker run --rm -p 127.0.0.1:6099:6099 <an image with Xvfb> Xvfb :99 -screen 0
+    /// 1280x800x24 -listen tcp -ac` and `TEAMS_LITE_TEST_X_DISPLAY=127.0.0.1:99`.
+    #[test]
+    #[ignore = "needs an X server without a window manager, named in TEAMS_LITE_TEST_X_DISPLAY"]
+    fn a_portal_window_hanging_off_the_screen_is_placed_and_then_read() {
+        use x11rb::protocol::xproto::{CreateWindowAux, PropMode, WindowClass};
+        use x11rb::wrapper::ConnectionExt as _;
+
+        let display = std::env::var("TEAMS_LITE_TEST_X_DISPLAY")
+            .expect("TEAMS_LITE_TEST_X_DISPLAY names the X server to measure against");
+        let (conn, screen) = RustConnection::connect(Some(&display)).expect("connect");
+        let root = &conn.setup().roots[screen];
+        assert_eq!((root.width_in_pixels, root.height_in_pixels), (1280, 800), "a 1280x800 screen");
+        let window = conn.generate_id().expect("id");
+        conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            root.root,
+            615,
+            375,
+            478,
+            628,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            root.root_visual,
+            &CreateWindowAux::new().background_pixel(root.white_pixel),
+        )
+        .expect("create")
+        .check()
+        .expect("created");
+        conn.change_property8(
+            PropMode::REPLACE,
+            window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            b"intune-portal\0Intune-portal\0",
+        )
+        .expect("class")
+        .check()
+        .expect("classed");
+        conn.map_window(window).expect("map").check().expect("mapped");
+
+        // The cause, measured: X refuses to read a window that is not wholly on its screen, and
+        // refuses it as BadMatch — the one refusal `capture` answers by placing the window.
+        let refused = conn
+            .get_image(ImageFormat::Z_PIXMAP, window, 0, 0, 478, 628, !0)
+            .expect("ask")
+            .reply();
+        assert!(
+            matches!(
+                &refused,
+                Err(x11rb::errors::ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Match
+            ),
+            "GetImage of a window off its screen must be refused as BadMatch: {refused:?}"
+        );
+
+        let found = SigninWindow::find_any(&display, ENROLL_WM_CLASSES)
+            .expect("search")
+            .expect("the portal window is found");
+        // A read that may not move it reads what is on the screen, and leaves it where it is.
+        let part = found.capture().expect("the part on the screen is read");
+        assert_eq!((part.width, part.height), (478, 425));
+        let unmoved = conn.get_geometry(window).expect("ask").reply().expect("geometry");
+        assert_eq!((unmoved.x, unmoved.y), (615, 375), "a diagnostic's read moves nothing");
+        // The session's read moves it, and reads nothing: its new rows are not drawn yet.
+        assert!(found.capture_or_place().expect("placed").is_none(), "the moving tick serves none");
+        let geometry = conn.get_geometry(window).expect("ask").reply().expect("geometry");
+        assert_eq!((geometry.x, geometry.y), (615, 172), "moved the least that puts it on");
+        // The next one reads it whole, and moves nothing.
+        let frame = found.capture_or_place().expect("read").expect("a placed window is read");
+        assert_eq!((frame.width, frame.height), (478, 628));
+        assert!(!frame.png.is_empty());
+        let again = conn.get_geometry(window).expect("ask").reply().expect("geometry");
+        assert_eq!((again.x, again.y), (615, 172));
+
+        conn.destroy_window(window).expect("destroy").check().expect("destroyed");
     }
 }

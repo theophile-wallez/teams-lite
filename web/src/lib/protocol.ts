@@ -691,6 +691,11 @@ export type SigninKind = "signin" | "enroll";
  *  none. */
 export type PortalPurpose = "enroll" | "account";
 
+/** What `signin_frame` answers: one frame of the window — or, on the tick the backend had to move
+ *  a window that hung off its screen (`SigninWindow::capture_or_place`), `{moved: true}` and no
+ *  picture, because the rows the move brought on screen are not drawn yet. */
+export type SigninFrameAnswer = { width: number; height: number; png: string } | { moved: true };
+
 /** Wire shape of the backend `signin_status` event and of `signin_status`. */
 export type SigninState = {
   /** Absent on a backend too old to enroll anything, which reads as `signin`. */
