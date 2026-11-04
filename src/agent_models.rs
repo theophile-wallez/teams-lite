@@ -103,7 +103,14 @@ fn opencode_config_path() -> PathBuf {
 
 /// A base directory, per the XDG spec: the variable when it is absolute, else the
 /// documented fallback under `$HOME`.
+///
+/// Under an agent home ([`crate::agent_cli::agent_home`]) it is the fallback under THAT home and
+/// never the variable: the CLI child runs with that home as `HOME` and every XDG variable removed
+/// (`agent_cli::prepare_child`), so this has to look exactly where opencode will write.
 fn xdg_dir(variable: &str, fallback: &str) -> PathBuf {
+    if let Some(home) = crate::agent_cli::agent_home() {
+        return home.join(fallback);
+    }
     std::env::var_os(variable)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())

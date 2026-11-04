@@ -124,6 +124,7 @@ import {
   petsShownValue,
 } from "./pet-visibility";
 import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
+import { withAgentCliProgress } from "./agent-cli";
 import type { AgentPersonaPatch } from "./agent-persona";
 import {
   AGENT_RUN_STALE_MS,
@@ -2324,6 +2325,20 @@ export class TeamsController {
     // How the CHESS ENGINE's download is going, and whether it is here at all. Sent on every whole
     // percent and on every change of state, so a second window draws the same bar and a page that
     // opened in the middle of a fetch learns from this rather than from nothing.
+    // The agent status changed under every page at once — an install of a CLI ended, one was
+    // removed, a check found a newer release (src/agent_cli.rs). The whole status, so a page draws
+    // what the backend holds rather than what it last asked for.
+    on("agent_status_changed", (raw) => {
+      const next = raw as AgentStatus | null;
+      if (next && Array.isArray(next.backends)) this.set({ agent: next });
+    });
+    // How far an install of a CLI has got, on every whole percent and every change of phase — the
+    // bar alone, folded into the status this page already holds.
+    on("agent_cli_progress", (raw) => {
+      const agent = this.get().agent;
+      const next = withAgentCliProgress(agent, raw);
+      if (next !== agent) this.set({ agent: next });
+    });
     on("chess_engine_progress", (raw) => {
       const next = raw as Partial<ChessEngineState> | null;
       if (next && typeof next.present === "boolean") {
@@ -6599,6 +6614,64 @@ export class TeamsController {
     let status: AgentStatus;
     try {
       status = await this.backend.agentSetUnrestricted(unrestricted);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    playCue("success");
+    return status;
+  }
+
+  /**
+   * Install one agent CLI from its vendor, or update the copy this app installed.
+   *
+   * It is the BACKEND that downloads and verifies it (this page never fetches from a vendor), so
+   * all this does is ask and draw the answer: the status comes back at once with the install
+   * under way, the bar arrives as `agent_cli_progress` events and the end as
+   * `agent_status_changed` — which is also how a second window draws the same bar.
+   *
+   * Rejects on a refusal, so the button that called it can say why where it was pressed.
+   */
+  async installAgentCli(provider: string): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentCliInstall(provider);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    return status;
+  }
+
+  /** Give back everything this app installed for one CLI. Rejects on a refusal. */
+  async removeAgentCli(provider: string): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentCliRemove(provider);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    playCue("success");
+    return status;
+  }
+
+  /** Ask now whether the CLIs this app installed have a newer release. A check that could not
+   *  finish is not a rejection: its reason travels in `check_error`, beside what it did learn. */
+  async checkAgentClis(): Promise<AgentStatus> {
+    const status = await this.backend.agentCliCheck();
+    this.set({ agent: status });
+    return status;
+  }
+
+  /** Whether the CLIs this app installed update themselves. Rejects on a refusal. */
+  async setAgentCliAutoUpdate(enabled: boolean): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentCliSetAutoUpdate(enabled);
     } catch (e) {
       playCue("error");
       throw e;

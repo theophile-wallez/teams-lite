@@ -404,7 +404,16 @@ pub fn is_available(backend: &Backend) -> bool {
 /// `src/bin/server.rs` prints this, and the path it prints is what says whether the
 /// process inherited the user's own bin directories.
 pub fn program_path(backend: &Backend) -> Option<PathBuf> {
-    which_program(backend.program)
+    resolve_program(backend.program)
+}
+
+/// Where a program is: on `PATH` first, then this app's own copy (see [`crate::agent_cli`]).
+///
+/// `PATH` WINS, and that is deliberate: a CLI the user installed themselves is theirs, set up the
+/// way they like it, and a copy this app fetched is the fallback for a machine — the container image
+/// above all — that has none. A user who later installs their own is answered with their own.
+fn resolve_program(program: &str) -> Option<PathBuf> {
+    which_program(program).or_else(|| crate::agent_cli::managed_program(program))
 }
 
 /// Resolve a program on `PATH` without spawning a shell.
@@ -444,13 +453,20 @@ pub async fn run(request: &Request, progress: &watch::Sender<Progress>) -> Resul
 }
 
 async fn run_once(request: &Request, progress: &watch::Sender<Progress>) -> Result<Outcome> {
-    let program = which_program(request.backend.program).with_context(|| {
-        format!("`{}` is not on PATH — this machine cannot run it", request.backend.program)
+    let program = resolve_program(request.backend.program).with_context(|| {
+        format!(
+            "`{}` is not on PATH and this app has not installed it — this machine cannot run it",
+            request.backend.program
+        )
     })?;
     std::fs::create_dir_all(&request.workspace)
         .with_context(|| format!("create the agent workspace {}", request.workspace.display()))?;
 
+    let managed = crate::agent_cli::is_managed(&program);
     let mut command = Command::new(program);
+    // Where the CLI keeps its own files (the agent home, on the store volume in the image), and
+    // whether it may update itself (never, when this app installed it and manages its versions).
+    crate::agent_cli::prepare_child(command.as_std_mut(), request.backend.program, managed);
     let stdin_prompt = build_command(&mut command, request);
     command
         .current_dir(&request.workspace)

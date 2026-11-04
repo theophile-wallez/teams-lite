@@ -90,6 +90,18 @@ x11rb = { version = "0.13", features = ["xtest"] }
 # portal opened on that display with no restart — and changes nothing a host install relies on:
 # the state file only gains an optional field. Move to a release once one carries those commits.
 #
+# RSA signature VERIFICATION, for exactly one caller: the Claude Code installer checks Anthropic's
+# detached signature over a release's manifest (see `src/openpgp.rs`, which reads the OpenPGP
+# packets and leaves every piece of cryptography to this crate). RustCrypto, like `p256` and
+# `aes-gcm` above: pure Rust, no system openssl. Only `sha2` is added, which is what lets a
+# PKCS#1 v1.5 signature name its hash by OID; `pem` and the rest stay off.
+rsa = { version = "0.9", default-features = false, features = ["std", "sha2", "u64_digit"] }
+# The agent CLIs this app can install from Settings › AI providers (see `src/agent_cli.rs`). Claude
+# Code ships each release as a zstd stream about a third of the binary's size, and opencode as a
+# gzipped tarball holding one file. Both crates are already in the tree through `intune-container`,
+# which unpacks its own image layers with them, so naming them here builds nothing new.
+zstd = "0.13"
+tar = { version = "0.4", default-features = false }
 # Default features only: the crate's `gui` feature (tauri, WebKitGTK) stays off.
 intune-container = { git = "https://github.com/magicabdel/intune-container", rev = "0f5fe0d7f94144e15127c2c38f519b2ff04d3cdd" }
 # The crate logs through `tracing`, and without a subscriber every word it says is dropped —

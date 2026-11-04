@@ -416,6 +416,11 @@ persistence:
   # SQLite in WAL mode needs a LOCAL filesystem: ReadWriteOnce, and never NFS or an RWX class.
   accessModes:
     - ReadWriteOnce
+  # It also holds the agent CLIs Settings › AI providers installs (`tools/`), and their logins and
+  # sessions (`agent-home/`): Claude Code is about 340 MB and opencode about 215 MB, and an update
+  # holds the new version beside the old one until it is swapped in — so budget about 1 GiB for
+  # both. The volume must allow EXEC, which a PVC does. A claim template cannot be resized through
+  # `helm upgrade`; grow an existing claim through its storage class instead.
   size: 2Gi
   annotations: {}
 

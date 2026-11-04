@@ -5805,6 +5805,37 @@ if (import.meta.main) {
         await openSettings(page);
         await page.locator(section).scrollIntoViewIfNeeded();
 
+        // INSTALLING a CLI from the app (agent-cli-install.tsx): the bar, held halfway through
+        // its download so it is a bar; the row once it landed — its version, how to sign it in,
+        // what it weighs, and the switch that keeps it current; and the update a newer release
+        // earns. Everything goes through the mock's `{kind:"agent_cli"}` hook, which is reset at
+        // the end because an install outlives the page.
+        const opencode = '[data-testid="ai-provider"][data-provider="opencode"]';
+        await emit({ kind: "agent_cli", hold: true });
+        await page.locator(`${opencode} [data-testid="agent-cli-action"]`).click();
+        await page.waitForSelector(`${opencode} [data-testid="agent-cli-progress-label"]:has-text("50%")`);
+        await shot(`${out}-installing-light.png`, section);
+        await setTheme("dark");
+        await shot(`${out}-installing-dark.png`, section);
+        await setTheme("light");
+        await emit({ kind: "agent_cli", release: true });
+        await page.waitForSelector(`${opencode} [data-testid="agent-cli"][data-managed="true"]`);
+        await shot(`${out}-installed-light.png`, section);
+        await setTheme("dark");
+        await shot(`${out}-installed-dark.png`, section);
+        await setTheme("light");
+        await emit({ kind: "agent_cli", latest: { opencode: "1.20.0" } });
+        await page.waitForSelector(`${opencode} [data-testid="agent-cli-action"][data-kind="update"]`);
+        await shot(`${out}-update-light.png`, section);
+        await setTheme("dark");
+        await shot(`${out}-update-dark.png`, section);
+        await setTheme("light");
+        await emit({ kind: "agent_cli", reset: true });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForSelector('[data-testid="conversation-row"]');
+        await openSettings(page);
+        await page.locator(section).scrollIntoViewIfNeeded();
+
         // The picker open on the installed provider, which is the one with a list.
         await page
           .locator(
@@ -5818,7 +5849,8 @@ if (import.meta.main) {
         await setTheme("dark");
         await shot(`${out}-open-dark.png`);
         console.log(
-          `[preview] wrote ${out}-{light,dark,default-light,default-dark,open-light,open-dark}.png`,
+          `[preview] wrote ${out}-{light,dark,default-light,default-dark,installing-light,installing-dark,` +
+            `installed-light,installed-dark,update-light,update-dark,open-light,open-dark}.png`,
         );
       },
       { deviceScaleFactor: dpr },

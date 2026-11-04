@@ -113,7 +113,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
+    agent, agent_cli, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
     channel_layout, custom_emoji, intune, intune_embedded,
     mail, push, push_policy, retry,
     sender_icon, signin, store, teams,
@@ -495,7 +495,7 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// four methods above serve that window — so it is gated as a sign-in is, and more than one: an
 /// enrollment registers a DEVICE in the user's organization, made as them, and nothing in this
 /// app takes a registration back.
-const MACHINE_METHODS: [&str; 36] = [
+const MACHINE_METHODS: [&str; 39] = [
     "repair_broker",
     "signin_start",
     "signin_frame",
@@ -527,6 +527,13 @@ const MACHINE_METHODS: [&str; 36] = [
     "agent_set_provider",
     "agent_set_unrestricted",
     "agent_stop",
+    // The agent CLIs this app installs (see `teams_lite::agent_cli`): installing or updating one
+    // downloads a program from the internet that a chat message then starts, removing one takes it
+    // away, and the switch decides whether new releases are taken with nobody pressing anything.
+    // Asking whether a release is newer (`agent_cli_check`) stays open: it changes nothing.
+    "agent_cli_install",
+    "agent_cli_remove",
+    "agent_cli_set_auto_update",
     // An AI READING of a merge request's diff. It starts a program on this machine and puts the
     // user's employer's code in a prompt that reaches whichever model provider their default CLI is
     // signed in to — so it is gated exactly as `agent_set_mode` is, and for the same reason. Reading
@@ -642,6 +649,15 @@ fn machine_effect(method: &str) -> &'static str {
              signed in to"
         }
         "agent_stop" => "stops a local agent this machine is running mid-answer",
+        "agent_cli_install" => {
+            "downloads a coding agent's program onto this machine from its vendor, which a chat \
+             message then starts"
+        }
+        "agent_cli_remove" => "deletes a coding agent's program this app installed on this machine",
+        "agent_cli_set_auto_update" => {
+            "decides whether this machine downloads and runs new releases of the coding agents it \
+             installed with nobody pressing anything"
+        }
         "seal_set" => {
             "decides that this machine encrypts every message it posts to a conversation, and \
              under which passphrase — so a wrong one makes every message unreadable to the \
@@ -1756,6 +1772,72 @@ impl EngineSlot {
         payload
     }
 }
+
+/// One agent CLI's install, as every page of THIS process sees it (see `teams_lite::agent_cli`).
+///
+/// Only what is in flight, and what the last check learned, is kept here. What is ON DISK — which
+/// version this app installed, and whether the program a run would start is that copy — is read
+/// fresh on every status, because the disk is shared with every other backend on this machine and a
+/// remembered answer would be a second one.
+#[derive(Debug, Clone, Default)]
+struct AgentCliSlot {
+    /// Where an install is, or `None` while nothing is happening.
+    phase: Option<AgentCliPhase>,
+    received: u64,
+    total: u64,
+    /// Why the last install or check failed, in the words of what happened — an install that did
+    /// not finish must never be left looking like it did.
+    error: String,
+    /// The newest version upstream offers, per the last check of this process.
+    latest: Option<String>,
+    /// When that check ran, epoch ms.
+    checked_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentCliPhase {
+    Resolving,
+    Downloading,
+    Unpacking,
+}
+
+impl AgentCliPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            AgentCliPhase::Resolving => "resolving",
+            AgentCliPhase::Downloading => "downloading",
+            AgentCliPhase::Unpacking => "unpacking",
+        }
+    }
+}
+
+/// Every CLI's slot. Process-wide rather than a field of `Ctx` because `agent_status_json` — which
+/// every agent setter answers with — reads it, and the state really is the process's: there is one
+/// install of a CLI in flight here at a time, whichever page asked.
+static AGENT_CLIS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<agent_cli::Tool, AgentCliSlot>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// One CLI's slot, copied out.
+fn agent_cli_slot(tool: agent_cli::Tool) -> AgentCliSlot {
+    AGENT_CLIS
+        .lock()
+        .map(|slots| slots.get(&tool).cloned().unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// Change one CLI's slot in place.
+fn with_agent_cli_slot<T>(tool: agent_cli::Tool, f: impl FnOnce(&mut AgentCliSlot) -> T) -> Option<T> {
+    let mut slots = AGENT_CLIS.lock().ok()?;
+    Some(f(slots.entry(tool).or_default()))
+}
+
+/// How often a backend asks whether the CLIs this app installed have a newer release. Each check
+/// is one small document per CLI (Anthropic's channel file, npm's record), never GitHub's API.
+const AGENT_CLI_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+/// The first check waits out the start: a backend that boots is busy signing in and syncing, and an
+/// update a few minutes later costs nobody anything.
+const AGENT_CLI_FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(3 * 60);
 
 #[derive(Debug, Default)]
 struct UpdateSlot {
@@ -3248,6 +3330,195 @@ impl Ctx {
         Ok(payload)
     }
 
+    // ---- the agent CLIs this app installs (see `teams_lite::agent_cli`) -------------------------
+    //
+    // Settings › AI providers offers an Install for a CLI this machine lacks, an Update once a newer
+    // release is out, and a Remove. A newer release of a CLI this app installed is also taken on its
+    // own, unless the user switched that off: the backend checks every few hours.
+
+    /// Tell every page the whole agent status changed — an install ended, a CLI went, a check found
+    /// a release. Not on every percent: that is `agent_cli_progress`, which carries the bar alone.
+    fn emit_agent_status(&self) {
+        let payload = self.store().and_then(|store| agent_status_json(&store));
+        match payload {
+            Ok(payload) => self.emit("agent_status_changed", payload),
+            Err(e) => eprintln!("[agent-cli] could not publish the agent status: {e:#}"),
+        }
+    }
+
+    /// Install (or update to) the newest release of one CLI, in the background.
+    ///
+    /// A second press while one is in flight JOINS it, exactly as the chess engine's and the
+    /// update's own downloads do — and across processes the install's own lock does the same, so a
+    /// second backend that tries finds the version already there.
+    fn start_agent_cli_install(&self, tool: agent_cli::Tool, why: &'static str) -> Result<()> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never installs anything"
+        );
+        anyhow::ensure!(
+            agent_cli::this_platform(tool).is_some(),
+            "{} publishes no {} build for this machine",
+            tool.publisher(),
+            tool.name()
+        );
+        let started = with_agent_cli_slot(tool, |slot| {
+            if slot.phase.is_some() {
+                return false;
+            }
+            slot.phase = Some(AgentCliPhase::Resolving);
+            slot.received = 0;
+            slot.total = 0;
+            slot.error.clear();
+            true
+        })
+        .unwrap_or(false);
+        if !started {
+            return Ok(());
+        }
+        eprintln!("[agent-cli] installing the newest {} ({why})", tool.name());
+        self.emit_agent_status();
+
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            // Throttled to whole percents, as every other bar here is: a frame per chunk over a
+            // hundred megabytes is thousands of events for a bar a few hundred pixels wide.
+            let mut last_percent = None;
+            let now_unix = u64::try_from(now_ms() / 1000).unwrap_or(0);
+            let outcome = agent_cli::install(&ctx.http, tool, now_unix, |phase| {
+                let (phase, received, total) = match phase {
+                    agent_cli::Phase::Resolving => (AgentCliPhase::Resolving, 0, 0),
+                    agent_cli::Phase::Downloading { received, total } => {
+                        (AgentCliPhase::Downloading, received, total)
+                    }
+                    agent_cli::Phase::Unpacking => (AgentCliPhase::Unpacking, 0, 0),
+                };
+                let percent = (total > 0).then(|| received.saturating_mul(100) / total);
+                let changed = with_agent_cli_slot(tool, |slot| {
+                    let moved = slot.phase != Some(phase);
+                    slot.phase = Some(phase);
+                    slot.received = received;
+                    slot.total = total;
+                    moved
+                })
+                .unwrap_or(false);
+                if changed || percent != last_percent {
+                    last_percent = percent;
+                    ctx.emit(
+                        "agent_cli_progress",
+                        json!({
+                            "provider": tool.name(),
+                            "phase": phase.as_str(),
+                            "received": received,
+                            "total": total,
+                        }),
+                    );
+                }
+            })
+            .await;
+            with_agent_cli_slot(tool, |slot| {
+                slot.phase = None;
+                slot.received = 0;
+                slot.total = 0;
+                match &outcome {
+                    Ok(agent_cli::Outcome::Installed { version } | agent_cli::Outcome::Current { version }) => {
+                        slot.error.clear();
+                        // What was just installed is the newest this process knows of, unless the
+                        // last check had already seen something newer still.
+                        if !agent_cli::is_update(Some(version), slot.latest.as_deref()) {
+                            slot.latest = Some(version.clone());
+                        }
+                        slot.checked_ms = Some(now_ms());
+                    }
+                    Err(e) => slot.error = format!("{e:#}"),
+                }
+            });
+            match outcome {
+                Ok(agent_cli::Outcome::Installed { version }) => {
+                    eprintln!("[agent-cli] {} {version} is installed and is what runs now", tool.name())
+                }
+                Ok(agent_cli::Outcome::Current { version }) => {
+                    eprintln!("[agent-cli] {} {version} is already the newest release", tool.name())
+                }
+                Err(e) => eprintln!("[agent-cli] installing {} failed: {e:#}", tool.name()),
+            }
+            ctx.emit_agent_status();
+        });
+        Ok(())
+    }
+
+    /// Give back everything this app installed for one CLI.
+    fn remove_agent_cli(&self, tool: agent_cli::Tool) -> Result<u64> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never deletes anything"
+        );
+        anyhow::ensure!(
+            agent_cli_slot(tool).phase.is_none(),
+            "{} is being installed right now — try again once that is done",
+            tool.name()
+        );
+        let freed = agent_cli::remove(tool)?;
+        with_agent_cli_slot(tool, |slot| slot.error.clear());
+        eprintln!("[agent-cli] removed {}, freeing {freed} bytes", tool.name());
+        self.emit_agent_status();
+        Ok(freed)
+    }
+
+    /// Ask upstream for the newest release of every CLI this app installed, and — when `update`
+    /// says so and the user left automatic updates on — take any that is newer.
+    ///
+    /// A CLI this app did NOT install is never asked about: a machine that never pressed Install
+    /// makes no request to Anthropic or npm on its behalf. And one the user's own install shadows
+    /// on `PATH` is not updated either, because it is not what runs.
+    async fn agent_cli_pass(&self, update: bool) -> Result<()> {
+        let auto = self
+            .store()
+            .ok()
+            .and_then(|store| store.get_setting(agent_cli::SETTING_AUTO_UPDATE).ok().flatten());
+        let auto = agent_cli::auto_update_from_setting(auto.as_deref());
+        let mut first_error = None;
+        for tool in agent_cli::Tool::ALL {
+            let Some(installed) = agent_cli::installed_version(tool) else {
+                continue;
+            };
+            match agent_cli::latest_version(&self.http, tool).await {
+                Ok(latest) => {
+                    with_agent_cli_slot(tool, |slot| {
+                        slot.latest = Some(latest.clone());
+                        slot.checked_ms = Some(now_ms());
+                        if slot.phase.is_none() {
+                            slot.error.clear();
+                        }
+                    });
+                    let in_use = agent_policy::backend_named(tool.name())
+                        .and_then(agent::program_path)
+                        .is_some_and(|path| agent_cli::is_managed(&path));
+                    if update && auto && in_use && agent_cli::is_update(Some(&installed), Some(&latest)) {
+                        if let Err(e) = self.start_agent_cli_install(tool, "automatic update") {
+                            eprintln!("[agent-cli] could not start updating {}: {e:#}", tool.name());
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[agent-cli] checking for a newer {} failed: {e:#}", tool.name());
+                    with_agent_cli_slot(tool, |slot| {
+                        slot.checked_ms = Some(now_ms());
+                        if slot.phase.is_none() {
+                            slot.error = format!("could not check for a newer release: {e:#}");
+                        }
+                    });
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        self.emit_agent_status();
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     // ---- the board's own SOUNDS -----------------------------------------------------------
     //
     // chess.com's twelve recordings, fetched once per machine, verified against digests this build
@@ -4313,6 +4584,9 @@ async fn serve() -> Result<()> {
     // best-effort, and for the whole life of the process: has the rolling `latest` tag
     // moved off this build? An app left open for weeks has to be able to notice.
     spawn_release_poll(ctx.clone());
+    // And of the agent CLIs this app installed, every few hours — taking a newer one on its own
+    // unless the user switched that off (see `Ctx::agent_cli_pass`).
+    spawn_agent_cli_poll(ctx.clone());
 
     eprintln!("[ok] server ws://{addr} — ready");
     // Read once at boot: a machine that answers a chat message with the user's own
@@ -4744,6 +5018,63 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // may do, and where it runs.
         "agent_status" => {
             let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        // Install a CLI this machine lacks, or update the copy this app installed to the newest
+        // release (see `teams_lite::agent_cli`). MACHINE: it downloads a program from the internet
+        // that a chat message will then start. Answers at once; the bar arrives as
+        // `agent_cli_progress` and the end as `agent_status_changed`.
+        "agent_cli_install" => {
+            let name = param_str(params, "provider")?;
+            let tool = agent_cli::Tool::named(&name).with_context(|| format!("no such provider: {name}"))?;
+            ctx.start_agent_cli_install(tool, "asked for from Settings")?;
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        // Give back everything this app installed for one CLI. MACHINE: it deletes a program
+        // from this machine, after which that provider answers nothing until it is installed again.
+        "agent_cli_remove" => {
+            let name = param_str(params, "provider")?;
+            let tool = agent_cli::Tool::named(&name).with_context(|| format!("no such provider: {name}"))?;
+            let freed = ctx.remove_agent_cli(tool)?;
+            let store = ctx.store()?;
+            let mut status = agent_status_json(&store)?;
+            status["freed"] = json!(freed);
+            Ok(status)
+        }
+
+        // Ask now whether the CLIs this app installed have a newer release — the button beside the
+        // switch below. It never installs anything: what an OPEN method may do is read, and the
+        // update itself is either the user's own press or the clock's, under the switch.
+        "agent_cli_check" => {
+            anyhow::ensure!(
+                !read_only(),
+                "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never checks for CLI updates"
+            );
+            let checked = ctx.agent_cli_pass(false).await;
+            let store = ctx.store()?;
+            let mut status = agent_status_json(&store)?;
+            if let Err(e) = checked {
+                status["check_error"] = json!(format!("{e:#}"));
+            }
+            Ok(status)
+        }
+
+        // Whether a newer release of a CLI this app installed is taken on its own. MACHINE: it
+        // decides whether this machine downloads and runs new code with nobody pressing anything.
+        "agent_cli_set_auto_update" => {
+            let on = params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .context("missing param: enabled (a boolean)")?;
+            let store = ctx.store()?;
+            store.set_setting(agent_cli::SETTING_AUTO_UPDATE, if on { "1" } else { "0" })?;
+            eprintln!(
+                "[agent-cli] the CLIs this app installed {} update themselves",
+                if on { "now" } else { "no longer" }
+            );
             agent_status_json(&store)
         }
 
@@ -11657,6 +11988,24 @@ fn spawn_presence_heartbeat(ctx: Ctx) {
 ///
 /// Best-effort by design: a dev build (no embedded commit), no network, or a rate-limited
 /// API all end a pass quietly — it must never affect startup or the running app.
+/// Check the CLIs this app installed for a newer release, and take one — see
+/// `Ctx::agent_cli_pass`. A read-only backend never installs anything, so it never asks either.
+fn spawn_agent_cli_poll(ctx: Ctx) {
+    if read_only() {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(AGENT_CLI_FIRST_CHECK).await;
+        let mut ticks = tokio::time::interval(AGENT_CLI_CHECK_INTERVAL);
+        loop {
+            ticks.tick().await;
+            // The outcome is in the slot and the journal already; a pass on the clock has nobody
+            // waiting for it.
+            let _ = ctx.agent_cli_pass(true).await;
+        }
+    });
+}
+
 fn spawn_release_poll(ctx: Ctx) {
     let Some(current) = teams_lite::update::build_rev() else {
         // Built from source: nothing meaningful to compare against, so we never
@@ -12438,18 +12787,28 @@ fn log_agent_backends(unrestricted: bool) {
     for backend in agent_policy::BACKENDS.iter() {
         match agent::program_path(backend) {
             Some(path) => eprintln!(
-                "[agent] {} ready — {} runs {}",
+                "[agent] {} ready — {} runs {}{}",
                 backend.name,
                 backend.prefix,
-                path.display()
+                path.display(),
+                match agent_cli::Tool::named(backend.name).and_then(agent_cli::installed_version) {
+                    Some(version) if agent_cli::is_managed(&path) => {
+                        format!(" (version {version}, installed by this app)")
+                    }
+                    _ => String::new(),
+                }
             ),
             None => eprintln!(
-                "[agent] {} unavailable — `{}` is on no PATH entry: {}",
+                "[agent] {} unavailable — `{}` is on no PATH entry and this app has not installed \
+                 it (Settings › AI providers can): {}",
                 backend.name,
                 backend.program,
                 std::env::var("PATH").unwrap_or_else(|_| "<unset>".into())
             ),
         }
+    }
+    if let Some(home) = agent_cli::agent_home() {
+        eprintln!("[agent] every agent CLI runs with HOME={}", home.display());
     }
 }
 
@@ -13408,6 +13767,9 @@ fn agent_status_json(store: &Store) -> Result<Value> {
                 // What a picker offers, never a limit on what may be saved — see
                 // `agent_models::choices`, which reads this machine's own catalogue.
                 "models": agent_models::choices(backend),
+                // Whether this app can install it, which version it installed, whether a newer
+                // one is out, and how far an install in flight has got (`agent_cli`).
+                "cli": agent_cli_json(backend),
             })
         })
         .collect();
@@ -13465,7 +13827,51 @@ fn agent_status_json(store: &Store) -> Result<Value> {
         // switch that would do nothing.
         "enabled": !read_only(),
         "sandbox_conversation": agent_policy::SANDBOX_THREAD,
+        // Whether a newer release of a CLI this app installed is taken on its own.
+        "cli_auto_update": agent_cli::auto_update_from_setting(
+            store.get_setting(agent_cli::SETTING_AUTO_UPDATE)?.as_deref(),
+        ),
     }))
+}
+
+/// One backend's `cli` block in `agent_status`: what this app can do about installing it, and what
+/// it already did.
+///
+/// `managed` and `version` are two facts and a page needs both. `version` is this app's copy on
+/// disk; `managed` is whether the program a run starts IS that copy — which it is not when the
+/// user's own install comes first on `PATH`, and then that copy is offered for removal and never
+/// for an update, because it is not what runs.
+fn agent_cli_json(backend: &agent_policy::Backend) -> Value {
+    let Some(tool) = agent_cli::Tool::named(backend.name) else {
+        return Value::Null;
+    };
+    let slot = agent_cli_slot(tool);
+    let path = agent::program_path(backend);
+    let managed = path.as_deref().is_some_and(agent_cli::is_managed);
+    let version = agent_cli::installed_version(tool);
+    json!({
+        // Whether an Install or an Update could be pressed at all on this machine.
+        "installable": !read_only()
+            && agent_cli::this_platform(tool).is_some()
+            && agent_cli::tools_dir().is_some(),
+        "managed": managed,
+        "version": version,
+        "latest": slot.latest,
+        "update_available": managed && agent_cli::is_update(version.as_deref(), slot.latest.as_deref()),
+        "checked_ms": slot.checked_ms,
+        "phase": slot.phase.map_or("idle", AgentCliPhase::as_str),
+        "received": slot.received,
+        "total": slot.total,
+        "error": slot.error,
+        // A statement of size for the sentence beside the button, never a bound.
+        "download_bytes": tool.download_estimate_bytes(),
+        "installed_bytes": agent_cli::installed_bytes(tool),
+        "publisher": tool.publisher(),
+        // Where the program a run starts is, and what the user runs to sign it in there.
+        "path": path.as_ref().map(|p| p.display().to_string()),
+        "login_command": agent_cli::login_command(tool, intune::in_container_image(), path.as_deref()),
+        "login_in_container": intune::in_container_image(),
+    })
 }
 
 // ---------------------------------------------------------------------------

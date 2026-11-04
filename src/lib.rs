@@ -19,6 +19,7 @@ pub fn read_only() -> bool {
 }
 
 pub mod agent;
+pub mod agent_cli;
 pub mod agent_markdown;
 pub mod agent_models;
 pub mod agent_persona;
@@ -63,6 +64,7 @@ pub mod linear;
 pub mod link_preview;
 pub mod mail;
 pub mod mail_html;
+pub mod openpgp;
 pub mod pinned_download;
 pub mod png;
 pub mod push;

@@ -10,8 +10,10 @@
 # also why the kubelet's probes and `kubectl port-forward` still work. Host-level isolation is the
 # node's firewall, or hostNetwork, where the front stays on 127.0.0.1.
 #
-# Egress is left open — the app talks to Microsoft and to the trackers the user configured, and
-# the embedded mode's own Intune container downloads its image and enrolls through the same door.
+# Egress is left open — the app talks to Microsoft and to the trackers the user configured, the
+# embedded mode's own Intune container downloads its image and enrolls through the same door, and
+# an agent CLI installed from Settings comes from its vendor (downloads.claude.ai, registry.npmjs.org
+# and github.com) and then talks to the model provider it is signed in to.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

@@ -1209,6 +1209,30 @@ export class Backend {
   agentSetUnrestricted(unrestricted: boolean): Promise<AgentStatus> {
     return this.writeRequest<AgentStatus>("agent_set_unrestricted", { unrestricted });
   }
+  /** Install one agent CLI from its vendor, or update the copy this app installed to the newest
+   *  release (src/agent_cli.rs).
+   *
+   *  A WRITE request: it downloads a program onto the backend's machine that a chat message then
+   *  starts (a `MACHINE_METHODS` entry, refused read-only). It answers at once; the bar arrives as
+   *  `agent_cli_progress` events and the end as `agent_status_changed`. */
+  agentCliInstall(provider: string): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_cli_install", { provider });
+  }
+  /** Give back everything this app installed for one CLI. A WRITE request: it deletes a program
+   *  from the backend's machine. The answer carries how many bytes went, as `freed`. */
+  agentCliRemove(provider: string): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_cli_remove", { provider });
+  }
+  /** Ask now whether the CLIs this app installed have a newer release. A read: it installs
+   *  nothing, and a check that could not finish says why in `check_error`. */
+  agentCliCheck(): Promise<AgentStatus> {
+    return this.request<AgentStatus>("agent_cli_check", {});
+  }
+  /** Whether a newer release of a CLI this app installed is taken on its own. A WRITE request: it
+   *  decides whether that machine downloads and runs new code with nobody pressing anything. */
+  agentCliSetAutoUpdate(enabled: boolean): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_cli_set_auto_update", { enabled });
+  }
   /** Stop a run this backend is streaming, mid-answer, by the `run_id` its frames carry.
    *
    *  A WRITE request: it kills a program the machine is running for the user (a

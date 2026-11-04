@@ -8,6 +8,7 @@ import {
   type AgentProviderPatch,
 } from "~/lib/agent";
 import { cn } from "~/lib/utils";
+import { AgentCliInstall, AgentCliUpdates } from "./agent-cli-install";
 import { AgentLogo } from "./agent-logo";
 import { AgentModelSelect } from "./agent-model-select";
 import { useAppState, useController } from "./controller-context";
@@ -20,7 +21,9 @@ import { useAppState, useController } from "./controller-context";
  *
  * - **A provider the machine has no CLI for can never answer.** It is marked "Not
  *   installed", its switch is disabled and it offers no model, rather than showing
- *   controls whose only effect would be a silent thread.
+ *   controls whose only effect would be a silent thread. Where the backend can fetch it
+ *   — the container image above all, which carries none — the row offers an Install
+ *   instead (agent-cli-install.tsx), and later an Update for the copy this app installed.
  * - **Every installed provider is on out of the box.** Turning one off is the user
  *   narrowing the set, so the switch reflects the backend's own answer and never a
  *   hopeful local guess.
@@ -82,16 +85,19 @@ export function AiProvidersSettings() {
           This backend is read-only, so no provider ever answers.
         </p>
       ) : (
-        <div className="flex flex-col rounded-xl bg-card shadow-chip">
-          {backends.map((backend, index) => (
-            <ProviderRow
-              key={backend.name}
-              backend={backend}
-              isDefault={backend.name === defaultProvider}
-              first={index === 0}
-            />
-          ))}
-        </div>
+        <>
+          <div className="flex flex-col rounded-xl bg-card shadow-chip">
+            {backends.map((backend, index) => (
+              <ProviderRow
+                key={backend.name}
+                backend={backend}
+                isDefault={backend.name === defaultProvider}
+                first={index === 0}
+              />
+            ))}
+          </div>
+          <AgentCliUpdates />
+        </>
       )}
     </section>
   );
@@ -160,11 +166,23 @@ function ProviderRow(props: { backend: AgentBackend; isDefault: boolean; first: 
                   Not installed
                 </span>
               )}
+              {/* Which version, when it is the copy this app installed — the one this app keeps
+                  current, and so the one whose number the reader may want to check. */}
+              {backend.cli?.managed && backend.cli.version && (
+                <span
+                  data-testid="ai-provider-version"
+                  className="rounded-full bg-element px-1.5 py-0.5 font-mono text-[10px] text-text-dim"
+                >
+                  {backend.cli.version}
+                </span>
+              )}
             </span>
             <span className="truncate text-[11px] text-text-faint">
               {backend.available
                 ? `Write ${backend.prefix} in an armed conversation to ask for an answer.`
-                : `This machine has no ${backend.name} command, so it can never answer.`}
+                : backend.cli?.installable
+                  ? `This machine has no ${backend.name} command yet — install it to have it answer.`
+                  : `This machine has no ${backend.name} command, so it can never answer.`}
             </span>
           </div>
         </div>
@@ -228,6 +246,10 @@ function ProviderRow(props: { backend: AgentBackend; isDefault: boolean; first: 
           </button>
         </div>
       </div>
+
+      {/* Installing it, updating the copy this app installed, and how to sign it in — see
+          agent-cli-install.tsx. Drawn nothing on a backend too old to install anything. */}
+      <AgentCliInstall backend={backend} />
 
       {/* No CLI, no model to choose: a control that could never change a run is a
           question with no answer. */}

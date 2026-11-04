@@ -894,6 +894,8 @@ export async function fetchAgentModes(page: Page): Promise<{
   providers: { name: string; available: boolean; enabled: boolean; model: string | null }[];
   unrestricted: boolean;
   default_provider: string;
+  cli_auto_update: boolean;
+  clis: { name: string; managed: boolean; version: string | null }[];
 }> {
   const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/agent`);
   expect(res.ok()).toBeTruthy();
@@ -920,6 +922,31 @@ export async function setAgentProviders(
       body === "reset"
         ? { kind: "agent_providers", reset: true }
         : { kind: "agent_providers", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Arm what the mock's pretend machine holds of an agent CLI's install (see `{kind:"agent_cli"}` in
+ * mock/server.ts): a copy this app installed (`installed`), a newer release upstream (`latest`), a
+ * platform with no build (`installable`), a refusal of the next install (`fail`), or an install
+ * that holds at its download until `release`. A spec that arms any of it MUST reset afterwards.
+ */
+export async function setAgentCli(
+  page: Page,
+  body:
+    | {
+        installed?: Record<string, string>;
+        latest?: Record<string, string>;
+        installable?: Record<string, boolean>;
+        fail?: string;
+        hold?: boolean;
+        release?: boolean;
+      }
+    | "reset",
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: body === "reset" ? { kind: "agent_cli", reset: true } : { kind: "agent_cli", ...body },
   });
   expect(res.ok()).toBeTruthy();
 }
