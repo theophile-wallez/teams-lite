@@ -38,6 +38,7 @@ import { replyHeading } from "~/lib/threads";
 import { BROADCAST_HINT, BROADCAST_LABEL, broadcastOffered } from "~/lib/chat-threads";
 import { threadDraftKey, type ThreadTarget } from "~/lib/store";
 import { cn } from "~/lib/utils";
+import { reportUnsentWork } from "~/lib/unsent-work";
 import { FadeArc } from "./loading-ui/fade-arc";
 import { ScheduleSendMenu } from "./schedule-send-menu";
 import { ScheduledMessagesDialog } from "./scheduled-messages-dialog";
@@ -287,6 +288,13 @@ export function Composer(props: {
   // be threaded through that hop — and it is read once and cleared, so a scheduled press
   // can never make the Enter after it a scheduled send too.
   const scheduledAtRef = useRef<number | null>(null);
+
+  // What a reload would throw away from this box — the words, a title, pasted pictures — for the
+  // page's automatic sign-in reload to ask about first (lib/unsent-work.ts). Read through a ref, so
+  // the one registration always sees this render's values.
+  const unsentRef = useRef(false);
+  unsentRef.current = !richEmpty || subject.trim() !== "" || images.length > 0 || loadingImages > 0;
+  useEffect(() => reportUnsentWork(() => unsentRef.current), []);
 
   // Restore the format bar preference on the client (kept out of SSR to avoid a
   // hydration mismatch — the server renders the bar closed, which is the default).

@@ -16,8 +16,7 @@
 //
 // READ-ONLY: GETs only.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example self_chat_lookup
+//   cargo run --example self_chat_lookup
 use anyhow::Result;
 use serde_json::Value;
 

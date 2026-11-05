@@ -4144,15 +4144,39 @@ impl Store {
     /// Unlike a `push_deliveries` key this claim is a moving timestamp, because the thing
     /// being claimed comes round again every interval.
     pub fn claim_release_check(&self, now_ms: i64, not_asked_since_ms: i64) -> Result<bool> {
+        self.claim_moving_timestamp(
+            crate::update::SETTING_RELEASE_CHECKED_MS,
+            now_ms,
+            not_asked_since_ms,
+        )
+    }
+
+    /// Claim the machine's next broker repair, so ONE backend restarts the Intune container
+    /// and the others stand down.
+    ///
+    /// `true` means "you start it"; `false` means a repair started on this machine at or after
+    /// `not_started_since_ms`. This is the rate limit the installed repair unit used to carry as
+    /// `StartLimitBurst=`, moved to the one place every backend on the machine shares: the
+    /// in-process floor beside it was reset by every backend restart, and every repair caused
+    /// one. A press of the app's own button passes `i64::MAX`, so it always claims — and still
+    /// moves the timestamp, which is what keeps an automatic repair from following it at once.
+    pub fn claim_broker_repair(&self, now_ms: i64, not_started_since_ms: i64) -> Result<bool> {
+        self.claim_moving_timestamp(
+            crate::intune::SETTING_REPAIR_STARTED_MS,
+            now_ms,
+            not_started_since_ms,
+        )
+    }
+
+    /// Take a machine-wide slot held as a timestamp: write `now_ms` under `key` unless the
+    /// stored one is newer than `not_since_ms`. The claim is the write itself, so SQLite
+    /// arbitrates and two backends can never both win.
+    fn claim_moving_timestamp(&self, key: &str, now_ms: i64, not_since_ms: i64) -> Result<bool> {
         Ok(self.exec(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = ?2
              WHERE CAST(settings.value AS INTEGER) <= ?3",
-            params![
-                crate::update::SETTING_RELEASE_CHECKED_MS,
-                now_ms.to_string(),
-                not_asked_since_ms
-            ],
+            params![key, now_ms.to_string(), not_since_ms],
         )? > 0)
     }
 
@@ -9217,6 +9241,27 @@ mod tests {
         let pressed = now + interval + 1;
         assert!(s.claim_release_check(pressed, pressed).unwrap());
         assert!(!s.claim_release_check(pressed + 1, pressed + 1 - interval).unwrap());
+    }
+
+    #[test]
+    fn one_broker_repair_per_floor_on_the_machine_and_a_press_always_claims() {
+        let s = Store::open_in_memory().unwrap();
+        let now = 1_000_000_000_000;
+        let floor = 20 * 60 * 1000;
+        assert!(s.claim_broker_repair(now, now - floor).unwrap(), "the first repair claims");
+        assert!(
+            !s.claim_broker_repair(now + 1000, now + 1000 - floor).unwrap(),
+            "a second automatic repair inside the floor stands down, whichever backend asks"
+        );
+        assert!(
+            s.claim_broker_repair(now + 2000, i64::MAX).unwrap(),
+            "the user's own press is never rate-limited away"
+        );
+        assert!(
+            !s.claim_broker_repair(now + 3000, now + 3000 - floor).unwrap(),
+            "and it moves the floor, so an automatic repair does not follow it at once"
+        );
+        assert!(s.claim_broker_repair(now + 2000 + floor, now + 2000).unwrap());
     }
 
     fn a_run(message_id: &str, heartbeat_ms: i64) -> AgentRun {

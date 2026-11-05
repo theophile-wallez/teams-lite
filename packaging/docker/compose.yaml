@@ -1,0 +1,197 @@
+# teams-lite in a container image — the user's own install, packaged, with its OWN Intune
+# container inside it (the image's default EMBEDDED mode).
+#
+#     docker compose -f packaging/docker/compose.yaml build
+#     docker compose -f packaging/docker/compose.yaml up -d
+#
+# Then open http://127.0.0.1:19443. The FIRST start downloads the Intune container's image
+# (ghcr.io/magicabdel/intune-container:latest — the intune-container project's image, which
+# carries Microsoft's identity broker and Intune agent; about 1.7 GB, into the `intune` volume below — leave it 8 GiB of disk) before the app can sign in, and
+# the banner says so while it runs. To reach the identity broker of THIS machine instead — an
+# intune-container already enrolled on the host — use compose.host-broker.yaml: the two files are
+# one project and one container, so only one of them runs at a time, and a switch keeps the store.
+#
+# THE ENROLLMENT, two ways, and the user's own choice:
+#
+#   • ENROLL THIS CONTAINER from the app: with nothing imported, the app offers "Enroll this
+#     device" and shows the Intune portal's own sign-in window in the page.
+#   • IMPORT the enrollment of a machine that already has one. On that machine:
+#
+#         intune-container backup -o enrollment-backup.tar.gz
+#
+#     (it stops that machine's Intune container and starts it again — about a minute), then
+#     uncomment the bind and the TEAMS_LITE_INTUNE_IMPORT line below. It is imported ONCE, on the
+#     first start that finds no device registration here, and never over one. Then MOVE it, never
+#     copy it: the same enrollment must NOT keep running on the machine it came from (stop it
+#     there with `intune-container stop` and leave it stopped) — two live copies of one device
+#     are unmeasured, and Intune may revoke both. The archive holds the device's keys, so it must
+#     never be committed and never be BUILT IN: beside this file it sits inside the build context,
+#     and .gitignore and .dockerignore both exclude it there — but the safest place for it is
+#     outside the checkout altogether (export TEAMS_LITE_INTUNE_BACKUP=/path/to/it; the bind
+#     reads that). The bind refuses to start the container when the file is missing, rather than
+#     booting one that offers a FRESH enrollment beside the device it was meant to move. Delete the
+#     archive (and the bind) once the first start has imported it — from then on the enrollment
+#     lives in the `intune` volume.
+#
+# THE HOST'S KERNEL HAS TO ALLOW IT. The Intune container boots in an unprivileged user namespace,
+# and the intune-container runtime refuses to start where the kernel restricts those. The case a
+# real machine meets is Ubuntu 23.10 and later (24.04 LTS included), which ship
+# kernel.apparmor_restrict_unprivileged_userns=1: the runtime refuses on that sysctl's VALUE, so
+# nothing in this file gets past it — not apparmor=unconfined below, not privileged. The one remedy
+# is the host's, `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (and a file in
+# /etc/sysctl.d to keep it); the container's log says so at every start until it is done.
+#
+# STARTING it is the user's act, never tooling's: the backend in here is send-capable and signs in
+# as them, exactly like the always-on service — so the automation guard refuses `up`, `start`,
+# `restart` and a `run` without TEAMS_LITE_READ_ONLY=1 (rule 3d in
+# .claude/hooks/guard-live-automation.sh). STOPPING it is the user's too: this container now holds
+# a live Intune enrollment, so a stop takes that sign-in down, and `down -v` DELETES the
+# enrollment for good — nothing brings it back but a new enrollment. Building and reading stay
+# open:
+#
+#     docker compose -f packaging/docker/compose.yaml logs -f
+#     docker compose -f packaging/docker/compose.yaml exec teams-lite teams-lite-intune-status
+#
+# (The container starts as root, so an `exec` does too — and root is nobody to the Intune
+# container's bus, which answers its own user. The diagnostic drops a root caller to `teams`
+# itself, so the plain spelling above is the right one.)
+#
+# and so does proving the embedded boot on a throwaway container, with no volume and nothing that
+# can send (it refuses to run on a directory that already holds anything):
+#
+#     docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined \
+#       --security-opt apparmor=unconfined --entrypoint teams-lite-intune-selftest teams-lite:local
+#
+# WHAT THE SECURITY OPTIONS COST, said rather than hidden. Booting a systemd inside a user
+# namespace needs the three below: the default seccomp profile refuses `unshare` of a user
+# namespace and the mounts after it, Docker's masked and read-only /proc paths are in the way of
+# the inner container's own /proc, and the default AppArmor profile — where the host enforces one
+# — refuses `mount`. The measured boot used the first two (Dockerfile header). They are a real
+# widening: ROOT in this container would reach /proc files Docker normally hides, which is why the
+# entrypoint is root only for the few lines that delegate the cgroup and give a fresh volume its
+# root, and drops to the runtime user before anything else runs. The container stays
+# unprivileged — no capability is added, and the Intune container's own root is that runtime
+# user, never the host's. None of them is no-new-privileges, deliberately: it makes the kernel
+# ignore the file capabilities of newuidmap and newgidmap, and the inner container could not map
+# its ids.
+
+name: teams-lite
+
+services:
+  teams-lite:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+      args:
+        # The runtime user's ids, and in this mode they OWN the Intune state: the inner container's
+        # root is this uid, so its rootfs and the keyring holding the enrollment are written under
+        # it. So they must NOT change once the `intune` volume exists — an image rebuilt for other
+        # ids finds that state owned by the old uid, and the Intune container does not boot again
+        # until the old ids are put back. They also decide whose a bound host store must be: the
+        # entrypoint takes over only a FRESH volume's root and never re-owns a host directory, so
+        # to bind one (below) build for its owner first —
+        # `export TEAMS_LITE_UID=$(id -u) TEAMS_LITE_GID=$(id -g)` — before the first start.
+        UID: ${TEAMS_LITE_UID:-1000}
+        GID: ${TEAMS_LITE_GID:-1000}
+        # Optional. Set it (`TEAMS_BUILD_REV=$(git rev-parse HEAD)`) and the app says when the
+        # rolling `latest` release has moved past this build; unset, the check skips itself.
+        TEAMS_BUILD_REV: ${TEAMS_BUILD_REV:-}
+    # The image this checkout builds, or — with TEAMS_LITE_IMAGE=ghcr.io/theophile-wallez/teams-lite:latest
+    # and a `docker compose … pull` first — the one CI publishes from master.
+    image: ${TEAMS_LITE_IMAGE:-teams-lite:local}
+    container_name: teams-lite
+
+    # No `user:`: the entrypoint starts as root to hand this container's cgroup to its runtime user
+    # (the Intune container's systemd needs a subtree it can write), then drops to that user.
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+      - apparmor=unconfined
+
+    # A network of its OWN, never the host's — and an IPC namespace of its own, which is Docker's
+    # default (no `ipc:` here). The Intune container shares this container's network namespace,
+    # and its display `:99` is an ABSTRACT socket (`@/tmp/.X11-unix/X99`): in the host's namespace
+    # it would collide with the user's own Intune container's `:99`, and whichever started second
+    # would lose its display and its broker. So HOST NETWORKING IS UNSUPPORTED in this mode, and the
+    # entrypoint refuses it two ways. `network_mode: host` itself is recognised by the kernel's fixed
+    # number for its INITIAL network namespace (the host's with any runtime that shares the host's
+    # kernel; a microVM runtime declares its guest's own, below) and refused at every start,
+    # however early the daemon brings this container up — but only on a kernel recent enough to
+    # fix that number (this machine's 7.3 does). On an older kernel the one refusal left is a
+    # `:99` that is ALREADY bound when this container starts, and at boot (`restart:
+    # unless-stopped`) this container usually starts before the user's session has brought their
+    # own `:99` up — so there it would boot, and take the display from under the user's Intune
+    # container. `ipc: host` is refused on every kernel (the host's /dev/shm holds the user's
+    # broker's lock semaphores). Here the app's served sign-in window reaches `:99` with no host
+    # networking at all.
+    environment:
+      # Inside its own namespace the web front has to listen beyond the container's loopback for a
+      # published port to reach it. It serves the WRITE TOKEN to every page it hands out, so what
+      # keeps that token off the LAN is the `127.0.0.1:` prefix on the port below — never drop it.
+      # The container's bridge address is reachable from this machine too, which is no wider than
+      # loopback; whether a neighbour that routes to the bridge can reach it is the Docker daemon's
+      # firewall to refuse, and is not measured here.
+      TEAMS_WEB_HOST: 0.0.0.0
+      # TEAMS_LITE_INTUNE_IMPORT: /run/teams-lite/intune-import/enrollment-backup.tar.gz
+      # ONLY under a microVM runtime (`runtime: io.containerd.kata.v2`, Firecracker), and NEVER
+      # with runc: there this container runs on a GUEST kernel of its own, in that kernel's initial
+      # network namespace — on no host network, but reading the very number the entrypoint
+      # recognises `network_mode: host` by, so every start is refused. This declares the runtime
+      # (it is never detected) and relaxes that one check; the IPC refusal and the `:99` check still
+      # run. Declared on a container that shares the host's kernel, it is `network_mode: host` let
+      # through. UNVERIFIED: no microVM runtime has run this image.
+      # TEAMS_LITE_NETNS_IS_OWN: "1"
+    ports:
+      - "127.0.0.1:19443:19443"
+
+    # Always on, like the systemd service — and brought back by the daemon at boot.
+    restart: unless-stopped
+    # A stop first stops the launcher, then powers the Intune container off GRACEFULLY: up to 25 s
+    # for a setup or a start holding its lock, then up to 20 s for its systemd. Docker's default
+    # 10 s would SIGKILL the broker and the keyring mid-write, in the volume holding the enrollment.
+    stop_grace_period: 60s
+
+    volumes:
+      # The store: messages, settings, the custom emoji pack, sealed chats' keys. A volume of its
+      # own by default, so nothing on the host is touched. To bring an existing install's history
+      # and settings along, bind the host's store instead of this entry — and build the image for
+      # that directory's owner first (the build args above): the entrypoint never re-owns a host
+      # directory, so a store that belongs to another uid stays unwritable in here. The long
+      # syntax, so a mistyped path is an error rather than an empty store Docker made for it:
+      #   - type: bind
+      #     source: ${HOME}/.local/share/teams-lite
+      #     target: /home/teams/.local/share/teams-lite
+      #     bind:
+      #       create_host_path: false
+      - type: volume
+        source: data
+        target: /home/teams/.local/share/teams-lite
+
+      # Uncomment with TEAMS_LITE_INTUNE_IMPORT above to import an enrollment (see the header).
+      # The LONG syntax on purpose: the short one creates a missing source as an empty directory,
+      # the boot then finds no archive to import, and the app offers a fresh enrollment beside the
+      # device the backup was meant to move. With `create_host_path: false` a missing archive stops
+      # the container from starting and says why.
+      #   - type: bind
+      #     source: ${TEAMS_LITE_INTUNE_BACKUP:-./enrollment-backup.tar.gz}
+      #     target: /run/teams-lite/intune-import/enrollment-backup.tar.gz
+      #     read_only: true
+      #     bind:
+      #       create_host_path: false
+
+      # The Intune container: its rootfs, from ghcr.io/magicabdel/intune-container:latest (about 1.7 GB, owned by the inner container's
+      # subordinate ids) and its persistent state — the device registration and the keyring that
+      # hold the ENROLLMENT. Writable, and a volume of its own: deleting it unenrolls this install.
+      - type: volume
+        source: intune
+        target: /home/teams/.local/share/intune-container
+
+      # The machine's own zone, which is what an unset presence zone means.
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+        read_only: true
+
+volumes:
+  data:
+  intune:

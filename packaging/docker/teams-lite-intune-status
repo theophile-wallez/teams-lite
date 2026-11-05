@@ -1,0 +1,18 @@
+#!/bin/sh
+# The READ-ONLY Intune diagnostic (examples/intune_status.rs), run as the runtime user whoever
+# calls it.
+#
+# The image starts as ROOT (its entrypoint drops to `teams` itself), so `docker exec` and
+# `kubectl exec` land as root unless told otherwise — and root is the one id that cannot answer the
+# questions this asks. In the embedded mode the Intune container's user namespace maps only the
+# runtime user (to its root) and the subordinate range, so an outer root is unmapped there: its
+# bus refuses root's AUTH EXTERNAL and the keyring reads as unanswered, which is a diagnostic
+# reporting a failure it caused. So a root caller is dropped to `teams` first, exactly as the
+# entrypoint drops (no new privileges are gained either way); any other caller — the host-broker
+# shape runs as the host user from the start — runs it as itself.
+set -eu
+BIN=/usr/local/lib/teams-lite/intune-status
+if [ "$(id -u)" = 0 ]; then
+  exec setpriv --reuid=teams --regid=teams --init-groups --inh-caps=-all -- "$BIN" "$@"
+fi
+exec "$BIN" "$@"

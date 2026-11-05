@@ -7,8 +7,7 @@
 // sibling of `mail_live_check.rs`: not a unit test, a hands-on verification that the
 // implementation works against the real account.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example calendar_live_check -- 2026-07
+//   cargo run --example calendar_live_check -- 2026-07
 //
 // READS ONLY, and it prints STRUCTURE, never content: subjects, attendees, locations
 // and join URLs stay out of the output. What it shows is counts, shapes and the

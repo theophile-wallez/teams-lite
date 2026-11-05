@@ -18,8 +18,7 @@
 //
 // READ-ONLY: two GETs and one profile POST that fetches, never publishes.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example self_identity_recon
+//   cargo run --example self_identity_recon
 use anyhow::Result;
 use serde_json::Value;
 

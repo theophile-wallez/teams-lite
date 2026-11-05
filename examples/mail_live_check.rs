@@ -5,8 +5,7 @@
 // reports what it found. This is the mail sibling of `broker_token.rs`: not a unit
 // test, a hands-on verification that the implementation works against the tenant.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example mail_live_check
+//   cargo run --example mail_live_check
 //
 // READS ONLY, and it prints STRUCTURE, never content: subjects, senders, addresses
 // and bodies stay out of the output. What it shows is counts, sizes and shapes —

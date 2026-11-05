@@ -54,6 +54,24 @@ export function backendLogPath(): string {
     : `/tmp/teams-lite-server-${port}.log`;
 }
 
+/// `TEAMS_LITE_BACKEND_LOG=-`: the backend writes to THIS process's own stdout and stderr
+/// instead of a file. The container image sets it (packaging/docker/entrypoint.sh), because
+/// there the file is inside a container nobody reads and `docker logs` — the one place a
+/// reader of an image looks — would hold the launcher's three lines and none of the backend's:
+/// which bus it found, why sign-in failed, what it refused. Any other value, or none, keeps the
+/// file, which is right wherever a person runs `teams` in a terminal they are also using.
+export const BACKEND_LOG_ENV = "TEAMS_LITE_BACKEND_LOG";
+
+/// Does the backend write where this process writes?
+export function backendLogsInherited(): boolean {
+  return process.env[BACKEND_LOG_ENV]?.trim() === "-";
+}
+
+/// Where a reader finds what the backend said — named in every message that sends them there.
+export function backendLogLocation(): string {
+  return backendLogsInherited() ? "the backend's output above" : backendLogPath();
+}
+
 /// Are we running as a `bun build --compile` standalone binary? In that mode the
 /// backend is embedded inside this executable (see embedded-backend.ts) rather
 /// than sitting next to a source tree. Bun.embeddedFiles is populated only in a
@@ -275,7 +293,7 @@ export async function ensureBackend(opts: { keepAlive?: boolean } = {}): Promise
       start: spawnSupervised,
       log: (message) => console.error(message),
       wait: (ms) => Bun.sleep(ms),
-      logPath: backendLogPath(),
+      logPath: backendLogLocation(),
     });
   };
   watch(proc, generation);
@@ -398,7 +416,7 @@ async function startBackend(
   // offsets as though it had happened twice. Reading a real outage out of that took an hour.
   // Per port, so the two never share; appended, so a RESTART does not erase the reason the
   // last backend died, which is the one thing worth having after one.
-  const log = openSync(backendLogPath(), "a");
+  const log = backendLogsInherited() ? "inherit" : openSync(backendLogPath(), "a");
   const proc: Subprocess = spawn([bin], {
     stdout: log,
     stderr: log,
@@ -411,14 +429,14 @@ async function startBackend(
   while (Date.now() < deadline) {
     if (proc.exitCode !== null) {
       throw new Error(
-        `backend exited (code ${proc.exitCode}). See ${backendLogPath()}`,
+        `backend exited (code ${proc.exitCode}). See ${backendLogLocation()}`,
       );
     }
     if (await portOpen()) return proc;
     await Bun.sleep(300);
   }
   try { proc.kill(9); } catch {}
-  throw new Error(`backend still not listening after 60s. See ${backendLogPath()}`);
+  throw new Error(`backend still not listening after 60s. See ${backendLogLocation()}`);
 }
 
 /// Kill the backend whenever this process goes away, for any reason.

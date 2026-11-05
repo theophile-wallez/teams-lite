@@ -1471,16 +1471,31 @@ if (import.meta.main) {
   // touched — and the banner cannot be seen any other way without breaking sign-in.
   if (args.includes("--broker")) {
     await withPreview(async ({ page, shot, setTheme, emit }) => {
-      await emit({
+      const banner = '[data-testid="broker-banner"]';
+      const disconnected = {
         kind: "broker",
         ok: false,
         signature: "disconnected",
         message: "The identity broker stopped answering. Its keyring is usually locked.",
-      });
-      await page.locator('[data-testid="broker-banner"]').waitFor({ state: "visible" });
+      };
+      await emit(disconnected);
+      await page.locator(banner).waitFor({ state: "visible" });
       await shot(`${out}-light.png`);
       await setTheme("dark");
       await shot(`${out}-dark.png`);
+      // A repair RUNNING, held by the mock so the state has a duration: the busy sentence is
+      // the one that changed when the backend stopped restarting with the container, and the
+      // mock's own repair otherwise ends before a capture could see it.
+      await emit({ ...disconnected, repair: "hold" });
+      await page.locator('[data-testid="broker-repair"]').click();
+      await page.locator('[data-testid="broker-repair"]:disabled').waitFor();
+      await shot(`${out}-repairing-dark.png`, banner);
+      // A press on a keyring that is NOT locked: refused, in the backend's own sentence, under
+      // a button that is the reader's again.
+      await emit({ ...disconnected, repair: "refuse" });
+      await page.locator('[data-testid="broker-repair"]').click();
+      await page.locator('[data-testid="broker-repair-error"]').waitFor({ state: "visible" });
+      await shot(`${out}-not-locked-dark.png`, banner);
       // The other half: a failure a container restart cannot fix keeps the button
       // visible but inert, so the boundary is explicit.
       await emit({
@@ -1492,9 +1507,12 @@ if (import.meta.main) {
       });
       await page.waitForTimeout(200);
       await shot(`${out}-refused-dark.png`);
-      // Leave the shared mock healthy again.
+      // Leave the shared mock healthy again — which also disarms the repair outcome armed above.
       await emit({ kind: "broker", ok: true });
-      console.log(`[preview] wrote ${out}-light.png, ${out}-dark.png and ${out}-refused-dark.png`);
+      console.log(
+        `[preview] wrote ${out}-{light,dark}.png, ${out}-repairing-dark.png, ` +
+          `${out}-not-locked-dark.png and ${out}-refused-dark.png`,
+      );
     });
     process.exit(0);
   }
@@ -1572,14 +1590,96 @@ if (import.meta.main) {
       await page.locator('[data-testid="broker-signin"]').waitFor({ state: "visible" });
       await shot(`${out}-blocked-dark.png`, '[data-testid="broker-banner"]');
 
+      // EMBEDDED mode, the states only the self-contained image has. First the container
+      // being STARTED — its first start, which is the one that says what it costs, with no
+      // button because the boot is already under way.
+      await emit({ kind: "signin", reset: true });
+      await emit({
+        kind: "broker",
+        ok: false,
+        signature: "unreachable",
+        message: "The identity broker could not be reached.",
+        can_repair: false,
+      });
+      await emit({ kind: "intune", helper: "boot", initialized: false, running: false });
+      await page.locator('[data-testid="broker-starting"]').waitFor({ state: "visible" });
+      await shot(`${out}-embedded-starting-dark.png`, '[data-testid="broker-banner"]');
+      await setTheme("light");
+      await shot(`${out}-embedded-starting-light.png`, '[data-testid="broker-banner"]');
+
+      // Then a container that is up and enrolled nowhere: the one remedy a person carries out,
+      // and the portal it opens — served exactly as the broker's window is, with the words for an
+      // enrollment, and once the pretend portal has registered the container, the panel handing
+      // the close to the reader.
+      await emit({
+        kind: "broker",
+        ok: false,
+        signature: "no_account",
+        message: "The identity broker holds no account — this device is not enrolled.",
+        can_repair: false,
+      });
+      await emit({ kind: "intune", helper: null, initialized: true, registered: false, running: true });
+      await page.locator('[data-testid="broker-enroll"]').waitFor({ state: "visible" });
+      await shot(`${out}-embedded-enroll-light.png`, '[data-testid="broker-banner"]');
+      await setTheme("dark");
+      await shot(`${out}-embedded-enroll-dark.png`, '[data-testid="broker-banner"]');
+      await emit({ kind: "signin", outcome: "window" });
+      await page.locator('[data-testid="broker-enroll"]').click();
+      await page.locator(`${panel}[data-kind="enroll"][data-phase="waiting"]`).waitFor();
+      await page.locator('[data-testid="signin-frame"]').waitFor({ state: "visible" });
+      await shot(`${out}-enroll-window-dark.png`, panel);
+      await page.keyboard.press("Enter");
+      await page.locator(`${panel}[data-registered="true"]`).waitFor();
+      await page.waitForTimeout(1200);
+      await shot(`${out}-enroll-registered-dark.png`, panel);
+      // Closing the portal is CARRIED OUT before the session settles — its helper closes it, which
+      // takes seconds — and the panel says so with nothing to press meanwhile.
+      await page.locator('[data-testid="signin-cancel"]').click();
+      await page.locator(`${panel}[data-stopping="true"]`).waitFor();
+      await shot(`${out}-enroll-closing-dark.png`, panel);
+      await page.locator(`${panel}[data-phase="done"]`).waitFor();
+      await shot(`${out}-enroll-done-dark.png`, panel);
+      await page.locator('[data-testid="signin-close"]').click();
+
+      // And a container that IS enrolled but whose broker holds no account — an imported backup
+      // whose account did not come along. It used to fall through to the host-mode sentence; the
+      // same portal is offered to sign the account in again, in its own words.
+      await emit({
+        kind: "broker",
+        ok: false,
+        signature: "no_account",
+        message: "The identity broker holds no account.",
+        can_repair: false,
+      });
+      await emit({ kind: "intune", helper: null, initialized: true, registered: true, running: true });
+      await page.locator('[data-testid="broker-portal-signin"]').waitFor({ state: "visible" });
+      await shot(`${out}-embedded-account-dark.png`, '[data-testid="broker-banner"]');
+      await setTheme("light");
+      await shot(`${out}-embedded-account-light.png`, '[data-testid="broker-banner"]');
+      await setTheme("dark");
+      await emit({ kind: "signin", outcome: "window" });
+      await page.locator('[data-testid="broker-portal-signin"]').click();
+      await page.locator(`${panel}[data-purpose="account"][data-phase="waiting"]`).waitFor();
+      await page.locator('[data-testid="signin-frame"]').waitFor({ state: "visible" });
+      await shot(`${out}-account-window-dark.png`, panel);
+      await page.locator('[data-testid="signin-cancel"]').click();
+      await page.locator(`${panel}[data-phase="cancelled"]`).waitFor();
+      await page.locator('[data-testid="signin-close"]').click();
+
       // Leave the shared mock healthy, and its sign-in hook reset: one mock process serves the
-      // whole run, and a sign-in left running puts a dialog over every later capture.
+      // whole run, and a sign-in left running puts a dialog over every later capture. The signin
+      // reset puts the broker status — and the embedded state with it — back to null.
+      await emit({ kind: "intune", reset: true });
       await emit({ kind: "signin", reset: true });
       await emit({ kind: "broker", ok: true });
       console.log(
         `[preview] wrote ${out}-offered-{light,dark}.png, ${out}-done-light.png, ` +
           `${out}-window-{light,dark}.png, ${out}-typed-dark.png, ${out}-phone-dark.png, ` +
-          `${out}-cancelled-dark.png and ${out}-blocked-dark.png`,
+          `${out}-cancelled-dark.png, ${out}-blocked-dark.png, ` +
+          `${out}-embedded-starting-{dark,light}.png, ${out}-embedded-enroll-{light,dark}.png, ` +
+          `${out}-enroll-window-dark.png, ${out}-enroll-registered-dark.png, ` +
+          `${out}-enroll-closing-dark.png, ${out}-enroll-done-dark.png, ` +
+          `${out}-embedded-account-{dark,light}.png and ${out}-account-window-dark.png`,
       );
     });
     process.exit(0);

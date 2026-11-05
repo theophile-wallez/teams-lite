@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { backendLogPath, superviseBackend, type SupervisorDeps } from "./backend";
+import {
+  BACKEND_LOG_ENV,
+  backendLogLocation,
+  backendLogPath,
+  backendLogsInherited,
+  superviseBackend,
+  type SupervisorDeps,
+} from "./backend";
 
 // THE BACKEND IS WATCHED, and it was not.
 //
@@ -111,6 +118,28 @@ describe("superviseBackend", () => {
 // send-capable installs on this machine spliced their output into one file, with whole lines
 // overwritten mid-word and one run's startup banner appearing at two offsets as though it had
 // happened twice. Reading a real outage out of that took an hour.
+
+describe("the backend's output in a container", () => {
+  test("goes where the launcher's goes only when asked for by name", () => {
+    const before = process.env[BACKEND_LOG_ENV];
+    try {
+      process.env[BACKEND_LOG_ENV] = "-";
+      // The container image: `docker logs` is the one place its reader looks.
+      expect(backendLogsInherited()).toBe(true);
+      expect(backendLogLocation()).not.toContain("/tmp/");
+      for (const other of ["", "1", "/tmp/x.log", "inherit"]) {
+        process.env[BACKEND_LOG_ENV] = other;
+        expect(backendLogsInherited()).toBe(false);
+        expect(backendLogLocation()).toBe(backendLogPath());
+      }
+      delete process.env[BACKEND_LOG_ENV];
+      expect(backendLogsInherited()).toBe(false);
+    } finally {
+      if (before === undefined) delete process.env[BACKEND_LOG_ENV];
+      else process.env[BACKEND_LOG_ENV] = before;
+    }
+  });
+});
 
 describe("backendLogPath", () => {
   test("keeps the historical name for the default port", () => {

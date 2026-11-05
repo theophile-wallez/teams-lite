@@ -36,7 +36,10 @@ import { FadeArc } from "./loading-ui/fade-arc";
  *   * **Restart the backend** — the one repair for a process that answers reads and has
  *     stopped doing something else. It is deliberately not a fix for a broken SIGN-IN: that
  *     one has its own button, on its own banner, because it restarts the Intune container
- *     instead (see broker-banner.tsx).
+ *     instead (see broker-banner.tsx) — and the two do not overlap in either direction. The
+ *     sign-in repair leaves this backend running, since a backend now finds the container's
+ *     bus afresh on every connection; and restarting the backend touches no keyring, so it
+ *     cannot unlock one.
  *
  * The words for every state are `~/lib/maintenance.ts`, so they are unit-tested; this file
  * holds the one thing a pure function cannot: whether the socket really went down and came

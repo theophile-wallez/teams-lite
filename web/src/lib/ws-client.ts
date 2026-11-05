@@ -59,6 +59,7 @@ import type {
   SealSetResult,
   SealStatus,
   SettingsPatch,
+  SigninFrameAnswer,
   SigninState,
   UpdateCheckResult,
   UpdateProgress,
@@ -128,11 +129,31 @@ export function needsRelay(
   return pointsAtLoopback(configured) && !isLoopbackHost(loc.hostname);
 }
 
-/** `configured`, or the relay on this page's own origin when that address cannot
- *  work from where the page is running (see {@link needsRelay}). */
-function reachableFromThisPage(configured: string): string {
-  if (!needsRelay(configured, globalThis.location)) return configured;
-  return backendUrlForPage(globalThis.location) ?? configured;
+/**
+ * Where this page's socket goes, given the backend the BUILD was pinned to (`VITE_TEAMS_WS_URL`, or
+ * nothing) and where the page is running.
+ *
+ * AN UNPINNED BUILD ALWAYS GOES THROUGH THE SERVER THAT SERVED IT, on this machine too. That server
+ * is web/server.ts by construction — a dev server is always pinned — and it relays the socket to the
+ * backend it was started against (`TEAMS_LITE_WS_URL`), which is the right one by construction. It
+ * used to dial `ws://127.0.0.1:19420` directly whenever the page was on loopback, which is correct
+ * for exactly one front: the always-on service's 19440. Every other one dialled the wrong backend
+ * from this machine — the released build on 19442, the container image on 19443, a
+ * `kubectl port-forward` — reaching the always-on service's backend with a token it refuses (the
+ * `foreign` write lock), or nothing at all. The cost is one loopback hop, which the relay already
+ * pays for every phone.
+ *
+ * A PINNED build keeps the address it names, relayed only when that address is loopback and the page
+ * is not (see {@link needsRelay}): the mock stays the mock, a dev page on this machine dials its
+ * backend directly, and the safety catch in {@link defaultWsUrl} keeps meaning what it says.
+ */
+export function chooseBackendUrl(
+  pinned: string | undefined,
+  loc: { protocol: string; host: string; hostname: string } | null | undefined,
+): string {
+  if (!pinned) return backendUrlForPage(loc) ?? PRODUCTION_WS_URL;
+  if (!needsRelay(pinned, loc)) return pinned;
+  return backendUrlForPage(loc) ?? pinned;
 }
 
 /**
@@ -150,10 +171,11 @@ function reachableFromThisPage(configured: string): string {
  * 1:1 chats because a restarted `vite dev` lost its `VITE_TEAMS_WS_URL`. Failing
  * loudly at startup costs one variable; the silent fallback costs a real message.
  *
- * Either way, a page opened from ANOTHER DEVICE goes through the relay instead:
- * whatever this machine calls "the backend", a loopback address does not name it
- * from a phone (see {@link needsRelay} and {@link backendUrlForPage}). That is what
- * makes the app usable over Tailscale without exposing the backend's own port.
+ * A production page goes through the server that served it, from any device (see
+ * {@link chooseBackendUrl}); a pinned page does when it runs on ANOTHER device, since a
+ * loopback address does not name this machine from a phone (see {@link needsRelay} and
+ * {@link backendUrlForPage}). That is what makes the app usable over Tailscale without
+ * exposing the backend's own port.
  *
  * Resolved lazily (a function, not a module constant) so importing this module
  * stays side-effect-free — unit tests construct `Backend` with an explicit URL
@@ -161,7 +183,7 @@ function reachableFromThisPage(configured: string): string {
  */
 export function defaultWsUrl(): string {
   const configured = (import.meta.env?.VITE_TEAMS_WS_URL as string | undefined)?.trim();
-  if (configured) return reachableFromThisPage(configured);
+  if (configured) return chooseBackendUrl(configured, globalThis.location);
   if (import.meta.env?.DEV) {
     throw new Error(
       "VITE_TEAMS_WS_URL is not set. A dev server must name its backend explicitly — " +
@@ -171,7 +193,7 @@ export function defaultWsUrl(): string {
         "work against your own account.",
     );
   }
-  return reachableFromThisPage(PRODUCTION_WS_URL);
+  return chooseBackendUrl(undefined, globalThis.location);
 }
 
 /**
@@ -350,8 +372,10 @@ export class Backend {
     const ws = new WebSocket(this.url);
     this.ws = ws;
     let settled = false;
+    let opened = false;
 
     ws.onopen = () => {
+      opened = true;
       this.reconnectDelay = this.initialDelayMs;
       this.firstFailureAt = null;
       this.reconnecting = false;
@@ -376,6 +400,11 @@ export class Backend {
       for (const p of this.pending.values()) p.reject(new Error("connection closed"));
       this.pending.clear();
       this.emit("disconnected", {});
+      // A socket that never OPENED is a handshake something refused, and the browser will not say
+      // what: a 302 to a sign-in page, a 401, a 403 and a backend that is down all arrive as the
+      // same bare close. Said separately, so the store can ask the question a socket cannot answer
+      // — is it the SIGN-IN in front of this app that expired (see lib/auth-wall.ts)?
+      if (!opened) this.emit("handshake_failed", {});
       this.scheduleReconnect();
     };
     ws.onmessage = (m) => this.onMessage(String(m.data));
@@ -765,16 +794,33 @@ export class Backend {
   setChatMuted(conversation: string, muted: boolean): Promise<{ muted: boolean }> {
     return this.writeRequest<{ muted: boolean }>("set_chat_muted", { conversation, muted });
   }
-  /** Ask the backend to repair sign-in: it starts a systemd unit that restarts the
-   *  Intune container, because the container's login keyring re-locks and the broker
-   *  then answers no token call at all.
+  /** Ask the backend to repair sign-in: it asks the user's systemd manager for a transient
+   *  unit that restarts the Intune container through the `intune-container` crate, because
+   *  the container's login keyring re-locks and the broker then answers no token call at all
+   *  (see src/intune.rs).
    *
-   *  A WRITE request, though it posts nothing to Teams: it restarts a service on the
-   *  user's machine, so the backend gates it on the same capability token and refuses
-   *  it outright when read-only (see `MACHINE_METHODS` in src/bin/server.rs).
+   *  A WRITE request, though it posts nothing to Teams: it takes the user's sign-in down for
+   *  a minute on their own machine, so the backend gates it on the same capability token and
+   *  refuses it outright when read-only (see `MACHINE_METHODS` in src/bin/server.rs).
    *
-   *  Resolves as soon as the unit is ENQUEUED. The repair itself takes about a minute
-   *  and drops this socket on the way; recovery is the page's own reconnect. */
+   *  A PRESS is answered `{started: true}` or REJECTED with a sentence, never
+   *  `{started: false}`. A repair already running on this machine is FOLLOWED, which is what
+   *  the press asked for, and answered `started: true`; otherwise the backend asks the keyring,
+   *  and anything but a locked one is a press it refuses in words ("Not restarting the Intune
+   *  container: …"), one sentence per state — unlocked, a container that is not running right
+   *  now, one that could not be read — because a restart would take sign-in down for nothing
+   *  and a press that silently did nothing would look like one that worked. `started: false`
+   *  with a `reason` is the answer its AUTOMATIC triggers get, and `reason` is a `string` on
+   *  purpose: the set has already grown once (`not_locked`, `rate_limited`, `no_container`,
+   *  `already_running`), so nothing on this side may read it as closed. A machine with no
+   *  Intune container is refused too, though `can_repair` already keeps the button from being
+   *  offered there.
+   *
+   *  Resolves as soon as systemd has TAKEN the job (or answered that one is already running),
+   *  not when the repair is done. The backend stays up through the whole minute — the unit is
+   *  the manager's, not its child — so this socket stays open: the end of the repair arrives
+   *  as a `broker_status` with `repairing: false`, and sign-in coming back as the broker's own
+   *  `broker_status` once a token call succeeds. */
   repairBroker(): Promise<{ started: boolean; reason?: string }> {
     return this.writeRequest<{ started: boolean; reason?: string }>("repair_broker", {});
   }
@@ -800,7 +846,7 @@ export class Backend {
    *
    *  A WRITE request even though it reads: its answer is a picture of a sign-in page, which
    *  is not something a client that merely found this socket may have. */
-  signinFrame(): Promise<{ width: number; height: number; png: string }> {
+  signinFrame(): Promise<SigninFrameAnswer> {
     return this.writeRequest("signin_frame", {});
   }
 
@@ -817,6 +863,17 @@ export class Backend {
   /** Close the sign-in window, which is how a flow is ended. */
   cancelSignin(): Promise<{ closed: boolean }> {
     return this.writeRequest("signin_cancel", {});
+  }
+
+  /** Open the Intune portal in an embedded backend's own Intune container: the sign-in methods
+   *  above then serve the portal's window (see `Kind` in src/signin.rs). The BACKEND decides what
+   *  for — to ENROLL a container that holds no registration, or to sign an ACCOUNT in again on one
+   *  that does but whose broker holds none — and the answer's `signin.purpose` says which. A WRITE
+   *  request — it registers a device in the user's organization, or signs their account in, as
+   *  them — answered, like `startSignin`, with the first state rather than the outcome. Refused in
+   *  words outside embedded mode and wherever neither can happen right now. */
+  intuneEnroll(): Promise<{ started: boolean; reason?: string; signin: SigninState }> {
+    return this.writeRequest("intune_enroll", {});
   }
 
   /** Ask GitHub, now, whether a newer build than this one has been published — Settings ›

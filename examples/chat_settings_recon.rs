@@ -17,11 +17,10 @@
 // CSA calls muted versus not, pinned versus not, hidden versus not. A key that tracks
 // one of those flags is the key the write has to address.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example chat_settings_recon
+//   cargo run --example chat_settings_recon
 //
 //   # dump one chat's properties in full
-//   … cargo run --example chat_settings_recon -- --conv 19:<id>@thread.v2
+//   cargo run --example chat_settings_recon -- --conv 19:<id>@thread.v2
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::BTreeMap;

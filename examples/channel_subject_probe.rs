@@ -27,8 +27,7 @@
 // one endpoint for a chat and a channel alike. One titled post in a real channel stays the
 // user's own click, in their own app.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example channel_subject_probe
+//   cargo run --example channel_subject_probe
 use anyhow::{Context, Result};
 
 use teams_lite::{teams, teams_read, teams_send};

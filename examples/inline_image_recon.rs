@@ -15,8 +15,7 @@
 // It prints SHAPES and never content: an object id is truncated, and no message text, no
 // sender and no conversation is read out.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example inline_image_recon [-- <how many pictures> [<how many tables>]]
+//   cargo run --example inline_image_recon [-- <how many pictures> [<how many tables>]]
 use anyhow::Result;
 use rusqlite::{Connection, OpenFlags};
 

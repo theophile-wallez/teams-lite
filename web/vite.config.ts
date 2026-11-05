@@ -4,7 +4,7 @@
 // (react's plugin MUST come after Start's, per the TanStack Start docs).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, type Plugin, type ProxyOptions } from "vite";
 import tsConfigPaths from "vite-tsconfig-paths";
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
@@ -14,6 +14,7 @@ import { CHESS_SOUND_ROUTE, chessSoundFileResponse } from "./chess-sound-file";
 import { ENGINE_ROUTE, engineFileResponse } from "./engine-file";
 import { BUILD_INFO_FILE, type BuildInfo } from "./build-info";
 import { BACKEND_WS_ROUTE } from "./src/lib/backend-route";
+import { policyFromEnv, upgradeVerdict } from "./request-origin";
 
 // The dev server port for `vite dev`. The production server reads PORT at
 // runtime (see server.ts), so this only affects local dev.
@@ -142,6 +143,36 @@ function buildInfoPlugin(): Plugin {
 // variable, no relay: the page then has to name a backend it can reach itself.
 const DEV_BACKEND_WS_URL = process.env.VITE_TEAMS_WS_URL?.trim();
 
+/**
+ * The page's socket, forwarded to the backend the way web/server.ts relays it — through the same
+ * check (request-origin.ts), and WITHOUT its Origin.
+ *
+ * The backend refuses an Origin that is not loopback (`ws_origin_refusal` in src/bin/server.rs),
+ * because the only browser that should dial it directly is one on this machine. A phone reaching
+ * this dev server over the tailnet carries the tailnet origin, so the proxy takes the decision
+ * itself and forwards a request that is not a page any more — exactly what the production relay's
+ * own upstream socket is. Stripping it unchecked would hand the backend a page from ANY site.
+ * The Host half is Vite's own `allowedHosts` too, so the names a dev server answers to are the
+ * ones the production server answers to.
+ */
+const devOriginPolicy = policyFromEnv(process.env, [DEV_HOST]);
+const guardDevSocket: NonNullable<ProxyOptions["configure"]> = (proxy) => {
+  proxy.on("proxyReqWs", (proxyReq, req, socket) => {
+    const header = (name: string) => {
+      const value = req.headers[name.toLowerCase()];
+      return Array.isArray(value) ? value.join(",") : value;
+    };
+    const verdict = upgradeVerdict(header, devOriginPolicy);
+    if (!verdict.ok) {
+      console.error(`[teams-dev] refused a WebSocket: ${verdict.reason}`);
+      socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      proxyReq.destroy();
+      return;
+    }
+    proxyReq.removeHeader("origin");
+  });
+};
+
 export default defineConfig(({ command }) => ({
   server: {
     port: DEV_PORT,
@@ -152,7 +183,14 @@ export default defineConfig(({ command }) => ({
     // makes the app work from a phone (over Tailscale) with the backend still bound
     // to loopback; `web/server.ts` does the same for a production build.
     proxy: DEV_BACKEND_WS_URL
-      ? { [BACKEND_WS_ROUTE]: { target: DEV_BACKEND_WS_URL, ws: true, rewrite: () => "/" } }
+      ? {
+          [BACKEND_WS_ROUTE]: {
+            target: DEV_BACKEND_WS_URL,
+            ws: true,
+            rewrite: () => "/",
+            configure: guardDevSocket,
+          },
+        }
       : undefined,
     // Reached through a Tailscale name, not just localhost. Vite rejects unknown
     // Host headers by default (DNS-rebinding protection), which would answer the

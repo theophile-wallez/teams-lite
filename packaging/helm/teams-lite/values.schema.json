@@ -1,0 +1,568 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "teams-lite chart values",
+  "description": "A value this chart does not know is refused rather than ignored, at every level whose keys the chart defines — a typo in `hostUser` must not deploy a pod as the image's default uid, `networkPolicy.enable` must not drop the policy, and `replicas` is not a value at all. Free-form maps (annotations, selectors, resources, security contexts) stay open.",
+  "type": "object",
+  "required": [
+    "image",
+    "hostUser",
+    "broker",
+    "persistence",
+    "service"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "global": {
+      "type": "object"
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Ignored here: a parent chart's `condition: teams-lite.enabled` hands it down."
+    },
+    "image": {
+      "type": "object",
+      "required": [
+        "repository"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "description": "A content digest, sha256:<64 hex>, or empty.",
+          "pattern": "^(sha256:[0-9a-f]{64})?$"
+        },
+        "pullPolicy": {
+          "enum": [
+            "",
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "imagePullSecrets": {
+      "type": "array"
+    },
+    "hostUser": {
+      "type": "object",
+      "description": "HOST MODES: the node user the identity broker answers (`id -u` / `id -g`). Never root: the broker refuses uid 0 and so does the pod. The embedded mode ignores it.",
+      "required": [
+        "uid",
+        "gid"
+      ],
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gid": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "readOnly": {
+      "type": "boolean",
+      "description": "A backend that reads and refuses every write. In the embedded mode it boots nothing, so it is rendered without what booting costs (no privilege, no import Secret, the Intune claim mounted read-only) and keeps the Intune claim, which a StatefulSet cannot drop and re-add in place."
+    },
+    "broker": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "description": "embedded: the pod runs its own Intune container (the default). intuneContainer / sessionBus: the pod reaches the NODE's broker.",
+          "enum": [
+            "embedded",
+            "intuneContainer",
+            "sessionBus"
+          ]
+        },
+        "embedded": {
+          "type": "object",
+          "required": [
+            "persistence",
+            "import",
+            "userNamespaces"
+          ],
+          "properties": {
+            "persistence": {
+              "type": "object",
+              "required": [
+                "accessModes",
+                "size"
+              ],
+              "properties": {
+                "storageClassName": {
+                  "type": "string"
+                },
+                "accessModes": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "description": "The Intune rootfs is owned by subordinate ids and its keyring is one writer's: a local filesystem, never a shared (RWX) volume.",
+                    "enum": [
+                      "ReadWriteOnce",
+                      "ReadWriteOncePod"
+                    ]
+                  }
+                },
+                "size": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            },
+            "import": {
+              "type": "object",
+              "required": [
+                "secretName",
+                "key"
+              ],
+              "properties": {
+                "secretName": {
+                  "type": "string",
+                  "description": "The Secret holding an `intune-container backup` archive, or empty for none (a DNS subdomain name).",
+                  "maxLength": 253,
+                  "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
+                },
+                "key": {
+                  "type": "string",
+                  "description": "The Secret's key that holds the archive.",
+                  "minLength": 1,
+                  "maxLength": 253,
+                  "pattern": "^[-._a-zA-Z0-9]+$"
+                }
+              },
+              "additionalProperties": false
+            },
+            "userNamespaces": {
+              "type": "boolean",
+              "description": "UNVERIFIED opt-in: hostUsers=false and capabilities instead of a privileged container. Kubernetes 1.30 or later."
+            },
+            "vmIsolated": {
+              "type": "boolean",
+              "description": "DECLARES a microVM runtime (Kata Containers, Firecracker), whose guest kernel's initial network namespace is the sandbox's own: writes TEAMS_LITE_NETNS_IS_OWN=1, which lets the entrypoint boot there. Never detected; on a pod that shares the node's kernel it is hostNetwork let through. Not required, so a values tree from a chart that predates it still validates. UNVERIFIED."
+            }
+          },
+          "additionalProperties": false
+        },
+        "intuneContainer": {
+          "type": "object",
+          "properties": {
+            "stateDir": {
+              "type": "string",
+              "description": "An absolute path on the node, or empty. Refused with broker.mode=embedded, which never reads it.",
+              "pattern": "^(/.*)?$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "sessionBus": {
+          "type": "object",
+          "properties": {
+            "socket": {
+              "type": "string",
+              "description": "/run/user/<uid>/bus, or empty: /run/user is what the pod mounts. Refused with broker.mode=embedded, which never dials it.",
+              "pattern": "^(/run/user/[0-9]+/[^/]+)?$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "nodeSelector": {
+      "type": "object"
+    },
+    "affinity": {
+      "type": "object"
+    },
+    "tolerations": {
+      "type": "array"
+    },
+    "hostNetwork": {
+      "type": "boolean",
+      "description": "HOST MODES ONLY: refused with broker.mode=embedded, whose own Intune container's :99 would collide with the node's."
+    },
+    "web": {
+      "type": "object",
+      "properties": {
+        "listenAddress": {
+          "type": "string",
+          "minLength": 1
+        },
+        "allowedHosts": {
+          "description": "Names the app answers to beyond loopback, IP addresses and tailnet names (.ts.net); a leading \".\" covers a domain and every name under it. The chart adds every httpRoute and ingress hostname itself. There is no `*`: a name the app answers to is one a DNS-rebinding page can read the write token under.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^\\.?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "service": {
+      "type": "object",
+      "required": [
+        "type",
+        "port"
+      ],
+      "properties": {
+        "type": {
+          "description": "ClusterIP, unless you mean to publish the account to whatever reaches the node.",
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "annotations": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "host"
+            ],
+            "properties": {
+              "host": {
+                "type": "string",
+                "minLength": 1
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "tls": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": false
+    },
+    "httpRoute": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "parentRefs": {
+          "description": "The Gateway (and listener) the route attaches to, as written in an HTTPRoute's parentRefs.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "hostnames": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+          }
+        },
+        "annotations": {
+          "type": "object"
+        },
+        "labels": {
+          "type": "object"
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "timeouts": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "external": {
+          "description": "Your word that something in front of this chart authenticates every request to its route, or that the route is reachable only from a network you trust. Never detected.",
+          "type": "boolean"
+        },
+        "oauth2Proxy": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": "object",
+              "properties": {
+                "repository": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tag": {
+                  "type": "string"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^(sha256:[a-f0-9]{64})?$"
+                },
+                "pullPolicy": {
+                  "enum": [
+                    "",
+                    "Always",
+                    "IfNotPresent",
+                    "Never"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "issuerUrl": {
+              "description": "The OpenID Connect issuer, over https.",
+              "type": "string",
+              "pattern": "^(https://[^\\s]+)?$"
+            },
+            "clientId": {
+              "type": "string"
+            },
+            "publicClient": {
+              "type": "boolean"
+            },
+            "existingSecret": {
+              "type": "string",
+              "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
+            },
+            "clientSecretKey": {
+              "type": "string",
+              "pattern": "^[-._a-zA-Z0-9]+$"
+            },
+            "cookieSecretKey": {
+              "type": "string",
+              "pattern": "^[-._a-zA-Z0-9]+$"
+            },
+            "emails": {
+              "description": "Who may sign in, one verified address each. Never a domain, and never everyone.",
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[^@\\s*,]+@[^@\\s*,]+\\.[^@\\s*,]+$"
+              }
+            },
+            "subjects": {
+              "description": "Who may sign in, by the provider's own user id (the ID token's sub), checked as well as emails. No comma, quote or space: oauth2-proxy reads --allowed-group as a comma-separated list.",
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[^\\s,\"]+$"
+              }
+            },
+            "redirectUrl": {
+              "type": "string",
+              "pattern": "^(https://[^\\s/]+/[^\\s]*)?$"
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cookieExpire": {
+              "type": "string",
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+            },
+            "cookieRefresh": {
+              "type": "string",
+              "pattern": "^(([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)?$"
+            },
+            "extraArgs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^--"
+              }
+            },
+            "resources": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "persistence": {
+      "type": "object",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "existingClaim": {
+          "type": "string"
+        },
+        "storageClassName": {
+          "type": "string"
+        },
+        "accessModes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "description": "SQLite needs a local filesystem: one writer, never a shared (RWX) volume.",
+            "enum": [
+              "ReadWriteOnce",
+              "ReadWriteOncePod"
+            ]
+          }
+        },
+        "size": {
+          "type": "string",
+          "minLength": 1
+        },
+        "annotations": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "cache": {
+      "type": "object",
+      "properties": {
+        "sizeLimit": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "timezone": {
+      "type": "string"
+    },
+    "resources": {
+      "type": "object"
+    },
+    "extraEnv": {
+      "type": "array"
+    },
+    "extraEnvFrom": {
+      "type": "array"
+    },
+    "extraVolumes": {
+      "type": "array"
+    },
+    "extraVolumeMounts": {
+      "type": "array"
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "description": "Merged over the pod's own. The embedded mode refuses fsGroup (a recursive re-group of the Intune rootfs and its keyring), runAsUser and runAsNonRoot (the entrypoint must start as root)."
+    },
+    "securityContext": {
+      "type": "object",
+      "description": "Merged over the container's own. The embedded mode refuses runAsUser and runAsNonRoot (the entrypoint must start as root)."
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "from": {
+          "type": "array"
+        },
+        "allowNamespaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          }
+        },
+        "allowCiliumIngress": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "podAnnotations": {
+      "type": "object"
+    },
+    "podLabels": {
+      "type": "object"
+    },
+    "priorityClassName": {
+      "type": "string"
+    },
+    "terminationGracePeriodSeconds": {
+      "description": "Unset: 90 where the pod boots its own Intune container (powered off after the launcher), 30 in a host mode or a read-only release.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    }
+  }
+}

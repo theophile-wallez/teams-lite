@@ -76,8 +76,7 @@ It must:
 - [ ] **Step 3: Run probe 1**
 
 ```bash
-. bin/broker-env.sh && teams_lite_export_broker_bus && \
-  cargo run --example custom_emoji_send_probe
+cargo run --example custom_emoji_send_probe
 ```
 
 - [ ] **Step 4: Ask the user what stock Teams drew**
@@ -91,8 +90,7 @@ Same const. It must: post one message to `SANDBOX`; `PUT …/messages/{id}/prope
 - [ ] **Step 6: Run probe 2 and ask again**
 
 ```bash
-. bin/broker-env.sh && teams_lite_export_broker_bus && \
-  cargo run --example custom_emoji_reaction_probe
+cargo run --example custom_emoji_reaction_probe
 ```
 
 Then ask the user what the stock client showed in the reaction row while the key was set.

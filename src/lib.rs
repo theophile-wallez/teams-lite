@@ -54,6 +54,11 @@ pub mod gitlab_mr;
 pub mod gitlab_mr_write;
 pub mod gitlab_review;
 pub mod graph_time;
+pub mod intune;
+/// The SELF-CONTAINED Intune container: in `embedded` mode this process owns one and boots,
+/// stops, repairs and enrolls it through helpers of its own, so `intune` keeps its promise that
+/// it never starts a process (see AGENTS.md § The Intune container is a LIBRARY).
+pub mod intune_embedded;
 pub mod linear;
 pub mod link_preview;
 pub mod mail;

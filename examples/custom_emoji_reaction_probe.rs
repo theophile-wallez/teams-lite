@@ -19,8 +19,7 @@
 // anywhere is a send waiting for a typo, and `.claude/hooks/guard-live-automation.sh`
 // (rule 1c) refuses to run one.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example custom_emoji_reaction_probe
+//   cargo run --example custom_emoji_reaction_probe
 //
 use anyhow::{Context, Result};
 use serde_json::Value;

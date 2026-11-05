@@ -67,6 +67,11 @@ def steps():
         ("released", "ALLOW", f"{PLAY}navigate", {"url": "http://127.0.0.1:19442/"}),
         ("released", "ALLOW", f"{PLAY}take_screenshot", {}),
         ("released", "BLOCK", f"{PLAY}type", {"element": "composer", "ref": "e1", "text": "hi"}),
+        # The container image's front (19443, packaging/docker) runs in the host's network
+        # namespace, so it is a fourth door on this machine's loopback.
+        ("image", "ALLOW", f"{PLAY}navigate", {"url": "http://127.0.0.1:19443/"}),
+        ("image", "ALLOW", f"{PLAY}take_screenshot", {}),
+        ("image", "BLOCK", f"{PLAY}click", {"element": "send", "ref": "e1"}),
         # A tailnet name is a live front whatever port it is served on.
         ("tailnet", "ALLOW", f"{PLAY}navigate", {"url": "https://theophile-remote.taild26c06.ts.net/"}),
         ("tailnet", "BLOCK", f"{PLAY}press_key", {"key": "Enter"}),

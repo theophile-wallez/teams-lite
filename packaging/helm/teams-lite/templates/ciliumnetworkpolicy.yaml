@@ -1,0 +1,31 @@
+{{- include "teams-lite.validate" . -}}
+{{- if and (include "teams-lite.networkPolicyApplies" .) .Values.networkPolicy.allowCiliumIngress }}
+# CILIUM'S OWN GATEWAY AND INGRESS (networkPolicy.allowCiliumIngress). Cilium's proxy reaches a
+# backend under the reserved `ingress` identity, which belongs to no namespace — so no peer of the
+# NetworkPolicy beside this one can name it, and that policy drops every request the Gateway sends.
+# Measured on Cilium 1.20: a route to a pod behind a NetworkPolicy admitting `kube-system` (where
+# cilium-envoy runs) answered 503, and 200 once this policy was added.
+#
+# Cilium admits the UNION of every policy that selects a pod, so this adds that one source and
+# nothing else, on the one port the NetworkPolicy opens. It is never rendered without that
+# NetworkPolicy: alone, it would turn the pod deny-by-default instead of widening anything.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "teams-lite.fullname" . }}-cilium-ingress
+  labels:
+    {{- include "teams-lite.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "teams-lite.selectorLabels" . | nindent 6 }}
+  ingress:
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            # The sign-in's port when the chart runs one, the web front's otherwise — by name, as
+            # the NetworkPolicy opens it (Cilium resolves a named port; a wrong name admits nothing).
+            - port: {{ ternary "auth" "web" (eq (include "teams-lite.oauth2Proxy" .) "true") | quote }}
+              protocol: TCP
+{{- end }}

@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# `process` is here for exactly one caller: `Ctx::start_broker_repair` asks systemd to
-# run the broker repair unit. It is the only process this crate ever spawns.
+# `process` is here for exactly two callers, and only one of them runs another program. The local
+# agent runs its CLI (`agent::run_once`) — the only HOST program this crate ever spawns: the
+# broker repair used to be a second (`systemctl`), and on a host it is a D-Bus call now (see
+# `intune::start_repair_unit`). The other is `intune_embedded::spawn_helper`, in the image's
+# self-contained mode, and what it spawns is THIS binary again with one hidden argument — the
+# boot, the repair or the enrollment's portal helper, in a session of its own — never anything
+# else, which a test in that module pins (`the_only_program_a_helper_spawn_runs_is_this_binary`).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync", "process"] }
 # rustls-tls => no system openssl dependency, portable static binary
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
@@ -66,6 +71,32 @@ chrono-tz = "0.10"
 # portable, and nothing here spawns `xdotool`, `scrot`, `x11vnc` or `websockify` — the four
 # binaries the same job took by hand.
 x11rb = { version = "0.13", features = ["xtest"] }
+# The user's own Intune container, as a LIBRARY rather than as host commands (see
+# `src/intune.rs`): where the identity broker's bus is, read from the container's own runtime
+# state on every connection, and the broker repair's stop and start. It replaced `busctl`,
+# `pgrep`, `systemctl` and the `intune-container` binary, which the shell side ran for all of it.
+#
+# PINNED TO A COMMIT, NOT TO crates.io 0.2.3, and that is load-bearing. 0.2.3 stamps the
+# platform digest where it compares the index digest, so every start re-pulls the whole rootfs;
+# and it does not persist /etc/microsoft/identity-broker across a pull, so that re-pull also
+# erases the device registration ("Device is not registered"). A repair through 0.2.3 would
+# unenroll the machine. 2917d92 fixed both, and master (7605004) is the code the user's own
+# installed binary is built from, so the two agree on the state file, the lock and the config.
+#
+# The pin is the branch `fix/boot-without-a-user-manager` on top of that master (0f5fe0d). It
+# adds what running the container INSIDE teams-lite's own image takes — a cgroup with no systemd
+# user session (INTUNE_CONTAINER_CGROUP=own), the id range read from /etc/subuid, a recycled pid
+# never read as the container, a clean PID 1 environment, a desktop-size 24-bit :99, and the
+# portal opened on that display with no restart — and changes nothing a host install relies on:
+# the state file only gains an optional field. Move to a release once one carries those commits.
+#
+# Default features only: the crate's `gui` feature (tauri, WebKitGTK) stays off.
+intune-container = { git = "https://github.com/magicabdel/intune-container", rev = "0f5fe0d7f94144e15127c2c38f519b2ff04d3cdd" }
+# The crate logs through `tracing`, and without a subscriber every word it says is dropped —
+# a failed container boot would leave nothing to read. Installed only in the processes that
+# run the crate's lifecycle (`intune::dispatch_reexec`); the same version and feature the crate
+# itself already compiles, so it adds nothing to the tree.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 # `test-util` is tokio's paused clock, and it is here for one rule: the agent stops a

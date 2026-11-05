@@ -1,0 +1,553 @@
+{{- include "teams-lite.validate" . -}}
+{{- $fullname := include "teams-lite.fullname" . -}}
+{{- $webPort := include "teams-lite.webPort" . | int -}}
+{{- $embedded := include "teams-lite.embedded" . | eq "true" -}}
+{{- $intune := eq .Values.broker.mode "intuneContainer" -}}
+{{- $sessionBus := eq .Values.broker.mode "sessionBus" -}}
+{{- /*
+Whether the pod BOOTS its own Intune container: the embedded mode, unless the release is
+read-only — a read-only backend never boots one (booting is a write). Everything only a boot
+needs follows this rather than the mode: the privilege, the user-namespace opt-in (an alternative
+to that privilege, so with none to replace it has nothing to do), the Unconfined seccomp profile,
+the enrollment Secret (the device's own keys, which a release that imports nothing must not
+hold), the microVM declaration (it relaxes a namespace check that only a boot makes), the write
+access to the Intune claim, and the grace period its poweroff takes. The CLAIM
+itself follows the mode and never this: volume claim templates cannot change in place, so a claim
+that came and went with readOnly would turn the upgrade that switches it off into a refusal.
+*/ -}}
+{{- $boots := and $embedded (not .Values.readOnly) -}}
+{{- $userns := and $boots .Values.broker.embedded.userNamespaces -}}
+{{- $import := and $boots .Values.broker.embedded.import.secretName -}}
+{{- $vmIsolated := and $boots .Values.broker.embedded.vmIsolated -}}
+{{- $storeClaim := and .Values.persistence.enabled (not .Values.persistence.existingClaim) -}}
+{{- $intunePath := include "teams-lite.intuneStatePath" . -}}
+{{- /* The sign-in in front of the app (auth.oauth2Proxy): the web front then listens on the pod's own
+       loopback, and oauth2-proxy on the pod's address is the only way in — for the Service, every
+       route, every other pod and the node alike. */ -}}
+{{- $oauth2Proxy := include "teams-lite.oauth2Proxy" . | eq "true" -}}
+{{- $allowedHosts := include "teams-lite.allowedHosts" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "teams-lite.labels" . | nindent 4 }}
+spec:
+  # ONE, and deliberately not a value. One Teams account, one SQLite store on a local volume, one
+  # send-capable backend: a second replica could not share the store (SQLite needs a local
+  # filesystem) and would be a second device posting, ringing and syncing as the same person.
+  # A StatefulSet is what makes "one" hold during an upgrade too — it terminates the old pod
+  # before it starts the new one (a pod's name is unique, so the controller waits for the
+  # deletion), where a Deployment's default rolling update starts the new one first.
+  replicas: 1
+  serviceName: {{ $fullname }}-headless
+  # PARALLEL, and with one replica it orders nothing — what it changes is that the controller
+  # replaces a pod that never became Ready. Under OrderedReady it stops at a pod that is not
+  # Running and Ready BEFORE it reaches the update, so a release installed with a mistyped state
+  # directory or import Secret (stuck in ContainerCreating) or a crashing image is never mended by
+  # the `helm upgrade` or `helm rollback` that fixes it — Kubernetes' documented "forced rollback"
+  # limitation. The field is immutable once the StatefulSet exists.
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  # The volume claim template's PVC — the user's whole history — is kept when the release is
+  # uninstalled. That is the Kubernetes default for a StatefulSet, and it is the right one here.
+  selector:
+    matchLabels:
+      {{- include "teams-lite.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "teams-lite.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- $podAnnotations := .Values.podAnnotations }}
+      {{- if $oauth2Proxy }}
+      {{- /* Two containers: `kubectl logs` and `kubectl exec` go to the app's unless told otherwise. */}}
+      {{- $podAnnotations = merge (dict "kubectl.kubernetes.io/default-container" "teams-lite") $podAnnotations }}
+      {{- end }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- include "teams-lite.annotations" . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "teams-lite.serviceAccountName" . }}
+      # The pod asks the Kubernetes API for nothing, so it holds no credential for it.
+      automountServiceAccountToken: false
+      # LOAD-BEARING. Kubernetes writes `<SERVICE>_PORT=tcp://<ip>:<port>` into every pod of the
+      # namespace for every Service in it, and a Service named `teams-lite` makes that
+      # TEAMS_LITE_PORT — the very variable the backend reads for its own port. Left on, the
+      # backend would be handed `tcp://10.x.x.x:19443` as a port.
+      enableServiceLinks: false
+      {{- if $intune }}
+      # The broker's bus is /proc/<Intune container leader>/root/run/user/0/bus: without the
+      # node's PID namespace there is no such /proc entry to open (src/intune.rs).
+      hostPID: true
+      {{- end }}
+      {{- if $userns }}
+      # UNVERIFIED (broker.embedded.userNamespaces): the pod's ids are remapped, so its root is an
+      # unprivileged range on the node and the container below needs no `privileged`.
+      hostUsers: false
+      {{- end }}
+      {{- if .Values.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      securityContext:
+        {{- if $boots }}
+        # The EMBEDDED pod starts as ROOT — the entrypoint delegates the container's cgroup and
+        # hands the two volumes' root directories to `teams`, then drops to it — so there is no
+        # runAsUser and no runAsNonRoot. And NO fsGroup: its recursive chown would give the Intune
+        # rootfs, owned by the pod's subordinate ids, to one group (teams-lite.validate refuses all
+        # three in podSecurityContext). Unconfined seccomp, because the Intune container's runtime
+        # unshares, mounts and enters namespaces (the compose file's `seccomp=unconfined`).
+        {{- $pod := dict "seccompProfile" (dict "type" "Unconfined") }}
+        {{- toYaml (mergeOverwrite $pod .Values.podSecurityContext) | nindent 8 }}
+        {{- else if $embedded }}
+        # A READ-ONLY embedded release starts as root too (its entrypoint drops to `teams` itself),
+        # and the same three values are refused — but it unshares, mounts and enters nothing, so
+        # the runtime's default seccomp profile holds everything it does.
+        {{- $pod := dict "seccompProfile" (dict "type" "RuntimeDefault") }}
+        {{- toYaml (mergeOverwrite $pod .Values.podSecurityContext) | nindent 8 }}
+        {{- else }}
+        {{- $pod := dict
+              "runAsUser" (int .Values.hostUser.uid)
+              "runAsGroup" (int .Values.hostUser.gid)
+              "runAsNonRoot" true
+              "fsGroup" (int .Values.hostUser.gid)
+              "fsGroupChangePolicy" "OnRootMismatch"
+              "seccompProfile" (dict "type" "RuntimeDefault") }}
+        {{- toYaml (mergeOverwrite $pod .Values.podSecurityContext) | nindent 8 }}
+        {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- /* Unset: 90 s where the entrypoint also powers an Intune container off, 30 s where not —
+             a host mode, and a read-only release, whose entrypoint stops nothing after the launcher. */}}
+      {{- if kindIs "invalid" .Values.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ ternary 90 30 $boots }}
+      {{- else }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: teams-lite
+          image: {{ include "teams-lite.image" . | quote }}
+          imagePullPolicy: {{ include "teams-lite.pullPolicy" . }}
+          env:
+            # Which broker the backend asks, DECLARED (src/intune_embedded.rs refuses any other
+            # value): `embedded` runs the pod's own Intune container, `host` reaches the node's. The
+            # image's own default is `embedded`, so a host mode must say so. extraEnv may not set it
+            # (the chart refuses that): the rest of this pod is drawn from the same value.
+            - name: TEAMS_LITE_INTUNE_MODE
+              value: {{ ternary "embedded" "host" $embedded | quote }}
+            {{- if $import }}
+            # Imported ONCE, at boot, only while the pod's Intune state holds no device registration.
+            - name: TEAMS_LITE_INTUNE_IMPORT
+              value: {{ printf "%s/%s" (include "teams-lite.importDir" .) (include "teams-lite.importFile" .) | quote }}
+            {{- end }}
+            {{- if $vmIsolated }}
+            # DECLARED, never detected (broker.embedded.vmIsolated): this pod runs under a microVM
+            # runtime, so the kernel's initial network namespace it is in is the guest's — the
+            # sandbox's own — and not the node's. The entrypoint then lets that one namespace through
+            # (packaging/docker/entrypoint.sh, `netns_is_declared_own`); on a pod that shares the
+            # node's kernel it would be hostNetwork let through. Only where the pod boots: a
+            # read-only release checks no namespace.
+            - name: TEAMS_LITE_NETNS_IS_OWN
+              value: "1"
+            {{- end }}
+            # Where the web front listens. With hostNetwork that is the NODE's loopback, so the
+            # write token it serves never leaves the machine; behind auth.oauth2Proxy the POD's
+            # loopback, which only the sign-in beside it (and `kubectl port-forward pod/…`) reaches;
+            # otherwise the pod's own interface, which is what a Service reaches.
+            - name: TEAMS_WEB_HOST
+              value: {{ ternary "127.0.0.1" .Values.web.listenAddress (or .Values.hostNetwork $oauth2Proxy) | quote }}
+            {{- with $allowedHosts }}
+            # The names the app answers to beyond loopback, IP addresses and tailnet names — every
+            # route hostname and web.allowedHosts. Any other Host is refused as a DNS-rebinding page
+            # (web/request-origin.ts).
+            - name: TEAMS_LITE_ALLOWED_HOSTS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if $sessionBus }}
+            # The socket at the very path it has on the node: /run/user is mounted where it is.
+            - name: TEAMS_LITE_BROKER_BUS
+              value: {{ printf "unix:path=%s" .Values.broker.sessionBus.socket | quote }}
+            {{- end }}
+            {{- with .Values.timezone }}
+            - name: TZ
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.readOnly }}
+            # LAST, after extraEnv, so nothing a value adds can turn a release installed read-only
+            # back into one that sends: with Helm 3's client-side apply a container's later entry
+            # for a name wins, and Helm 4's server-side apply refuses the duplicate outright.
+            - name: TEAMS_LITE_READ_ONLY
+              value: "1"
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: web
+              containerPort: {{ $webPort }}
+              protocol: TCP
+          # A TCP connect, never a page: rendering the app on every probe is work for nothing, and
+          # the launcher already brings a dead backend back on its own. With hostNetwork the front
+          # listens on the node's loopback, which is where the kubelet has to knock. Behind
+          # auth.oauth2Proxy it listens on the POD's loopback, which the kubelet cannot reach from
+          # the node at all — so the connect is made from INSIDE the container, by the image's own
+          # bash (Debian's, which has /dev/tcp).
+          {{- $probe := dict "tcpSocket" (dict "port" "web") }}
+          {{- if .Values.hostNetwork }}
+          {{- $probe = dict "tcpSocket" (dict "port" $webPort "host" "127.0.0.1") }}
+          {{- else if $oauth2Proxy }}
+          {{- $probe = dict "exec" (dict "command" (list "/bin/bash" "-c" (printf "exec 3<>/dev/tcp/127.0.0.1/%d" $webPort))) "timeoutSeconds" 2 }}
+          {{- end }}
+          startupProbe:
+            {{- toYaml $probe | nindent 12 }}
+            periodSeconds: 2
+            failureThreshold: 90
+          readinessProbe:
+            {{- toYaml $probe | nindent 12 }}
+            periodSeconds: 10
+          livenessProbe:
+            {{- toYaml $probe | nindent 12 }}
+            periodSeconds: 20
+            failureThreshold: 3
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- if $userns }}
+            # UNVERIFIED. What `privileged` buys the embedded mode, spelled out for a pod whose ids
+            # are remapped: SYS_ADMIN for the Intune container's mounts and namespaces, SETUID and
+            # SETGID for the file-capability newuidmap/newgidmap, an unmasked /proc (the compose
+            # file's `systempaths=unconfined`) and no AppArmor confinement (its
+            # `apparmor=unconfined`).
+            {{- $container := dict
+                  "privileged" false
+                  "readOnlyRootFilesystem" true
+                  "procMount" "Unmasked"
+                  "capabilities" (dict "add" (list "SYS_ADMIN" "SETUID" "SETGID"))
+                  "appArmorProfile" (dict "type" "Unconfined") }}
+            {{- toYaml (mergeOverwrite $container .Values.securityContext) | nindent 12 }}
+            {{- else if $boots }}
+            # PRIVILEGED, because the pod runs a whole Intune container — systemd, the broker, its
+            # keyring — inside itself: it delegates its own cgroup, maps a range of subordinate ids
+            # and mounts a rootfs. NO `allowPrivilegeEscalation: false` and no dropped capabilities:
+            # newuidmap and newgidmap run on FILE capabilities, which no_new_privs defeats, and
+            # Kubernetes rejects that flag beside a privileged container anyway.
+            {{- $container := dict
+                  "privileged" true
+                  "readOnlyRootFilesystem" true }}
+            {{- toYaml (mergeOverwrite $container .Values.securityContext) | nindent 12 }}
+            {{- else if $embedded }}
+            # READ-ONLY, and NOT privileged: privilege is what booting an Intune container costs,
+            # and this release boots nothing — a read-only release handed root on the node would be
+            # the opposite of what it is for. What is kept is what its entrypoint still does AS ROOT
+            # (packaging/docker/entrypoint.sh): it takes its instance lock in /tmp, which is root's
+            # own emptyDir; it delegates nothing and takes over ONE directory, a fresh STORE root
+            # (root_stage's read-only branch) — a new release's claim is root-owned and empty, and
+            # its backend creates and migrates its database there whatever the mode, so without it
+            # the backend cannot open its store and exits at every start; and it drops to `teams`.
+            # So CHOWN for that one chown, and DAC_OVERRIDE to reach the claim at all: the image's
+            # /home/teams is 0700, which root without it cannot cross. SETUID and SETGID for the
+            # setpriv, and KILL for tini, which stays root as PID 1 for the pod's whole life and
+            # forwards the stop signal to a process that is no longer root's — without it the TERM
+            # is refused and the pod waits out its grace period. All five are in the `baseline` Pod
+            # Security level's list (and in Docker's default set). no_new_privs costs it nothing:
+            # nothing it runs needs newuidmap's file capabilities. MEASURED under Docker with a
+            # stand-in for the image's user (a stock trixie with the same user, a read-only root,
+            # no_new_privs and these five capabilities over a root-owned empty volume): the store root
+            # was taken over and `teams` created a file in it, and with KILL, SETGID and SETUID alone
+            # root could not even stat it. Not measured on a cluster.
+            {{- $container := dict
+                  "allowPrivilegeEscalation" false
+                  "readOnlyRootFilesystem" true
+                  "capabilities" (dict
+                    "drop" (list "ALL")
+                    "add" (list "CHOWN" "DAC_OVERRIDE" "KILL" "SETGID" "SETUID")) }}
+            {{- toYaml (mergeOverwrite $container .Values.securityContext) | nindent 12 }}
+            {{- else }}
+            {{- $container := dict
+                  "allowPrivilegeEscalation" false
+                  "readOnlyRootFilesystem" true
+                  "capabilities" (dict "drop" (list "ALL")) }}
+            {{- toYaml (mergeOverwrite $container .Values.securityContext) | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /home/teams/.local/share/teams-lite
+            - name: cache
+              mountPath: /home/teams/.cache
+            - name: tmp
+              mountPath: /tmp
+            {{- if $embedded }}
+            # READ-WRITE where the pod boots its Intune container — its rootfs and persist/ live
+            # here. READ-ONLY in a read-only release, which only ever READS it (whether the device
+            # is enrolled, whether a helper holds the volume), so not even a bug can write the
+            # enrollment from there.
+            - name: intune
+              mountPath: {{ $intunePath }}
+              {{- if not $boots }}
+              readOnly: true
+              {{- end }}
+            {{- end }}
+            {{- if $import }}
+            - name: intune-import
+              mountPath: {{ include "teams-lite.importDir" . }}
+              readOnly: true
+            {{- end }}
+            {{- if $intune }}
+            - name: intune-state
+              mountPath: {{ $intunePath }}
+              readOnly: true
+            {{- end }}
+            {{- if $sessionBus }}
+            # /run/user, never the socket itself: the user's /run/user/<uid> is a tmpfs made at login
+            # and unmounted at the last logout, so a bind of the socket (or of that directory) keeps
+            # showing a bus that died. Mounted from its parent with the node's later mounts
+            # propagated in, the pod sees the bus of the session that is running now.
+            - name: session-bus
+              mountPath: /run/user
+              readOnly: true
+              mountPropagation: HostToContainer
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- if $oauth2Proxy }}
+        {{- $o := .Values.auth.oauth2Proxy }}
+        # THE SIGN-IN (auth.oauth2Proxy): OpenID Connect against your provider, and only the
+        # addresses in auth.oauth2Proxy.emails get past it to the web front on this pod's loopback.
+        # Its own container, at its own (default) privilege: none, whatever the app beside it needs.
+        - name: oauth2-proxy
+          image: {{ ternary (printf "%s@%s" $o.image.repository $o.image.digest) (printf "%s:%s" $o.image.repository $o.image.tag) (ne $o.image.digest "") | quote }}
+          imagePullPolicy: {{ default "IfNotPresent" $o.image.pullPolicy }}
+          # Every value from values.yaml is QUOTED: unquoted, `clientId: "abc #tail"` rendered as
+          # `--client-id=abc` (YAML reads ` #` as a comment) and a value ending in `:` as a map.
+          args:
+            - --http-address=0.0.0.0:{{ include "teams-lite.authPort" . }}
+            # The web front on this pod's loopback. The Host header is passed through
+            # (--pass-host-header, oauth2-proxy's default), which is what the app's own address and
+            # origin checks compare a page against.
+            - --upstream=http://127.0.0.1:{{ $webPort }}/
+            - --provider=oidc
+            - {{ printf "--oidc-issuer-url=%s" $o.issuerUrl | quote }}
+            - {{ printf "--client-id=%s" $o.clientId | quote }}
+            {{- if $o.publicClient }}
+            # A PUBLIC client (auth.oauth2Proxy.publicClient): registered with no secret. oauth2-proxy
+            # refuses an OIDC provider with none at all, and reads an empty file as the empty secret
+            # — so the token exchange carries the client id and the PKCE verifier, and nothing else.
+            - --client-secret-file=/dev/null
+            {{- end }}
+            - {{ printf "--redirect-url=%s" (include "teams-lite.redirectUrl" .) | quote }}
+            - {{ printf "--scope=%s" $o.scope | quote }}
+            # Who may sign in: the listed addresses and nobody else — no --email-domain, which would
+            # widen it to a whole domain (`*` to every account at the provider).
+            - --authenticated-emails-file=/etc/oauth2-proxy/authenticated-emails
+            {{- with $o.subjects }}
+            # AND by the provider's own user id (auth.oauth2Proxy.subjects): oauth2-proxy reads the
+            # `sub` claim as a list of one, and it has to be one of these. Another organization's
+            # admin can give a user any address, never a `sub`.
+            - --oidc-groups-claim=sub
+            {{- range . }}
+            - {{ printf "--allowed-group=%s" . | quote }}
+            {{- end }}
+            {{- end }}
+            # Straight to the provider, with PKCE.
+            - --skip-provider-button=true
+            - --code-challenge-method=S256
+            # `__Host-`: Secure, Path=/ and no Domain, so no other name under the same domain can
+            # set or overwrite it. SameSite=Lax rather than Strict, because the provider's redirect
+            # back is a cross-site navigation that has to carry it.
+            - --cookie-name=__Host-teams-lite
+            - --cookie-secure=true
+            - --cookie-httponly=true
+            - --cookie-samesite=lax
+            - {{ printf "--cookie-expire=%s" $o.cookieExpire | quote }}
+            - {{ printf "--cookie-refresh=%s" (default "0" $o.cookieRefresh) | quote }}
+            # The page's sign-in probe (web/src/lib/auth-wall.ts): an expired session answers this
+            # route with a 401 rather than a redirect, which is the one answer the page reloads on.
+            - --api-route=^/__write-token$
+            # What a browser fetches WITHOUT the session to install the app: the manifest (unless it
+            # honours crossorigin=use-credentials) and its icons. Static files that say nothing but
+            # the app's name. Every pattern is anchored at both ends and admits one file name of
+            # its own shape, so no `/`, no `..` and no other route can ride on it.
+            - --skip-auth-route=GET=^/manifest\.webmanifest$
+            - --skip-auth-route=GET=^/icons/[a-z0-9-]+\.png$
+            - --skip-auth-route=GET=^/favicon\.(svg|ico)$
+            - --silence-ping-logging=true
+            {{- with $o.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- if not $o.publicClient }}
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $o.existingSecret | quote }}
+                  key: {{ $o.clientSecretKey | quote }}
+            {{- end }}
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $o.existingSecret | quote }}
+                  key: {{ $o.cookieSecretKey | quote }}
+          ports:
+            - name: auth
+              containerPort: {{ include "teams-lite.authPort" . }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: auth
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: auth
+            periodSeconds: 20
+          {{- with $o.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # oauth2-proxy's image is distroless and runs as its own `nonroot` user (65532), named
+          # here so runAsNonRoot can be checked. RuntimeDefault seccomp even in the embedded mode,
+          # whose POD profile is Unconfined for the app's Intune container.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: oauth2-proxy-emails
+              mountPath: /etc/oauth2-proxy
+              readOnly: true
+        {{- end }}
+      volumes:
+        # Re-made on every start, and it must allow exec: the launcher unpacks the backend here
+        # and runs it (an emptyDir does; a noexec tmpfs would not).
+        - name: cache
+          emptyDir:
+            sizeLimit: {{ .Values.cache.sizeLimit }}
+        # In the embedded mode, also where an enrollment import is unpacked before it is copied
+        # into the Intune state (the crate's restore extracts into the temp dir): a few files.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        {{- if $oauth2Proxy }}
+        # Who may sign in (templates/oauth2-proxy.yaml), as a file oauth2-proxy watches.
+        - name: oauth2-proxy-emails
+          configMap:
+            name: {{ $fullname }}-oauth2-proxy
+            defaultMode: 292
+        {{- end }}
+        {{- if $import }}
+        # The enrollment backup, as the one file the backend is told about. 0444 because the pod
+        # has no fsGroup to give it to: the file is root's, and the process that imports it is the
+        # image's `teams` user. NOT optional, so a mistyped name or key is a pod that does not start
+        # and says why, rather than a device enrolled anew beside the one the user meant to move.
+        - name: intune-import
+          secret:
+            secretName: {{ .Values.broker.embedded.import.secretName | quote }}
+            defaultMode: 292
+            items:
+              - key: {{ .Values.broker.embedded.import.key | quote }}
+                path: {{ include "teams-lite.importFile" . }}
+        {{- end }}
+        {{- if $intune }}
+        # `Directory`, not `DirectoryOrCreate`: a missing state directory is a pod that does not
+        # start and says why, rather than a root-owned empty directory left in the user's home.
+        - name: intune-state
+          hostPath:
+            path: {{ .Values.broker.intuneContainer.stateDir | quote }}
+            type: Directory
+        {{- end }}
+        {{- if $sessionBus }}
+        - name: session-bus
+          hostPath:
+            path: /run/user
+            type: Directory
+        {{- end }}
+        {{- if not .Values.persistence.enabled }}
+        # NO PERSISTENCE: the store is lost with the pod, and every start syncs from nothing.
+        - name: data
+          emptyDir: {}
+        {{- else if .Values.persistence.existingClaim }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+  {{- if or $storeClaim $embedded }}
+  volumeClaimTemplates:
+    {{- if $storeClaim }}
+    - metadata:
+        name: data
+        labels:
+          {{- include "teams-lite.selectorLabels" . | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- include "teams-lite.annotations" . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- with include "teams-lite.storageClassName" .Values.persistence.storageClassName }}
+        {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+    {{- end }}
+    {{- if $embedded }}
+    # The pod's own Intune container: the downloaded rootfs and the device's enrollment. A claim
+    # whatever `persistence` says, and kept by `helm uninstall` like the store — losing it is
+    # losing the enrollment. A claim whatever `readOnly` says too, which boots nothing on it:
+    # claim templates cannot change in place, so a claim that followed readOnly would make the
+    # upgrade that turns it off a refusal.
+    - metadata:
+        name: intune
+        labels:
+          {{- include "teams-lite.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.broker.embedded.persistence.accessModes | nindent 10 }}
+        {{- with include "teams-lite.storageClassName" .Values.broker.embedded.persistence.storageClassName }}
+        {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.broker.embedded.persistence.size }}
+    {{- end }}
+  {{- end }}

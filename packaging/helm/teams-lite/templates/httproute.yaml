@@ -1,0 +1,49 @@
+{{- include "teams-lite.validate" . -}}
+{{- if .Values.httpRoute.enabled }}
+{{- $fullname := include "teams-lite.fullname" . -}}
+# PUBLISHING THE APP IS PUBLISHING THE ACCOUNT: every page this route serves is handed the write
+# token. It routes the Service, which is the sign-in (auth.oauth2Proxy) when the chart runs one —
+# teams-lite.validate refuses this route without one unless auth.external says something in front
+# of it authenticates every request.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "teams-lite.labels" . | nindent 4 }}
+    {{- with .Values.httpRoute.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.httpRoute.annotations }}
+  annotations:
+    {{- include "teams-lite.annotations" . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml .Values.httpRoute.parentRefs | nindent 4 }}
+  {{- with .Values.httpRoute.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    # ONE rule for every path: the page, its assets, the token route, the socket — and, behind the
+    # sign-in, oauth2-proxy's own /oauth2/ paths. The socket is an ordinary HTTP/1.1 Upgrade on the
+    # same route: Gateway API leaves WebSockets to the implementation, and the common ones (Envoy
+    # Gateway, Istio, Cilium, Traefik, NGINX Gateway Fabric) proxy an Upgrade on an HTTPRoute as
+    # they are. What can still cut it is a request timeout — see httpRoute.timeouts.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      {{- with .Values.httpRoute.filters }}
+      filters:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.httpRoute.timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      backendRefs:
+        - name: {{ $fullname }}
+          port: {{ .Values.service.port }}
+{{- end }}

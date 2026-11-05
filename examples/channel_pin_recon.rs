@@ -9,8 +9,7 @@
 // shown rather than hidden" (nearly all of them)? And does CSA carry a SEPARATE
 // pin/hidden key that the parser reads today?
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example channel_pin_recon
+//   cargo run --example channel_pin_recon
 use anyhow::Result;
 use serde_json::Value;
 

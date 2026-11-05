@@ -17,8 +17,7 @@
 // they are the user's own, this runs in their own terminal, and without them the answer
 // cannot be checked against what their own client draws.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example channel_layout_recon
+//   cargo run --example channel_layout_recon
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;

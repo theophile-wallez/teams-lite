@@ -963,8 +963,7 @@ The rest of this section is unchanged, and is what a 1:1 answers:
 
 The tenant half, read-only, one authz call:
 
-    . bin/broker-env.sh && teams_lite_export_broker_bus && \
-      cargo run --example calling_endpoint_recon
+    cargo run --example calling_endpoint_recon
 
 The client half needs no account at all — the bundles are public:
 
