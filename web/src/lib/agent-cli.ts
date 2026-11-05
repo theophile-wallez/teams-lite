@@ -95,30 +95,6 @@ export function agentCliVersionLine(backend: AgentBackend): string | null {
   return `Version ${cli.version}, installed by this app.`;
 }
 
-/** How to sign a CLI in: a sentence, the command, and the other way in. */
-export type AgentCliLoginHint = { lead: string; command: string; alternative: string };
-
-/**
- * How the user signs in a CLI this app installed. The app never relays a sign-in itself —
- * Anthropic forbids a third party to collect or relay Claude.ai credentials — so the login is the
- * user's own, in a terminal where the app runs, against the very binary and home this app starts.
- * In the container image that is a shell INSIDE the container, which is why the backend says so.
- */
-export function agentCliLoginHint(backend: AgentBackend): AgentCliLoginHint | null {
-  const cli = backend.cli;
-  if (!cli?.managed || !cli.login_command) return null;
-  return {
-    lead: cli.login_in_container
-      ? "To sign it in, open a shell in the app's container (docker exec -it or kubectl exec -it) and run:"
-      : "To sign it in, run this in a terminal on the machine the app runs on:",
-    command: cli.login_command,
-    alternative:
-      backend.name === "claude"
-        ? "Or give the app an ANTHROPIC_API_KEY instead."
-        : "Or give the app the API key of the provider you use, such as OPENAI_API_KEY.",
-  };
-}
-
 /** One frame of `agent_cli_progress`. */
 export type AgentCliProgress = {
   provider: string;

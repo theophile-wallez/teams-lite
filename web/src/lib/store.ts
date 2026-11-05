@@ -123,7 +123,7 @@ import {
   coercePetsShown,
   petsShownValue,
 } from "./pet-visibility";
-import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
+import type { AgentAuthPatch, AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import { withAgentCliProgress } from "./agent-cli";
 import type { AgentPersonaPatch } from "./agent-persona";
 import {
@@ -6679,6 +6679,56 @@ export class TeamsController {
     this.set({ agent: status });
     playCue("success");
     return status;
+  }
+
+  /** Run one agent account call and adopt the status it answers with. Every one of them is an
+   *  action the reader just pressed, so a refusal is cued and handed back to the control that
+   *  asked — its sentence is the backend's, said beside that control. */
+  private async agentAccountCall(
+    call: () => Promise<AgentStatus>,
+    cue: "success" | null = "success",
+  ): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await call();
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    if (cue) playCue(cue);
+    return status;
+  }
+
+  /** Change how the agent CLIs sign in (src/agent_auth.rs). Rejects on a refusal. */
+  setAgentAuth(patch: AgentAuthPatch): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentAuthSet(patch));
+  }
+
+  /** Start Claude Code's own sign-in; the answer carries the claude.com link to open. */
+  startAgentSignin(provider: string, account: "claude_ai" | "console"): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentSigninStart(provider, account), null);
+  }
+
+  /** Hand the waiting sign-in its code. Rejects with the CLI's own sentence when it refuses it. */
+  finishAgentSignin(provider: string, code: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentSigninFinish(provider, code));
+  }
+
+  cancelAgentSignin(provider: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentSigninCancel(provider), null);
+  }
+
+  signOutAgent(provider: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentSignout(provider));
+  }
+
+  setOpencodeKey(providerId: string, key: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentOpencodeKeySet(providerId, key));
+  }
+
+  removeOpencodeKey(providerId: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentOpencodeKeyRemove(providerId));
   }
 
   async setAgentTools(tools: string[]): Promise<AgentStatus> {

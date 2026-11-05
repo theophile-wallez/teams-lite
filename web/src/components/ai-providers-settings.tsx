@@ -8,6 +8,7 @@ import {
   type AgentProviderPatch,
 } from "~/lib/agent";
 import { cn } from "~/lib/utils";
+import { AgentAccountSection, CloudAccounts } from "./agent-auth";
 import { AgentCliInstall, AgentCliUpdates } from "./agent-cli-install";
 import { AgentLogo } from "./agent-logo";
 import { AgentModelSelect } from "./agent-model-select";
@@ -27,6 +28,9 @@ import { useAppState, useController } from "./controller-context";
  * - **Every installed provider is on out of the box.** Turning one off is the user
  *   narrowing the set, so the switch reflects the backend's own answer and never a
  *   hopeful local guess.
+ * - **How it signs in is chosen here too** (agent-auth.tsx): Claude Code's own Claude account,
+ *   signed in on claude.com with no terminal, an API key, or a cloud account set up once under
+ *   the list. Nothing about a sign-in ever leaves this machine's own CLI.
  * - **The model is chosen from the machine's own list.** The backend reads what this
  *   machine can really run (`agent_models::choices`) and names each model the way its
  *   vendor does, so the picker offers models rather than ids. It stays a picker and
@@ -97,6 +101,9 @@ export function AiProvidersSettings() {
             ))}
           </div>
           <AgentCliUpdates />
+          {/* The machine's cloud accounts — Bedrock, Vertex AI, Foundry — which Claude Code runs
+              on when chosen in its row and opencode reaches models through (agent-auth.tsx). */}
+          <CloudAccounts />
         </>
       )}
     </section>
@@ -247,9 +254,13 @@ function ProviderRow(props: { backend: AgentBackend; isDefault: boolean; first: 
         </div>
       </div>
 
-      {/* Installing it, updating the copy this app installed, and how to sign it in — see
-          agent-cli-install.tsx. Drawn nothing on a backend too old to install anything. */}
+      {/* Installing it, and updating the copy this app installed — see agent-cli-install.tsx.
+          Drawn nothing on a backend too old to install anything. */}
       <AgentCliInstall backend={backend} />
+
+      {/* How it signs in: Claude Code's way in and its own account, opencode's provider keys —
+          see agent-auth.tsx. Only once the CLI is on the machine: there is nothing to sign in. */}
+      <AgentAccountSection backend={backend} />
 
       {/* No CLI, no model to choose: a control that could never change a run is a
           question with no answer. */}

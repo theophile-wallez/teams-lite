@@ -113,7 +113,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_cli, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
+    agent, agent_auth, agent_cli, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
     channel_layout, custom_emoji, intune, intune_embedded,
     mail, push, push_policy, retry,
     sender_icon, signin, store, teams,
@@ -495,7 +495,7 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// four methods above serve that window — so it is gated as a sign-in is, and more than one: an
 /// enrollment registers a DEVICE in the user's organization, made as them, and nothing in this
 /// app takes a registration back.
-const MACHINE_METHODS: [&str; 39] = [
+const MACHINE_METHODS: [&str; 46] = [
     "repair_broker",
     "signin_start",
     "signin_frame",
@@ -534,6 +534,18 @@ const MACHINE_METHODS: [&str; 39] = [
     "agent_cli_install",
     "agent_cli_remove",
     "agent_cli_set_auto_update",
+    // How those CLIs SIGN IN (see `teams_lite::agent_auth`): an API key or a cloud account this app
+    // then hands to every run, and a Claude account signed in through Claude Code's own login. Each
+    // decides which account a chat message's agent runs under and is billed to, and the first holds
+    // credentials — so they are gated as the provider settings are. Reading how a CLI signs in rides
+    // in `agent_status`, which names no secret.
+    "agent_auth_set",
+    "agent_signin_start",
+    "agent_signin_finish",
+    "agent_signin_cancel",
+    "agent_signout",
+    "agent_opencode_key_set",
+    "agent_opencode_key_remove",
     // An AI READING of a merge request's diff. It starts a program on this machine and puts the
     // user's employer's code in a prompt that reaches whichever model provider their default CLI is
     // signed in to — so it is gated exactly as `agent_set_mode` is, and for the same reason. Reading
@@ -658,6 +670,20 @@ fn machine_effect(method: &str) -> &'static str {
             "decides whether this machine downloads and runs new releases of the coding agents it \
              installed with nobody pressing anything"
         }
+        "agent_auth_set" => {
+            "decides which account the coding agents on this machine sign in with — an API key or a \
+             cloud account it then hands to every run, billed to whoever owns it"
+        }
+        "agent_signin_start" => "starts Claude Code's own sign-in on this machine",
+        "agent_signin_finish" => {
+            "signs Claude Code on this machine in to the account a sign-in code belongs to"
+        }
+        "agent_signin_cancel" => "cancels Claude Code's sign-in on this machine",
+        "agent_signout" => "signs Claude Code on this machine out of its account",
+        "agent_opencode_key_set" => {
+            "gives opencode on this machine an API key for a model provider, billed to whoever owns it"
+        }
+        "agent_opencode_key_remove" => "takes an API key away from opencode on this machine",
         "seal_set" => {
             "decides that this machine encrypts every message it posts to a conversation, and \
              under which passphrase — so a wrong one makes every message unreadable to the \
@@ -1838,6 +1864,131 @@ const AGENT_CLI_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// The first check waits out the start: a backend that boots is busy signing in and syncing, and an
 /// update a few minutes later costs nobody anything.
 const AGENT_CLI_FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+
+// ---- how the agent CLIs sign in (see `teams_lite::agent_auth`) ----------------------------------
+
+/// What Claude Code last said about how it signs in, as THIS process read it — with the environment
+/// a run gets, so "signed in through Amazon Bedrock" means what a run will really use.
+#[derive(Debug, Clone, Default)]
+struct ClaudeAccountSlot {
+    account: Option<agent_auth::ClaudeAccount>,
+    /// Why the last read failed, when it did. A status the page could not get is a sentence.
+    error: String,
+    checked_ms: Option<i64>,
+    /// A background read in flight, so a burst of pages connecting reads once.
+    checking: bool,
+    /// The newest read whose answer landed: an older read finishing later must not overwrite it.
+    seq: u64,
+}
+
+static CLAUDE_ACCOUNT: std::sync::LazyLock<std::sync::Mutex<ClaudeAccountSlot>> =
+    std::sync::LazyLock::new(Default::default);
+static CLAUDE_ACCOUNT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long a read of Claude Code's status stands before a page that connects asks again. A sign-in
+/// made in this app refreshes it at once; this bounds how long one made elsewhere goes unnoticed.
+const CLAUDE_ACCOUNT_FRESH: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Claude Code's own sign-in, waiting for the code its link leads to. One at a time per process:
+/// a second press replaces the first, because its link is the one the reader is about to open.
+struct ClaudeSigninSlot {
+    generation: u64,
+    url: String,
+    started_ms: i64,
+    console: bool,
+    /// The code has been handed over and the CLI is exchanging it — since when, epoch ms.
+    finishing: bool,
+    finishing_since_ms: i64,
+    session: Option<agent_auth::ClaudeLogin>,
+}
+
+impl ClaudeSigninSlot {
+    /// An exchange that has run far past every bound it has — the CLI's minute, the status read,
+    /// the drain — is one whose task is gone, and is no reason to keep the reader waiting.
+    fn finishing_is_stale(&self) -> bool {
+        self.finishing && now_ms().saturating_sub(self.finishing_since_ms) > CLAUDE_SIGNIN_FINISH_STALE_MS
+    }
+}
+
+/// How long an exchange may be "finishing" before it is treated as abandoned: the CLI's own minute,
+/// the 15-second status read after it, and a margin.
+const CLAUDE_SIGNIN_FINISH_STALE_MS: i64 = 150_000;
+
+static CLAUDE_SIGNIN: std::sync::LazyLock<std::sync::Mutex<Option<ClaudeSigninSlot>>> =
+    std::sync::LazyLock::new(Default::default);
+static CLAUDE_SIGNIN_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The Claude Code entry of the static table.
+fn claude_backend() -> &'static agent_policy::Backend {
+    agent_policy::BACKENDS
+        .iter()
+        .find(|backend| backend.name == agent_cli::Tool::Claude.name())
+        .expect("the provider table names claude")
+}
+
+/// How this machine's agents sign in, as stored. Unreadable is the machine's own setup.
+fn agent_auth_config(store: &Store) -> agent_auth::Config {
+    agent_auth::Config::parse(store.get_setting(agent_auth::SETTING).ok().flatten().as_deref())
+}
+
+/// The environment one run of `backend` gets from what the user set up in Settings › AI providers,
+/// with the files it names put back first — a key file deleted under the app is written again rather
+/// than leaving the CLI pointed at nothing.
+///
+/// A service-account key that cannot be written REFUSES the run rather than pointing the CLI at
+/// whatever file is on disk, which may hold the account the user just replaced.
+fn agent_child_env(store: &Store, backend: &agent_policy::Backend) -> Result<agent_auth::ChildEnv> {
+    let Some(tool) = agent_cli::Tool::named(backend.name) else {
+        return Ok(agent_auth::ChildEnv::default());
+    };
+    let config = agent_auth_config(store);
+    let dir = agent_auth::credentials_dir();
+    if let Some(dir) = &dir {
+        if let Err(e) = agent_auth::sync_files(&config, dir) {
+            let needs_file = config.vertex.as_ref().is_some_and(|vertex| vertex.service_account.is_some());
+            if needs_file {
+                return Err(e.context("the Google Vertex AI service-account key could not be written"));
+            }
+            eprintln!("[agent-auth] could not tidy the agents' credentials files: {e:#}");
+        }
+    }
+    Ok(agent_auth::child_env(&config, tool, dir.as_deref()))
+}
+
+/// One backend's `account` block in `agent_status`: how it signs in right now. Never a secret.
+fn agent_account_json(backend: &agent_policy::Backend) -> Value {
+    match agent_cli::Tool::named(backend.name) {
+        Some(agent_cli::Tool::Claude) => {
+            let slot = CLAUDE_ACCOUNT.lock().map(|slot| slot.clone()).unwrap_or_default();
+            let signin = CLAUDE_SIGNIN.lock().ok().and_then(|slot| {
+                slot.as_ref().map(|signin| {
+                    json!({
+                        // The authorize link on claude.com — checked to be one before it got here
+                        // (`agent_auth::login_url`). It carries the flow's `state` and its code
+                        // CHALLENGE, and neither redeems anything: the verifier never leaves the
+                        // CLI (PKCE), so a page that can read this status gains nothing by it that
+                        // it could use. A second page of the user's opens it just as well.
+                        "url": signin.url,
+                        "started_ms": signin.started_ms,
+                        "console": signin.console,
+                        "finishing": signin.finishing,
+                    })
+                })
+            });
+            json!({
+                "account": slot.account.as_ref().map(agent_auth::account_json),
+                "error": slot.error,
+                "checked_ms": slot.checked_ms,
+                "signin": signin,
+            })
+        }
+        Some(agent_cli::Tool::Opencode) => {
+            let text = std::fs::read_to_string(agent_models::opencode_auth_path()).ok();
+            json!({ "credentials": agent_auth::opencode_credentials(text.as_deref()) })
+        }
+        None => Value::Null,
+    }
+}
 
 #[derive(Debug, Default)]
 struct UpdateSlot {
@@ -3443,6 +3594,10 @@ impl Ctx {
                 Err(e) => eprintln!("[agent-cli] installing {} failed: {e:#}", tool.name()),
             }
             ctx.emit_agent_status();
+            if tool == agent_cli::Tool::Claude {
+                // A fresh copy has a home of its own to read, and a signed-out one says so.
+                ctx.refresh_claude_account(true);
+            }
         });
         Ok(())
     }
@@ -3462,6 +3617,9 @@ impl Ctx {
         with_agent_cli_slot(tool, |slot| slot.error.clear());
         eprintln!("[agent-cli] removed {}, freeing {freed} bytes", tool.name());
         self.emit_agent_status();
+        if tool == agent_cli::Tool::Claude {
+            self.refresh_claude_account(true);
+        }
         Ok(freed)
     }
 
@@ -3517,6 +3675,227 @@ impl Ctx {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    /// Read Claude Code's status in the background when the last read is stale, or when `force`
+    /// says something changed it. Every page connecting asks; one read answers them all.
+    fn refresh_claude_account(&self, force: bool) {
+        if read_only() {
+            return;
+        }
+        let due = CLAUDE_ACCOUNT
+            .lock()
+            .map(|mut slot| {
+                let fresh = slot.checked_ms.is_some_and(|at| {
+                    now_ms().saturating_sub(at) < CLAUDE_ACCOUNT_FRESH.as_millis() as i64
+                });
+                if !force && (slot.checking || fresh) {
+                    return false;
+                }
+                slot.checking = true;
+                true
+            })
+            .unwrap_or(false);
+        if due {
+            let ctx = self.clone();
+            tokio::spawn(async move { ctx.read_claude_account().await });
+        }
+    }
+
+    /// Ask Claude Code how it would sign in now — with the environment a run gets — and tell every
+    /// page when the answer moved. Awaited by the methods that change it, so their answer carries it.
+    async fn read_claude_account(&self) {
+        let seq = CLAUDE_ACCOUNT_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let outcome: Result<Option<agent_auth::ClaudeAccount>> = async {
+            let Some(program) = agent::resolve_program(claude_backend().program) else {
+                return Ok(None);
+            };
+            let managed = agent_cli::is_managed(&program);
+            let env = agent_child_env(&self.store()?, claude_backend())?;
+            agent_auth::claude_status(&program, managed, &env).await.map(Some)
+        }
+        .await;
+        let changed = CLAUDE_ACCOUNT
+            .lock()
+            .map(|mut slot| {
+                slot.checking = false;
+                if seq < slot.seq {
+                    return false;
+                }
+                slot.seq = seq;
+                slot.checked_ms = Some(now_ms());
+                let (account, error) = match outcome {
+                    Ok(account) => (account, String::new()),
+                    Err(e) => (slot.account.clone(), format!("{e:#}")),
+                };
+                let changed = slot.account != account || slot.error != error;
+                slot.account = account;
+                slot.error = error;
+                changed
+            })
+            .unwrap_or(false);
+        if changed {
+            self.emit_agent_status();
+        }
+    }
+
+    /// Start Claude Code's own sign-in and hand back the link it printed — the page opens it in the
+    /// reader's own browser, where they sign in on claude.com (see `agent_auth::ClaudeLogin`).
+    async fn start_claude_signin(&self, console: bool) -> Result<String> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never signs an agent in"
+        );
+        let program = agent::resolve_program(claude_backend().program)
+            .context("Claude Code is not on this machine — install it first")?;
+        let managed = agent_cli::is_managed(&program);
+        // A second press replaces the first — dropping the old session kills its CLI — except while
+        // a code is being exchanged: that sign-in is about to land, and replacing it would hide its
+        // outcome from the reader who is waiting for it.
+        if let Ok(mut slot) = CLAUDE_SIGNIN.lock() {
+            if slot.as_ref().is_some_and(|s| s.finishing && !s.finishing_is_stale()) {
+                anyhow::bail!("A code is being exchanged right now — wait a moment for it to finish");
+            }
+            *slot = None;
+        }
+        let login = agent_auth::ClaudeLogin::start(&program, managed, console).await?;
+        let url = login.url().to_string();
+        let generation = CLAUDE_SIGNIN_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if let Ok(mut slot) = CLAUDE_SIGNIN.lock() {
+            *slot = Some(ClaudeSigninSlot {
+                generation,
+                url: url.clone(),
+                started_ms: now_ms(),
+                console,
+                finishing: false,
+                finishing_since_ms: 0,
+                session: Some(login),
+            });
+        }
+        eprintln!(
+            "[agent-auth] a Claude Code sign-in is waiting for its code{}",
+            if console { " (Anthropic Console)" } else { "" }
+        );
+        self.emit_agent_status();
+        // Watch it: a CLI that exits on its own has nothing left to hand a code to, so its link is
+        // withdrawn at once; one still waiting at the deadline is closed. A slot that is exchanging
+        // its code is the exchange's to clear.
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            let until = std::time::Instant::now() + agent_auth::LOGIN_DEADLINE;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let expired = std::time::Instant::now() >= until;
+                let ended = CLAUDE_SIGNIN.lock().map(|mut slot| {
+                    let Some(signin) = slot.as_mut().filter(|s| s.generation == generation) else {
+                        return Some(None);
+                    };
+                    if signin.finishing {
+                        return None;
+                    }
+                    let gone = signin.session.as_mut().is_some_and(|session| session.has_exited());
+                    if gone || expired {
+                        *slot = None;
+                        return Some(Some(if gone { "its CLI exited" } else { "it waited ten minutes for a code" }));
+                    }
+                    None
+                });
+                match ended {
+                    Ok(Some(Some(why))) => {
+                        eprintln!("[agent-auth] the Claude Code sign-in was closed: {why}");
+                        ctx.emit_agent_status();
+                        return;
+                    }
+                    // Replaced, cancelled or finished: nothing of ours left to watch.
+                    Ok(Some(None)) | Err(_) => return,
+                    Ok(None) if expired => return,
+                    Ok(None) => {}
+                }
+            }
+        });
+        Ok(url)
+    }
+
+    /// Hand the code to the waiting sign-in. The code is checked first, so a paste with a stray
+    /// space costs a sentence rather than the sign-in; anything the CLI itself refuses ends it, and
+    /// the reader starts again (the CLI exits on a refused code).
+    async fn finish_claude_signin(&self, code: &str) -> Result<()> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never signs an agent in"
+        );
+        let code = agent_auth::login_code(code)?;
+        let (generation, session) = CLAUDE_SIGNIN
+            .lock()
+            .ok()
+            .and_then(|mut slot| {
+                let signin = slot.as_mut()?;
+                if signin.finishing {
+                    return None;
+                }
+                let session = signin.session.take()?;
+                signin.finishing = true;
+                signin.finishing_since_ms = now_ms();
+                Some((signin.generation, session))
+            })
+            .context("No sign-in is waiting for a code — press Sign in again")?;
+        self.emit_agent_status();
+        // The exchange runs in a task of its OWN, not in this request: a request is dropped with the
+        // connection that sent it — a phone locking mid-exchange — and dropping the session would
+        // kill the CLI holding the single-use code, and skip the cleanup below, leaving every page on
+        // a spinner. The handler waits for the task; the task does not wait for the handler.
+        let ctx = self.clone();
+        let exchange = tokio::spawn(async move {
+            let outcome = session.finish(&code).await;
+            if let Ok(mut slot) = CLAUDE_SIGNIN.lock() {
+                if slot.as_ref().is_some_and(|s| s.generation == generation) {
+                    *slot = None;
+                }
+            }
+            match &outcome {
+                Ok(()) => eprintln!("[agent-auth] Claude Code is signed in"),
+                Err(e) => eprintln!("[agent-auth] Claude Code's sign-in did not take the code: {e:#}"),
+            }
+            ctx.read_claude_account().await;
+            ctx.emit_agent_status();
+            outcome
+        });
+        exchange.await.context("the sign-in's exchange stopped unexpectedly")?
+    }
+
+    /// Give up on a sign-in waiting for its code. Its CLI is killed with it.
+    ///
+    /// Refused while the code is being exchanged: the CLI holding it would finish the sign-in after
+    /// the reader was told it was cancelled. An exchange stuck far past its bounds is cleared.
+    fn cancel_claude_signin(&self) -> Result<()> {
+        let had = CLAUDE_SIGNIN
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the sign-in state is unavailable"))
+            .and_then(|mut slot| {
+                if slot.as_ref().is_some_and(|s| s.finishing && !s.finishing_is_stale()) {
+                    anyhow::bail!("The code is being exchanged — wait a moment for it to finish");
+                }
+                Ok(slot.take().is_some())
+            })?;
+        if had {
+            eprintln!("[agent-auth] the Claude Code sign-in was cancelled");
+            self.emit_agent_status();
+        }
+        Ok(())
+    }
+
+    /// Sign Claude Code out of its own account (`claude auth logout`).
+    async fn claude_signout(&self) -> Result<()> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never signs an agent out"
+        );
+        let program = agent::resolve_program(claude_backend().program)
+            .context("Claude Code is not on this machine")?;
+        agent_auth::claude_logout(&program, agent_cli::is_managed(&program)).await?;
+        eprintln!("[agent-auth] Claude Code signed out of its account");
+        self.read_claude_account().await;
+        Ok(())
     }
 
     // ---- the board's own SOUNDS -----------------------------------------------------------
@@ -5017,6 +5396,9 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // Which backends exist here, which conversations are opted in, what an agent
         // may do, and where it runs.
         "agent_status" => {
+            // Every page asks on connect, so this is where a stale read of Claude Code's own status
+            // is refreshed — behind the answer, which arrives on `agent_status_changed` if it moved.
+            ctx.refresh_claude_account(false);
             let store = ctx.store()?;
             agent_status_json(&store)
         }
@@ -5076,6 +5458,115 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
                 if on { "now" } else { "no longer" }
             );
             agent_status_json(&store)
+        }
+
+        // How the agent CLIs sign in: Claude Code's way in, an Anthropic API key, and the cloud
+        // accounts (see `teams_lite::agent_auth`). MACHINE: it decides which account every run is
+        // signed in to and billed to, and it stores credentials. A secret left out of a section
+        // keeps the stored one, so a form never has to be shown a key to change a region.
+        "agent_auth_set" => {
+            anyhow::ensure!(
+                !read_only(),
+                "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never changes how an agent signs in"
+            );
+            let store = ctx.store()?;
+            let current = agent_auth_config(&store);
+            let next = current.update(params)?;
+            // The key file FIRST: a setting stored before its file would leave runs on the previous
+            // service account while every page showed the new one. A store that then refuses puts
+            // the file back the way the stored setting still says.
+            let dir = agent_auth::credentials_dir();
+            if let Some(dir) = &dir {
+                agent_auth::sync_files(&next, dir)?;
+            }
+            if let Err(e) = store.set_setting(agent_auth::SETTING, &next.to_stored()) {
+                if let Some(dir) = &dir {
+                    let _ = agent_auth::sync_files(&current, dir);
+                }
+                return Err(e);
+            }
+            if next.claude_method != current.claude_method {
+                eprintln!("[agent-auth] Claude Code now signs in with {}", next.claude_method.as_str());
+            } else {
+                eprintln!("[agent-auth] the agents' sign-in settings changed");
+            }
+            ctx.read_claude_account().await;
+            agent_status_json(&store)
+        }
+
+        // Claude Code's own sign-in, behind the scenes (`agent_auth::ClaudeLogin`). The answer
+        // carries the authorize link on claude.com; the page opens it in the reader's browser.
+        "agent_signin_start" => {
+            let provider = param_str(params, "provider")?;
+            anyhow::ensure!(provider == "claude", "{provider} signs in with an API key, not an account");
+            let console = match params.get("account").and_then(Value::as_str).unwrap_or("claude_ai") {
+                "claude_ai" => false,
+                "console" => true,
+                other => anyhow::bail!("no such account to sign in to: {other}"),
+            };
+            let url = ctx.start_claude_signin(console).await?;
+            let store = ctx.store()?;
+            let mut status = agent_status_json(&store)?;
+            status["signin_url"] = json!(url);
+            Ok(status)
+        }
+
+        // The code claude.com showed, handed to the waiting CLI. It is never stored and never
+        // logged: PKCE makes it worthless to anything but that one process.
+        "agent_signin_finish" => {
+            let provider = param_str(params, "provider")?;
+            anyhow::ensure!(provider == "claude", "no sign-in of {provider} is waiting");
+            let code = param_str(params, "code")?;
+            ctx.finish_claude_signin(&code).await?;
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        "agent_signin_cancel" => {
+            let provider = param_str(params, "provider")?;
+            anyhow::ensure!(provider == "claude", "no sign-in of {provider} is waiting");
+            ctx.cancel_claude_signin()?;
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        "agent_signout" => {
+            let provider = param_str(params, "provider")?;
+            anyhow::ensure!(provider == "claude", "{provider} keeps no account to sign out of");
+            ctx.claude_signout().await?;
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        // An API key for one of opencode's providers, written into opencode's OWN credentials file
+        // in the shape its `/connect` writes. The provider id is logged, the key never.
+        "agent_opencode_key_set" => {
+            anyhow::ensure!(
+                !read_only(),
+                "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never changes opencode's keys"
+            );
+            let provider = param_str(params, "provider_id")?;
+            let key = param_str(params, "key")?;
+            agent_auth::opencode_set_key(&agent_models::opencode_auth_path(), &provider, &key)?;
+            eprintln!("[agent-auth] opencode has an API key for {provider}");
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        "agent_opencode_key_remove" => {
+            anyhow::ensure!(
+                !read_only(),
+                "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never changes opencode's keys"
+            );
+            let provider = param_str(params, "provider_id")?;
+            let removed = agent_auth::opencode_remove(&agent_models::opencode_auth_path(), &provider)?;
+            if removed {
+                eprintln!("[agent-auth] opencode no longer holds a credential for {provider}");
+            }
+            let store = ctx.store()?;
+            let mut status = agent_status_json(&store)?;
+            status["removed"] = json!(removed);
+            Ok(status)
         }
 
         // Opt one conversation in or out. The sandbox channel starts opted in because
@@ -10539,6 +11030,8 @@ async fn gitlab_review_run_reported(
         // NO tools. See the note above — this is deliberately not the machine's own allowlist.
         permissions: agent::Permissions::Granted(Vec::new()),
         model: model.clone(),
+        // How it signs in is the machine's choice, exactly as for an `@claude` run.
+        env: agent_child_env(&ctx.store()?, backend)?,
     };
     eprintln!(
         "[gitlab-review] {project_path}!{iid} at {} — {} files, {} bytes of patch{}",
@@ -10669,6 +11162,7 @@ async fn gitlab_review_ask(
         // may reach: the code it is allowed to look at is what the reader tagged.
         permissions: agent::Permissions::Granted(Vec::new()),
         model: model.clone(),
+        env: agent_child_env(&ctx.store()?, backend)?,
     };
     eprintln!(
         "[gitlab-review] {project_path}!{iid} question — {} themes, {} files, {} bytes{}",
@@ -12983,6 +13477,9 @@ fn agent_request(
             )
             .model(command.backend.name)
         }),
+        // How the CLI signs in — an API key or a cloud account the user set up in Settings › AI
+        // providers, handed to this child alone (`agent_auth::child_env`).
+        env: agent_child_env(&store, command.backend)?,
     })
 }
 
@@ -13750,6 +14247,8 @@ fn agent_personas_json(store: &Store) -> Result<Vec<Value>> {
 
 fn agent_status_json(store: &Store) -> Result<Value> {
     let personas = agent_personas_json(store)?;
+    let auth = agent_auth_config(store);
+    let cloud = agent_auth::opencode_cloud_providers(&auth);
     let modes = store.get_setting(agent_policy::SETTING_MODES)?;
     let stored_providers = store.get_setting(agent_policy::SETTING_PROVIDERS)?;
     let providers = agent_policy::Providers::parse(stored_providers.as_deref());
@@ -13766,7 +14265,13 @@ fn agent_status_json(store: &Store) -> Result<Value> {
                 "model": providers.model(backend.name),
                 // What a picker offers, never a limit on what may be saved — see
                 // `agent_models::choices`, which reads this machine's own catalogue.
-                "models": agent_models::choices(backend),
+                "models": agent_models::choices(
+                    backend,
+                    if backend.catalogue == agent_policy::Catalogue::Opencode { &cloud } else { &[] },
+                ),
+                // How it signs in right now: Claude Code's own account (and a sign-in waiting for
+                // its code), opencode's providers. Never a secret.
+                "account": agent_account_json(backend),
                 // Whether this app can install it, which version it installed, whether a newer
                 // one is out, and how far an install in flight has got (`agent_cli`).
                 "cli": agent_cli_json(backend),
@@ -13831,6 +14336,9 @@ fn agent_status_json(store: &Store) -> Result<Value> {
         "cli_auto_update": agent_cli::auto_update_from_setting(
             store.get_setting(agent_cli::SETTING_AUTO_UPDATE)?.as_deref(),
         ),
+        // How the CLIs sign in: Claude Code's chosen way in, whether an Anthropic API key is held,
+        // and the cloud accounts set up here — what each form needs, and never a secret.
+        "auth": agent_auth::status_json(&auth),
     }))
 }
 
@@ -13867,10 +14375,8 @@ fn agent_cli_json(backend: &agent_policy::Backend) -> Value {
         "download_bytes": tool.download_estimate_bytes(),
         "installed_bytes": agent_cli::installed_bytes(tool),
         "publisher": tool.publisher(),
-        // Where the program a run starts is, and what the user runs to sign it in there.
+        // Where the program a run starts is. Signing it in is `account`'s (see `agent_auth`).
         "path": path.as_ref().map(|p| p.display().to_string()),
-        "login_command": agent_cli::login_command(tool, intune::in_container_image(), path.as_deref()),
-        "login_in_container": intune::in_container_image(),
     })
 }
 

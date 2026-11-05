@@ -439,9 +439,11 @@ Things to know:
   image (Claude Code is Anthropic's, all rights reserved), so Settings › AI providers offers an
   **Install** for each: it downloads the CLI from its vendor, checks it (Anthropic's signed release
   manifest; GitHub's digest for opencode), keeps it on the data volume with its login and sessions,
-  and updates the copies it installed on its own unless you switch that off. Sign one in with
-  `docker exec -it teams-lite teams-lite-agent claude auth login`, or give the container an
-  `ANTHROPIC_API_KEY`. ripgrep is in the image for opencode's searches.
+  and updates the copies it installed on its own unless you switch that off. **Sign one in from
+  the same pane**, with no terminal: Claude Code with your Claude account (you sign in on
+  claude.com and paste back the code it shows), an Anthropic API key, or a cloud account — Amazon
+  Bedrock, Google Vertex AI, Microsoft Foundry; opencode with the API key of each provider you use.
+  ripgrep is in the image for opencode's searches.
 
 **Already enrolled on this machine?** `packaging/docker/compose.host-broker.yaml` reaches the
 host's own identity broker instead, the way the image first worked:

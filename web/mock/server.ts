@@ -4093,8 +4093,6 @@ function mockCliView(name: string, available: boolean) {
     installed_bytes: cli.version ? (name === "claude" ? 337_814_032 : 214_386_864) : null,
     publisher: meta?.publisher ?? "",
     path,
-    login_command: `teams-lite-agent ${name} auth login`,
-    login_in_container: true,
   };
 }
 
@@ -4319,6 +4317,284 @@ function mockPersonasView() {
     }));
 }
 
+// ---- signing the agent CLIs in (see src/agent_auth.rs) -----------------------------------------
+//
+// The mock runs no `claude auth login` and holds no real key. It reproduces the surface: Claude
+// Code's way in, its own account and a sign-in waiting for its code, opencode's provider keys and
+// the cloud accounts — and every refusal the backend makes, because a mock that accepted what the
+// backend refuses hides the bug instead of failing a test. The one code the mock's "claude.com"
+// accepts is MOCK_SIGNIN_CODE; any other is refused in the CLI's own words.
+
+type MockClaudeMethod = "machine" | "claude_ai" | "api_key" | "bedrock" | "vertex" | "foundry";
+type MockBedrockKind = "api_key" | "access_key" | "profile";
+
+type MockAgentAuth = {
+  claude_method: MockClaudeMethod;
+  anthropic_key: string | null;
+  bedrock: {
+    region: string;
+    kind: MockBedrockKind;
+    secret: string | null;
+    access_key_id?: string;
+    session_token?: boolean;
+    profile?: string;
+  } | null;
+  vertex: { project: string; region: string; service_account: string | null } | null;
+  foundry: { resource: string; api_key: string } | null;
+};
+
+/** The code the mock's pretend claude.com shows. */
+const MOCK_SIGNIN_CODE = "MOCK-CODE#mock-state";
+/** The link the mock's pretend `claude auth login` prints: on claude.com, as the backend demands. */
+const MOCK_SIGNIN_URL =
+  "https://claude.com/cai/oauth/authorize?code=true&client_id=mock&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&code_challenge=mock&code_challenge_method=S256&state=mock-state";
+const MOCK_REFUSED_CODE =
+  "Login failed: That code wasn't accepted. It may be incomplete, expired, already used, or from an earlier sign-in attempt. Sign in again to get a new code.";
+
+function freshMockAgentAuth(): MockAgentAuth {
+  return { claude_method: "machine", anthropic_key: null, bedrock: null, vertex: null, foundry: null };
+}
+
+let mockAgentAuth: MockAgentAuth = freshMockAgentAuth();
+/** Claude Code's own Claude account login, or null when it holds none. */
+let mockClaudeLogin: { email: string; plan: string; organization: string } | null = null;
+let mockClaudeSignin: { started_ms: number; console: boolean; finishing: boolean } | null = null;
+/** opencode's `auth.json`, provider id → kind. Its secrets are not kept: nothing ever reads one back. */
+let mockOpencodeCredentials = new Map<string, string>();
+
+function resetMockAgentAuth(): void {
+  mockAgentAuth = freshMockAgentAuth();
+  mockClaudeLogin = null;
+  mockClaudeSignin = null;
+  mockOpencodeCredentials = new Map();
+}
+
+/** `agent_auth::status_json`: what is set up, never a secret. */
+function mockAgentAuthView() {
+  const bedrock = mockAgentAuth.bedrock;
+  return {
+    claude_method: mockAgentAuth.claude_method,
+    anthropic_key: mockAgentAuth.anthropic_key !== null,
+    bedrock: bedrock
+      ? {
+          region: bedrock.region,
+          kind: bedrock.kind,
+          ...(bedrock.kind === "profile" ? { profile: bedrock.profile } : {}),
+          ...(bedrock.kind === "access_key"
+            ? { access_key_id_tail: (bedrock.access_key_id ?? "").slice(-4), session_token: Boolean(bedrock.session_token) }
+            : {}),
+        }
+      : null,
+    vertex: mockAgentAuth.vertex
+      ? {
+          project: mockAgentAuth.vertex.project,
+          region: mockAgentAuth.vertex.region,
+          service_account: mockAgentAuth.vertex.service_account,
+        }
+      : null,
+    foundry: mockAgentAuth.foundry ? { resource: mockAgentAuth.foundry.resource } : null,
+  };
+}
+
+/** What `claude auth status` would say with the environment a run gets. */
+function mockClaudeStatus() {
+  const method = mockAgentAuth.claude_method;
+  const cloud = method === "bedrock" || method === "vertex" || method === "foundry";
+  if (cloud) {
+    return { logged_in: true, method: "third_party", provider: method, email: null, organization: null, plan: null };
+  }
+  if (method === "api_key") {
+    return { logged_in: true, method: "api_key", provider: "firstParty", email: null, organization: null, plan: null };
+  }
+  if (mockClaudeLogin) {
+    return {
+      logged_in: true,
+      method: "claude.ai",
+      provider: "firstParty",
+      email: mockClaudeLogin.email,
+      organization: mockClaudeLogin.organization,
+      plan: mockClaudeLogin.plan,
+    };
+  }
+  return { logged_in: false, method: "none", provider: "firstParty", email: null, organization: null, plan: null };
+}
+
+/** One backend's `account` block, the shape `agent_account_json` publishes. */
+function mockAccountView(name: string, available: boolean) {
+  if (name === "claude") {
+    return {
+      account: available ? mockClaudeStatus() : null,
+      error: "",
+      checked_ms: Date.now(),
+      signin: mockClaudeSignin
+        ? {
+            url: MOCK_SIGNIN_URL,
+            started_ms: mockClaudeSignin.started_ms,
+            console: mockClaudeSignin.console,
+            finishing: mockClaudeSignin.finishing,
+          }
+        : null,
+    };
+  }
+  if (name === "opencode") {
+    return {
+      credentials: [...mockOpencodeCredentials]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([provider, kind]) => ({ provider, kind })),
+    };
+  }
+  return null;
+}
+
+/** `agent_auth::secret`: one token of printable ASCII, the rule a key is held to. */
+function mockSecret(value: unknown, what: string): string {
+  if (typeof value !== "string") throw new Error(`${what} must be text`);
+  const text = value.trim();
+  if (!text) throw new Error(`${what} is empty`);
+  if (text.length > 8 * 1024) throw new Error(`${what} is far longer than any key`);
+  if (!/^[\x21-\x7e]+$/.test(text)) throw new Error(`${what} must be one line with no spaces — paste the key alone`);
+  return text;
+}
+
+/** `agent_auth::is_vertex_region`. */
+function isMockVertexRegion(region: string): boolean {
+  return ["global", "us", "eu"].includes(region) || (region.length <= 32 && /^[a-z]+-[a-z]+\d{1,2}$/.test(region));
+}
+
+/** `agent_auth::is_profile_name`. */
+function isMockProfileName(name: string): boolean {
+  return /^[A-Za-z0-9_.+@-]{1,64}$/.test(name);
+}
+
+function mockField(value: Record<string, unknown>, field: string, what: string): string {
+  const text = typeof value[field] === "string" ? (value[field] as string).trim() : "";
+  if (!text) throw new Error(`${what} is missing`);
+  return text;
+}
+
+const MOCK_METHOD_LABELS: Record<MockClaudeMethod, string> = {
+  machine: "this machine's own setup",
+  claude_ai: "a Claude account",
+  api_key: "an Anthropic API key",
+  bedrock: "Amazon Bedrock",
+  vertex: "Google Vertex AI",
+  foundry: "Microsoft Foundry",
+};
+
+/** `agent_auth::Config::update`, refusal for refusal. */
+function applyMockAgentAuth(patch: Record<string, unknown>): void {
+  const next: MockAgentAuth = structuredClone(mockAgentAuth);
+  if ("anthropic_key" in patch) {
+    next.anthropic_key = patch.anthropic_key === null ? null : mockSecret(patch.anthropic_key, "The Anthropic API key");
+  }
+  if ("bedrock" in patch) {
+    if (patch.bedrock === null) next.bedrock = null;
+    else {
+      const b = asObject(patch.bedrock);
+      const region = mockField(b, "region", "The AWS region");
+      if (!/^[a-z]{2,3}(-[a-z]+)+-\d{1,2}$/.test(region)) {
+        throw new Error(`${region} is not an AWS region (like us-east-1 or eu-west-3)`);
+      }
+      const kind = mockField(b, "kind", "How to authenticate to AWS") as MockBedrockKind;
+      const old = mockAgentAuth.bedrock;
+      if (kind === "api_key") {
+        const secret = b.api_key !== undefined ? mockSecret(b.api_key, "The Bedrock API key") : old?.kind === "api_key" ? old.secret : null;
+        if (!secret) throw new Error("The Bedrock API key is missing");
+        next.bedrock = { region, kind, secret };
+      } else if (kind === "access_key") {
+        // Left out, the stored ID is kept with its own secret (the page never sees the whole ID).
+        const given = typeof b.access_key_id === "string" ? b.access_key_id.trim() : "";
+        const id = given || (old?.kind === "access_key" ? (old.access_key_id ?? "") : "");
+        if (!id) throw new Error("The access key ID is missing");
+        if (!/^[A-Z0-9]{16,128}$/.test(id)) throw new Error(`${id} is not an AWS access key ID`);
+        const same = old?.kind === "access_key" && old.access_key_id === id;
+        const secret = b.secret_access_key !== undefined ? mockSecret(b.secret_access_key, "The secret access key") : same ? old.secret : null;
+        if (!secret) throw new Error("The secret access key is missing");
+        const session = b.session_token === null ? false : b.session_token !== undefined ? Boolean(mockSecret(b.session_token, "The session token")) : same ? Boolean(old.session_token) : false;
+        next.bedrock = { region, kind, secret, access_key_id: id, session_token: session };
+      } else if (kind === "profile") {
+        const profile = mockField(b, "profile", "The AWS profile name");
+        if (!isMockProfileName(profile)) throw new Error(`${profile} is not an AWS profile name`);
+        next.bedrock = { region, kind, secret: null, profile };
+      } else {
+        throw new Error(`no such way to authenticate to AWS: ${String(kind)}`);
+      }
+    }
+  }
+  if ("vertex" in patch) {
+    if (patch.vertex === null) next.vertex = null;
+    else {
+      const v = asObject(patch.vertex);
+      const project = mockField(v, "project", "The Google Cloud project");
+      if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(project)) throw new Error(`${project} is not a Google Cloud project ID`);
+      const region = mockField(v, "region", "The Vertex AI region");
+      if (!isMockVertexRegion(region)) {
+        throw new Error(`${region} is not a Vertex AI location (like global or us-east5)`);
+      }
+      let service_account = mockAgentAuth.vertex?.service_account ?? null;
+      if (v.service_account === null) service_account = null;
+      else if (typeof v.service_account === "string") {
+        if (!v.service_account.trim()) throw new Error("The service-account key is empty");
+        if (v.service_account.length > 64 * 1024) throw new Error("That file is far larger than a service-account key");
+        let parsed: Record<string, unknown> | null = null;
+        try {
+          parsed = asObject(JSON.parse(v.service_account));
+        } catch {
+          throw new Error("That is not a service-account key file (it is not JSON)");
+        }
+        if (parsed.type !== "service_account") throw new Error("That JSON is not a service-account key (its type is not service_account)");
+        if (typeof parsed.client_email !== "string" || !parsed.client_email.includes("@")) {
+          throw new Error("That service-account key names no client_email");
+        }
+        if (typeof parsed.private_key !== "string" || !parsed.private_key.includes("PRIVATE KEY")) {
+          throw new Error("That service-account key holds no private_key");
+        }
+        service_account = parsed.client_email;
+      }
+      next.vertex = { project, region, service_account };
+    }
+  }
+  if ("foundry" in patch) {
+    if (patch.foundry === null) next.foundry = null;
+    else {
+      const f = asObject(patch.foundry);
+      const resource = mockField(f, "resource", "The Foundry resource name");
+      if (!/^[A-Za-z0-9][A-Za-z0-9-]{1,63}$/.test(resource)) {
+        throw new Error(`${resource} is not a Foundry resource name — give the name alone, not its URL`);
+      }
+      const key = f.api_key !== undefined ? mockSecret(f.api_key, "The Foundry API key") : mockAgentAuth.foundry?.api_key ?? null;
+      if (!key) throw new Error("The Foundry API key is missing");
+      next.foundry = { resource, api_key: key };
+    }
+  }
+  const chose = "claude_method" in patch;
+  if (chose) {
+    const method = patch.claude_method;
+    if (typeof method !== "string" || !Object.hasOwn(MOCK_METHOD_LABELS, method)) {
+      throw new Error(`no such way to sign in: ${String(method)}`);
+    }
+    next.claude_method = method as MockClaudeMethod;
+  }
+  const missing =
+    next.claude_method === "api_key" && !next.anthropic_key
+      ? "Add an Anthropic API key"
+      : next.claude_method === "bedrock" && !next.bedrock
+        ? "Set up Amazon Bedrock"
+        : next.claude_method === "vertex" && !next.vertex
+          ? "Set up Google Vertex AI"
+          : next.claude_method === "foundry" && !next.foundry
+            ? "Set up Microsoft Foundry"
+            : null;
+  if (missing) {
+    throw new Error(
+      chose
+        ? `${missing} first`
+        : `Claude Code signs in with ${MOCK_METHOD_LABELS[next.claude_method]} — choose another way for it before removing that`,
+    );
+  }
+  mockAgentAuth = next;
+}
+
 /** The `agent_status` result, matching the Rust one. */
 function agentStatusView(): {
   backends: {
@@ -4329,6 +4605,7 @@ function agentStatusView(): {
     model: string | null;
     models: MockAgentModel[];
     cli: ReturnType<typeof mockCliView>;
+    account: ReturnType<typeof mockAccountView>;
   }[];
   default_provider: string;
   personas: ReturnType<typeof mockPersonasView>;
@@ -4340,12 +4617,14 @@ function agentStatusView(): {
   enabled: boolean;
   sandbox_conversation: string;
   cli_auto_update: boolean;
+  auth: ReturnType<typeof mockAgentAuthView>;
 } {
   return {
     backends: [...mockAgentProviders].map(([name, provider]) => ({
       name,
       ...provider,
       cli: mockCliView(name, provider.available),
+      account: mockAccountView(name, provider.available),
     })),
     default_provider: mockAgentDefaultProvider,
     personas: mockPersonasView(),
@@ -4357,6 +4636,7 @@ function agentStatusView(): {
     enabled: true,
     sandbox_conversation: MOCK_AGENT_SANDBOX,
     cli_auto_update: mockCliAutoUpdate,
+    auth: mockAgentAuthView(),
   };
 }
 
@@ -4724,7 +5004,7 @@ function isValidMockModel(model: string): boolean {
     model.length > 0 &&
     model.length <= 80 &&
     !model.startsWith("-") &&
-    /^[A-Za-z0-9._:/-]+$/.test(model)
+    /^[A-Za-z0-9._:/@-]+$/.test(model)
   );
 }
 
@@ -9731,6 +10011,75 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return agentStatusView();
     }
 
+    // ---- signing the agent CLIs in (see src/agent_auth.rs) --------------------
+    case "agent_auth_set": {
+      applyMockAgentAuth(asObject(params));
+      return agentStatusView();
+    }
+
+    case "agent_signin_start": {
+      const provider = requireString(params, "provider");
+      if (provider !== "claude") throw new Error(`${provider} signs in with an API key, not an account`);
+      const account = asObject(params).account ?? "claude_ai";
+      if (account !== "claude_ai" && account !== "console") throw new Error(`no such account to sign in to: ${String(account)}`);
+      if (!mockAgentProviders.get("claude")?.available) throw new Error("Claude Code is not on this machine — install it first");
+      mockClaudeSignin = { started_ms: Date.now(), console: account === "console", finishing: false };
+      broadcast("agent_status_changed", agentStatusView());
+      return { ...agentStatusView(), signin_url: MOCK_SIGNIN_URL };
+    }
+
+    case "agent_signin_finish": {
+      const provider = requireString(params, "provider");
+      if (provider !== "claude") throw new Error(`no sign-in of ${provider} is waiting`);
+      const code = requireString(params, "code").trim();
+      // `agent_auth::login_code`, checked before the sign-in is spent.
+      if (!/^[\x21-\x7e]{1,1024}$/.test(code)) throw new Error("A sign-in code is one line with no spaces — paste it alone");
+      if (!mockClaudeSignin || mockClaudeSignin.finishing) throw new Error("No sign-in is waiting for a code — press Sign in again");
+      const console = mockClaudeSignin.console;
+      // The CLI exits on any code it was handed, accepted or not: the sign-in ends either way.
+      mockClaudeSignin = null;
+      if (code !== MOCK_SIGNIN_CODE) {
+        broadcast("agent_status_changed", agentStatusView());
+        throw new Error(MOCK_REFUSED_CODE);
+      }
+      mockClaudeLogin = console
+        ? { email: "ada@example.com", plan: "", organization: "Ada's Console org" }
+        : { email: "ada@example.com", plan: "max", organization: "Ada Lovelace" };
+      broadcast("agent_status_changed", agentStatusView());
+      return agentStatusView();
+    }
+
+    case "agent_signin_cancel": {
+      const provider = requireString(params, "provider");
+      if (provider !== "claude") throw new Error(`no sign-in of ${provider} is waiting`);
+      mockClaudeSignin = null;
+      broadcast("agent_status_changed", agentStatusView());
+      return agentStatusView();
+    }
+
+    case "agent_signout": {
+      const provider = requireString(params, "provider");
+      if (provider !== "claude") throw new Error(`${provider} keeps no account to sign out of`);
+      mockClaudeLogin = null;
+      broadcast("agent_status_changed", agentStatusView());
+      return agentStatusView();
+    }
+
+    case "agent_opencode_key_set": {
+      const id = requireString(params, "provider_id");
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) throw new Error(`${id} is not an opencode provider id`);
+      mockSecret(asObject(params).key, "The API key");
+      mockOpencodeCredentials.set(id, "api");
+      return agentStatusView();
+    }
+
+    case "agent_opencode_key_remove": {
+      const id = requireString(params, "provider_id");
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) throw new Error(`${id} is not an opencode provider id`);
+      const removed = mockOpencodeCredentials.delete(id);
+      return { ...agentStatusView(), removed };
+    }
+
     case "agent_stop": {
       // A run in flight is stopped by flagging its id; the running simulation sees the
       // flag between steps and finalizes with the answer so far. A flag for a run that is
@@ -13339,6 +13688,21 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       broadcast("agent_status_changed", agentStatusView());
       return Response.json({ ok: true, ...agentStatusView() }, { status: 200 });
     }
+    // How the agent CLIs sign in (src/agent_auth.rs): arm a Claude account already signed in
+    // (`claude_login: true`), keys opencode already holds (`opencode: ["anthropic"]`), or reset it.
+    // A spec MUST reset it (`{kind:"agent_auth", reset:true}`): one mock process serves the whole
+    // run, and an account left signed in changes every later Settings pane.
+    if (body.kind === "agent_auth") {
+      if (body.reset === true) resetMockAgentAuth();
+      if (body.claude_login === true) {
+        mockClaudeLogin = { email: "ada@example.com", plan: "max", organization: "Ada Lovelace" };
+      }
+      if (Array.isArray(body.opencode)) {
+        for (const id of body.opencode) if (typeof id === "string") mockOpencodeCredentials.set(id, "api");
+      }
+      broadcast("agent_status_changed", agentStatusView());
+      return Response.json({ ok: true, ...agentStatusView() }, { status: 200 });
+    }
     if (body.kind === "agent_providers") {
       if (body.reset === true) {
         resetMockAgentProviders();
@@ -13972,6 +14336,19 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
       // backend kept the decision.
       cli_auto_update: mockCliAutoUpdate,
       clis: [...mockAgentClis].map(([name, cli]) => ({ name, managed: cli.managed, version: cli.version })),
+      // How the CLIs sign in, as the pretend machine holds it — the secrets included, so a spec can
+      // prove a key it typed reached the backend and that one it left empty was KEPT there.
+      auth: {
+        ...mockAgentAuthView(),
+        secrets: {
+          anthropic_key: mockAgentAuth.anthropic_key,
+          bedrock: mockAgentAuth.bedrock?.secret ?? null,
+          foundry: mockAgentAuth.foundry?.api_key ?? null,
+        },
+      },
+      claude_login: mockClaudeLogin,
+      claude_signin: mockClaudeSignin !== null,
+      opencode: [...mockOpencodeCredentials.keys()].sort(),
     });
   }
   if (req.method === "GET" && url.pathname === "/__test/channels") {

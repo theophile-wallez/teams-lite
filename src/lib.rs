@@ -19,6 +19,7 @@ pub fn read_only() -> bool {
 }
 
 pub mod agent;
+pub mod agent_auth;
 pub mod agent_cli;
 pub mod agent_markdown;
 pub mod agent_models;

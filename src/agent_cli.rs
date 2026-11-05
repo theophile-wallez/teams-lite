@@ -226,9 +226,9 @@ pub fn this_platform(tool: Tool) -> Option<&'static str> {
 
 // ---- layout -------------------------------------------------------------------------------------
 
-/// `$XDG_DATA_HOME/teams-lite/tools`, falling back to `~/.local/share/teams-lite/tools` — beside
-/// the store, on the data volume in the image.
-pub fn tools_dir() -> Option<PathBuf> {
+/// `$XDG_DATA_HOME/teams-lite`, falling back to `~/.local/share/teams-lite` — the directory the
+/// store lives in, which is the data volume in the image.
+pub fn data_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -238,7 +238,12 @@ pub fn tools_dir() -> Option<PathBuf> {
                 .filter(|p| p.is_absolute())
                 .map(|home| home.join(".local/share"))
         })?;
-    Some(base.join("teams-lite/tools"))
+    Some(base.join("teams-lite"))
+}
+
+/// `<data dir>/tools` — beside the store, on the data volume in the image.
+pub fn tools_dir() -> Option<PathBuf> {
+    Some(data_dir()?.join("tools"))
 }
 
 /// The directory every version of one tool lives in.
@@ -325,7 +330,12 @@ pub fn prepare_child(command: &mut std::process::Command, program: &str, managed
 
 /// [`prepare_child`] with the agent home handed in, so both halves are tested without touching
 /// this process's own environment.
-fn prepare_child_with(command: &mut std::process::Command, program: &str, managed: bool, home: Option<&Path>) {
+pub(crate) fn prepare_child_with(
+    command: &mut std::process::Command,
+    program: &str,
+    managed: bool,
+    home: Option<&Path>,
+) {
     if let Some(home) = home {
         if let Err(e) = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(home) {
             eprintln!("[agent] could not create the agent home {}: {e}", home.display());
@@ -345,23 +355,6 @@ fn prepare_child_with(command: &mut std::process::Command, program: &str, manage
             }
             None => {}
         }
-    }
-}
-
-/// What the user runs to sign a CLI in, where this app is running.
-///
-/// The app never relays a sign-in itself: Anthropic forbids a third party to collect or relay
-/// Claude.ai credentials, so the login is the user's own, in a terminal, against the very binary and
-/// home this app will run. In the image that is the `teams-lite-agent` helper, which sets both; on
-/// a workstation it is the program at the path the backend resolved.
-pub fn login_command(tool: Tool, in_image: bool, program: Option<&Path>) -> String {
-    let subcommand = "auth login";
-    if in_image {
-        return format!("teams-lite-agent {} {subcommand}", tool.program());
-    }
-    match program {
-        Some(path) => format!("{} {subcommand}", path.display()),
-        None => format!("{} {subcommand}", tool.program()),
     }
 }
 
@@ -1317,17 +1310,6 @@ mod tests {
         assert!(helper.contains("teams-lite/tools/bin"));
         let root = Path::new("/d/teams-lite/tools");
         assert_eq!(bin_path(root, Tool::Claude), Path::new("/d/teams-lite/tools/bin/claude"));
-        // And it is what the app tells the user to run.
-        assert!(login_command(Tool::Claude, true, None).starts_with("teams-lite-agent "));
-    }
-
-    #[test]
-    fn the_login_command_is_one_the_user_can_run_where_the_app_runs() {
-        assert_eq!(login_command(Tool::Claude, true, None), "teams-lite-agent claude auth login");
-        assert_eq!(
-            login_command(Tool::Opencode, false, Some(Path::new("/home/u/.local/share/teams-lite/tools/bin/opencode"))),
-            "/home/u/.local/share/teams-lite/tools/bin/opencode auth login"
-        );
     }
 
     /// The whole chain against the real vendors: the channel, the signed manifest, the zstd stream
