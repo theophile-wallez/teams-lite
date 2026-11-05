@@ -3980,6 +3980,7 @@ function resetMockAgentProviders(): void {
   const claude = mockAgentProviders.get("claude");
   const opencode = mockAgentProviders.get("opencode");
   if (claude) {
+    claude.available = true;
     claude.enabled = true;
     claude.model = null;
   }
@@ -3989,6 +3990,191 @@ function resetMockAgentProviders(): void {
     opencode.model = null;
   }
   mockAgentDefaultProvider = "claude";
+}
+
+// ---- installing an agent CLI from the app (see src/agent_cli.rs) -----------------------------
+//
+// The mock downloads nothing and runs nothing. It reproduces the STATES a real install passes
+// through — resolving, a download that is a bar, the check, and the swap — and the frames that
+// carry them, so the whole surface is reviewable with nothing leaving the machine. Out of the box it
+// is the state the image is in for one provider: `claude` is the user's own install (on PATH, not
+// this app's), and `opencode` is missing and installable — so the pane shows an Install from the
+// first paint, exactly as the container image would.
+
+type MockCliPhase = "idle" | "resolving" | "downloading" | "unpacking";
+
+type MockCli = {
+  installable: boolean;
+  managed: boolean;
+  version: string | null;
+  latest: string | null;
+  phase: MockCliPhase;
+  received: number;
+  total: number;
+  error: string;
+  checked_ms: number | null;
+};
+
+/** What a real install of each would download, as `Tool::download_estimate_bytes` states it. */
+const MOCK_CLI_DOWNLOAD: Record<string, { bytes: number; publisher: string; latest: string }> = {
+  claude: { bytes: 125_000_000, publisher: "Anthropic", latest: "2.1.311" },
+  opencode: { bytes: 80_000_000, publisher: "the opencode project", latest: "1.19.5" },
+};
+
+/** How long one tick of a pretend install takes. Four ticks of download, so the bar is a bar: an
+ *  install that only ever appears finished would let a page that draws no progress at all pass. */
+const MOCK_CLI_TICK_MS = Number(process.env.MOCK_CLI_TICK_MS ?? 150);
+
+function freshMockCli(): MockCli {
+  return {
+    installable: true,
+    managed: false,
+    version: null,
+    latest: null,
+    phase: "idle",
+    received: 0,
+    total: 0,
+    error: "",
+    checked_ms: null,
+  };
+}
+
+const mockAgentClis = new Map<string, MockCli>([
+  ["claude", freshMockCli()],
+  ["opencode", freshMockCli()],
+]);
+
+/** Whether a newer release of a CLI this "machine" installed is taken on its own — on, like a
+ *  fresh Rust store (`agent_cli::auto_update_from_setting`). */
+let mockCliAutoUpdate = true;
+/** The refusal the NEXT install answers with, armed by the `{kind:"agent_cli"}` hook. It stays
+ *  armed, as a refused send does: a spec asserts the sentence and then resets. */
+let mockCliInstallError: string | null = null;
+/** Whether a pretend install stops at its download, so a spec can photograph the bar. */
+let mockCliHold = false;
+/** The install a held one is waiting to finish, by provider. */
+const mockCliHeld = new Map<string, () => void>();
+
+function resetMockAgentClis(): void {
+  for (const [name] of mockAgentClis) mockAgentClis.set(name, freshMockCli());
+  mockCliAutoUpdate = true;
+  mockCliInstallError = null;
+  mockCliHold = false;
+  for (const release of mockCliHeld.values()) release();
+  mockCliHeld.clear();
+  const claude = mockAgentProviders.get("claude");
+  const opencode = mockAgentProviders.get("opencode");
+  if (claude) claude.available = true;
+  if (opencode) opencode.available = MOCK_OPENCODE_INSTALLED;
+}
+
+/** One backend's `cli` block, in the shape `agent_cli_json` publishes. */
+function mockCliView(name: string, available: boolean) {
+  const cli = mockAgentClis.get(name) ?? freshMockCli();
+  const meta = MOCK_CLI_DOWNLOAD[name];
+  const path = !available
+    ? null
+    : cli.managed
+      ? `/home/teams/.local/share/teams-lite/tools/bin/${name}`
+      : `/usr/local/bin/${name}`;
+  return {
+    installable: cli.installable,
+    managed: cli.managed,
+    version: cli.version,
+    latest: cli.latest,
+    update_available:
+      cli.managed && cli.version !== null && cli.latest !== null && mockVersionNewer(cli.latest, cli.version),
+    checked_ms: cli.checked_ms,
+    phase: cli.phase,
+    received: cli.received,
+    total: cli.total,
+    error: cli.error,
+    download_bytes: meta?.bytes ?? 0,
+    installed_bytes: cli.version ? (name === "claude" ? 337_814_032 : 214_386_864) : null,
+    publisher: meta?.publisher ?? "",
+    path,
+    login_command: `teams-lite-agent ${name} auth login`,
+    login_in_container: true,
+  };
+}
+
+/** `latest > installed`, compared as numbers — `agent_cli::is_update`'s rule. */
+function mockVersionNewer(latest: string, installed: string): boolean {
+  const a = latest.split(".").map(Number);
+  const b = installed.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  }
+  return false;
+}
+
+/** Walk one pretend install through every phase a real one passes, with the frames a real one
+ *  sends — then make the provider available, as the swap does. */
+function startMockCliInstall(name: string): void {
+  const cli = mockAgentClis.get(name);
+  const provider = mockAgentProviders.get(name);
+  if (!cli || !provider) throw new Error(`no such provider: ${name}`);
+  if (cli.phase !== "idle") return;
+  if (!cli.installable) {
+    throw new Error(`${MOCK_CLI_DOWNLOAD[name]?.publisher ?? "Its vendor"} publishes no ${name} build for this machine`);
+  }
+  if (mockCliInstallError) {
+    cli.error = mockCliInstallError;
+    throw new Error(mockCliInstallError);
+  }
+  const meta = MOCK_CLI_DOWNLOAD[name];
+  if (!meta) throw new Error(`no such provider: ${name}`);
+  const target = cli.latest && (!cli.version || mockVersionNewer(cli.latest, cli.version)) ? cli.latest : meta.latest;
+  const progress = () =>
+    broadcast("agent_cli_progress", {
+      provider: name,
+      phase: cli.phase,
+      received: cli.received,
+      total: cli.total,
+    });
+  cli.phase = "resolving";
+  cli.error = "";
+  broadcast("agent_status_changed", agentStatusView());
+  let step = 0;
+  const finish = () => {
+    cli.phase = "idle";
+    cli.received = 0;
+    cli.total = 0;
+    cli.version = target;
+    cli.latest = target;
+    cli.managed = true;
+    cli.checked_ms = Date.now();
+    provider.available = true;
+    broadcast("agent_status_changed", agentStatusView());
+  };
+  const tick = () => {
+    step += 1;
+    if (step <= 4) {
+      cli.phase = "downloading";
+      cli.total = meta.bytes;
+      cli.received = Math.round((meta.bytes * step) / 4);
+      progress();
+      if (step === 2 && mockCliHold) {
+        mockCliHeld.set(name, () => {
+          mockCliHeld.delete(name);
+          setTimeout(tick, MOCK_CLI_TICK_MS);
+        });
+        return;
+      }
+      setTimeout(tick, MOCK_CLI_TICK_MS);
+      return;
+    }
+    if (step === 5) {
+      cli.phase = "unpacking";
+      cli.received = 0;
+      cli.total = 0;
+      progress();
+      setTimeout(tick, MOCK_CLI_TICK_MS);
+      return;
+    }
+    finish();
+  };
+  setTimeout(tick, MOCK_CLI_TICK_MS);
 }
 
 /** Whether the agent would run on the user's own Claude Code configuration. Off, like a
@@ -4142,6 +4328,7 @@ function agentStatusView(): {
     enabled: boolean;
     model: string | null;
     models: MockAgentModel[];
+    cli: ReturnType<typeof mockCliView>;
   }[];
   default_provider: string;
   personas: ReturnType<typeof mockPersonasView>;
@@ -4152,9 +4339,14 @@ function agentStatusView(): {
   workspace: string;
   enabled: boolean;
   sandbox_conversation: string;
+  cli_auto_update: boolean;
 } {
   return {
-    backends: [...mockAgentProviders].map(([name, provider]) => ({ name, ...provider })),
+    backends: [...mockAgentProviders].map(([name, provider]) => ({
+      name,
+      ...provider,
+      cli: mockCliView(name, provider.available),
+    })),
     default_provider: mockAgentDefaultProvider,
     personas: mockPersonasView(),
     conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
@@ -4164,6 +4356,7 @@ function agentStatusView(): {
     workspace: "/home/mock/GitHub/teams-lite",
     enabled: true,
     sandbox_conversation: MOCK_AGENT_SANDBOX,
+    cli_auto_update: mockCliAutoUpdate,
   };
 }
 
@@ -9498,6 +9691,46 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return agentStatusView();
     }
 
+    // ---- installing an agent CLI (see src/agent_cli.rs) ---------------------
+    case "agent_cli_install": {
+      startMockCliInstall(requireString(params, "provider"));
+      return agentStatusView();
+    }
+
+    case "agent_cli_remove": {
+      const name = requireString(params, "provider");
+      const cli = mockAgentClis.get(name);
+      const provider = mockAgentProviders.get(name);
+      if (!cli || !provider) throw new Error(`no such provider: ${name}`);
+      if (cli.phase !== "idle") {
+        throw new Error(`${name} is being installed right now — try again once that is done`);
+      }
+      const freed = cli.version ? (name === "claude" ? 337_814_032 : 214_386_864) : 0;
+      // The copy goes; a provider whose ONLY copy was this app's then answers nothing, while one
+      // the user also installed themselves keeps answering with theirs.
+      if (cli.managed) provider.available = false;
+      Object.assign(cli, { managed: false, version: null, error: "" });
+      broadcast("agent_status_changed", agentStatusView());
+      return { ...agentStatusView(), freed };
+    }
+
+    case "agent_cli_check": {
+      // Only the CLIs this "machine" installed are asked about, exactly as the backend asks.
+      for (const [name, cli] of mockAgentClis) {
+        if (!cli.version) continue;
+        cli.checked_ms = Date.now();
+        cli.latest = cli.latest ?? MOCK_CLI_DOWNLOAD[name]?.latest ?? cli.version;
+      }
+      return agentStatusView();
+    }
+
+    case "agent_cli_set_auto_update": {
+      const enabled = asObject(params).enabled;
+      if (typeof enabled !== "boolean") throw new Error("missing param: enabled (a boolean)");
+      mockCliAutoUpdate = enabled;
+      return agentStatusView();
+    }
+
     case "agent_stop": {
       // A run in flight is stopped by flagging its id; the running simulation sees the
       // flag between steps and finalizes with the answer so far. A flag for a run that is
@@ -13069,6 +13302,43 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // spec MUST reset it afterwards (`{kind: "agent_providers", reset: true}`): one mock
     // process serves the whole run, and a second CLI left installed changes what every
     // later spec's menu holds.
+    // An agent CLI's install: arm what this "machine" already holds (`installed: {claude:
+    // "2.1.311"}` makes the copy this app installed the one that runs), what upstream has
+    // (`latest: {claude: "2.1.318"}`), a platform with no build (`installable: {opencode:
+    // false}`), a refusal of the next install (`fail`), or an install that holds at its download
+    // (`hold: true`, released by `release: true`). A spec MUST reset it (`{kind:"agent_cli",
+    // reset:true}`): one mock process serves the whole run, and an install left behind changes
+    // every later Settings pane.
+    if (body.kind === "agent_cli") {
+      if (body.reset === true) {
+        resetMockAgentClis();
+        broadcast("agent_status_changed", agentStatusView());
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      const installed = asObject(body.installed);
+      for (const [name, version] of Object.entries(installed)) {
+        const cli = mockAgentClis.get(name);
+        const provider = mockAgentProviders.get(name);
+        if (!cli || !provider || typeof version !== "string") continue;
+        Object.assign(cli, { version, managed: true, checked_ms: Date.now() });
+        provider.available = true;
+      }
+      for (const [name, version] of Object.entries(asObject(body.latest))) {
+        const cli = mockAgentClis.get(name);
+        if (cli && typeof version === "string") cli.latest = version;
+      }
+      for (const [name, can] of Object.entries(asObject(body.installable))) {
+        const cli = mockAgentClis.get(name);
+        if (cli && typeof can === "boolean") cli.installable = can;
+      }
+      if (typeof body.fail === "string") mockCliInstallError = body.fail || null;
+      if (typeof body.hold === "boolean") mockCliHold = body.hold;
+      if (body.release === true) {
+        for (const release of [...mockCliHeld.values()]) release();
+      }
+      broadcast("agent_status_changed", agentStatusView());
+      return Response.json({ ok: true, ...agentStatusView() }, { status: 200 });
+    }
     if (body.kind === "agent_providers") {
       if (body.reset === true) {
         resetMockAgentProviders();
@@ -13697,6 +13967,11 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         enabled: p.enabled,
         model: p.model,
       })),
+      // What the pretend machine holds of each CLI's install, and whether new releases are taken
+      // on their own — asserted here for the same reason: a press is only worth anything if the
+      // backend kept the decision.
+      cli_auto_update: mockCliAutoUpdate,
+      clis: [...mockAgentClis].map(([name, cli]) => ({ name, managed: cli.managed, version: cli.version })),
     });
   }
   if (req.method === "GET" && url.pathname === "/__test/channels") {

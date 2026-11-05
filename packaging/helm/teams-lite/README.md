@@ -459,8 +459,13 @@ at the same time. No NetworkPolicy applies to a host-network pod, so none is ren
   installed on the host, which repairs it on its own. The embedded pod repairs its own.
 - **Update itself.** A new build is a new chart version (`helm upgrade`); the in-app update stays a
   link.
-- **Answer `@claude`.** The agent CLIs are your own installs, signed in to your own providers, and
-  are not in the image.
+- **Carry an agent CLI.** Claude Code and opencode are not in the image — Claude Code is
+  Anthropic's, all rights reserved — but **Settings › AI providers installs either one** onto the
+  data volume, verified against its vendor's own statement of the file (Anthropic's signed
+  manifest; GitHub's digest for opencode), and keeps the copies it installed up to date unless you
+  turn that off. Sign one in with `kubectl exec -it -n <namespace> <pod> -c teams-lite --
+  teams-lite-agent claude auth login`, or give the pod an `ANTHROPIC_API_KEY` through
+  `extraEnvFrom`. The two together are about 550 MB on the data claim (`persistence.size`).
 
 ## Values
 

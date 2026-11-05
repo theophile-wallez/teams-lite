@@ -1931,7 +1931,9 @@ Five more things worth knowing before touching it:
 - **The providers live in Settings, and the model with them.** Settings › AI providers
   (`web/src/components/ai-providers-settings.tsx`) shows every CLI in
   `agent_policy::BACKENDS`, says which ones this machine actually holds
-  (`agent::is_available`, so a missing CLI is stated instead of offering a dead switch),
+  (`agent::is_available`, so a missing CLI is stated instead of offering a dead switch —
+  and, where the backend can fetch one, offers to INSTALL it: § Installing an agent CLI
+  from the app),
   and lets the user turn one off or choose the model it runs — `agent_set_provider`, a
   third write-token-gated `MACHINE_METHODS` entry, because it decides which program a
   chat message starts and which model reads the thread. Two defaults are deliberate and
@@ -1982,7 +1984,9 @@ Five more things worth knowing before touching it:
   trigger with one journal line, and the thread stayed silent — a broken feature with no
   visible cause. The unit therefore carries `Environment=PATH=@AGENT_PATH@`
   (`bin/teams-lite-service.sh` substitutes it, and a test in `agent::tests` pins both
-  halves), and every backend says at startup which CLIs it resolved and to where.
+  halves), and every backend says at startup which CLIs it resolved and to where. A CLI
+  this app INSTALLED is found after `PATH` (`agent::resolve_program`), so the user's own
+  install always wins over the app's copy — see § Installing an agent CLI from the app.
 - **The thread transcript travels with the prompt, and it is DATA.** The appended
   system prompt says so explicitly, because the people in a thread never agreed to be
   able to steer an agent on the user's machine. Keep that instruction, keep the
@@ -2195,6 +2199,112 @@ cargo run --example agent_stream_probe -- "your prompt" [claude|opencode] [model
 It also pins the fact the streaming rests on: a send returns no `id`, only
 `{"OriginalArrivalTime": …}` — and a Teams message id IS its arrival time in epoch
 ms, which is what the edits address.
+
+## Installing an agent CLI from the app (and keeping it current)
+
+The local agent runs `claude` or `opencode`, found by name (§ The local agent). A workstation has
+the user's own; teams-lite's container image has neither and cannot carry Claude Code (§ Running
+teams-lite in a container image). So Settings › AI providers offers an **Install** for a CLI the
+machine lacks, an **Update** once a newer release of the copy it installed is out, a **Remove**, and
+a switch that keeps those copies current with nobody pressing anything. `src/agent_cli.rs` holds the
+whole policy, `src/openpgp.rs` the one signature check it needs, `web/src/lib/agent-cli.ts` every
+pure decision the page makes and `web/src/components/agent-cli-install.tsx` draws it.
+
+**WHERE EACH COMES FROM, AND WHAT VOUCHES FOR IT, is the whole safety story** — this downloads a
+program a chat message then starts:
+
+- **Claude Code follows Anthropic's `stable` channel** (`downloads.claude.ai/claude-code-releases`).
+  The channel file is unsigned and only names a version; that version's `manifest.json` names the
+  binary's SHA-256 and size per platform, and `manifest.json.sig` is Anthropic's detached
+  signature over it, checked against the release key committed at `src/keys/claude-code.asc` and
+  pinned by the fingerprint Anthropic documents (`31DD DE24 … 1A7E CACE`). Linux builds are not
+  signed one by one, so the signed manifest IS the chain, and the manifest must name the version
+  that was asked for. The binary travels as its zstd stream (~100 MB against ~300 MB) and the
+  DECOMPRESSED bytes are what is checked, refused at the first byte past the signed size.
+- **opencode follows its version 1 line** — npm's `opencode-ai@latest`, which is that line's
+  newest; OpenCode 2 is a different package and breaks how this app runs it (`run` has no `--dir`,
+  and it starts a background service that outlives the run), so a major other than
+  `OPENCODE_MAJOR` is refused. Its release publishes no checksum file; GitHub's own API states the
+  asset's SHA-256 (the releases are immutable) and the tarball must match it. Weaker than a
+  signature, and the strongest statement upstream makes. Only the `opencode` entry is taken out, and
+  only as a plain file. The x86-64 build is the BASELINE one, which needs no AVX2.
+
+Nine rules hold it, and each is pinned by a test:
+
+- **THE OPENPGP CHECK IS A VERIFIER, NOT AN IMPLEMENTATION.** A packet reader, the version 4 hash
+  construction and RSA — the last is the `rsa` crate's, so nothing cryptographic is written here.
+  It refuses anything but a v4 binary-document signature, any algorithm but RSA with SHA-2, a
+  signature naming another key, an unknown CRITICAL subpacket, an expired signature and partial
+  lengths. It is tested against Anthropic's real 2.1.311 manifest and signature
+  (`src/testdata/`), and against one changed byte of either. The cost is stated: a key Anthropic
+  REVOKES keeps verifying until a build pins the new one, because nothing here asks a key server.
+- **EVERY VERSION IS A DIRECTORY, AND `current` IS A SYMLINK.**
+  `<store>/tools/<cli>/<version>/<binary>`, with `<store>/tools/bin/<binary>` →
+  `../<cli>/current/<binary>`; the store is `$XDG_DATA_HOME/teams-lite`, the data volume in the
+  image and under the chart, so a CLI survives every restart and every image upgrade. An update
+  RENAMES a new link over the old one and only then deletes the old version: a run in flight keeps
+  the inode it started from (unlinking a running executable is safe, overwriting one is not), and
+  the next run starts the new one.
+- **AN INSTALL ONLY EVER MOVES FORWARD** (`is_update`). A version not newer than the one on disk is
+  a no-op, so a channel pointed at an older release — the one thing an unsigned channel file can do
+  — never downgrades a working CLI.
+- **ONE INSTALL OF A CLI PER MACHINE.** Several backends share one store, so each install holds an
+  exclusive lock on `<store>/tools/<cli>/.lock` (a non-blocking try in a loop, for the reason the
+  embedded helper slot gives); a second waits, then finds the version already there. A removal
+  while one runs is refused rather than pulled out from under it.
+- **`PATH` WINS OVER THE APP'S COPY** (`agent::resolve_program`). A CLI the user installed is theirs,
+  set up their way; the app's copy is the fallback for a machine that has none. So `managed` (the
+  program a run starts IS the app's copy) and `version` (the app's copy is on disk) are two facts
+  on the wire, and an update is offered only where both hold. A shadowed copy is named and offered
+  for removal, never updated, because it is not what runs.
+- **A CLI'S FILES LIVE ON THE DATA VOLUME TOO** (`TEAMS_LITE_AGENT_HOME`, `prepare_child`). Claude
+  Code keeps its login and every session under `~/.claude`; opencode under `~/.config`,
+  `~/.local/share` and `~/.cache`. Under the chart `HOME` is on a read-only root, where `--resume`
+  silently finds no session and a login can be neither saved nor refreshed. So the image DECLARES an
+  agent home on the data volume, and every CLI child runs with that as `HOME` (created `0700`, since
+  it holds credentials) and the four XDG variables REMOVED. Nothing image-wide moves: `XDG_DATA_HOME`
+  would move the store itself. `agent_models` reads opencode's catalogue under that same home, or
+  the picker would read files the child never writes. Without the variable — every workstation —
+  the child keeps the user's own `HOME`.
+- **THE APP'S COPY NEVER UPDATES ITSELF.** `DISABLE_UPDATES=1` for Claude Code (which otherwise
+  writes 340 MB versions into its home and moves a launcher this app does not use) and
+  `OPENCODE_DISABLE_AUTOUPDATE=1` for opencode, set ONLY on the app's own copy — the user's own
+  install is left as they set it up.
+- **THE APP NEVER SIGNS A CLI IN.** Anthropic forbids a third party to collect or relay Claude.ai
+  credentials, so the row names the command the user runs themselves (`login_command`): in the image
+  `teams-lite-agent <cli> auth login` inside the container (`packaging/docker/teams-lite-agent`,
+  which drops a root `docker exec` to `teams`, sets the same home and the same XDG removal, and puts
+  the installed CLIs on PATH — `the_image_runs_a_cli_exactly_where_the_backend_does` pins the two
+  halves together), on a workstation the resolved binary's own path. An API key in the environment
+  is the other way in.
+- **A MACHINE THAT NEVER PRESSED INSTALL ASKS NOBODY ANYTHING.** The poll (`spawn_agent_cli_poll`,
+  three minutes after boot and then every six hours) asks only about CLIs this app installed, with
+  ONE small document each — Anthropic's channel file, npm's record — and never GitHub's API, whose
+  unauthenticated 60 an hour the app's own update check already spends half of; the API is asked
+  once per INSTALL, for the digest. A newer release is taken on its own only for a copy that is
+  what runs, with the switch on (`agent_cli_auto_update`, on in a fresh store — keeping what it
+  installed current is what installing it from here promised). A read-only backend never polls.
+
+**THE GATES.** `agent_cli_install`, `agent_cli_remove` and `agent_cli_set_auto_update` are
+`MACHINE_METHODS` entries: the write token, refused read-only, and the automation hook blocks each
+against a live port — one downloads a program a chat message then starts, one deletes it, one
+decides whether new code arrives with nobody pressing. `agent_cli_check` stays OPEN: it asks
+upstream and installs nothing, which is the split `update_check` makes. The progress is
+`agent_cli_progress` (the bar alone, on whole percents) and every end is `agent_status_changed` (the
+whole status), so a second window draws the same bar.
+
+`web/mock/server.ts` walks a pretend install through every phase with the frames a real one sends;
+out of the box `opencode` is missing and installable, which is the image's state. Its
+`{kind:"agent_cli"}` hook arms an installed copy, a newer release, a platform with no build, a
+refusal and an install held at its download — **a spec MUST reset it**. `web/e2e/agent-cli.spec.ts`
+pins every rule the page owns, `web/src/lib/agent-cli.test.ts` the pure ones.
+
+**THE WHOLE CHAIN IS VERIFIED AGAINST THE REAL VENDORS, through the code that ships**:
+`agent_cli::tests::the_real_clis_install_and_verify` (`#[ignore]`d, ~200 MB) installed Claude Code
+2.1.311 from the stable channel — signed manifest verified, zstd stream decompressed and checked —
+and opencode 1.19.5 against GitHub's digest, ran each with `--version`, and found both current on a
+second pass, on 2026-11-04. What is UNVERIFIED is the pairing: an install pressed in the real app
+inside the real image, and a run of the installed CLI answering `@claude` from the data volume.
 
 ## Mail is READ-ONLY (MANDATORY — no exception, not even a sandbox)
 
@@ -5027,7 +5137,9 @@ user. Two independent mechanisms enforce that split:
   (it honours `--dpr`, because the faces in it are 20px). For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. For Settings › AI providers and its model picker, open and closed in both
-  themes: `bun run preview -- --out /tmp/prov --ai-providers`. For Settings › This app — the
+  themes — and a CLI being INSTALLED from it (the bar held halfway, the row it lands as with
+  its sign-in command, and the update a newer release earns, each in both themes):
+  `bun run preview -- --out /tmp/prov --ai-providers`. For Settings › This app — the
   update check's answer and the restart armed on a live agent run:
   `bun run preview -- --out /tmp/app --maintenance`. For the update button, the
   changelog it discloses on hover in both themes, its progress mid-download and the link the
@@ -9240,7 +9352,10 @@ user's. What changes is only what is asked.
   the local agent that answers an `@claude`
   message (`src/agent.rs`, `src/agent_policy.rs`, `src/agent_markdown.rs` — see
   § The local agent) and the user's own CUSTOM AGENTS that answer to a name they chose
-  (`src/agent_persona.rs`, see § CUSTOM AGENTS) and the app's own update — the check, the download and the swap
+  (`src/agent_persona.rs`, see § CUSTOM AGENTS) and the agent CLIs the app itself installs and
+  keeps current — Claude Code from Anthropic's signed channel, opencode's version 1 line —
+  onto the data volume (`src/agent_cli.rs`, over the one OpenPGP signature check in
+  `src/openpgp.rs`; see § Installing an agent CLI from the app) and the app's own update — the check, the download and the swap
   (`src/update.rs`, see § Updating the app from inside it) — plus the restart the user can
   ask for without a new build at all (`src/restart.rs`, see § Settings › This app), and
   SIGNING IN AGAIN when the identity broker asks a human — the automatic interactive
@@ -10987,11 +11102,14 @@ image was before, and each fact still holds:
   launcher's rule — one appended FILE per port in `/tmp` — is right on a host and wrong in an image,
   where nobody reads a container's `/tmp`.
 
-**THE LOCAL AGENT HAS NO CLI IN THE IMAGE.** `claude` and `opencode` are the user's own installs,
-signed in to the user's own providers, and baking either into a local image would copy credentials
-into it — so the backend says each is "on no PATH entry" at startup and Settings › AI providers
-states it, as on any machine that lacks one. A user who wants `@claude` answered from the image
-extends it with their CLI.
+**THE LOCAL AGENT'S CLIs ARE NOT IN THE IMAGE, AND THE APP INSTALLS THEM.** Claude Code is
+"© Anthropic PBC. All rights reserved", so a published image carrying it would be redistributing it
+— the objection that kept chess.com's sounds out of the release asset — and opencode is 215 MB most
+pulls would never run. So Settings › AI providers offers an **Install** for each, fetched per
+machine onto the DATA volume and kept current (§ Installing an agent CLI from the app). The image
+carries what that needs and nothing more: `ripgrep` (opencode would otherwise download one
+unverified on its first search), `TEAMS_LITE_AGENT_HOME` declared on the data volume (a CLI's login
+and sessions survive the read-only root), and the `teams-lite-agent` helper a sign-in is typed into.
 
 **IT IS NOT A SANDBOX, in either mode, and nothing here pretends it is.** The host mode shares the
 host's PID and network namespaces and the host user's uid, because that is what reaching the broker

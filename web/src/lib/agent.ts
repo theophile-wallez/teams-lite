@@ -57,6 +57,48 @@ export type AgentBackend = {
   model: string | null;
   /** The models this machine can offer — never a limit on what may be typed. */
   models: AgentModel[];
+  /** Installing this CLI from the app (see lib/agent-cli.ts). Absent on a backend too old to
+   *  install anything, which then offers no Install button rather than one that is refused. */
+  cli?: AgentCli | null;
+};
+
+/** Where an install of a CLI is, as the backend reports it. */
+export type AgentCliPhase = "idle" | "resolving" | "downloading" | "unpacking";
+
+/**
+ * What this app can do about installing one agent CLI, and what it already did
+ * (src/agent_cli.rs, published per backend by `agent_status`).
+ *
+ * `version` and `managed` are two facts: `version` is the copy this app installed, on disk, and
+ * `managed` is whether that copy is what a run starts — it is not when the user's own install comes
+ * first on the backend's PATH.
+ */
+export type AgentCli = {
+  /** Whether an Install or an Update can be pressed on this machine at all. */
+  installable: boolean;
+  managed: boolean;
+  version: string | null;
+  /** The newest release the backend has seen, or null when it has not asked. */
+  latest: string | null;
+  update_available: boolean;
+  /** When the backend last asked, epoch ms. */
+  checked_ms: number | null;
+  phase: AgentCliPhase;
+  received: number;
+  total: number;
+  /** Why the last install or check failed, in its own words; "" when nothing did. */
+  error: string;
+  /** Roughly what one install downloads — a statement of size, never a bound. */
+  download_bytes: number;
+  installed_bytes: number | null;
+  /** Who publishes it: "Anthropic", "the opencode project". */
+  publisher: string;
+  /** Where the program a run starts is, when there is one. */
+  path: string | null;
+  /** What the user runs, where the app runs, to sign this CLI in. */
+  login_command: string;
+  /** Whether that is a shell INSIDE the app's container rather than a terminal on the machine. */
+  login_in_container: boolean;
 };
 
 /** What one `agent_set_provider` call changes. Every half is optional, so a switch
@@ -127,6 +169,13 @@ export type AgentStatus = {
   enabled: boolean;
   /** The one conversation that is opted in out of the box. */
   sandbox_conversation: string;
+  /** Whether a newer release of a CLI this app installed is taken on its own. Absent on a
+   *  backend too old to install anything. */
+  cli_auto_update?: boolean;
+  /** Why the check the user just asked for could not finish — only on that answer. */
+  check_error?: string;
+  /** How many bytes a removal gave back — only on that answer. */
+  freed?: number;
 };
 
 /** The mode one conversation is in. Anything the backend did not list is `off`, which

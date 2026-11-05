@@ -1,0 +1,63 @@
+#!/bin/sh
+# Run an agent CLI the way the backend runs it (src/agent_cli.rs, `prepare_child`):
+#
+#     docker exec -it teams-lite teams-lite-agent claude auth login
+#     kubectl exec -it -n teams-lite teams-lite-0 -c teams-lite -- teams-lite-agent opencode auth login
+#
+# It exists because a sign-in typed into a shell must land where every run will read it. The
+# backend starts each CLI with HOME set to TEAMS_LITE_AGENT_HOME — a directory on the data volume,
+# since the root is read-only under the chart — and with the XDG variables removed, so a login
+# saved anywhere else is a login no run ever sees. And `docker exec` and `kubectl exec` land as
+# ROOT: a login made as root is written as root, and the runtime user cannot read it back. So:
+#
+#   - a root caller is dropped to `teams` first, exactly as the entrypoint drops (no new
+#     privileges are gained either way);
+#   - HOME becomes the agent home and the XDG variables go, as they do for a run;
+#   - the CLIs this app installed are put on PATH (after the image's own, as the backend resolves
+#     them), and they are told not to update themselves, as a run tells them — their versions are
+#     the app's to manage.
+#
+# Only the two CLIs the app runs: this is a way to sign one in, not a shell.
+set -eu
+
+case "${1:-}" in
+  claude | opencode) ;;
+  *)
+    echo "usage: teams-lite-agent claude|opencode [arguments…]" >&2
+    echo "  e.g. teams-lite-agent claude auth login" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$(id -u)" = 0 ]; then
+  exec setpriv --reuid=teams --regid=teams --init-groups --inh-caps=-all -- "$0" "$@"
+fi
+
+# The CLIs this app installed sit beside the store, which follows XDG_DATA_HOME as the backend's
+# own does — resolved BEFORE HOME is moved, because it is the runtime user's real home.
+data="${XDG_DATA_HOME:-${HOME:?}/.local/share}"
+tools="$data/teams-lite/tools/bin"
+
+home="${TEAMS_LITE_AGENT_HOME:?this image declares TEAMS_LITE_AGENT_HOME; it is unset here}"
+mkdir -p -m 0700 "$home"
+export HOME="$home"
+unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME
+export PATH="$PATH:$tools"
+
+program="$1"
+shift
+if ! command -v "$program" >/dev/null 2>&1; then
+  echo "$program is not installed here — install it from Settings › AI providers first" >&2
+  exit 1
+fi
+resolved="$(command -v "$program")"
+case "$resolved" in
+  "$tools"/*)
+    if [ "$program" = claude ]; then
+      export DISABLE_UPDATES=1
+    else
+      export OPENCODE_DISABLE_AUTOUPDATE=1
+    fi
+    ;;
+esac
+exec "$resolved" "$@"

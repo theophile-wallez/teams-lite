@@ -149,10 +149,14 @@ FROM debian:${DEBIAN_RELEASE}-slim
 # inner container's id range (above): the two map helpers, and `setcap` / `getcap` to give them
 # their capabilities and for the entrypoint to check they still carry them. util-linux, which the
 # slim image already holds, supplies setpriv, unshare, setsid and flock — the last for the lock
-# that keeps the entrypoint to one copy per container.
+# that keeps the entrypoint to one copy per container. ripgrep, for the agent CLIs this app can
+# install from Settings (src/agent_cli.rs): opencode searches with the `rg` on PATH, and with none
+# it downloads one from GitHub on its first search and verifies nothing. Claude Code bundles its
+# own. The CLIs themselves are NOT here — Claude Code is Anthropic's, all rights reserved, so a
+# published image cannot carry it — they are fetched per machine onto the data volume.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates tini tzdata uidmap libcap2-bin \
+      ca-certificates tini tzdata uidmap libcap2-bin ripgrep \
  && rm -rf /var/lib/apt/lists/* \
  && chmod u-s /usr/bin/newuidmap /usr/bin/newgidmap \
  && setcap cap_setuid=ep /usr/bin/newuidmap \
@@ -207,6 +211,10 @@ COPY --chmod=0755 packaging/docker/entrypoint.sh /usr/local/bin/teams-lite-conta
 #   docker run --rm --security-opt seccomp=unconfined --security-opt systempaths=unconfined \
 #     --security-opt apparmor=unconfined --entrypoint teams-lite-intune-selftest teams-lite:local
 COPY --chmod=0755 packaging/docker/teams-lite-intune-selftest /usr/local/bin/teams-lite-intune-selftest
+# Runs an agent CLI the way the backend runs it — as the runtime user, with the agent home as HOME
+# and the CLIs this app installed on PATH — so a sign-in typed into a shell lands where every run
+# will read it:   docker exec -it teams-lite teams-lite-agent claude auth login
+COPY --chmod=0755 packaging/docker/teams-lite-agent /usr/local/bin/teams-lite-agent
 
 LABEL org.opencontainers.image.title="teams-lite" \
       org.opencontainers.image.description="A Microsoft Teams client for Linux that boots its own Intune container, as a container image" \
@@ -217,9 +225,13 @@ LABEL org.opencontainers.image.title="teams-lite" \
 # the HOST-mode repair, `intune::repair_blocker`); TEAMS_LITE_INTUNE_MODE says whose Intune
 # container it deals with (src/intune_embedded.rs) — a host-broker run overrides it with `host`.
 # HOME, USER and LOGNAME are the runtime user's, set here because the process starts as root and
-# setpriv keeps the environment it is handed.
+# setpriv keeps the environment it is handed. TEAMS_LITE_AGENT_HOME is the HOME every agent CLI
+# runs with (src/agent_cli.rs): on the data volume, because the root is read-only under the chart
+# and a CLI keeps its login and every session it can resume under its home. Nothing image-wide is
+# moved for it — XDG_DATA_HOME would move the store itself.
 ENV TEAMS_LITE_CONTAINER_IMAGE=1 \
     TEAMS_LITE_INTUNE_MODE=embedded \
+    TEAMS_LITE_AGENT_HOME=/home/teams/.local/share/teams-lite/agent-home \
     HOME=/home/teams \
     USER=teams \
     LOGNAME=teams
