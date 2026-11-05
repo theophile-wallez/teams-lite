@@ -33,8 +33,7 @@
 // `users/me/teamsOrder`, `users/me/teams` and `part/{region}/…` answers 404, as does
 // `csa/api/v1/teams/users/me/settings`.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example team_order_recon
+//   cargo run --example team_order_recon
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::BTreeMap;

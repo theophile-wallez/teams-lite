@@ -13,6 +13,14 @@
 
 import { Store } from "@tanstack/store";
 import { Backend, defaultWsUrl } from "./ws-client";
+import {
+  AUTH_RELOAD_KEY,
+  SESSION_PROBE_INTERVAL_MS,
+  sessionVerdict,
+  signInRemedy,
+  type ProbeAnswer,
+} from "./auth-wall";
+import { hasUnsentWork } from "./unsent-work";
 import type { SendImage } from "./composer-image";
 import {
   channelMentionCandidate,
@@ -45,6 +53,8 @@ import {
   type PresenceSchedule,
   type LinearWorkspace,
   type BrokerStatus,
+  type PortalPurpose,
+  type SigninFrameAnswer,
   type SigninState,
   INITIAL_SIGNIN,
   type CalendarEvent,
@@ -113,7 +123,8 @@ import {
   coercePetsShown,
   petsShownValue,
 } from "./pet-visibility";
-import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
+import type { AgentAuthPatch, AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
+import { withAgentCliProgress } from "./agent-cli";
 import type { AgentPersonaPatch } from "./agent-persona";
 import {
   AGENT_RUN_STALE_MS,
@@ -473,6 +484,9 @@ export type AppState = {
   ready: boolean;
   splashMessage: string;
   fatal: string | null;
+  /** The sign-in in front of this app (an authenticating proxy) expired, and an automatic reload
+   *  would have lost something — so the reader is asked instead (lib/auth-wall.ts). */
+  signInExpired: boolean;
   update: UpdateInfo | null;
   /** How far the update has got (the backend's `update_progress` event), or null while
    *  nothing has been asked of it. Held apart from `update` because they answer two
@@ -1237,6 +1251,7 @@ function initialState(): AppState {
     ready: false,
     splashMessage: "connecting",
     fatal: null,
+    signInExpired: false,
     update: null,
     updateProgress: null,
     draft: "",
@@ -1389,6 +1404,20 @@ function initialState(): AppState {
     gitlabActionError: null,
     gitlabActionDone: null,
   };
+}
+
+/** The app server's route for the backend's write token (`WRITE_TOKEN_ROUTE` in web/write-token.ts). */
+const WRITE_TOKEN_PATH = "/__write-token";
+
+/** When this tab last reloaded to sign in again, or null (see lib/auth-wall.ts). */
+function lastSignInReload(): number | null {
+  try {
+    const raw = window.sessionStorage.getItem(AUTH_RELOAD_KEY);
+    const at = raw === null ? Number.NaN : Number(raw);
+    return Number.isFinite(at) ? at : null;
+  } catch {
+    return null;
+  }
 }
 
 export class TeamsController {
@@ -1548,6 +1577,10 @@ export class TeamsController {
   // and consulted when we reconnect: a genuine recovery re-syncs, but the very
   // first connect (no prior drop) does not. See `handleLiveRecovery`.
   private connectionDropped = false;
+
+  // When the last sign-in probe left, and whether one is out (see `checkSignInWall`).
+  private signInProbeAt = 0;
+  private signInProbing = false;
 
   constructor(url: string = defaultWsUrl()) {
     this.backend = new Backend(url);
@@ -1712,7 +1745,10 @@ export class TeamsController {
   private async loadWriteToken(): Promise<string | null> {
     if (typeof window === "undefined") return null; // SSR: no writes happen there
     try {
-      const res = await fetch("/__write-token", { cache: "no-store" });
+      // `redirect: "manual"`: a sign-in proxy in front of this app answers an expired session with
+      // a redirect to its identity provider, and following it cross-origin only to fail CORS says
+      // nothing. Not followed, it is a response that is not ok — read-only, as before.
+      const res = await fetch(WRITE_TOKEN_PATH, { cache: "no-store", redirect: "manual" });
       if (!res.ok) return null;
       const body = (await res.json()) as { token?: string };
       if (!body.token) return null;
@@ -1722,6 +1758,62 @@ export class TeamsController {
       /* offline or no endpoint: leave the client read-only */
       return null;
     }
+  }
+
+  /**
+   * After a handshake failed: is it the SIGN-IN in front of this app that expired? If so, reload —
+   * the one request a browser follows through an identity provider and back (lib/auth-wall.ts says
+   * why, and what bounds it).
+   *
+   * The question is asked of the token route, because it is behind the same wall as everything
+   * else and this app's own servers never answer it with a redirect or a 401. Throttled to one
+   * probe in flight and one per {@link SESSION_PROBE_INTERVAL_MS}: the reconnect backoff fails a
+   * handshake every few seconds while a backend is down.
+   */
+  private async checkSignInWall(): Promise<void> {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    const started = Date.now();
+    if (this.signInProbing || started - this.signInProbeAt < SESSION_PROBE_INTERVAL_MS) return;
+    this.signInProbing = true;
+    this.signInProbeAt = started;
+    let answer: ProbeAnswer = null;
+    try {
+      const res = await fetch(WRITE_TOKEN_PATH, { cache: "no-store", redirect: "manual" });
+      answer = { type: res.type, status: res.status };
+    } catch {
+      answer = null;
+    } finally {
+      this.signInProbing = false;
+    }
+    const now = Date.now();
+    const { threadDrafts, callStatus } = this.get();
+    const remedy = signInRemedy({
+      verdict: sessionVerdict(answer),
+      visible: document.visibilityState === "visible",
+      lastReloadAt: lastSignInReload(),
+      now,
+      // A thread's draft, a title, pasted pictures (the composers report them) and a live call's
+      // audio: everything a reload would throw away. The conversation's own draft is in the list
+      // too, as the composer's words, because its last edits never reached the backend.
+      wouldLoseWork:
+        hasUnsentWork() ||
+        callStatus.call !== null ||
+        Object.values(threadDrafts).some((text) => text.trim() !== ""),
+    });
+    if (remedy === "none") return;
+    if (remedy === "reload") {
+      try {
+        window.sessionStorage.setItem(AUTH_RELOAD_KEY, String(now));
+        this.set({ status: "signing in again — the sign-in in front of this app expired" });
+        window.location.reload();
+        return;
+      } catch {
+        // No storage to remember the reload in (a browser that refuses it): the next page could
+        // not tell it had just reloaded, so a wall it cannot satisfy would be a loop. Ask instead.
+      }
+    }
+    // A bar, not the blocking overlay: the reader's unsent words are still on screen to copy.
+    this.set({ signInExpired: true, fatal: null, status: "the sign-in in front of this app expired" });
   }
 
   /**
@@ -2233,6 +2325,20 @@ export class TeamsController {
     // How the CHESS ENGINE's download is going, and whether it is here at all. Sent on every whole
     // percent and on every change of state, so a second window draws the same bar and a page that
     // opened in the middle of a fetch learns from this rather than from nothing.
+    // The agent status changed under every page at once — an install of a CLI ended, one was
+    // removed, a check found a newer release (src/agent_cli.rs). The whole status, so a page draws
+    // what the backend holds rather than what it last asked for.
+    on("agent_status_changed", (raw) => {
+      const next = raw as AgentStatus | null;
+      if (next && Array.isArray(next.backends)) this.set({ agent: next });
+    });
+    // How far an install of a CLI has got, on every whole percent and every change of phase — the
+    // bar alone, folded into the status this page already holds.
+    on("agent_cli_progress", (raw) => {
+      const agent = this.get().agent;
+      const next = withAgentCliProgress(agent, raw);
+      if (next !== agent) this.set({ agent: next });
+    });
     on("chess_engine_progress", (raw) => {
       const next = raw as Partial<ChessEngineState> | null;
       if (next && typeof next.present === "boolean") {
@@ -2278,7 +2384,7 @@ export class TeamsController {
       // backend is not reachable" under a green dot is a sentence the page can no longer
       // stand behind, and the token is re-read below. The words stay in the composer, so
       // the user retries rather than retypes.
-      this.set({ live: "connected", fatal: null, status: "reconnected", sendError: null, sendErrorAt: null });
+      this.set({ live: "connected", fatal: null, signInExpired: false, status: "reconnected", sendError: null, sendErrorAt: null });
       // Refetch the write token. The backend mints a new one per PROCESS, so a
       // backend that restarted — a crash, an update, a `systemctl restart` of the
       // always-on service — invalidates the one this page fetched at startup. Reads
@@ -2303,10 +2409,17 @@ export class TeamsController {
         void this.handleLiveRecovery();
       }
     });
+    // A socket the browser could not even OPEN: ask whether a sign-in in front of this app is what
+    // refused it, since the socket itself can never say (see lib/auth-wall.ts).
+    on("handshake_failed", () => void this.checkSignInWall());
     on("backend_lost", () =>
       this.set({
         live: "disconnected",
-        fatal: "Backend lost — the teams-lite server is no longer reachable.",
+        // Not while the sign-in bar says why: the backend is not lost, the session is, and the
+        // overlay would cover the very words the bar asks the reader to copy first.
+        fatal: this.get().signInExpired
+          ? null
+          : "Backend lost — the teams-lite server is no longer reachable.",
         status: "backend lost — retries exhausted",
       }),
     );
@@ -6510,6 +6623,114 @@ export class TeamsController {
     return status;
   }
 
+  /**
+   * Install one agent CLI from its vendor, or update the copy this app installed.
+   *
+   * It is the BACKEND that downloads and verifies it (this page never fetches from a vendor), so
+   * all this does is ask and draw the answer: the status comes back at once with the install
+   * under way, the bar arrives as `agent_cli_progress` events and the end as
+   * `agent_status_changed` — which is also how a second window draws the same bar.
+   *
+   * Rejects on a refusal, so the button that called it can say why where it was pressed.
+   */
+  async installAgentCli(provider: string): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentCliInstall(provider);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    return status;
+  }
+
+  /** Give back everything this app installed for one CLI. Rejects on a refusal. */
+  async removeAgentCli(provider: string): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentCliRemove(provider);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    playCue("success");
+    return status;
+  }
+
+  /** Ask now whether the CLIs this app installed have a newer release. A check that could not
+   *  finish is not a rejection: its reason travels in `check_error`, beside what it did learn. */
+  async checkAgentClis(): Promise<AgentStatus> {
+    const status = await this.backend.agentCliCheck();
+    this.set({ agent: status });
+    return status;
+  }
+
+  /** Whether the CLIs this app installed update themselves. Rejects on a refusal. */
+  async setAgentCliAutoUpdate(enabled: boolean): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await this.backend.agentCliSetAutoUpdate(enabled);
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    playCue("success");
+    return status;
+  }
+
+  /** Run one agent account call and adopt the status it answers with. Every one of them is an
+   *  action the reader just pressed, so a refusal is cued and handed back to the control that
+   *  asked — its sentence is the backend's, said beside that control. */
+  private async agentAccountCall(
+    call: () => Promise<AgentStatus>,
+    cue: "success" | null = "success",
+  ): Promise<AgentStatus> {
+    let status: AgentStatus;
+    try {
+      status = await call();
+    } catch (e) {
+      playCue("error");
+      throw e;
+    }
+    this.set({ agent: status });
+    if (cue) playCue(cue);
+    return status;
+  }
+
+  /** Change how the agent CLIs sign in (src/agent_auth.rs). Rejects on a refusal. */
+  setAgentAuth(patch: AgentAuthPatch): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentAuthSet(patch));
+  }
+
+  /** Start Claude Code's own sign-in; the answer carries the claude.com link to open. */
+  startAgentSignin(provider: string, account: "claude_ai" | "console"): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentSigninStart(provider, account), null);
+  }
+
+  /** Hand the waiting sign-in its code. Rejects with the CLI's own sentence when it refuses it. */
+  finishAgentSignin(provider: string, code: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentSigninFinish(provider, code));
+  }
+
+  cancelAgentSignin(provider: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentSigninCancel(provider), null);
+  }
+
+  signOutAgent(provider: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentSignout(provider));
+  }
+
+  setOpencodeKey(providerId: string, key: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentOpencodeKeySet(providerId, key));
+  }
+
+  removeOpencodeKey(providerId: string): Promise<AgentStatus> {
+    return this.agentAccountCall(() => this.backend.agentOpencodeKeyRemove(providerId));
+  }
+
   async setAgentTools(tools: string[]): Promise<AgentStatus> {
     let status: AgentStatus;
     try {
@@ -6825,20 +7046,42 @@ export class TeamsController {
   /** Ask the backend to repair sign-in by restarting the Intune container.
    *
    *  Marks the broker as repairing straight away, so the button disables before the
-   *  backend's own event arrives, and REJECTS on refusal so the banner can say why
-   *  (the backend's refusal text is the useful part: a missing write token, or
-   *  read-only mode). The repair drops the socket a moment later; the page's own
-   *  reconnect brings it back — see `watchWakeups` and the `reconnected` handler. */
+   *  backend's own event arrives, and REJECTS on refusal so the banner can say why. The
+   *  backend's refusal text is the useful part: a missing write token, read-only mode, a
+   *  machine with no Intune container, a container that is not running right now — and, the
+   *  one a reader really meets, a keyring that is NOT locked, where a restart would take
+   *  sign-in down for a minute and fix nothing.
+   *
+   *  From an ACCEPTED press on, `repairing` is the backend's to say: the backend stays up
+   *  through the repair, and its `broker_status` with `repairing: false` is what ends it —
+   *  whether the repair worked or not. Sign-in coming back is a separate `broker_status`, the
+   *  broker's own, once a token call succeeds again.
+   *
+   *  A refusal takes back THIS press's flag and nothing newer. The backend asks a D-Bus
+   *  keyring before it answers, so a `broker_status` can land during the round trip — sign-in
+   *  coming back on its own retry, or another failure — and putting the snapshot from before
+   *  the press back over it restored a broken sign-in over a working one. Nothing would ever
+   *  have corrected that: the backend speaks only on a CHANGE, and its greeting re-sends a
+   *  failure but never news that all is well. So the rollback happens only while the status on
+   *  screen is still the very object this press put there. */
   async repairBroker(): Promise<void> {
     const before = this.get().brokerStatus;
-    if (before) this.set({ brokerStatus: { ...before, repairing: true } });
+    const optimistic = before ? { ...before, repairing: true } : null;
+    if (optimistic) this.set({ brokerStatus: optimistic });
     try {
-      await this.backend.repairBroker();
+      const answer = await this.backend.repairBroker();
+      // A press is refused in words rather than answered `started: false` — that answer is
+      // the automatic triggers' — so this is a backend that disagrees with this page about the
+      // contract. The flag set above would then claim a repair nothing will ever end, and a
+      // press that changed nothing must not look like one that worked.
+      if (!answer.started) {
+        throw new Error(`No repair was started (${answer.reason || "no reason given"}).`);
+      }
     } catch (e) {
-      if (before) this.set({ brokerStatus: { ...before, repairing: false } });
+      if (optimistic && this.get().brokerStatus === optimistic) this.set({ brokerStatus: before });
       // A refused repair sounds; an accepted one does not. The repair only STARTS
-      // here — the socket drops a moment later and the reconnect is the real answer,
-      // so a success cue now would applaud a result nobody has yet.
+      // here — a minute of container restart is still ahead, and sign-in coming back is
+      // the real answer — so a success cue now would applaud a result nobody has yet.
       playCue("error");
       throw e;
     }
@@ -6872,6 +7115,45 @@ export class TeamsController {
     }
   }
 
+  /** Open the Intune portal in this backend's own Intune container — embedded mode only, offered
+   *  by the banner's "Enroll this device", and by its "Sign in through the Intune portal" on a
+   *  container that is enrolled but whose broker holds no account. ONE press for both: the
+   *  backend decides what the portal is opened for, from the same state the banner drew its offer
+   *  from, and `purpose` is only what the optimistic panel says until its answer arrives. The same
+   *  panel and the same optimistic `starting` as a sign-in, and for the same reason: the portal
+   *  can take half a minute to appear, and a press answered by nothing reads as one that missed.
+   *  A refusal is the whole answer and is shown in the panel the press opened, in the backend's
+   *  own words. */
+  async startEnroll(purpose: PortalPurpose = "enroll"): Promise<void> {
+    this.set({
+      signin: { ...INITIAL_SIGNIN, kind: "enroll", purpose, phase: "starting" },
+      signinDismissed: false,
+    });
+    try {
+      const answer = await this.backend.intuneEnroll();
+      if (answer.signin) this.set({ signin: answer.signin });
+    } catch (e) {
+      this.set({
+        signin: {
+          ...INITIAL_SIGNIN,
+          kind: "enroll",
+          purpose,
+          phase: "failed",
+          detail: e instanceof Error ? e.message : String(e),
+        },
+      });
+      playCue("error");
+    }
+  }
+
+  /** Bring back a panel the reader put away, without touching the flow behind it — the
+   *  banner's "Show the enrollment". Starting the flow again is not the same act: an enrollment
+   *  already open is refused a second time, and the reader asked to SEE the one they have. */
+  reopenSignin(): void {
+    this.set({ signinDismissed: false });
+    void this.refreshSignin();
+  }
+
   /** Re-read the phase. The panel polls this while it waits, because the transition that
    *  matters — the broker putting a window up — is one the backend can only notice when it is
    *  asked: there is no signal that says "I am asking a human". */
@@ -6887,7 +7169,7 @@ export class TeamsController {
 
   /** One frame of the broker's window. Held by the panel, never by this state: it is a PNG a
    *  second, and the rest of the app has no use for it. */
-  signinFrame(): Promise<{ width: number; height: number; png: string }> {
+  signinFrame(): Promise<SigninFrameAnswer> {
     return this.backend.signinFrame();
   }
 

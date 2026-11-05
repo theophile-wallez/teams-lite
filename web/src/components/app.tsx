@@ -66,6 +66,7 @@ function AppInner() {
   const navigate = useNavigate();
   const ready = useAppState((s) => s.ready);
   const fatal = useAppState((s) => s.fatal);
+  const signInExpired = useAppState((s) => s.signInExpired);
   // Survives the socket drop, because it is plain state rather than connection state.
   const repairing = useAppState((s) => s.brokerStatus?.repairing ?? false);
   const splashMessage = useAppState((s) => s.splashMessage);
@@ -553,11 +554,12 @@ function AppInner() {
           than over it, and the bar reserves that room itself. */}
       <AppToaster />
 
-      {/* A repair restarts the backend on purpose, so the socket drops and the
-          reconnect can outlast its 35 s give-up window. Telling the user the backend
-          is "lost" at the exact moment they asked for a repair reads as a failure —
-          say what is actually happening instead. */}
+      {/* A repair no longer restarts the backend, so it is not what drops this socket — but
+          a backend can still be lost DURING one (a re-stage, a machine going to sleep), and
+          the reader is then owed both halves: what is wrong, and that the repair they asked
+          for is not lost with it. */}
       {fatal && <FatalOverlay message={repairing ? REPAIRING_MESSAGE : fatal} />}
+      {signInExpired && !fatal && <SignInExpiredBar />}
 
       {/* The conversation routes render nothing themselves; the shell above is
           the whole UI. Rendering the Outlet keeps the matched route mounted so
@@ -567,10 +569,40 @@ function AppInner() {
   );
 }
 
-/** What the overlay says while a broker repair is running — the backend is meant to be
- *  down at that moment, so "backend lost" would be a lie of emphasis. */
+/** What the overlay says when the backend is lost while a broker repair is running.
+ *
+ *  It used to say the backend was MEANT to be down, because the repair restarted it; the
+ *  repair now runs in a unit of the user's own systemd manager and the backend stays up
+ *  through it, so a lost backend is a fault of its own and is named as one. What the sentence
+ *  still owes the reader is the half "backend lost" alone would get wrong: the repair is not
+ *  the backend's child, so it carries on without it and the container comes back regardless.
+ *  `repairing` is plain state rather than connection state, so it is what the page last
+ *  heard — and the sentence claims no more than that. Nor does it promise a reconnect: this
+ *  overlay is what the socket's retries giving up looks like, and from here the way back is a
+ *  wake-up of the tab or the overlay's own Reload. */
 const REPAIRING_MESSAGE =
-  "Repairing sign-in — the Intune container is restarting. This takes about a minute, and the app reconnects on its own.";
+  "Backend lost — the teams-lite server stopped answering while sign-in was being repaired. The repair carries on without it and brings the Intune container back in about a minute; reload once the server is answering again.";
+
+/**
+ * The sign-in IN FRONT OF this app expired (an authenticating proxy — lib/auth-wall.ts), and a
+ * reload, which is what signs in again, would throw something away: a thread's draft, a title,
+ * pasted pictures, a live call. So it is a BAR rather than the blocking overlay — the reader's
+ * words stay on screen to copy — and the reload is their own press.
+ */
+function SignInExpiredBar() {
+  return (
+    <div
+      role="alert"
+      data-testid="sign-in-expired"
+      className="fixed inset-x-0 top-0 z-[100] flex flex-wrap items-center justify-center gap-3 border-b bg-card px-4 py-2 text-sm shadow-pop"
+    >
+      <p>Your sign-in to this app has expired. Copy anything you have not sent, then sign in again.</p>
+      <Button size="sm" onClick={() => window.location.reload()}>
+        Sign in again
+      </Button>
+    </div>
+  );
+}
 
 function FatalOverlay(props: { message: string }) {
   return (

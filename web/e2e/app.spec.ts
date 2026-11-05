@@ -8,6 +8,9 @@ test.describe("app boot", () => {
     // SSR sets the default (light) theme on <html> before any JS runs.
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
     await expect(page.locator('head link[rel="icon"]')).toHaveCount(1);
+    // Fetched WITH cookies, or a sign-in proxy in front of the app answers it with a redirect and
+    // the app cannot be installed (see __root.tsx).
+    await expect(page.locator('head link[rel="manifest"]')).toHaveAttribute("crossorigin", "use-credentials");
   });
 
   test("connects to the backend and loads conversations", async ({ page }) => {

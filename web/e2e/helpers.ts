@@ -641,6 +641,16 @@ export async function emitBrokerStatus(
      *  for the failure a container restart cannot fix (see e2e/signin.spec.ts). */
     can_sign_in?: boolean;
     signin_blocker?: string;
+    /** Why a restart that would cure this failure is not offered here — the sentence the
+     *  container image's backend sends (`intune::repair_blocker` in src/intune.rs). */
+    repair_blocker?: string;
+    /** What the NEXT press of Repair sign-in does: `refuse` answers the real backend's
+     *  refusal of a keyring that is not locked, `refuse_late` answers it only after the NEXT
+     *  call of this helper has broadcast its status (a press crossed by newer news), `hold`
+     *  starts a repair that never ends on its own. Absent is the repair that works — and EVERY
+     *  call sets it, so the `{ ok: true }` reset every spec already owes disarms it too, and
+     *  answers a `refuse_late` press still waiting. */
+    repair?: "refuse" | "refuse_late" | "hold";
   } = {},
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
@@ -660,10 +670,44 @@ export async function emitBrokerStatus(
  *  whole run, and a sign-in left running would put a dialog over every later spec. */
 export async function armSignin(
   page: Page,
-  body: { outcome?: "window" | "immediate" | "refuse" | "fail" | "hold"; reset?: boolean },
+  body: {
+    outcome?: "window" | "immediate" | "refuse" | "fail" | "hold";
+    reset?: boolean;
+    /** The next N frame reads answer `{moved: true}`, as the backend does on the tick it moves a
+     *  window that hung off its screen. */
+    moved_frames?: number;
+  },
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: { kind: "signin", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/** Arm an EMBEDDED backend's own Intune container, as `broker_status.intune` states it — or
+ *  reset it to host mode (`{ reset: true }`).
+ *
+ *  Merged into the mock's current broker status (one with no failure yet is given the "no
+ *  account" failure an unenrolled container answers with, so the banner is raised), with
+ *  `can_enroll` DERIVED as the backend derives it — up, no helper at work, no registration — and
+ *  `can_portal_sign_in` beside it: the same, on a REGISTERED container whose broker holds no
+ *  account. A spec MUST reset it — `armSignin(page, { reset: true })` does too — because one mock
+ *  process serves the whole run. */
+export async function armIntune(
+  page: Page,
+  body: {
+    helper?: "boot" | "repair" | "portal" | null;
+    initialized?: boolean;
+    registered?: boolean;
+    running?: boolean;
+    /** What the broker's silent call answers once an account is signed in through the portal:
+     *  `refuses` is the fresh account's shape, where only an interactive call mints. */
+    account_probe?: "answers" | "refuses";
+    reset?: boolean;
+  },
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: { kind: "intune", ...body },
   });
   expect(res.ok()).toBeTruthy();
 }
@@ -850,6 +894,19 @@ export async function fetchAgentModes(page: Page): Promise<{
   providers: { name: string; available: boolean; enabled: boolean; model: string | null }[];
   unrestricted: boolean;
   default_provider: string;
+  cli_auto_update: boolean;
+  clis: { name: string; managed: boolean; version: string | null }[];
+  auth: {
+    claude_method: string;
+    anthropic_key: boolean;
+    bedrock: { region: string; kind: string } | null;
+    vertex: { project: string; region: string; service_account: string | null } | null;
+    foundry: { resource: string } | null;
+    secrets: { anthropic_key: string | null; bedrock: string | null; foundry: string | null };
+  };
+  claude_login: { email: string; plan: string } | null;
+  claude_signin: boolean;
+  opencode: string[];
 }> {
   const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/agent`);
   expect(res.ok()).toBeTruthy();
@@ -876,6 +933,48 @@ export async function setAgentProviders(
       body === "reset"
         ? { kind: "agent_providers", reset: true }
         : { kind: "agent_providers", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Arm what the mock's pretend machine holds of an agent CLI's install (see `{kind:"agent_cli"}` in
+ * mock/server.ts): a copy this app installed (`installed`), a newer release upstream (`latest`), a
+ * platform with no build (`installable`), a refusal of the next install (`fail`), or an install
+ * that holds at its download until `release`. A spec that arms any of it MUST reset afterwards.
+ */
+export async function setAgentCli(
+  page: Page,
+  body:
+    | {
+        installed?: Record<string, string>;
+        latest?: Record<string, string>;
+        installable?: Record<string, boolean>;
+        fail?: string;
+        hold?: boolean;
+        release?: boolean;
+      }
+    | "reset",
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: body === "reset" ? { kind: "agent_cli", reset: true } : { kind: "agent_cli", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Arm how the mock's agent CLIs sign in (src/agent_auth.rs): a Claude account already signed in,
+ * keys opencode already holds — or put it all back.
+ *
+ * **Reset it afterwards** (`setAgentAuth(page, "reset")`). One mock process serves the whole run,
+ * and an account left signed in changes every later Settings pane.
+ */
+export async function setAgentAuth(
+  page: Page,
+  body: { claude_login?: boolean; opencode?: string[] } | "reset",
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: body === "reset" ? { kind: "agent_auth", reset: true } : { kind: "agent_auth", ...body },
   });
   expect(res.ok()).toBeTruthy();
 }

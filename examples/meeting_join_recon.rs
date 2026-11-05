@@ -10,8 +10,7 @@
 // the SHAPE rather than the values — a join URL is a key to a real meeting, and this
 // output ends up in a terminal, a journal or a transcript.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example meeting_join_recon
+//   cargo run --example meeting_join_recon
 use anyhow::{Context, Result};
 
 /// The window to read, as arguments — no date crate in this tree, and a window the

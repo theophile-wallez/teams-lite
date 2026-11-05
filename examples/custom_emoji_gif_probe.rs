@@ -11,8 +11,7 @@
 // It is READ-ONLY: it fetches an object the user already uploaded and writes nothing
 // to the tenant. It names no conversation and posts nothing.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example custom_emoji_gif_probe
+//   cargo run --example custom_emoji_gif_probe
 //
 use anyhow::{Context, Result};
 

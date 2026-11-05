@@ -1,0 +1,193 @@
+{{- $fullname := include "teams-lite.fullname" . -}}
+{{- $embedded := include "teams-lite.embedded" . -}}
+teams-lite is starting as {{ $fullname }}-0 in namespace {{ .Release.Namespace }}.
+
+{{- if .Values.readOnly }}
+
+READ-ONLY: this backend reads the account and refuses every write — no send, no call, no push.
+{{- if $embedded }}
+It never boots its Intune container either (booting one is a write), so it never signs in: it
+shows what its store already holds and reaches Teams for nothing. Installed read-only from the
+start, it has a fresh store claim that is EMPTY and stays so — the app starts and shows nothing.
+To read a history, point persistence.existingClaim at a store owned by uid 1000, or switch an
+install that has one — at the chart version it ALREADY runs: --reuse-values on a newer chart
+renders that chart against the old one's defaults, which its strict schema refuses as soon as a
+key moved, and moves the app to a new image.
+
+  version=$(helm -n <namespace> get metadata <release> -o json | jq -r .version)
+  helm -n <namespace> upgrade <release> <chart> --version "${version:?}" --reuse-values --set readOnly=true
+{{- end }}
+{{- else if $embedded }}
+
+This is a send-capable Teams client, signed in through an Intune container of its OWN that the pod
+boots inside itself (broker.mode=embedded). Whatever can open its web port is handed the write
+token and can post as the account enrolled there.
+{{- else }}
+
+This is a send-capable Teams client signed in as the node's user ({{ .Values.hostUser.uid }}:{{ .Values.hostUser.gid }}).
+Whatever can open its web port is handed the write token and can post as them.
+{{- end }}
+{{- if include "teams-lite.oauth2Proxy" . }}
+{{- $emails := .Values.auth.oauth2Proxy.emails }}
+
+In front of it, oauth2-proxy signs in against {{ .Values.auth.oauth2Proxy.issuerUrl }} and lets in
+{{ len $emails }} address{{ if gt (len $emails) 1 }}es{{ end }} and nobody else ({{ join ", " $emails }}).
+{{- with .Values.auth.oauth2Proxy.subjects }} Each must also be one of {{ len . }}
+user id{{ if gt (len .) 1 }}s{{ end }} at the provider ({{ join ", " . }}), which nobody but the provider can mint.
+{{- else }}
+ONLY THE ADDRESS IS CHECKED. On a provider where anybody may register an organization or an
+account, or where another organization's admin (or Microsoft Entra's tenant) sets a user's
+address, somebody else can be given yours — pin your own user id with auth.oauth2Proxy.subjects.
+{{- end }}
+The web front listens on the pod's own loopback, so the sign-in is the only way to it — for the
+Service, every route, every other pod and the node alike. A sign-in lasts {{ .Values.auth.oauth2Proxy.cookieExpire }}; the page signs
+in again by itself when it runs out. Register {{ include "teams-lite.redirectUrl" . }} as the client's redirect URI.
+{{- if include "teams-lite.networkPolicyApplies" . }}
+A NetworkPolicy keeps other pods away from the sign-in's port too.
+{{- end }}
+{{- else if include "teams-lite.networkPolicyApplies" . }}
+A NetworkPolicy keeps other pods away from that port; nothing keeps out the node itself (every
+process on the machine, every hostNetwork pod there).
+{{- else if not .Values.hostNetwork }}
+NO NetworkPolicy: every pod in the cluster can reach that port.
+{{- end }}
+{{- if and .Values.auth.external (include "teams-lite.publishedBeyondTailnet" .) (not (include "teams-lite.oauth2Proxy" .)) }}
+
+auth.external: the chart was told that something in front of this route authenticates every
+request. It cannot check that — if nothing does, the route is a public door to the account.
+{{- end }}
+
+Open it:
+{{- if .Values.hostNetwork }}
+
+  # The web front is on the NODE's loopback (hostNetwork). From the node: http://127.0.0.1:19443
+  kubectl -n {{ .Release.Namespace }} port-forward pod/{{ $fullname }}-0 19443:19443
+{{- else if include "teams-lite.oauth2Proxy" . }}
+{{- with (include "teams-lite.redirectUrl" .) }}
+
+  # Through the sign-in: {{ printf "https://%s/" (urlParse .).host }}
+{{- end }}
+  # Or from this machine, AROUND it: a port-forward to the POD reaches its loopback, where the web
+  # front listens. Whoever may port-forward in this namespace holds the account either way.
+  kubectl -n {{ .Release.Namespace }} port-forward pod/{{ $fullname }}-0 19443:19443
+{{- else if .Values.httpRoute.enabled }}
+
+  # Through the Gateway{{ with .Values.httpRoute.hostnames }} at https://{{ first . }}/{{ end }}, or straight from this machine:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} 19443:{{ .Values.service.port }}
+{{- else if .Values.ingress.enabled }}
+
+  # Through the Ingress{{ with .Values.ingress.className }} ({{ . }}){{ end }}, or straight from this machine:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} 19443:{{ .Values.service.port }}
+{{- else }}
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} 19443:{{ .Values.service.port }}
+  # then http://127.0.0.1:19443
+{{- end }}
+
+Where it stands:
+
+  kubectl -n {{ .Release.Namespace }} logs -f {{ $fullname }}-0
+{{- if $embedded }}
+  # As the image's own user: the Intune container's bus authenticates the uid that booted it,
+  # and root is not mapped inside it.
+  kubectl -n {{ .Release.Namespace }} exec {{ $fullname }}-0 -- setpriv --reuid=teams --regid=teams --init-groups -- teams-lite-intune-status
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} exec {{ $fullname }}-0 -- teams-lite-intune-status
+{{- end }}
+{{- if and $embedded (not .Values.readOnly) }}
+
+THE FIRST START downloads the Intune container's image — about 1.7 GB — into the claim
+intune-{{ $fullname }}-0 ({{ .Values.broker.embedded.persistence.size }}). The logs show it, and the app says "Setting up the Intune
+container…" meanwhile ("Starting the Intune container…" on a later boot).
+{{- if .Values.broker.embedded.import.secretName }}
+It then imports the enrollment backup in Secret {{ .Values.broker.embedded.import.secretName }} (key {{ .Values.broker.embedded.import.key }}) — once,
+while this pod's state holds no device registration. STOP that enrollment on the machine it came
+from: this is a MOVE, and two live copies of one device are unmeasured. Once it is imported, drop
+the Secret — the import's own upgrade, pinned to the chart version this release runs
+(--version {{ .Chart.Version }} --reuse-values --set broker.embedded.import.secretName=""; never an
+unpinned --reuse-values, which renders a newer chart against this one's defaults) — then delete it.
+{{- else }}
+No enrollment backup is imported (broker.embedded.import.secretName), so ENROLL the device from the
+app: once the container is up it offers "Enroll this device" and draws the enrollment window in
+the page.
+{{- end }}
+
+It boots only on a node whose kernel permits unprivileged user namespaces. On Ubuntu 23.10 and
+later (24.04 LTS included) that means kernel.apparmor_restrict_unprivileged_userns=0, set ON THE
+NODE: while it is 1 the Intune container refuses to start, privileged or not, and the logs say
+"AppArmor restricts unprivileged user namespaces". A pod cannot set it (it is not a namespaced
+sysctl), and an AppArmor profile does not get past that check.
+{{- if .Values.broker.embedded.userNamespaces }}
+
+UNVERIFIED — pod user namespaces (broker.embedded.userNamespaces) instead of a privileged
+container. Nothing about this shape has been run. It needs containerd 2.1 or later with writable
+cgroups, the UserNamespacesSupport and ProcMountType feature gates, volumes that support idmapped
+mounts, the kubelet's userNamespaces.idsPerPod at 196608 or more (uid 1000 and the 65536
+subordinate ids from 100000), and a seccomp profile allowing unshare, mount and setns.
+{{- else }}
+
+It runs PRIVILEGED: it boots a whole Intune container inside itself.
+{{- end }}
+A namespace enforcing the `baseline` or `restricted` Pod Security level refuses it — label this one
+`pod-security.kubernetes.io/enforce=privileged`.
+
+Its Intune state (the claim above) is kept by `helm uninstall`: it is the device's enrollment.
+A locked Intune keyring is repaired by the pod itself, and the sign-in window is served into the
+app — both without hostNetwork, which this mode refuses.
+{{- if .Values.broker.embedded.vmIsolated }}
+
+DECLARED — a microVM runtime (broker.embedded.vmIsolated): the entrypoint lets this pod boot in
+the kernel's INITIAL network namespace on that word alone (TEAMS_LITE_NETNS_IS_OWN=1), because
+under Kata Containers or Firecracker that namespace is the guest kernel's, the sandbox's own.
+Nothing in the pod can check it. On a pod that shares the node's kernel the same namespace IS the
+node's network — hostNetwork by another name — and the Intune container would take the :99 of
+one already running there: set it only where the pod runs in a VM of its own. The chart does not
+choose that runtime, and no microVM runtime has run this image (UNVERIFIED).
+{{- end }}
+{{- else if $embedded }}
+
+It keeps the claim intune-{{ $fullname }}-0 all the same, mounted read-only, so turning readOnly off
+later is a `helm upgrade` (a StatefulSet cannot change its claims in place), and `helm uninstall`
+keeps it. It runs UNPRIVILEGED — privilege is what booting an Intune container costs, and this
+release boots nothing — with only the capabilities its entrypoint uses as root: to take over a
+fresh store claim's root (the backend creates its store there), to drop to the image's user, and
+to pass that user the stop signal. By the Pod Security Standards that is
+`baseline`; `restricted` refuses it, since it starts as root and drops itself.
+{{- if .Values.broker.embedded.userNamespaces }}
+broker.embedded.userNamespaces is an alternative to privilege, so with none to replace it is not
+rendered here.
+{{- end }}
+{{- if .Values.broker.embedded.vmIsolated }}
+broker.embedded.vmIsolated relaxes a network-namespace check only a boot makes, so with nothing
+booted it is not rendered here.
+{{- end }}
+{{- if .Values.broker.embedded.import.secretName }}
+The enrollment backup in Secret {{ .Values.broker.embedded.import.secretName }} is not mounted: a read-only release imports nothing,
+and the archive is the device's own keys.
+{{- end }}
+{{- end }}
+{{- if $embedded }}
+
+KUBERNETES IS UNVERIFIED: the embedded boot was measured under Docker only.
+{{- end }}
+{{- if eq .Values.broker.mode "intuneContainer" }}
+
+The pod reaches the identity broker through the node's /proc, so it must run ON the machine whose
+intune-container state is {{ .Values.broker.intuneContainer.stateDir }}, on a Kubernetes that runs
+directly on that machine (never kind, k3d or minikube's docker driver, whose nodes are containers).
+{{- if not .Values.nodeSelector }}
+On a cluster with more than one node, pin it there with nodeSelector.
+{{- end }}
+It needs the node's PID namespace: a namespace enforcing the `baseline` or `restricted` Pod
+Security level refuses it — label this one `pod-security.kubernetes.io/enforce=privileged`.
+{{- end }}
+{{- if and (not $embedded) (not .Values.hostNetwork) }}
+
+The broker's sign-in WINDOW cannot be served into the app without hostNetwork; the app says so,
+and the automatic re-sign-in still works. A locked Intune keyring is repaired on the node
+(`intune-container stop && intune-container start`), never from the pod.
+{{- end }}
+{{- if not .Values.persistence.enabled }}
+
+NO PERSISTENCE: the store is an emptyDir and is lost with the pod.
+{{- end }}

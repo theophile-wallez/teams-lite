@@ -611,9 +611,14 @@ export type BrokerStatus = {
   detail: string;
   consecutive_failures: number;
   /** Whether the backend can restart the Intune container for this failure. False
-   *  for every failure a container restart cannot fix, and on a read-only backend. */
+   *  for every failure a container restart cannot fix, on a read-only backend, and on a
+   *  machine with no Intune container (`intune::repair_available` in src/intune.rs). It does
+   *  NOT say the keyring is locked: that is asked when the button is pressed, and a press on a
+   *  keyring that is not is refused with a sentence the banner shows. */
   can_repair: boolean;
-  /** True while a repair runs, so every open client disables its button. */
+  /** True while a repair runs, so every open client disables its button. The backend stays up
+   *  through a repair and sends this back as `false` when its unit ends — whether or not
+   *  sign-in came back, which is the broker's own `ok` to say. */
   repairing: boolean;
   /** Whether this app can serve the broker's OWN sign-in window for this failure — the
    *  remedy for the one a container restart cannot fix (see `can_sign_in` in
@@ -625,6 +630,47 @@ export type BrokerStatus = {
   /** Why a sign-in cannot be served, when a failure would otherwise call for one: the
    *  broker's display is gone, or it has none at all. Empty when there is nothing to say. */
   signin_blocker?: string;
+  /** Why the container restart that WOULD cure this failure is not offered HERE, or empty:
+   *  teams-lite's container image cannot restart the host's Intune container
+   *  (`intune::repair_blocker` in src/intune.rs). Without it the banner's fallback sentence —
+   *  that a restart will not fix this — is what an image showed, and it is false there. Absent
+   *  on a backend too old to say, which reads as empty. */
+  repair_blocker?: string;
+  /** This backend's OWN Intune container, when it has one (`intune_status_payload` in
+   *  src/bin/server.rs): `null` in host mode — where the container is the user's and the fields
+   *  above say everything there is — and absent on a backend too old to know about embedded
+   *  mode. Both read as host mode, which draws exactly what this banner always drew. */
+  intune?: EmbeddedIntune | null;
+};
+
+/** Which lifecycle helper of the embedded Intune container is at work (`Helper` in
+ *  src/intune_embedded.rs): starting it (`boot`, which is also the first start's ~1.7 GB pull),
+ *  repairing a locked keyring (`repair`), or holding the Intune portal open for an enrollment
+ *  (`portal`). One at a time, on the container's own volume. */
+export type IntuneHelper = "boot" | "repair" | "portal";
+
+/** What an EMBEDDED backend says about its own Intune container — the one teams-lite's image
+ *  boots, repairs and enrolls inside itself (src/intune_embedded.rs). Cheap reads on the
+ *  backend's side, built into every `broker_status`. */
+export type EmbeddedIntune = {
+  mode: "embedded";
+  /** The helper at work right now, or null. */
+  helper: IntuneHelper | null;
+  /** Whether the container has been set up (its rootfs pulled and provisioned). */
+  initialized: boolean;
+  /** Whether it holds a device registration — enrolled here, or imported from a backup. */
+  registered: boolean;
+  /** Whether it is up: a live leader and its broker's bus. */
+  running: boolean;
+  /** Whether "Enroll this device" may be offered: a send-capable backend, a container that is
+   *  up, no helper at work, and no registration yet. The backend's answer, never derived here. */
+  can_enroll: boolean;
+  /** Whether the Intune portal may be offered to sign an ACCOUNT in again: the same gates as an
+   *  enrollment, but on a container that IS registered and whose broker holds no account
+   *  (`portal_purpose` in src/bin/server.rs). The press is the same `intune_enroll`, and the
+   *  backend decides which the portal is opened for. Absent on a backend too old to offer it,
+   *  which reads as false. */
+  can_portal_sign_in?: boolean;
 };
 
 /** Where an interactive sign-in has got to (see `Phase` in src/signin.rs).
@@ -635,8 +681,25 @@ export type BrokerStatus = {
  *  Primary Refresh Token, in which case the reader is never shown a page at all. */
 export type SigninPhase = "idle" | "starting" | "waiting" | "done" | "cancelled" | "failed";
 
+/** What a served session is for (see `Kind` in src/signin.rs): signing in again, or a session
+ *  of the Intune PORTAL in an embedded backend's own Intune container — which the wire calls
+ *  `enroll` whatever it is for, with `purpose` beside it. */
+export type SigninKind = "signin" | "enroll";
+
+/** What a portal session is for (`PortalPurpose` in src/signin.rs): enrolling a container that
+ *  holds no registration, or signing an account in again on one that does but whose broker holds
+ *  none. */
+export type PortalPurpose = "enroll" | "account";
+
+/** What `signin_frame` answers: one frame of the window — or, on the tick the backend had to move
+ *  a window that hung off its screen (`SigninWindow::capture_or_place`), `{moved: true}` and no
+ *  picture, because the rows the move brought on screen are not drawn yet. */
+export type SigninFrameAnswer = { width: number; height: number; png: string } | { moved: true };
+
 /** Wire shape of the backend `signin_status` event and of `signin_status`. */
 export type SigninState = {
+  /** Absent on a backend too old to enroll anything, which reads as `signin`. */
+  kind?: SigninKind;
   phase: SigninPhase;
   /** Why it failed, in words for the reader. Empty unless `phase` is `failed`. */
   detail: string;
@@ -647,6 +710,19 @@ export type SigninState = {
   waited_ms: number;
   /** The size of the broker's own window, once it is up. Null in every other phase. */
   window: { width: number; height: number } | null;
+  /** A PORTAL session only: what the portal is open for. Absent for a sign-in, and on a backend
+   *  too old to sign an account in through the portal — which reads as `enroll`, the only purpose
+   *  such a backend has. */
+  purpose?: PortalPurpose;
+  /** A PORTAL session only: whether the container holds a device registration yet. It lands in
+   *  the middle of the portal's steps, and the portal goes on after it — so the page is told, and
+   *  the reader closes the portal once it says it is done. Absent for a sign-in. */
+  registered?: boolean;
+  /** A live flow the reader has CANCELLED, which is waiting for what it asked to stop: the
+   *  portal's helper takes seconds to close the portal, and the session settles only once it has
+   *  (src/signin.rs). Nothing is served meanwhile, so the page says it is closing. Absent on a
+   *  backend too old to say, which reads as false. */
+  stopping?: boolean;
 };
 
 /** What the app holds before the backend has said anything about a sign-in.

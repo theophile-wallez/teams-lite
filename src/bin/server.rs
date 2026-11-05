@@ -113,8 +113,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use teams_lite::store::{Message, Store};
 use teams_lite::teams::Session;
 use teams_lite::{
-    agent, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
-    channel_layout, custom_emoji,
+    agent, agent_auth, agent_cli, agent_markdown, agent_models, agent_persona, agent_policy, auth, calendar, calling,
+    channel_layout, custom_emoji, intune, intune_embedded,
     mail, push, push_policy, retry,
     sender_icon, signin, store, teams,
     teams_activity, teams_avatars, teams_media, teams_members, teams_presence, teams_profiles,
@@ -486,12 +486,22 @@ const OUTWARD_METHODS: [&str; 23] = [
 /// authenticates as the user, `signin_frame` answers with a picture of a sign-in page, and
 /// `signin_input` presses keys into it. `signin_frame` is gated as hard as the rest for that
 /// reason: a read whose answer is the pixels of somebody's password field is not a read.
-const MACHINE_METHODS: [&str; 35] = [
+///
+/// `intune_enroll` is the same surface pointed at the other thing an embedded image needs a
+/// human for: ENROLLING its own Intune container (see [`teams_lite::signin`]'s `Kind::Enroll`) —
+/// or, on a container that is enrolled but whose broker holds no account, signing that account
+/// in again through the same portal (the backend decides which, see `portal_purpose`). It starts
+/// the portal helper, which opens the Intune portal inside the container, and from then on the
+/// four methods above serve that window — so it is gated as a sign-in is, and more than one: an
+/// enrollment registers a DEVICE in the user's organization, made as them, and nothing in this
+/// app takes a registration back.
+const MACHINE_METHODS: [&str; 46] = [
     "repair_broker",
     "signin_start",
     "signin_frame",
     "signin_input",
     "signin_cancel",
+    "intune_enroll",
     "restart_backend",
     "update_download",
     "update_apply",
@@ -517,6 +527,25 @@ const MACHINE_METHODS: [&str; 35] = [
     "agent_set_provider",
     "agent_set_unrestricted",
     "agent_stop",
+    // The agent CLIs this app installs (see `teams_lite::agent_cli`): installing or updating one
+    // downloads a program from the internet that a chat message then starts, removing one takes it
+    // away, and the switch decides whether new releases are taken with nobody pressing anything.
+    // Asking whether a release is newer (`agent_cli_check`) stays open: it changes nothing.
+    "agent_cli_install",
+    "agent_cli_remove",
+    "agent_cli_set_auto_update",
+    // How those CLIs SIGN IN (see `teams_lite::agent_auth`): an API key or a cloud account this app
+    // then hands to every run, and a Claude account signed in through Claude Code's own login. Each
+    // decides which account a chat message's agent runs under and is billed to, and the first holds
+    // credentials — so they are gated as the provider settings are. Reading how a CLI signs in rides
+    // in `agent_status`, which names no secret.
+    "agent_auth_set",
+    "agent_signin_start",
+    "agent_signin_finish",
+    "agent_signin_cancel",
+    "agent_signout",
+    "agent_opencode_key_set",
+    "agent_opencode_key_remove",
     // An AI READING of a merge request's diff. It starts a program on this machine and puts the
     // user's employer's code in a prompt that reaches whichever model provider their default CLI is
     // signed in to — so it is gated exactly as `agent_set_mode` is, and for the same reason. Reading
@@ -585,6 +614,11 @@ fn machine_effect(method: &str) -> &'static str {
         "signin_frame" => "answers with a picture of the sign-in page open on this machine",
         "signin_input" => "presses keys into the sign-in page open on this machine",
         "signin_cancel" => "closes the sign-in window open on this machine",
+        "intune_enroll" => {
+            "opens the Intune portal in this container's own Intune container, to enroll it as a \
+             device of the user's organization — a registration made as the user — or to sign \
+             the user's account in on it again"
+        }
         "restart_backend" => {
             "restarts this app's backend on this machine, which drops every open page's \
              connection and cuts off a local agent that is writing a reply"
@@ -627,6 +661,29 @@ fn machine_effect(method: &str) -> &'static str {
              signed in to"
         }
         "agent_stop" => "stops a local agent this machine is running mid-answer",
+        "agent_cli_install" => {
+            "downloads a coding agent's program onto this machine from its vendor, which a chat \
+             message then starts"
+        }
+        "agent_cli_remove" => "deletes a coding agent's program this app installed on this machine",
+        "agent_cli_set_auto_update" => {
+            "decides whether this machine downloads and runs new releases of the coding agents it \
+             installed with nobody pressing anything"
+        }
+        "agent_auth_set" => {
+            "decides which account the coding agents on this machine sign in with — an API key or a \
+             cloud account it then hands to every run, billed to whoever owns it"
+        }
+        "agent_signin_start" => "starts Claude Code's own sign-in on this machine",
+        "agent_signin_finish" => {
+            "signs Claude Code on this machine in to the account a sign-in code belongs to"
+        }
+        "agent_signin_cancel" => "cancels Claude Code's sign-in on this machine",
+        "agent_signout" => "signs Claude Code on this machine out of its account",
+        "agent_opencode_key_set" => {
+            "gives opencode on this machine an API key for a model provider, billed to whoever owns it"
+        }
+        "agent_opencode_key_remove" => "takes an API key away from opencode on this machine",
         "seal_set" => {
             "decides that this machine encrypts every message it posts to a conversation, and \
              under which passphrase — so a wrong one makes every message unreadable to the \
@@ -730,14 +787,42 @@ const CALL_RING_TIMEOUT: Duration = Duration::from_secs(60);
 /// button that stops appearing.
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(120);
 
-/// The systemd unit that repairs the broker by restarting the Intune container.
-/// Never run `intune-container` from here: one unit keeps the rate limit in one
-/// place, counted across the health timer, this backend and the in-app button.
-const BROKER_REPAIR_UNIT: &str = "teams-lite-broker-repair.service";
-
-/// The floor between two repairs this process asks for. Shorter than the unit's own
-/// limit (three an hour) so the backend refuses first and the journal names it.
+/// The floor between two AUTOMATIC broker repairs on this machine — at most three an hour,
+/// which is the limit the installed repair unit carried. Counted in the store, so it covers
+/// every backend on the machine and survives the restarts it used to be reset by (see
+/// `Store::claim_broker_repair`). A keyring that re-locks faster than this needs a person,
+/// and the app's own button is how one asks.
 const REPAIR_MIN_INTERVAL: Duration = Duration::from_secs(20 * 60);
+
+/// How long after boot the keyring health check first looks, and how often after that (see
+/// `spawn_broker_health`). Five minutes first, so a container that is still coming up is not
+/// read as a broken one; then every fifteen, which is the cadence the timer it replaced kept.
+const BROKER_HEALTH_FIRST: Duration = Duration::from_secs(5 * 60);
+const BROKER_HEALTH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// How many repairs this process is following right now (see `Ctx::follow_repair`), so a page
+/// that connects in the middle of one is told so in its greeting. Process-wide, like the broker
+/// state it sits beside.
+static BROKER_REPAIRS_FOLLOWED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many embedded-container BOOTS this process is following (see `Ctx::follow_boot`). The
+/// greeting reads which helper is at work from the helper slot itself, live; this count covers
+/// the moment between spawning a boot and its helper taking the slot, in which the page must
+/// already say "Starting…" rather than nothing.
+static BOOTS_FOLLOWED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many PORTAL helpers this process is following to their end without a session that owns
+/// them (see `Ctx::follow_portal_helper`). Not read by the greeting — the slot says live that the
+/// portal is open — but by the followers themselves: two triggers finding the same helper (the
+/// startup boot and the health check both reach `Ctx::follow_running_work`) follow it once, so its
+/// end is announced once.
+static PORTALS_FOLLOWED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How long the follower asks the broker after a repair before it says the repair is over. A
+/// broker call has no deadline of its own; this is long enough for a silent acquisition on a
+/// container that has just come up, and short enough that a broker that never answers does
+/// not hold "Repairing…" on the page.
+const REPAIR_SETTLE_PROBE: Duration = Duration::from_secs(30);
 
 /// How long an applied update waits for the launcher to restart the app before this
 /// backend concludes that nothing will (see `Ctx::apply_update`). Several seconds
@@ -1126,6 +1211,49 @@ fn write_lock_payload(presented: Option<&str>, token: Option<&str>, pinned: bool
     })
 }
 
+/// The sentence a press of "Repair sign-in" is refused with, per state of the keyring. Each one
+/// names what is true and the next move, because "the keyring is not locked" and "the container
+/// is not running" are different situations with different remedies — and the first version of
+/// this said "this machine runs no Intune container" about a container that was merely stopped.
+///
+/// In EMBEDDED mode two of them name a different next move, because the container is the app's
+/// own: nobody runs `intune-container start` in a pod — the app starts it itself (the press that
+/// earned this sentence has just asked for that boot, see `Ctx::start_broker_repair`), and its
+/// first start is a download worth stating the size of.
+fn repair_refusal(keyring: &intune::KeyringCheck) -> String {
+    repair_refusal_in(keyring, intune_embedded::embedded())
+}
+
+/// [`repair_refusal`], with the mode handed in so both sets of sentences are tested.
+fn repair_refusal_in(keyring: &intune::KeyringCheck, embedded: bool) -> String {
+    match keyring {
+        intune::KeyringCheck::Unlocked => "Not restarting the Intune container: its login keyring \
+             is unlocked. A restart only repairs a locked keyring, and it would take sign-in down \
+             for a minute for nothing."
+            .to_string(),
+        intune::KeyringCheck::NotRunning if embedded => "Not restarting the Intune container: it \
+             is not running right now, so there is no locked keyring to repair. This app starts \
+             it itself instead — its first start downloads about 1.7 GB, so it can take a while."
+            .to_string(),
+        intune::KeyringCheck::NotRunning => "Not restarting the Intune container: it is not \
+             running right now (stopped, starting up, or being repaired). If it does not come \
+             back on its own, start it with `intune-container start`."
+            .to_string(),
+        intune::KeyringCheck::NoContainer if embedded => "Not restarting anything: this app's \
+             Intune container has not been set up yet. The app sets it up on its own when it \
+             starts — that first start downloads about 1.7 GB."
+            .to_string(),
+        intune::KeyringCheck::NoContainer => "Not restarting anything: intune-container is not \
+             set up on this machine, so there is no container to restart."
+            .to_string(),
+        intune::KeyringCheck::Unknown(why) => format!(
+            "Not restarting the Intune container: its keyring could not be read ({why}), and a \
+             restart on a guess would take sign-in down for a minute."
+        ),
+        intune::KeyringCheck::Locked => String::new(),
+    }
+}
+
 /// The `broker_status` event payload: what the backend thinks of the identity
 /// broker, and whether it can do anything about it.
 ///
@@ -1139,16 +1267,17 @@ fn broker_status_payload(repairing: bool) -> Value {
     // per field paid for the whole walk twice each time.
     let display = teams_lite::xwindow::broker_display();
     let state = auth::broker_state().unwrap_or_default();
-    // Only the one signature whose known cause a container restart fixes, and never
-    // from a read-only backend. Not checked here: whether this host HAS an Intune
-    // container. It does not need to be — a locked keyring is a containerized-Intune
-    // failure, and a classic host produces `Unreachable` or `Refused` instead, both of
-    // which already answer false. The repair unit re-checks anyway
-    // (ConditionFileIsExecutable + its ExecCondition), so a wrong yes costs nothing.
-    let can_repair = state
-        .failure
-        .map(|f| f.is_repairable() && !read_only())
-        .unwrap_or(false);
+    // Only the signatures whose known cause a container restart fixes, and only where there
+    // is a container to restart and this backend may restart it (`intune::repair_available`,
+    // which is false read-only and on a classic-Intune host). Whether the keyring really is
+    // locked is asked when the button is pressed, not here: this payload is built in every
+    // greeting, and a D-Bus round trip per connection is not what a banner is worth.
+    let repairable = state.failure.is_some_and(|f| f.is_repairable());
+    let can_repair = repairable && intune::repair_available();
+    // Why a restart that WOULD cure this failure is not offered — said only where it is the
+    // cure, so a failure no restart fixes keeps the sentence that tells the reader so.
+    let repair_blocker = if repairable && !can_repair { intune::repair_blocker() } else { None };
+    let repairing = repairing || BROKER_REPAIRS_FOLLOWED.load(Ordering::SeqCst) > 0;
     json!({
         "ok": state.is_ok(),
         // Whether this app can serve the broker's own sign-in for this failure. Answered
@@ -1168,8 +1297,205 @@ fn broker_status_payload(repairing: bool) -> Value {
         "detail": state.detail,
         "consecutive_failures": state.consecutive_failures,
         "can_repair": can_repair,
+        // What a restart cannot be asked for HERE, in the words the reader needs, or empty:
+        // teams-lite's container image cannot restart the host's Intune container, and the
+        // banner's fallback sentence — that a restart will not fix this — would be false.
+        "repair_blocker": repair_blocker.unwrap_or(""),
         "repairing": repairing,
+        // The embedded container's own state, or null in host mode — where the container is the
+        // user's and this backend has nothing to say about it beyond the fields above.
+        "intune": intune_status_payload(state.failure),
     })
+}
+
+/// Which portal helper [`Ctx::follow_portal_helper`] follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortalHelper {
+    /// One a session of THIS process gave up on (its deadline, or a stop it did not answer in
+    /// time), and has already asked to close.
+    LeftBySession,
+    /// One with no session here at all — an earlier backend's, orphaned when it restarted — with
+    /// its pid as the slot named it when it was found (`None` when the pid could not be
+    /// confirmed: it is then only followed).
+    Unowned(Option<u32>),
+}
+
+/// What a follower (`Ctx::follow`) watches: the broker repair, or the embedded container's boot
+/// — each one this process started (`Some`, whose own end says how it went) or one found running
+/// (`None`, which can only be watched until it is gone).
+enum Followed {
+    Repair(Option<intune::RepairJob>),
+    Boot(Option<intune_embedded::HelperChild>),
+}
+
+impl Followed {
+    /// Work this process did not start, found running.
+    fn is_found(&self) -> bool {
+        matches!(self, Self::Repair(None) | Self::Boot(None))
+    }
+}
+
+/// Who asked for an embedded container boot (`Ctx::start_container_boot`), which decides the
+/// floor it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootTrigger {
+    /// The backend coming up: no floor.
+    Startup,
+    /// The health check or the broker observer: the machine-wide floor an automatic repair takes.
+    Automatic,
+    /// A person pressing "Repair sign-in" on a container that is down: always, and it moves the
+    /// floor.
+    Press,
+}
+
+/// What is already running on this machine, in the words a journal line needs: a repair unit
+/// in host mode, the holder of the helper slot in embedded mode.
+fn running_work_description() -> String {
+    if !intune_embedded::embedded() {
+        return "a repair is already running on this machine".to_string();
+    }
+    match intune_embedded::slot_holder() {
+        Some(intune_embedded::SlotHolder::Stop) => "the container is being stopped".to_string(),
+        Some(holder) => format!("the container's {} helper is already at work", holder.tag()),
+        None => "a container helper was at work a moment ago".to_string(),
+    }
+}
+
+/// What is already at work on the Intune container when a repair is asked for — which decides
+/// what the request is answered with ([`running_work_answer`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkInHand {
+    /// A repair: the very thing a press asked for is under way, and is followed.
+    Repair,
+    /// Something that is NOT a repair holds the embedded container's helper slot — a boot, an
+    /// enrollment's portal, or the stop — so no repair can start, and none was.
+    Busy(intune_embedded::SlotHolder),
+}
+
+/// What is in hand, read again right after something was found running: in host mode that is a
+/// repair unit, by definition; in embedded mode it is whoever holds the slot, and `None` when the
+/// holder ended between the two reads — which is nothing in hand at all.
+fn work_in_hand() -> Option<WorkInHand> {
+    if !intune_embedded::embedded() {
+        return Some(WorkInHand::Repair);
+    }
+    Some(match intune_embedded::slot_holder()? {
+        intune_embedded::SlotHolder::Repair => WorkInHand::Repair,
+        holder => WorkInHand::Busy(holder),
+    })
+}
+
+/// What a repair request is answered with when work is already in hand.
+///
+/// `started: true` is RESERVED for a repair that really is under way and followed: a press
+/// answered that way while a portal held the slot reported an outward action that never happened
+/// — the rule this app keeps for the composer and the approval menu alike. So a press against
+/// other work is refused IN WORDS (the page shows the sentence under the button), and an automatic
+/// trigger is told `busy` and by whom, which is what its journal line needs.
+fn running_work_answer(work: WorkInHand, automatic: bool) -> std::result::Result<Value, String> {
+    match (work, automatic) {
+        (WorkInHand::Repair, true) => Ok(json!({ "started": false, "reason": "already_running" })),
+        (WorkInHand::Repair, false) => Ok(json!({ "started": true })),
+        (WorkInHand::Busy(holder), true) => {
+            Ok(json!({ "started": false, "reason": "busy", "helper": holder.tag() }))
+        }
+        (WorkInHand::Busy(holder), false) => Err(busy_refusal(holder)),
+    }
+}
+
+/// The sentence a press of "Repair sign-in" is refused with while the embedded container's slot
+/// holds something that is not a repair — what is true, and the next move.
+fn busy_refusal(holder: intune_embedded::SlotHolder) -> String {
+    use intune_embedded::SlotHolder;
+    match holder {
+        SlotHolder::Boot => "Not restarting the Intune container: the app is starting it right now, \
+             and a start unlocks the keyring on its own. Its first start downloads about 1.7 GB, so \
+             it can take a while — wait for it to finish."
+            .to_string(),
+        SlotHolder::Portal => "Not restarting the Intune container: an enrollment has the Intune \
+             portal open in it, and a restart would close it. Finish or cancel the enrollment first."
+            .to_string(),
+        SlotHolder::Stop => "Not restarting the Intune container: it is being powered off, because \
+             this container is stopping."
+            .to_string(),
+        SlotHolder::Repair => "A repair of the Intune container is already running.".to_string(),
+    }
+}
+
+/// Does the machine-wide floor (`Store::claim_broker_repair`) let a start through at
+/// `not_since`? The same comparison the claim makes, asked WITHOUT moving the floor — so a boot
+/// can be refused by the floor before it is spawned and claim the floor only once it has been
+/// (`Ctx::start_container_boot`). An absent or unparseable value lets it through, exactly as the
+/// claim's `CAST(… AS INTEGER)` reads one as 0.
+fn repair_floor_allows(store: &Store, not_since: i64) -> Result<bool> {
+    let last = store
+        .get_setting(intune::SETTING_REPAIR_STARTED_MS)?
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    Ok(last <= not_since)
+}
+
+/// The `intune` field of `broker_status`: `null` in host mode, and in embedded mode what the
+/// page needs to say what this pod's own Intune container is doing and what can be done — which
+/// helper is at work (`"boot"` reads as "Starting…"), whether it is set up, registered and up,
+/// whether an enrollment may be offered, and whether the portal may be offered to sign an
+/// account in again (`can_portal_sign_in`, see [`portal_purpose`]). Cheap reads only
+/// (`intune_embedded::status`, and one more look at the slot): this is built in every greeting.
+fn intune_status_payload(failure: Option<auth::BrokerFailure>) -> Value {
+    if !intune_embedded::embedded() {
+        return Value::Null;
+    }
+    let boot_followed = BOOTS_FOLLOWED.load(Ordering::SeqCst) > 0;
+    let status = intune_embedded::status(boot_followed);
+    let purpose = portal_purpose(&status, failure, || portal_slot_free(&status, boot_followed));
+    json!({
+        "mode": "embedded",
+        "helper": status.helper.map(intune_embedded::Helper::tag),
+        "initialized": status.initialized,
+        "registered": status.registered,
+        "running": status.running,
+        "can_enroll": status.can_enroll,
+        "can_portal_sign_in": purpose == Some(signin::PortalPurpose::Account),
+    })
+}
+
+/// What the Intune portal may be opened FOR right now, or `None` when it may not be opened at all
+/// — the one decision `broker_status` and a press of `intune_enroll` both read, so the offer a
+/// page draws and the press it makes cannot disagree.
+///
+/// TO ENROLL, wherever `intune_embedded::can_enroll` says so: up, the slot free, no registration.
+///
+/// TO SIGN AN ACCOUNT IN AGAIN, on a container that IS registered and whose broker answers
+/// `NoAccount` — an import of a backup whose broker account did not come along, or an account
+/// removed in the portal. Nothing else in embedded mode can mend that: a served sign-in needs an
+/// account to name (`failure_needs_a_human`), a container restart fixes a keyring rather than an
+/// account, and the host-mode sentence "sign in to Intune again" names a tool this image does not
+/// have — the banner used to fall through to exactly that. The portal is how an account is added
+/// on an enrolled device. Every gate an enrollment has holds for it too — a send-capable backend,
+/// a container that is up, a FREE slot — except the registration, which is the other way round;
+/// `can_enroll` is asked with the registration left out to say so, so a gate added there reaches
+/// both. `slot_free` is a closure because the slot is looked at again only when the answer turns
+/// on it: `EmbeddedStatus` names the helper at work but not the STOP, which takes the slot too.
+fn portal_purpose(
+    status: &intune_embedded::EmbeddedStatus,
+    failure: Option<auth::BrokerFailure>,
+    slot_free: impl FnOnce() -> bool,
+) -> Option<signin::PortalPurpose> {
+    if status.can_enroll {
+        return Some(signin::PortalPurpose::Enroll);
+    }
+    let account_missing = matches!(failure, Some(auth::BrokerFailure::NoAccount));
+    if !(status.registered && account_missing && status.running && status.helper.is_none()) {
+        return None;
+    }
+    intune_embedded::can_enroll(!read_only(), status.running, slot_free(), false)
+        .then_some(signin::PortalPurpose::Account)
+}
+
+/// Is the helper slot free for a portal — no helper at work, no boot of this backend's about to
+/// take it, and not held by the STOP (which `EmbeddedStatus.helper` does not name)?
+fn portal_slot_free(status: &intune_embedded::EmbeddedStatus, boot_followed: bool) -> bool {
+    status.helper.is_none() && !boot_followed && !intune_embedded::slot_held()
 }
 
 /// Which broker failures a served sign-in can actually answer.
@@ -1202,12 +1528,59 @@ fn signin_blocker(state: &auth::BrokerState, display: &teams_lite::xwindow::Disp
     display.refusal().unwrap_or_default()
 }
 
+/// How a claim of the one sign-in slot went (`Ctx::claim_signin_slot`).
+enum SigninClaim {
+    /// A session is already live, and is not replaced.
+    Running(Arc<signin::Signin>),
+    /// The session could not even be started; the words are for the reader.
+    Refused(String),
+    /// A new session is running in the slot.
+    Started(Arc<signin::Signin>),
+}
+
+/// Why an enrollment is not offered right now, in the words a press of "Enroll this device" is
+/// answered with — one per reason `intune_embedded::can_enroll` says no, because each has a
+/// different next move: wait for the work in hand to finish, wait for the container to come up,
+/// or nothing at all (there is nothing to enroll).
+fn enroll_refusal(status: &intune_embedded::EmbeddedStatus) -> String {
+    if let Some(helper) = status.helper {
+        let what = match helper {
+            intune_embedded::Helper::Boot => "the app is starting it",
+            intune_embedded::Helper::Repair => "the app is repairing it",
+            intune_embedded::Helper::Portal => "an enrollment is already open",
+        };
+        return format!(
+            "Not enrolling now: the Intune container is busy — {what}. Try again once that has \
+             finished."
+        );
+    }
+    if status.registered {
+        return "Not enrolling: this container already holds a device registration. Enrolling \
+                again would replace a registration that works."
+            .to_string();
+    }
+    if !status.running {
+        return if status.initialized {
+            "Not enrolling yet: this container's Intune container is not running, and the portal \
+             runs inside it. The app starts it on its own — try again once it is up."
+                .to_string()
+        } else {
+            "Not enrolling yet: this container's Intune container has not been set up. The app sets \
+             it up on its own — its first start downloads about 1.7 GB — and enrolling is offered \
+             once it is up."
+                .to_string()
+        };
+    }
+    "Not enrolling: a read-only backend never enrolls a device as the user.".to_string()
+}
+
 /// The `signin_status` payload when no sign-in is going on.
 ///
 /// A shape rather than `null`, so a page reads one field to decide whether to draw the panel
 /// and an older backend's silence is not mistaken for a sign-in that is running.
 fn signin_idle() -> Value {
     json!({
+        "kind": "signin",
         "phase": "idle",
         "detail": "",
         "scope": "",
@@ -1426,6 +1799,197 @@ impl EngineSlot {
     }
 }
 
+/// One agent CLI's install, as every page of THIS process sees it (see `teams_lite::agent_cli`).
+///
+/// Only what is in flight, and what the last check learned, is kept here. What is ON DISK — which
+/// version this app installed, and whether the program a run would start is that copy — is read
+/// fresh on every status, because the disk is shared with every other backend on this machine and a
+/// remembered answer would be a second one.
+#[derive(Debug, Clone, Default)]
+struct AgentCliSlot {
+    /// Where an install is, or `None` while nothing is happening.
+    phase: Option<AgentCliPhase>,
+    received: u64,
+    total: u64,
+    /// Why the last install or check failed, in the words of what happened — an install that did
+    /// not finish must never be left looking like it did.
+    error: String,
+    /// The newest version upstream offers, per the last check of this process.
+    latest: Option<String>,
+    /// When that check ran, epoch ms.
+    checked_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentCliPhase {
+    Resolving,
+    Downloading,
+    Unpacking,
+}
+
+impl AgentCliPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            AgentCliPhase::Resolving => "resolving",
+            AgentCliPhase::Downloading => "downloading",
+            AgentCliPhase::Unpacking => "unpacking",
+        }
+    }
+}
+
+/// Every CLI's slot. Process-wide rather than a field of `Ctx` because `agent_status_json` — which
+/// every agent setter answers with — reads it, and the state really is the process's: there is one
+/// install of a CLI in flight here at a time, whichever page asked.
+static AGENT_CLIS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<agent_cli::Tool, AgentCliSlot>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// One CLI's slot, copied out.
+fn agent_cli_slot(tool: agent_cli::Tool) -> AgentCliSlot {
+    AGENT_CLIS
+        .lock()
+        .map(|slots| slots.get(&tool).cloned().unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// Change one CLI's slot in place.
+fn with_agent_cli_slot<T>(tool: agent_cli::Tool, f: impl FnOnce(&mut AgentCliSlot) -> T) -> Option<T> {
+    let mut slots = AGENT_CLIS.lock().ok()?;
+    Some(f(slots.entry(tool).or_default()))
+}
+
+/// How often a backend asks whether the CLIs this app installed have a newer release. Each check
+/// is one small document per CLI (Anthropic's channel file, npm's record), never GitHub's API.
+const AGENT_CLI_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+/// The first check waits out the start: a backend that boots is busy signing in and syncing, and an
+/// update a few minutes later costs nobody anything.
+const AGENT_CLI_FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+
+// ---- how the agent CLIs sign in (see `teams_lite::agent_auth`) ----------------------------------
+
+/// What Claude Code last said about how it signs in, as THIS process read it — with the environment
+/// a run gets, so "signed in through Amazon Bedrock" means what a run will really use.
+#[derive(Debug, Clone, Default)]
+struct ClaudeAccountSlot {
+    account: Option<agent_auth::ClaudeAccount>,
+    /// Why the last read failed, when it did. A status the page could not get is a sentence.
+    error: String,
+    checked_ms: Option<i64>,
+    /// A background read in flight, so a burst of pages connecting reads once.
+    checking: bool,
+    /// The newest read whose answer landed: an older read finishing later must not overwrite it.
+    seq: u64,
+}
+
+static CLAUDE_ACCOUNT: std::sync::LazyLock<std::sync::Mutex<ClaudeAccountSlot>> =
+    std::sync::LazyLock::new(Default::default);
+static CLAUDE_ACCOUNT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long a read of Claude Code's status stands before a page that connects asks again. A sign-in
+/// made in this app refreshes it at once; this bounds how long one made elsewhere goes unnoticed.
+const CLAUDE_ACCOUNT_FRESH: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Claude Code's own sign-in, waiting for the code its link leads to. One at a time per process:
+/// a second press replaces the first, because its link is the one the reader is about to open.
+struct ClaudeSigninSlot {
+    generation: u64,
+    url: String,
+    started_ms: i64,
+    console: bool,
+    /// The code has been handed over and the CLI is exchanging it — since when, epoch ms.
+    finishing: bool,
+    finishing_since_ms: i64,
+    session: Option<agent_auth::ClaudeLogin>,
+}
+
+impl ClaudeSigninSlot {
+    /// An exchange that has run far past every bound it has — the CLI's minute, the status read,
+    /// the drain — is one whose task is gone, and is no reason to keep the reader waiting.
+    fn finishing_is_stale(&self) -> bool {
+        self.finishing && now_ms().saturating_sub(self.finishing_since_ms) > CLAUDE_SIGNIN_FINISH_STALE_MS
+    }
+}
+
+/// How long an exchange may be "finishing" before it is treated as abandoned: the CLI's own minute,
+/// the 15-second status read after it, and a margin.
+const CLAUDE_SIGNIN_FINISH_STALE_MS: i64 = 150_000;
+
+static CLAUDE_SIGNIN: std::sync::LazyLock<std::sync::Mutex<Option<ClaudeSigninSlot>>> =
+    std::sync::LazyLock::new(Default::default);
+static CLAUDE_SIGNIN_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The Claude Code entry of the static table.
+fn claude_backend() -> &'static agent_policy::Backend {
+    agent_policy::BACKENDS
+        .iter()
+        .find(|backend| backend.name == agent_cli::Tool::Claude.name())
+        .expect("the provider table names claude")
+}
+
+/// How this machine's agents sign in, as stored. Unreadable is the machine's own setup.
+fn agent_auth_config(store: &Store) -> agent_auth::Config {
+    agent_auth::Config::parse(store.get_setting(agent_auth::SETTING).ok().flatten().as_deref())
+}
+
+/// The environment one run of `backend` gets from what the user set up in Settings › AI providers,
+/// with the files it names put back first — a key file deleted under the app is written again rather
+/// than leaving the CLI pointed at nothing.
+///
+/// A service-account key that cannot be written REFUSES the run rather than pointing the CLI at
+/// whatever file is on disk, which may hold the account the user just replaced.
+fn agent_child_env(store: &Store, backend: &agent_policy::Backend) -> Result<agent_auth::ChildEnv> {
+    let Some(tool) = agent_cli::Tool::named(backend.name) else {
+        return Ok(agent_auth::ChildEnv::default());
+    };
+    let config = agent_auth_config(store);
+    let dir = agent_auth::credentials_dir();
+    if let Some(dir) = &dir {
+        if let Err(e) = agent_auth::sync_files(&config, dir) {
+            let needs_file = config.vertex.as_ref().is_some_and(|vertex| vertex.service_account.is_some());
+            if needs_file {
+                return Err(e.context("the Google Vertex AI service-account key could not be written"));
+            }
+            eprintln!("[agent-auth] could not tidy the agents' credentials files: {e:#}");
+        }
+    }
+    Ok(agent_auth::child_env(&config, tool, dir.as_deref()))
+}
+
+/// One backend's `account` block in `agent_status`: how it signs in right now. Never a secret.
+fn agent_account_json(backend: &agent_policy::Backend) -> Value {
+    match agent_cli::Tool::named(backend.name) {
+        Some(agent_cli::Tool::Claude) => {
+            let slot = CLAUDE_ACCOUNT.lock().map(|slot| slot.clone()).unwrap_or_default();
+            let signin = CLAUDE_SIGNIN.lock().ok().and_then(|slot| {
+                slot.as_ref().map(|signin| {
+                    json!({
+                        // The authorize link on claude.com — checked to be one before it got here
+                        // (`agent_auth::login_url`). It carries the flow's `state` and its code
+                        // CHALLENGE, and neither redeems anything: the verifier never leaves the
+                        // CLI (PKCE), so a page that can read this status gains nothing by it that
+                        // it could use. A second page of the user's opens it just as well.
+                        "url": signin.url,
+                        "started_ms": signin.started_ms,
+                        "console": signin.console,
+                        "finishing": signin.finishing,
+                    })
+                })
+            });
+            json!({
+                "account": slot.account.as_ref().map(agent_auth::account_json),
+                "error": slot.error,
+                "checked_ms": slot.checked_ms,
+                "signin": signin,
+            })
+        }
+        Some(agent_cli::Tool::Opencode) => {
+            let text = std::fs::read_to_string(agent_models::opencode_auth_path()).ok();
+            json!({ "credentials": agent_auth::opencode_credentials(text.as_deref()) })
+        }
+        None => Value::Null,
+    }
+}
+
 #[derive(Debug, Default)]
 struct UpdateSlot {
     /// The `update_available` payload, once the check has found a newer release.
@@ -1501,9 +2065,6 @@ struct Ctx {
     /// calendar UI shows exactly one range at a time, and re-reading the month the
     /// user navigated away from would be work nobody is looking at.
     calendar_watch: Arc<Mutex<Option<CalendarWatch>>>,
-    /// When this process last asked systemd for a broker repair, so it cannot loop.
-    /// See {@link REPAIR_MIN_INTERVAL} and `start_broker_repair`.
-    last_repair: Arc<Mutex<Option<std::time::Instant>>>,
     /// The one interactive sign-in this backend may be serving, and nothing else.
     ///
     /// One at a time, because the broker draws one window and a second flow would fight it
@@ -1913,65 +2474,392 @@ impl Ctx {
         let _ = self.events.send(json!({ "event": event, "data": data }));
     }
 
-    /// Ask systemd to run the broker repair unit, unless this process asked for one
-    /// too recently.
+    /// Ask the user's systemd manager — or, in embedded mode, this pod's own repair helper — to
+    /// repair the broker: restart the Intune container, through the `intune-container` crate,
+    /// unless there is nothing a restart would fix or this machine started one too recently.
     ///
-    /// Refuses in read-only mode HERE, not only at the dispatch choke point: the
-    /// automatic trigger never passes through `check_write_allowed`, so without this
-    /// guard a read-only backend started by tooling could restart the user's
-    /// container on its own.
+    /// Refuses in read-only mode HERE, not only at the dispatch choke point: the automatic
+    /// triggers (the broker observer and the keyring health check) never pass through
+    /// `check_write_allowed`, so without this guard a read-only backend started by tooling
+    /// could restart the user's container on its own.
     ///
-    /// Starting a unit through `systemctl` is a child process, and that is safe:
-    /// `systemctl` is only a D-Bus client, so the unit's own processes are forked by
-    /// the user manager into the UNIT's cgroup, a sibling of ours. The repair
-    /// therefore survives the backend restart that `teams-lite-broker-bus.path`
-    /// fires seconds later when the container rewrites rootless.json — which a
-    /// direct child would not, because KillMode=control-group kills our whole group.
+    /// FOUR GATES, in the order that costs least to be wrong about:
+    /// - **a container to restart** (`intune::repair_available`) — a classic-Intune host has
+    ///   none, and the button there would only report a failure;
+    /// - **no repair already running** (`intune::repair_running`, ours or the legacy installed
+    ///   unit) — during one the container is down, so the keyring cannot be asked and the floor
+    ///   is taken; a repair found running is FOLLOWED (`Ctx::follow_repair`), which is what was
+    ///   asked for and how this backend's pages learn one is under way;
+    /// - **a LOCKED keyring**, asked now — the one cause a restart fixes. The installed unit
+    ///   carried this as `ExecCondition=` and skipped silently; here a press on a healthy keyring
+    ///   is answered with why nothing happened, because an outward action that did nothing must
+    ///   not look like one that worked, in a sentence per state (`repair_refusal`). The repair
+    ///   asks again itself, inside the container's lifecycle lock, so no trigger can skip it;
+    /// - **the machine-wide floor** (`Store::claim_broker_repair`) for an automatic trigger. A
+    ///   press is the person the floor exists to hand the problem to, so it always claims.
+    ///
+    /// The repair runs in a transient unit of the user's own manager, never as our child: it
+    /// stops the container this backend talks through, and a child in our cgroup dies with us
+    /// (see `intune::start_repair_unit`). A unit that already exists is a repair already
+    /// running, which is what was asked for. In EMBEDDED mode there is no manager to ask, and the
+    /// repair is a helper in a session of its own that outlives this backend just the same
+    /// (`intune_embedded::spawn_helper`); `intune::start_repair` picks, and the gates above are
+    /// the same gates in the same order.
     async fn start_broker_repair(&self, automatic: bool) -> Result<Value> {
         anyhow::ensure!(
             !read_only(),
             "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never restarts the user's \
              Intune container"
         );
-
-        if automatic {
-            let mut last = self
-                .last_repair
-                .lock()
-                .map_err(|_| anyhow::anyhow!("repair timestamp lock poisoned"))?;
-            if let Some(at) = *last {
-                let waited = at.elapsed();
-                if waited < REPAIR_MIN_INTERVAL {
-                    let left = (REPAIR_MIN_INTERVAL - waited).as_secs() / 60;
-                    eprintln!(
-                        "[broker] repair already tried {}m ago — not asking again for {left}m",
-                        waited.as_secs() / 60
-                    );
-                    return Ok(json!({ "started": false, "reason": "rate_limited" }));
-                }
+        if !intune::repair_available() {
+            // The container image sees the container and may not restart it: its sentence is
+            // the remedy, so a press gets it rather than "there is no container".
+            let blocker = intune::repair_blocker();
+            // Quiet for an automatic trigger: on a classic-Intune host the observer would
+            // otherwise log this every time the broker's state changed.
+            if automatic {
+                let reason = if blocker.is_some() { "container_image" } else { "no_container" };
+                return Ok(json!({ "started": false, "reason": reason }));
             }
-            *last = Some(std::time::Instant::now());
+            if let Some(blocker) = blocker {
+                anyhow::bail!("{blocker}");
+            }
+            if intune_embedded::embedded() {
+                anyhow::bail!("{}", repair_refusal(&intune::KeyringCheck::NoContainer));
+            }
+            anyhow::bail!(
+                "this machine runs no Intune container (intune-container is not set up here), so \
+                 there is nothing teams-lite could restart"
+            );
         }
 
-        eprintln!("[broker] asking systemd to run {BROKER_REPAIR_UNIT}");
-        let status = tokio::process::Command::new("systemctl")
-            .args(["--user", "start", "--no-block", BROKER_REPAIR_UNIT])
-            // Explicit: dropping this future must never kill the client mid-enqueue.
-            .kill_on_drop(false)
-            .status()
-            .await
-            .with_context(|| format!("run systemctl to start {BROKER_REPAIR_UNIT}"))?;
+        // A repair already running anywhere on this machine comes FIRST, because everything
+        // after this reads wrong while one does: the container is stopped or booting, so the
+        // keyring cannot be asked, and the floor was claimed by whichever backend started it.
+        // Following it is what was asked for — and it is how THIS backend's pages learn a
+        // repair another backend started is under way. In embedded mode ANY holder of the slot
+        // counts (a boot has the container in hand as surely as a repair does), and it is followed
+        // as what it is (`follow_running_work`), so a boot is never announced as "Repairing…" —
+        // and only a REPAIR is answered as the one asked for (`running_work_answer`): a press
+        // against a boot or an enrollment is refused in words, never told a repair started.
+        match intune::repair_running().await {
+            Ok(true) => {
+                // Read again for WHICH work: a holder that ended between the two reads is nothing
+                // in hand, and the gates below go on as though nothing had been found.
+                if let Some(work) = work_in_hand() {
+                    eprintln!("[broker] {} — following it", running_work_description());
+                    self.follow_running_work();
+                    return running_work_answer(work, automatic).map_err(|why| anyhow::anyhow!(why));
+                }
+            }
+            Ok(false) => {}
+            // Not fatal here: the start below asks the same manager and says why it cannot.
+            Err(e) => eprintln!("[broker] could not ask whether a repair is running: {e:#}"),
+        }
 
-        // A non-zero exit is almost always the unit's own rate limit. `--no-block`
-        // only enqueues, so success says nothing about the repair itself — the
-        // outcome arrives as the broker recovering, or not.
-        anyhow::ensure!(
-            status.success(),
-            "{BROKER_REPAIR_UNIT} refused to start ({status}). Most likely its rate limit of \
-             three repairs an hour; check `systemctl --user status {BROKER_REPAIR_UNIT}`."
-        );
-        self.emit("broker_status", broker_status_payload(true));
+        let keyring = intune::container_keyring().await;
+        if keyring != intune::KeyringCheck::Locked {
+            // EMBEDDED, and the container is simply not up: there is no keyring to unlock, so a
+            // restart is still refused — but the container is this pod's own and nobody else will
+            // start it, so the cure is a BOOT, started here rather than left to the next health
+            // tick (up to twenty minutes away). The refusal below then says that it was started.
+            let boots = intune_embedded::embedded()
+                && matches!(keyring, intune::KeyringCheck::NotRunning | intune::KeyringCheck::NoContainer);
+            if boots {
+                let trigger = if automatic { BootTrigger::Automatic } else { BootTrigger::Press };
+                if let Err(e) = self.start_container_boot(trigger) {
+                    eprintln!("[intune] could not start the Intune container: {e:#}");
+                }
+            }
+            if automatic {
+                eprintln!("[broker] not repairing: {}", keyring.describe());
+                let reason = if boots { "booting" } else { "not_locked" };
+                return Ok(json!({ "started": false, "reason": reason }));
+            }
+            anyhow::bail!("{}", repair_refusal(&keyring));
+        }
+
+        let now = now_ms();
+        let not_since = if automatic {
+            now - REPAIR_MIN_INTERVAL.as_millis() as i64
+        } else {
+            i64::MAX
+        };
+        if !self.store()?.claim_broker_repair(now, not_since)? {
+            eprintln!(
+                "[broker] a repair started on this machine less than {}m ago — not asking again",
+                REPAIR_MIN_INTERVAL.as_secs() / 60
+            );
+            return Ok(json!({ "started": false, "reason": "rate_limited" }));
+        }
+
+        if intune_embedded::embedded() {
+            eprintln!("[broker] the container keyring is locked — starting the repair helper");
+        } else {
+            eprintln!("[broker] the container keyring is locked — asking systemd for {}", intune::REPAIR_UNIT);
+        }
+        match intune::start_repair().await? {
+            intune::RepairStart::Started(job) => self.follow_repair(Some(job)),
+            // Started between the check above and this start, by another backend — or, in
+            // embedded mode, another holder took the slot: answered as what it is, exactly as one
+            // found by the check above is.
+            intune::RepairStart::AlreadyRunning => {
+                self.follow_running_work();
+                return match work_in_hand() {
+                    Some(work) => running_work_answer(work, automatic).map_err(|why| anyhow::anyhow!(why)),
+                    // It has ended already: no repair was started by this request.
+                    None if automatic => Ok(json!({ "started": false, "reason": "already_running" })),
+                    None => anyhow::bail!(
+                        "Not restarting the Intune container now: other work on it was under way and \
+                         has just ended. Press again if sign-in is still broken."
+                    ),
+                };
+            }
+        }
         Ok(json!({ "started": true }))
+    }
+
+    /// Tell this backend's pages a repair is running, follow it to its end, and tell them it
+    /// ended. `job` is the repair this process started — whose own job signal (host) or exit
+    /// (embedded) says how it ended — or `None` for one found running (another backend's, or one
+    /// this process came up in the middle of), which can only be watched until it is gone.
+    fn follow_repair(&self, job: Option<intune::RepairJob>) {
+        self.follow(Followed::Repair(job));
+    }
+
+    /// The same for the embedded container's BOOT helper: the pages are told (the greeting reads
+    /// `intune.helper: "boot"`, which the banner draws as "Starting…"), the boot is followed to
+    /// its end, and the broker is asked once before the end is announced — a boot that worked
+    /// moves the broker state, exactly as a repair that worked does.
+    fn follow_boot(&self, child: Option<intune_embedded::HelperChild>) {
+        self.follow(Followed::Boot(child));
+    }
+
+    /// Follow whatever is ALREADY running on this machine, as what it is: in host mode that is a
+    /// repair unit; in embedded mode it is whichever holder has the slot. The stop ends with the
+    /// pod, so it is only reported here — as is a holder that ended between the question and this
+    /// answer — so the page that asked is told where things stand now.
+    ///
+    /// An enrollment's PORTAL is followed by the sign-in session that opened it — when this
+    /// process has one. A portal helper lives in a session of its own and survives the backend, so
+    /// after a restart (Settings › Restart the backend, or the launcher re-spawning one that
+    /// crashed) it can hold the slot with no session anywhere: nothing here can serve its window or
+    /// cancel it from the app, and nothing would announce its end, so every page kept "the portal
+    /// is still open" and no Enroll offer until it reconnected — days, on a phone. Such a helper is
+    /// asked to close, at once, and followed to its end ([`Ctx::follow_portal_helper`]).
+    fn follow_running_work(&self) {
+        use intune_embedded::SlotHolder;
+        if !intune_embedded::embedded() {
+            return self.follow_repair(None);
+        }
+        match intune_embedded::slot_holder() {
+            Some(SlotHolder::Repair) => self.follow_repair(None),
+            Some(SlotHolder::Boot) => self.follow_boot(None),
+            Some(SlotHolder::Portal) => {
+                // The pid FIRST, then whose it is: a portal helper of a session that started a
+                // moment ago carries another pid than the one read here, so the stop asked for
+                // below can only ever reach the helper that was found.
+                let pid = intune_embedded::portal_helper_pid();
+                if self.owns_a_live_portal_session() {
+                    self.emit("broker_status", broker_status_payload(false));
+                } else {
+                    self.follow_portal_helper(PortalHelper::Unowned(pid));
+                }
+            }
+            Some(SlotHolder::Stop) | None => {
+                self.emit("broker_status", broker_status_payload(false));
+            }
+        }
+    }
+
+    /// Does this process hold a LIVE portal session — the one whose run follows the portal helper
+    /// holding the slot? Every portal helper is spawned by such a session (`Signin::enroll`, under
+    /// the one session slot), so a portal helper at work with none live here is either one an
+    /// earlier backend orphaned, or one a session of ours gave up on and has already asked to close
+    /// — and asking that one again is harmless.
+    fn owns_a_live_portal_session(&self) -> bool {
+        self.signin.lock().is_ok_and(|held| {
+            held.as_ref()
+                .is_some_and(|session| session.is_live() && matches!(session.kind(), signin::Kind::Enroll(_)))
+        })
+    }
+
+    /// The one follower behind [`Ctx::follow_repair`] and [`Ctx::follow_boot`].
+    ///
+    /// Each flag is a COUNT, because two followers can overlap in one process (a press while
+    /// the health check's follower still runs), and the first to finish must not clear it for
+    /// the other. A follower of work this process did NOT start (`None`) is not added beside one
+    /// already watching the same kind of work — it would only ask the broker a second time and
+    /// say the same thing twice — but the pages are still told, so a press gets its answer.
+    fn follow(&self, work: Followed) {
+        let counter = match &work {
+            Followed::Repair(_) => &BROKER_REPAIRS_FOLLOWED,
+            Followed::Boot(_) => &BOOTS_FOLLOWED,
+        };
+        let repair = matches!(work, Followed::Repair(_));
+        if work.is_found() && counter.load(Ordering::SeqCst) > 0 {
+            self.emit("broker_status", broker_status_payload(repair));
+            return;
+        }
+        counter.fetch_add(1, Ordering::SeqCst);
+        self.emit("broker_status", broker_status_payload(repair));
+        let watcher = self.clone();
+        tokio::spawn(async move {
+            match work {
+                Followed::Repair(Some(job)) => match job.finished().await {
+                    Ok(result) if result == "done" => {
+                        eprintln!("[broker] the repair finished ({})", intune::repair_log_hint())
+                    }
+                    Ok(result) => eprintln!(
+                        "[broker] the repair ended `{result}` — see {}",
+                        intune::repair_log_hint()
+                    ),
+                    Err(e) => eprintln!("[broker] lost track of the repair: {e:#}"),
+                },
+                Followed::Repair(None) => {
+                    if let Err(e) = intune::wait_for_repair_to_end().await {
+                        eprintln!("[broker] lost track of the running repair: {e:#}");
+                    }
+                }
+                // Bounded although the helper bounds itself (its setup, then its start): a
+                // follower that waited for ever on a handle would hold "Starting…" on every page.
+                Followed::Boot(Some(child)) => {
+                    match tokio::time::timeout(intune_embedded::BOOT_FOLLOW_BOUND, child.finished()).await {
+                        Ok(Ok(0)) => eprintln!("[intune] the container boot finished — it is up, its broker's bus with it"),
+                        // This boot did NOTHING: another holder had the slot. Saying "it is running"
+                        // here was the lie a race between two triggers told; what is true is that
+                        // somebody else has the container in hand, so follow THAT, as what it is.
+                        // The count is handed back first, or the follower of a second boot would
+                        // read this one as already watching it and say nothing.
+                        Ok(Ok(intune_embedded::BOOT_SLOT_TAKEN)) => {
+                            eprintln!(
+                                "[intune] the boot found another helper at work on the container — \
+                                 following that one instead"
+                            );
+                            counter.fetch_sub(1, Ordering::SeqCst);
+                            watcher.follow_running_work();
+                            return;
+                        }
+                        Ok(Ok(2)) => eprintln!(
+                            "[intune] the container boot REFUSED to act (exit 2) — its own lines above, \
+                             prefixed teams-lite(intune-boot), say why; it refuses again on every boot \
+                             until that is fixed"
+                        ),
+                        Ok(Ok(code)) => eprintln!(
+                            "[intune] the container boot ended with exit {code} — its own lines above, \
+                             prefixed teams-lite(intune-boot), say why; the health check tries again"
+                        ),
+                        Ok(Err(e)) => eprintln!("[intune] lost track of the container boot: {e:#}"),
+                        Err(_) => eprintln!(
+                            "[intune] the container boot did not end within {} min — no longer \
+                             following it",
+                            intune_embedded::BOOT_FOLLOW_BOUND.as_secs() / 60
+                        ),
+                    }
+                }
+                Followed::Boot(None) => {
+                    if let Err(e) = intune_embedded::wait_for_helper_to_end(intune_embedded::BOOT_FOLLOW_BOUND).await {
+                        eprintln!("[intune] lost track of the running container boot: {e:#}");
+                    }
+                }
+            }
+            // Ask the broker once, for the scope the failure was recorded against, BEFORE saying
+            // the work is over. The state the payload is built from changes only on a token
+            // call, and the next one could be thirty seconds away — so a repair (or a boot) that
+            // WORKED would otherwise be announced with the old failure still in it, and the
+            // banner would offer "Repair sign-in" again for that long. A call that succeeds moves
+            // the state, and the observer announces that on its own. BOUNDED, because a broker
+            // call has no deadline of its own, and a broker that accepted the call and never
+            // answered would otherwise hold "Repairing…" on every page for the life of the process.
+            let scope = auth::broker_state()
+                .map(|s| s.scope)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| teams::SKYPE_SCOPE.to_string());
+            let _ = tokio::time::timeout(REPAIR_SETTLE_PROBE, watcher.tokens.refresh(&scope)).await;
+            // The backend stays up through a repair now, so nothing reconnects the page and
+            // nothing else would take `repairing` back: the broker observer only speaks on a
+            // CHANGE, and a repair that did not help changes nothing.
+            counter.fetch_sub(1, Ordering::SeqCst);
+            watcher.emit("broker_status", broker_status_payload(false));
+        });
+    }
+
+    /// Start this pod's own Intune container — the embedded BOOT helper, which decides what that
+    /// means: set it up (the first start downloads about 1.7 GB), import an enrollment if one is
+    /// given and none is here, start it if it is not running, and nothing at all if it is.
+    ///
+    /// An AUTOMATIC trigger (the health check, or the broker observer, finding the container not
+    /// running) takes the SAME machine-wide floor an automatic repair does, because a boot and a
+    /// repair are the same act on the same container — a boot unlocks the keyring as surely as a
+    /// repair — and a container that will not stay up must not be booted every fifteen minutes
+    /// for ever, re-pulling a rootfs each time a pull is what fails. A PRESS always claims. The
+    /// boot at STARTUP takes no floor: the helper is a no-op on a running container, and a pod
+    /// that has just started is exactly when the container has to come up.
+    ///
+    /// The floor is ASKED before the spawn and CLAIMED only once a helper has really been
+    /// spawned: a boot refused as already running spends nothing, so a later automatic boot is not
+    /// held back twenty minutes by one that never ran. And an automatic trigger finds no second
+    /// boot to start while this process is already following one — the moment between spawning a
+    /// boot and its helper taking the slot is exactly when `spawn_helper` cannot see it, and a
+    /// second boot spawned there only loses the slot.
+    fn start_container_boot(&self, trigger: BootTrigger) -> Result<()> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never boots an Intune container"
+        );
+        anyhow::ensure!(
+            intune_embedded::embedded(),
+            "refused: this backend is not in embedded mode, so the Intune container is not its own"
+        );
+        if trigger != BootTrigger::Press && BOOTS_FOLLOWED.load(Ordering::SeqCst) > 0 {
+            eprintln!("[intune] this backend is already following a boot of the container — not starting another");
+            return Ok(());
+        }
+        // A PRESS always claims, exactly as a pressed repair does: the person pressing is who the
+        // floor exists to hand the problem to — and it moves the floor for the automatic triggers
+        // behind it.
+        let not_since = match trigger {
+            BootTrigger::Startup => None,
+            BootTrigger::Automatic => Some(now_ms() - REPAIR_MIN_INTERVAL.as_millis() as i64),
+            BootTrigger::Press => Some(i64::MAX),
+        };
+        let store = self.store()?;
+        if let Some(not_since) = not_since
+            && !repair_floor_allows(&store, not_since)?
+        {
+            eprintln!(
+                "[intune] the container was started or repaired less than {}m ago — not booting again yet",
+                REPAIR_MIN_INTERVAL.as_secs() / 60
+            );
+            return Ok(());
+        }
+        match intune_embedded::spawn_helper(intune_embedded::Helper::Boot)? {
+            intune_embedded::HelperStart::Started(child) => {
+                // Claimed now that a boot is really on its way — and never `?`-propagated: the
+                // helper is spawned, and returning here would leave it running with nobody
+                // following it. Lost to another backend's claim in the same instant is no reason to
+                // take this boot back either: the helper slot decides which of them acts, and the
+                // floor has moved either way.
+                match not_since.map(|not_since| store.claim_broker_repair(now_ms(), not_since)) {
+                    Some(Ok(false)) => {
+                        eprintln!("[intune] another trigger moved the start-or-repair floor in the same moment")
+                    }
+                    Some(Err(e)) => eprintln!("[intune] could not record this boot on the floor: {e:#}"),
+                    Some(Ok(true)) | None => {}
+                }
+                eprintln!(
+                    "[intune] starting this container's own Intune container (pid {}) — its first \
+                     start downloads about 1.7 GB",
+                    child.pid().map_or_else(|| "?".to_string(), |p| p.to_string())
+                );
+                self.follow_boot(Some(child));
+            }
+            intune_embedded::HelperStart::AlreadyRunning => {
+                eprintln!("[intune] {} — following it", running_work_description());
+                self.follow_running_work();
+            }
+        }
+        Ok(())
     }
 
     // ---- signing in again, from the app ---------------------------------------
@@ -1998,54 +2886,209 @@ impl Ctx {
 
     /// Start an interactive sign-in, and say what the reader should expect.
     async fn start_signin(&self, _params: &Value) -> Result<Value> {
-        // Read the display before the lock: it walks /proc, and nothing else may happen while
-        // the claim below is held. Handed to `spawn_blocking` for the same reason — a
-        // `read_dir` plus a read per process is not work for an async worker.
+        // Read the display before the claim: it walks /proc, and nothing else may happen while
+        // the claim is held. Handed to `spawn_blocking` for the same reason — a `read_dir` plus
+        // a read per process is not work for an async worker.
         let display = tokio::task::spawn_blocking(teams_lite::xwindow::broker_display)
             .await
             .context("read the display the broker draws on")?;
         let watcher = self.clone();
+        let claim = self.claim_signin_slot(|| {
+            signin::Signin::start(&Self::signin_scope(), &display, move |_phase| {
+                // Every open page hears how it ended, and the broker's own status goes out with
+                // it: a sign-in that worked makes the banner go away, and that fact belongs to the
+                // whole app rather than to the page that pressed the button.
+                watcher.emit_signin_status();
+                watcher.emit("broker_status", broker_status_payload(false));
+            })
+        })?;
+        if matches!(claim, SigninClaim::Started(_)) {
+            eprintln!("[signin] started for {}", Self::signin_scope());
+        }
+        self.answer_signin_claim(claim).await
+    }
 
-        // Claiming the slot and starting the flow happen under ONE guard, with no await
-        // between them. Two presses in the same instant would otherwise both pass the check
-        // and both start a flow — and since one interactive call is out at a time
-        // (`auth::interactive_gate`), the loser would sit holding a window nobody reads. A
-        // sign-in already going is not replaced: the broker draws one window, and a second
-        // flow would fight the first for it. A SPENT one is, so a reader whose sign-in failed
-        // can start another without waiting.
-        let started = {
-            let mut held = self.signin.lock().map_err(|_| anyhow::anyhow!("sign-in lock poisoned"))?;
-            match held.as_ref().filter(|s| s.is_live()).map(Arc::clone) {
-                Some(running) => Err(running),
-                None => {
-                    // Synchronous: it spawns the run and returns, so nothing awaits in here.
-                    let session = signin::Signin::start(&Self::signin_scope(), &display, move |_phase| {
-                        // Every open page hears how it ended, and the broker's own status goes
-                        // out with it: a sign-in that worked makes the banner go away, and that
-                        // fact belongs to the whole app rather than to the page that pressed
-                        // the button.
-                        watcher.emit_signin_status();
-                        watcher.emit("broker_status", broker_status_payload(false));
-                    })
-                    .map(Arc::new);
-                    if let Ok(session) = &session {
-                        *held = Some(Arc::clone(session));
-                    }
-                    Ok(session)
-                }
-            }
+    /// ENROLL this image's own Intune container: the portal helper opens the Intune portal on the
+    /// container's display, and the sign-in surface serves its window (see
+    /// [`teams_lite::signin`]'s `Kind::Enroll` for what an enrollment is and is not).
+    ///
+    /// THREE GATES before anything starts, and the order is the cost of being wrong about each:
+    /// read-only (a screenshot backend must never register a device as the user), embedded
+    /// mode (in host mode the container is the user's own, enrolled with their own
+    /// `intune-container`), and a portal session that can really happen ([`portal_purpose`]) —
+    /// the container up and no helper at work on it, and EITHER no registration yet (an
+    /// enrollment) OR a registration whose broker holds no account (an account sign-in). The
+    /// registration is the sharp one: enrolling a container that already holds a working one would
+    /// replace it, so a press against it is refused in words rather than obeyed — and an account
+    /// sign-in through the portal enrolls nothing. Which of the two the portal is opened for is
+    /// decided HERE, from the same state the banner drew its offer from, never by the client.
+    /// `Signin::enroll` asks the first two gates again itself, so no caller can skip them.
+    async fn start_enroll(&self) -> Result<Value> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never enrolls a device as the user"
+        );
+        anyhow::ensure!(
+            intune_embedded::embedded(),
+            "refused: only teams-lite's self-contained image enrolls its own Intune container — in \
+             host mode the Intune container is the user's own, and is enrolled with `intune-container` \
+             on that machine"
+        );
+        // Cheap reads, but `helper_running` may wait a few milliseconds on a slot changing hands
+        // and `container_display` reads /proc/net/unix: not work for an async worker.
+        let boot_followed = BOOTS_FOLLOWED.load(Ordering::SeqCst) > 0;
+        let failure = auth::broker_state().and_then(|state| state.failure);
+        let (status, purpose, display) = tokio::task::spawn_blocking(move || {
+            let status = intune_embedded::status(boot_followed);
+            let purpose = portal_purpose(&status, failure, || portal_slot_free(&status, boot_followed));
+            (status, purpose, teams_lite::xwindow::container_display())
+        })
+        .await
+        .context("read the Intune container's state")?;
+        let Some(purpose) = purpose else {
+            anyhow::bail!("{}", enroll_refusal(&status));
         };
 
-        match started {
-            Err(running) => Ok(json!({
+        let watcher = self.clone();
+        let claim = self.claim_signin_slot(|| {
+            signin::Signin::enroll(purpose, &Self::signin_scope(), &display, move |_phase| {
+                watcher.emit_signin_status();
+                // Then ask the broker ONCE, as a sign-in that worked does, and only then say where
+                // things stand. A registration is new in the container's persisted state, but the
+                // BROKER's state the payload is built from changes only on a token call — the next
+                // one could be thirty seconds away — so without this an enrollment that worked
+                // would be announced with the old "no account" failure still in the banner. A call
+                // that succeeds moves the state, and the observer announces that on its own; this
+                // one goes out whatever the call said, because `intune.registered` and
+                // `can_enroll` have moved either way. Bounded, as the repair's own settle probe is:
+                // a broker call has no deadline of its own.
+                let ctx = watcher.clone();
+                tokio::spawn(async move {
+                    let scope = Self::signin_scope();
+                    if let Ok(Err(e)) =
+                        tokio::time::timeout(REPAIR_SETTLE_PROBE, ctx.tokens.refresh(&scope)).await
+                    {
+                        eprintln!("[enroll] the broker still refuses after the enrollment: {e:#}");
+                    }
+                    ctx.emit("broker_status", broker_status_payload(false));
+                    ctx.follow_a_portal_left_running().await;
+                });
+            })
+        })?;
+        if matches!(claim, SigninClaim::Started(_)) {
+            // The portal helper now holds the slot, or is about to: every page's banner moves off
+            // "Enroll this device" and onto the enrollment in progress.
+            self.emit("broker_status", broker_status_payload(false));
+        }
+        self.answer_signin_claim(claim).await
+    }
+
+    /// Follow a PORTAL helper its session gave up on, and say so when it has gone.
+    ///
+    /// A portal session settles only once its helper has exited (`signin::run_portal`), which is
+    /// what makes the `broker_status` sent at its end true — the slot is free when it says so. The
+    /// exceptions are the paths that give up on the helper: the session's own deadline
+    /// ([`signin::ENROLL_DEADLINE`]), and a helper that had not exited within the session's stop
+    /// wait after it was asked to close the portal.
+    /// Nothing else would ever announce that helper's end — the broker observer speaks only on a
+    /// CHANGE of the broker's state, the health check says nothing for an unlocked keyring, and the
+    /// page has no poll — so every page would go on reading "the portal is still open", with no
+    /// way to enroll, until it reconnected. The other helpers get the same through `Ctx::follow`;
+    /// this is that for the one helper a session owns.
+    async fn follow_a_portal_left_running(&self) {
+        let still_open = tokio::task::spawn_blocking(|| {
+            intune_embedded::helper_running() == Some(intune_embedded::Helper::Portal)
+        })
+        .await
+        .unwrap_or(false);
+        if still_open {
+            self.follow_portal_helper(PortalHelper::LeftBySession);
+        }
+    }
+
+    /// Follow a portal helper no live session owns to its end, and announce that end — once, however
+    /// many triggers found it (`PORTALS_FOLLOWED`): a second follower would only say the same thing
+    /// twice. An UNOWNED one ([`PortalHelper::Unowned`], orphaned by a backend restart) is asked to
+    /// close first, by the pid read when it was found and through the pid re-check the stop helper
+    /// uses (`intune_embedded::ask_portal_helper_to_close`): its window can never be served by this
+    /// process, so there is no reason to let it hold the slot for its half hour. One a session of
+    /// ours gave up on has been asked already.
+    fn follow_portal_helper(&self, helper: PortalHelper) {
+        // Claimed in one step, so two triggers in the same instant cannot both see nobody.
+        if PORTALS_FOLLOWED.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            self.emit("broker_status", broker_status_payload(false));
+            return;
+        }
+        self.emit("broker_status", broker_status_payload(false));
+        let watcher = self.clone();
+        tokio::spawn(async move {
+            match helper {
+                PortalHelper::LeftBySession => {
+                    eprintln!("[enroll] the portal helper outlived its session — following it to its end");
+                }
+                PortalHelper::Unowned(None) => eprintln!(
+                    "[enroll] a portal helper holds the container's slot with no session of this \
+                     backend behind it, and its pid could not be confirmed — following it to its end"
+                ),
+                PortalHelper::Unowned(Some(pid)) => {
+                    match tokio::task::spawn_blocking(move || intune_embedded::ask_portal_helper_to_close(pid)).await {
+                        Ok(Ok(true)) => eprintln!(
+                            "[enroll] a portal helper (pid {pid}) holds the container's slot with no \
+                             session of this backend behind it — left by an earlier backend, so its \
+                             portal can never be served from here; asked it to close"
+                        ),
+                        Ok(Ok(false)) => {}
+                        Ok(Err(e)) => eprintln!("[enroll] could not ask the orphaned portal helper (pid {pid}) to close: {e:#}"),
+                        Err(e) => eprintln!("[enroll] could not ask the orphaned portal helper (pid {pid}) to close: {e}"),
+                    }
+                }
+            }
+            if let Err(e) = intune_embedded::wait_for_helper_to_end(signin::ENROLL_DEADLINE).await {
+                eprintln!("[enroll] lost track of the portal helper: {e:#}");
+            }
+            PORTALS_FOLLOWED.fetch_sub(1, Ordering::SeqCst);
+            watcher.emit("broker_status", broker_status_payload(false));
+        });
+    }
+
+    /// Claim the ONE slot a sign-in or an enrollment runs in, and start `start` in it.
+    ///
+    /// Claiming the slot and starting the flow happen under ONE guard, with no await between
+    /// them. Two presses in the same instant would otherwise both pass the check and both start
+    /// a flow — and since one interactive call is out at a time (`auth::interactive_gate`), the
+    /// loser would sit holding a window nobody reads. A session already going is not replaced,
+    /// whatever its kind: the broker draws one window, an enrollment holds the turn a sign-in
+    /// needs, and a second flow would fight the first for both. A SPENT one is, so a reader
+    /// whose sign-in failed can start another without waiting. `start` is synchronous — it
+    /// spawns the run and returns — so nothing awaits in here.
+    fn claim_signin_slot(
+        &self,
+        start: impl FnOnce() -> std::result::Result<signin::Signin, signin::Refusal>,
+    ) -> Result<SigninClaim> {
+        let mut held = self.signin.lock().map_err(|_| anyhow::anyhow!("sign-in lock poisoned"))?;
+        if let Some(running) = held.as_ref().filter(|s| s.is_live()).map(Arc::clone) {
+            return Ok(SigninClaim::Running(running));
+        }
+        Ok(match start().map(Arc::new) {
+            Ok(session) => {
+                *held = Some(Arc::clone(&session));
+                SigninClaim::Started(session)
+            }
+            Err(signin::Refusal(words)) => SigninClaim::Refused(words),
+        })
+    }
+
+    /// What a press of Sign in (or Enroll) is answered with, for whichever way the claim went.
+    async fn answer_signin_claim(&self, claim: SigninClaim) -> Result<Value> {
+        match claim {
+            SigninClaim::Running(running) => Ok(json!({
                 "started": false,
                 "reason": "already_running",
                 "signin": running.payload().await,
             })),
-            Ok(Err(signin::Refusal(words))) => Err(anyhow::anyhow!(words)),
-            Ok(Ok(session)) => {
+            SigninClaim::Refused(words) => Err(anyhow::anyhow!(words)),
+            SigninClaim::Started(session) => {
                 let payload = session.payload().await;
-                eprintln!("[signin] started for {}", Self::signin_scope());
                 self.emit("signin_status", payload.clone());
                 Ok(json!({ "started": true, "signin": payload }))
             }
@@ -2114,7 +3157,7 @@ impl Ctx {
     /// Close the sign-in window, which is how a flow is ended.
     async fn cancel_signin(&self) -> Result<Value> {
         self.with_live_signin(|session| async move {
-            Ok(json!({ "closed": session.cancel().await? }))
+            Ok(json!({ "closed": session.cancel().await }))
         })
         .await
     }
@@ -2436,6 +3479,423 @@ impl Ctx {
         let mut payload = self.chess_engine_status()?;
         payload["freed"] = json!(freed);
         Ok(payload)
+    }
+
+    // ---- the agent CLIs this app installs (see `teams_lite::agent_cli`) -------------------------
+    //
+    // Settings › AI providers offers an Install for a CLI this machine lacks, an Update once a newer
+    // release is out, and a Remove. A newer release of a CLI this app installed is also taken on its
+    // own, unless the user switched that off: the backend checks every few hours.
+
+    /// Tell every page the whole agent status changed — an install ended, a CLI went, a check found
+    /// a release. Not on every percent: that is `agent_cli_progress`, which carries the bar alone.
+    fn emit_agent_status(&self) {
+        let payload = self.store().and_then(|store| agent_status_json(&store));
+        match payload {
+            Ok(payload) => self.emit("agent_status_changed", payload),
+            Err(e) => eprintln!("[agent-cli] could not publish the agent status: {e:#}"),
+        }
+    }
+
+    /// Install (or update to) the newest release of one CLI, in the background.
+    ///
+    /// A second press while one is in flight JOINS it, exactly as the chess engine's and the
+    /// update's own downloads do — and across processes the install's own lock does the same, so a
+    /// second backend that tries finds the version already there.
+    fn start_agent_cli_install(&self, tool: agent_cli::Tool, why: &'static str) -> Result<()> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never installs anything"
+        );
+        anyhow::ensure!(
+            agent_cli::this_platform(tool).is_some(),
+            "{} publishes no {} build for this machine",
+            tool.publisher(),
+            tool.name()
+        );
+        let started = with_agent_cli_slot(tool, |slot| {
+            if slot.phase.is_some() {
+                return false;
+            }
+            slot.phase = Some(AgentCliPhase::Resolving);
+            slot.received = 0;
+            slot.total = 0;
+            slot.error.clear();
+            true
+        })
+        .unwrap_or(false);
+        if !started {
+            return Ok(());
+        }
+        eprintln!("[agent-cli] installing the newest {} ({why})", tool.name());
+        self.emit_agent_status();
+
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            // Throttled to whole percents, as every other bar here is: a frame per chunk over a
+            // hundred megabytes is thousands of events for a bar a few hundred pixels wide.
+            let mut last_percent = None;
+            let now_unix = u64::try_from(now_ms() / 1000).unwrap_or(0);
+            let outcome = agent_cli::install(&ctx.http, tool, now_unix, |phase| {
+                let (phase, received, total) = match phase {
+                    agent_cli::Phase::Resolving => (AgentCliPhase::Resolving, 0, 0),
+                    agent_cli::Phase::Downloading { received, total } => {
+                        (AgentCliPhase::Downloading, received, total)
+                    }
+                    agent_cli::Phase::Unpacking => (AgentCliPhase::Unpacking, 0, 0),
+                };
+                let percent = (total > 0).then(|| received.saturating_mul(100) / total);
+                let changed = with_agent_cli_slot(tool, |slot| {
+                    let moved = slot.phase != Some(phase);
+                    slot.phase = Some(phase);
+                    slot.received = received;
+                    slot.total = total;
+                    moved
+                })
+                .unwrap_or(false);
+                if changed || percent != last_percent {
+                    last_percent = percent;
+                    ctx.emit(
+                        "agent_cli_progress",
+                        json!({
+                            "provider": tool.name(),
+                            "phase": phase.as_str(),
+                            "received": received,
+                            "total": total,
+                        }),
+                    );
+                }
+            })
+            .await;
+            with_agent_cli_slot(tool, |slot| {
+                slot.phase = None;
+                slot.received = 0;
+                slot.total = 0;
+                match &outcome {
+                    Ok(agent_cli::Outcome::Installed { version } | agent_cli::Outcome::Current { version }) => {
+                        slot.error.clear();
+                        // What was just installed is the newest this process knows of, unless the
+                        // last check had already seen something newer still.
+                        if !agent_cli::is_update(Some(version), slot.latest.as_deref()) {
+                            slot.latest = Some(version.clone());
+                        }
+                        slot.checked_ms = Some(now_ms());
+                    }
+                    Err(e) => slot.error = format!("{e:#}"),
+                }
+            });
+            match outcome {
+                Ok(agent_cli::Outcome::Installed { version }) => {
+                    eprintln!("[agent-cli] {} {version} is installed and is what runs now", tool.name())
+                }
+                Ok(agent_cli::Outcome::Current { version }) => {
+                    eprintln!("[agent-cli] {} {version} is already the newest release", tool.name())
+                }
+                Err(e) => eprintln!("[agent-cli] installing {} failed: {e:#}", tool.name()),
+            }
+            ctx.emit_agent_status();
+            if tool == agent_cli::Tool::Claude {
+                // A fresh copy has a home of its own to read, and a signed-out one says so.
+                ctx.refresh_claude_account(true);
+            }
+        });
+        Ok(())
+    }
+
+    /// Give back everything this app installed for one CLI.
+    fn remove_agent_cli(&self, tool: agent_cli::Tool) -> Result<u64> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never deletes anything"
+        );
+        anyhow::ensure!(
+            agent_cli_slot(tool).phase.is_none(),
+            "{} is being installed right now — try again once that is done",
+            tool.name()
+        );
+        let freed = agent_cli::remove(tool)?;
+        with_agent_cli_slot(tool, |slot| slot.error.clear());
+        eprintln!("[agent-cli] removed {}, freeing {freed} bytes", tool.name());
+        self.emit_agent_status();
+        if tool == agent_cli::Tool::Claude {
+            self.refresh_claude_account(true);
+        }
+        Ok(freed)
+    }
+
+    /// Ask upstream for the newest release of every CLI this app installed, and — when `update`
+    /// says so and the user left automatic updates on — take any that is newer.
+    ///
+    /// A CLI this app did NOT install is never asked about: a machine that never pressed Install
+    /// makes no request to Anthropic or npm on its behalf. And one the user's own install shadows
+    /// on `PATH` is not updated either, because it is not what runs.
+    async fn agent_cli_pass(&self, update: bool) -> Result<()> {
+        let auto = self
+            .store()
+            .ok()
+            .and_then(|store| store.get_setting(agent_cli::SETTING_AUTO_UPDATE).ok().flatten());
+        let auto = agent_cli::auto_update_from_setting(auto.as_deref());
+        let mut first_error = None;
+        for tool in agent_cli::Tool::ALL {
+            let Some(installed) = agent_cli::installed_version(tool) else {
+                continue;
+            };
+            match agent_cli::latest_version(&self.http, tool).await {
+                Ok(latest) => {
+                    with_agent_cli_slot(tool, |slot| {
+                        slot.latest = Some(latest.clone());
+                        slot.checked_ms = Some(now_ms());
+                        if slot.phase.is_none() {
+                            slot.error.clear();
+                        }
+                    });
+                    let in_use = agent_policy::backend_named(tool.name())
+                        .and_then(agent::program_path)
+                        .is_some_and(|path| agent_cli::is_managed(&path));
+                    if update && auto && in_use && agent_cli::is_update(Some(&installed), Some(&latest)) {
+                        if let Err(e) = self.start_agent_cli_install(tool, "automatic update") {
+                            eprintln!("[agent-cli] could not start updating {}: {e:#}", tool.name());
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[agent-cli] checking for a newer {} failed: {e:#}", tool.name());
+                    with_agent_cli_slot(tool, |slot| {
+                        slot.checked_ms = Some(now_ms());
+                        if slot.phase.is_none() {
+                            slot.error = format!("could not check for a newer release: {e:#}");
+                        }
+                    });
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        self.emit_agent_status();
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Read Claude Code's status in the background when the last read is stale, or when `force`
+    /// says something changed it. Every page connecting asks; one read answers them all.
+    fn refresh_claude_account(&self, force: bool) {
+        if read_only() {
+            return;
+        }
+        let due = CLAUDE_ACCOUNT
+            .lock()
+            .map(|mut slot| {
+                let fresh = slot.checked_ms.is_some_and(|at| {
+                    now_ms().saturating_sub(at) < CLAUDE_ACCOUNT_FRESH.as_millis() as i64
+                });
+                if !force && (slot.checking || fresh) {
+                    return false;
+                }
+                slot.checking = true;
+                true
+            })
+            .unwrap_or(false);
+        if due {
+            let ctx = self.clone();
+            tokio::spawn(async move { ctx.read_claude_account().await });
+        }
+    }
+
+    /// Ask Claude Code how it would sign in now — with the environment a run gets — and tell every
+    /// page when the answer moved. Awaited by the methods that change it, so their answer carries it.
+    async fn read_claude_account(&self) {
+        let seq = CLAUDE_ACCOUNT_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let outcome: Result<Option<agent_auth::ClaudeAccount>> = async {
+            let Some(program) = agent::resolve_program(claude_backend().program) else {
+                return Ok(None);
+            };
+            let managed = agent_cli::is_managed(&program);
+            let env = agent_child_env(&self.store()?, claude_backend())?;
+            agent_auth::claude_status(&program, managed, &env).await.map(Some)
+        }
+        .await;
+        let changed = CLAUDE_ACCOUNT
+            .lock()
+            .map(|mut slot| {
+                slot.checking = false;
+                if seq < slot.seq {
+                    return false;
+                }
+                slot.seq = seq;
+                slot.checked_ms = Some(now_ms());
+                let (account, error) = match outcome {
+                    Ok(account) => (account, String::new()),
+                    Err(e) => (slot.account.clone(), format!("{e:#}")),
+                };
+                let changed = slot.account != account || slot.error != error;
+                slot.account = account;
+                slot.error = error;
+                changed
+            })
+            .unwrap_or(false);
+        if changed {
+            self.emit_agent_status();
+        }
+    }
+
+    /// Start Claude Code's own sign-in and hand back the link it printed — the page opens it in the
+    /// reader's own browser, where they sign in on claude.com (see `agent_auth::ClaudeLogin`).
+    async fn start_claude_signin(&self, console: bool) -> Result<String> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never signs an agent in"
+        );
+        let program = agent::resolve_program(claude_backend().program)
+            .context("Claude Code is not on this machine — install it first")?;
+        let managed = agent_cli::is_managed(&program);
+        // A second press replaces the first — dropping the old session kills its CLI — except while
+        // a code is being exchanged: that sign-in is about to land, and replacing it would hide its
+        // outcome from the reader who is waiting for it.
+        if let Ok(mut slot) = CLAUDE_SIGNIN.lock() {
+            if slot.as_ref().is_some_and(|s| s.finishing && !s.finishing_is_stale()) {
+                anyhow::bail!("A code is being exchanged right now — wait a moment for it to finish");
+            }
+            *slot = None;
+        }
+        let login = agent_auth::ClaudeLogin::start(&program, managed, console).await?;
+        let url = login.url().to_string();
+        let generation = CLAUDE_SIGNIN_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if let Ok(mut slot) = CLAUDE_SIGNIN.lock() {
+            *slot = Some(ClaudeSigninSlot {
+                generation,
+                url: url.clone(),
+                started_ms: now_ms(),
+                console,
+                finishing: false,
+                finishing_since_ms: 0,
+                session: Some(login),
+            });
+        }
+        eprintln!(
+            "[agent-auth] a Claude Code sign-in is waiting for its code{}",
+            if console { " (Anthropic Console)" } else { "" }
+        );
+        self.emit_agent_status();
+        // Watch it: a CLI that exits on its own has nothing left to hand a code to, so its link is
+        // withdrawn at once; one still waiting at the deadline is closed. A slot that is exchanging
+        // its code is the exchange's to clear.
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            let until = std::time::Instant::now() + agent_auth::LOGIN_DEADLINE;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let expired = std::time::Instant::now() >= until;
+                let ended = CLAUDE_SIGNIN.lock().map(|mut slot| {
+                    let Some(signin) = slot.as_mut().filter(|s| s.generation == generation) else {
+                        return Some(None);
+                    };
+                    if signin.finishing {
+                        return None;
+                    }
+                    let gone = signin.session.as_mut().is_some_and(|session| session.has_exited());
+                    if gone || expired {
+                        *slot = None;
+                        return Some(Some(if gone { "its CLI exited" } else { "it waited ten minutes for a code" }));
+                    }
+                    None
+                });
+                match ended {
+                    Ok(Some(Some(why))) => {
+                        eprintln!("[agent-auth] the Claude Code sign-in was closed: {why}");
+                        ctx.emit_agent_status();
+                        return;
+                    }
+                    // Replaced, cancelled or finished: nothing of ours left to watch.
+                    Ok(Some(None)) | Err(_) => return,
+                    Ok(None) if expired => return,
+                    Ok(None) => {}
+                }
+            }
+        });
+        Ok(url)
+    }
+
+    /// Hand the code to the waiting sign-in. The code is checked first, so a paste with a stray
+    /// space costs a sentence rather than the sign-in; anything the CLI itself refuses ends it, and
+    /// the reader starts again (the CLI exits on a refused code).
+    async fn finish_claude_signin(&self, code: &str) -> Result<()> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never signs an agent in"
+        );
+        let code = agent_auth::login_code(code)?;
+        let (generation, session) = CLAUDE_SIGNIN
+            .lock()
+            .ok()
+            .and_then(|mut slot| {
+                let signin = slot.as_mut()?;
+                if signin.finishing {
+                    return None;
+                }
+                let session = signin.session.take()?;
+                signin.finishing = true;
+                signin.finishing_since_ms = now_ms();
+                Some((signin.generation, session))
+            })
+            .context("No sign-in is waiting for a code — press Sign in again")?;
+        self.emit_agent_status();
+        // The exchange runs in a task of its OWN, not in this request: a request is dropped with the
+        // connection that sent it — a phone locking mid-exchange — and dropping the session would
+        // kill the CLI holding the single-use code, and skip the cleanup below, leaving every page on
+        // a spinner. The handler waits for the task; the task does not wait for the handler.
+        let ctx = self.clone();
+        let exchange = tokio::spawn(async move {
+            let outcome = session.finish(&code).await;
+            if let Ok(mut slot) = CLAUDE_SIGNIN.lock() {
+                if slot.as_ref().is_some_and(|s| s.generation == generation) {
+                    *slot = None;
+                }
+            }
+            match &outcome {
+                Ok(()) => eprintln!("[agent-auth] Claude Code is signed in"),
+                Err(e) => eprintln!("[agent-auth] Claude Code's sign-in did not take the code: {e:#}"),
+            }
+            ctx.read_claude_account().await;
+            ctx.emit_agent_status();
+            outcome
+        });
+        exchange.await.context("the sign-in's exchange stopped unexpectedly")?
+    }
+
+    /// Give up on a sign-in waiting for its code. Its CLI is killed with it.
+    ///
+    /// Refused while the code is being exchanged: the CLI holding it would finish the sign-in after
+    /// the reader was told it was cancelled. An exchange stuck far past its bounds is cleared.
+    fn cancel_claude_signin(&self) -> Result<()> {
+        let had = CLAUDE_SIGNIN
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the sign-in state is unavailable"))
+            .and_then(|mut slot| {
+                if slot.as_ref().is_some_and(|s| s.finishing && !s.finishing_is_stale()) {
+                    anyhow::bail!("The code is being exchanged — wait a moment for it to finish");
+                }
+                Ok(slot.take().is_some())
+            })?;
+        if had {
+            eprintln!("[agent-auth] the Claude Code sign-in was cancelled");
+            self.emit_agent_status();
+        }
+        Ok(())
+    }
+
+    /// Sign Claude Code out of its own account (`claude auth logout`).
+    async fn claude_signout(&self) -> Result<()> {
+        anyhow::ensure!(
+            !read_only(),
+            "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never signs an agent out"
+        );
+        let program = agent::resolve_program(claude_backend().program)
+            .context("Claude Code is not on this machine")?;
+        agent_auth::claude_logout(&program, agent_cli::is_managed(&program)).await?;
+        eprintln!("[agent-auth] Claude Code signed out of its account");
+        self.read_claude_account().await;
+        Ok(())
     }
 
     // ---- the board's own SOUNDS -----------------------------------------------------------
@@ -3250,8 +4710,37 @@ async fn sign_in(ctx: &Ctx) -> Result<Session> {
     Ok(ctx.adopt_session(session).await)
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // THE CRATE'S OWN RE-EXEC TARGETS COME FIRST, before a runtime exists.
+    //
+    // The broker repair boots the Intune container through the `intune-container` crate, and
+    // the crate boots it from a detached supervisor it spawns by re-executing THIS binary with
+    // a hidden argument (`__rootless-supervise`). Unrouted, that supervisor would start a second
+    // teams-lite backend, which dies on the port, and no container boots. It has to be handled
+    // before tokio starts, because the supervisor forks to unshare a user namespace — which a
+    // multithreaded process cannot do safely — and builds a runtime of its own. The repair
+    // itself is the third such argument. See `intune::dispatch_reexec`.
+    if let Some(code) = intune::dispatch_reexec(std::env::args_os()) {
+        std::process::exit(code);
+    }
+    // Whose Intune container this is, refused LOUDLY when it is a word nobody knows: read as
+    // `host` an image would follow a broker that is not there, and read as `embedded` a host
+    // install would boot and stop the user's own container. A typo in a compose file must be the
+    // first line of the log rather than an app that is quietly signed out.
+    if let Err(e) = intune_embedded::mode() {
+        eprintln!("teams-lite: {e:#}");
+        std::process::exit(2);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build the backend's runtime")?
+        .block_on(serve())
+}
+
+/// The backend: everything `server` does when it was not started as one of the hidden
+/// subcommands above.
+async fn serve() -> Result<()> {
     // CLAIM THE PORT FIRST, before anything with a side effect.
     //
     // The listener used to be bound at the very end, after authentication, the store
@@ -3309,6 +4798,22 @@ async fn main() -> Result<()> {
             Err(e) => eprintln!("[write-lock] armed: token published nowhere ({e})"),
         },
     }
+    // One line, because the log of an image looks like any other backend's, and the two images
+    // behave differently in exactly the part a reader looks for when sign-in breaks: who owns
+    // the Intune container, and therefore who boots and repairs it.
+    if intune_embedded::embedded() {
+        eprintln!(
+            "[startup] embedded Intune mode: this process runs its own Intune container inside \
+             this container — it boots, repairs and enrolls it, and the broker is followed through \
+             this container's own /proc"
+        );
+    } else if intune::in_container_image() {
+        eprintln!(
+            "[startup] running from teams-lite's container image in host Intune mode: the broker \
+             is followed through the host's /proc, and restarting the Intune container is the \
+             host's to do"
+        );
+    }
 
     let http = reqwest::Client::builder().user_agent(UA).http1_only().build()?;
     let tokens = auth::TokenCache::new();
@@ -3349,7 +4854,6 @@ async fn main() -> Result<()> {
         chess_sounds_fetching: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mail_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         calendar_watch: Arc::new(Mutex::new(None)),
-        last_repair: Arc::new(Mutex::new(None)),
         signin: Arc::new(Mutex::new(None)),
         calling: Arc::new(Mutex::new(CallingPlane::default())),
         gitlab_refreshing: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
@@ -3390,6 +4894,20 @@ async fn main() -> Result<()> {
         }
     });
 
+    // EMBEDDED: start this container's own Intune container, BEFORE the first sign-in, so the
+    // broker is on its way up while the rest of the boot happens. The helper decides what that
+    // means (set up, import, start, or nothing on a container already running), runs in a
+    // session of its own so a backend restart mid-pull leaves it running, and is followed so
+    // every page says "Starting…" while it works. The sign-in below then fails fast against a
+    // broker that is not up yet, which is the offline start this backend already knows how to
+    // serve: the live feed connects on its own once the broker answers.
+    if intune_embedded::embedded()
+        && !read_only()
+        && let Err(e) = ctx.start_container_boot(BootTrigger::Startup)
+    {
+        eprintln!("[intune] could not start the Intune container: {e:#}");
+    }
+
     // Sign in — AFTER the observer, so a failure at boot reaches every client that
     // connects and asks for a repair when the signature is the repairable one, exactly
     // as a failure hours later does.
@@ -3419,6 +4937,11 @@ async fn main() -> Result<()> {
     // it, so the user's calls ring here too (see `spawn_calling`).
     spawn_calling(ctx.clone());
 
+    // The container keyring re-locks on its own (roughly every 18 hours on this kind of host),
+    // and with a live real-time socket and nobody in Mail or the Calendar this backend can go
+    // hours without a token call that would notice. So it looks at the cause itself.
+    spawn_broker_health(ctx.clone());
+
     // mail: poll whichever folders a client opens (read-only, and idle until one
     // does — see `spawn_mail_sync`).
     spawn_mail_sync(ctx.clone());
@@ -3440,6 +4963,9 @@ async fn main() -> Result<()> {
     // best-effort, and for the whole life of the process: has the rolling `latest` tag
     // moved off this build? An app left open for weeks has to be able to notice.
     spawn_release_poll(ctx.clone());
+    // And of the agent CLIs this app installed, every few hours — taking a newer one on its own
+    // unless the user switched that off (see `Ctx::agent_cli_pass`).
+    spawn_agent_cli_poll(ctx.clone());
 
     eprintln!("[ok] server ws://{addr} — ready");
     // Read once at boot: a machine that answers a chat message with the user's own
@@ -3505,14 +5031,93 @@ async fn main() -> Result<()> {
 /// exist to state.
 const MAX_REQUEST_BYTES: usize = 128 * 1024 * 1024;
 
+/// Why a WebSocket handshake carrying this `Origin` is refused, or `None` when it may go through.
+///
+/// This port answers every read with no token, so a page on ANOTHER SITE that opens a socket here
+/// reads the user's chats, mail and calendar: WebSockets are outside the same-origin policy, and the
+/// backend is on 127.0.0.1 of exactly the machine whose browser that page is running in. A browser
+/// always says which page asked, and the only page that should ever dial this socket itself is one
+/// this machine serves on loopback — a dev build pinned at it. Every other path to it is a server
+/// that relays the page (web/server.ts, the Vite dev proxy), and a relay's own socket sends no
+/// Origin: the production relay because Bun's client sends none (measured), the dev proxy because it
+/// takes the decision itself (web/request-origin.ts) and strips it.
+///
+/// So: NO Origin is not a page and goes through — the relays, the launcher's keepalive, an example,
+/// none of which an Origin was ever going to stop. A LOOPBACK origin is this machine's own page. Any
+/// other origin, `null` included (a sandboxed frame, a `data:` page), is refused before the
+/// handshake completes. It refuses names rather than resolving them, so a DNS-rebinding page —
+/// same-origin under the attacker's name — is refused too.
+fn ws_origin_refusal(origin: Option<&str>) -> Option<String> {
+    let origin = origin?.trim();
+    let refusal = || {
+        Some(format!(
+            "a page on {origin} may not open the backend's socket: only a page this machine serves \
+             on loopback, or a server that relays it, may"
+        ))
+    };
+    let authority = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"));
+    let Some(authority) = authority else { return refusal() };
+    if authority.is_empty() || authority.contains(['/', '@', '?', '#']) {
+        return refusal();
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inside, tail)) if tail.is_empty() || tail.strip_prefix(':').is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())) => inside,
+            _ => return refusal(),
+        }
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+            Some(_) => return refusal(),
+            None => authority,
+        }
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    // The UNSPECIFIED address counts as this machine too: a browser routes `0.0.0.0` (and `[::]`)
+    // to itself, so only a local listener can serve a page of that origin — and the page itself
+    // calls it loopback (`LOOPBACK_HOSTS` in web/src/lib/ws-client.ts), so a pinned dev page opened
+    // at http://0.0.0.0:19440 (`teams --dev --host 0.0.0.0`) dials this socket directly.
+    let loopback = host == "localhost"
+        || host.ends_with(".localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified());
+    if loopback {
+        None
+    } else {
+        refusal()
+    }
+}
+
+/// The last origin a refusal was logged for, so a page retrying in a loop says so once.
+static LAST_REFUSED_ORIGIN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// Handle one UI connection: answer requests + forward broadcast events.
 async fn serve_conn(ctx: Ctx, stream: tokio::net::TcpStream, clients: ClientTracker) -> Result<()> {
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
         max_message_size: Some(MAX_REQUEST_BYTES),
         max_frame_size: Some(MAX_REQUEST_BYTES),
         ..Default::default()
     };
-    let ws = tokio_tungstenite::accept_async_with_config(stream, Some(config)).await?;
+    // The Origin check, decided BEFORE the handshake answers, so a refused page is never upgraded
+    // and never reads a single frame (see `ws_origin_refusal`).
+    let check_origin = |request: &Request, response: Response| -> std::result::Result<Response, ErrorResponse> {
+        let origin = request.headers().get("origin").map(|v| v.to_str().unwrap_or("(not text)"));
+        let Some(reason) = ws_origin_refusal(origin) else { return Ok(response) };
+        if let Ok(mut last) = LAST_REFUSED_ORIGIN.lock() {
+            if last.as_deref() != origin {
+                eprintln!("[ws] refused a handshake: {reason}");
+                *last = origin.map(str::to_string);
+            }
+        }
+        let mut refused = ErrorResponse::new(Some(reason));
+        *refused.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN;
+        Err(refused)
+    };
+    let ws = tokio_tungstenite::accept_hdr_async_with_config(stream, check_origin, Some(config)).await?;
     let _client_lease = clients.connect();
     let (mut write, mut read) = ws.split();
     let mut events_rx = ctx.events.subscribe();
@@ -3653,7 +5258,8 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
             }
             Ok(write_lock_payload(presented, write_token(), write_token_pinned()))
         }
-        // Restart the Intune container, through its own systemd unit, because the
+        // Restart the Intune container — through a transient systemd unit, or in embedded
+        // mode a helper of this binary's own — because the
         // container's login keyring re-locks and the broker then answers every token
         // call with NoReply. The only RPC with an effect outside the store and the
         // network: token-gated as a MACHINE method, refused read-only, and refused
@@ -3670,6 +5276,11 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         "signin_frame" => ctx.signin_frame().await,
         "signin_input" => ctx.signin_input(params).await,
         "signin_cancel" => ctx.cancel_signin().await,
+        // Enroll this image's own Intune container, through the same served window: the portal
+        // helper opens the Intune portal on the container's display, and the four methods above
+        // serve it. A MACHINE method, refused read-only, refused outside embedded mode, and
+        // refused unless an enrollment can really happen (`intune_embedded::can_enroll`).
+        "intune_enroll" => ctx.start_enroll().await,
 
         // The update, in the two steps the user takes: fetch the release binary, then
         // put it in place and restart onto it (see `Ctx::start_update_download` /
@@ -3785,8 +5396,177 @@ async fn dispatch(ctx: &Ctx, method: &str, params: &Value) -> Result<Value> {
         // Which backends exist here, which conversations are opted in, what an agent
         // may do, and where it runs.
         "agent_status" => {
+            // Every page asks on connect, so this is where a stale read of Claude Code's own status
+            // is refreshed — behind the answer, which arrives on `agent_status_changed` if it moved.
+            ctx.refresh_claude_account(false);
             let store = ctx.store()?;
             agent_status_json(&store)
+        }
+
+        // Install a CLI this machine lacks, or update the copy this app installed to the newest
+        // release (see `teams_lite::agent_cli`). MACHINE: it downloads a program from the internet
+        // that a chat message will then start. Answers at once; the bar arrives as
+        // `agent_cli_progress` and the end as `agent_status_changed`.
+        "agent_cli_install" => {
+            let name = param_str(params, "provider")?;
+            let tool = agent_cli::Tool::named(&name).with_context(|| format!("no such provider: {name}"))?;
+            ctx.start_agent_cli_install(tool, "asked for from Settings")?;
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        // Give back everything this app installed for one CLI. MACHINE: it deletes a program
+        // from this machine, after which that provider answers nothing until it is installed again.
+        "agent_cli_remove" => {
+            let name = param_str(params, "provider")?;
+            let tool = agent_cli::Tool::named(&name).with_context(|| format!("no such provider: {name}"))?;
+            let freed = ctx.remove_agent_cli(tool)?;
+            let store = ctx.store()?;
+            let mut status = agent_status_json(&store)?;
+            status["freed"] = json!(freed);
+            Ok(status)
+        }
+
+        // Ask now whether the CLIs this app installed have a newer release — the button beside the
+        // switch below. It never installs anything: what an OPEN method may do is read, and the
+        // update itself is either the user's own press or the clock's, under the switch.
+        "agent_cli_check" => {
+            anyhow::ensure!(
+                !read_only(),
+                "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never checks for CLI updates"
+            );
+            let checked = ctx.agent_cli_pass(false).await;
+            let store = ctx.store()?;
+            let mut status = agent_status_json(&store)?;
+            if let Err(e) = checked {
+                status["check_error"] = json!(format!("{e:#}"));
+            }
+            Ok(status)
+        }
+
+        // Whether a newer release of a CLI this app installed is taken on its own. MACHINE: it
+        // decides whether this machine downloads and runs new code with nobody pressing anything.
+        "agent_cli_set_auto_update" => {
+            let on = params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .context("missing param: enabled (a boolean)")?;
+            let store = ctx.store()?;
+            store.set_setting(agent_cli::SETTING_AUTO_UPDATE, if on { "1" } else { "0" })?;
+            eprintln!(
+                "[agent-cli] the CLIs this app installed {} update themselves",
+                if on { "now" } else { "no longer" }
+            );
+            agent_status_json(&store)
+        }
+
+        // How the agent CLIs sign in: Claude Code's way in, an Anthropic API key, and the cloud
+        // accounts (see `teams_lite::agent_auth`). MACHINE: it decides which account every run is
+        // signed in to and billed to, and it stores credentials. A secret left out of a section
+        // keeps the stored one, so a form never has to be shown a key to change a region.
+        "agent_auth_set" => {
+            anyhow::ensure!(
+                !read_only(),
+                "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never changes how an agent signs in"
+            );
+            let store = ctx.store()?;
+            let current = agent_auth_config(&store);
+            let next = current.update(params)?;
+            // The key file FIRST: a setting stored before its file would leave runs on the previous
+            // service account while every page showed the new one. A store that then refuses puts
+            // the file back the way the stored setting still says.
+            let dir = agent_auth::credentials_dir();
+            if let Some(dir) = &dir {
+                agent_auth::sync_files(&next, dir)?;
+            }
+            if let Err(e) = store.set_setting(agent_auth::SETTING, &next.to_stored()) {
+                if let Some(dir) = &dir {
+                    let _ = agent_auth::sync_files(&current, dir);
+                }
+                return Err(e);
+            }
+            if next.claude_method != current.claude_method {
+                eprintln!("[agent-auth] Claude Code now signs in with {}", next.claude_method.as_str());
+            } else {
+                eprintln!("[agent-auth] the agents' sign-in settings changed");
+            }
+            ctx.read_claude_account().await;
+            agent_status_json(&store)
+        }
+
+        // Claude Code's own sign-in, behind the scenes (`agent_auth::ClaudeLogin`). The answer
+        // carries the authorize link on claude.com; the page opens it in the reader's browser.
+        "agent_signin_start" => {
+            let provider = param_str(params, "provider")?;
+            anyhow::ensure!(provider == "claude", "{provider} signs in with an API key, not an account");
+            let console = match params.get("account").and_then(Value::as_str).unwrap_or("claude_ai") {
+                "claude_ai" => false,
+                "console" => true,
+                other => anyhow::bail!("no such account to sign in to: {other}"),
+            };
+            let url = ctx.start_claude_signin(console).await?;
+            let store = ctx.store()?;
+            let mut status = agent_status_json(&store)?;
+            status["signin_url"] = json!(url);
+            Ok(status)
+        }
+
+        // The code claude.com showed, handed to the waiting CLI. It is never stored and never
+        // logged: PKCE makes it worthless to anything but that one process.
+        "agent_signin_finish" => {
+            let provider = param_str(params, "provider")?;
+            anyhow::ensure!(provider == "claude", "no sign-in of {provider} is waiting");
+            let code = param_str(params, "code")?;
+            ctx.finish_claude_signin(&code).await?;
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        "agent_signin_cancel" => {
+            let provider = param_str(params, "provider")?;
+            anyhow::ensure!(provider == "claude", "no sign-in of {provider} is waiting");
+            ctx.cancel_claude_signin()?;
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        "agent_signout" => {
+            let provider = param_str(params, "provider")?;
+            anyhow::ensure!(provider == "claude", "{provider} keeps no account to sign out of");
+            ctx.claude_signout().await?;
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        // An API key for one of opencode's providers, written into opencode's OWN credentials file
+        // in the shape its `/connect` writes. The provider id is logged, the key never.
+        "agent_opencode_key_set" => {
+            anyhow::ensure!(
+                !read_only(),
+                "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never changes opencode's keys"
+            );
+            let provider = param_str(params, "provider_id")?;
+            let key = param_str(params, "key")?;
+            agent_auth::opencode_set_key(&agent_models::opencode_auth_path(), &provider, &key)?;
+            eprintln!("[agent-auth] opencode has an API key for {provider}");
+            let store = ctx.store()?;
+            agent_status_json(&store)
+        }
+
+        "agent_opencode_key_remove" => {
+            anyhow::ensure!(
+                !read_only(),
+                "refused: TEAMS_LITE_READ_ONLY=1 — a read-only backend never changes opencode's keys"
+            );
+            let provider = param_str(params, "provider_id")?;
+            let removed = agent_auth::opencode_remove(&agent_models::opencode_auth_path(), &provider)?;
+            if removed {
+                eprintln!("[agent-auth] opencode no longer holds a credential for {provider}");
+            }
+            let store = ctx.store()?;
+            let mut status = agent_status_json(&store)?;
+            status["removed"] = json!(removed);
+            Ok(status)
         }
 
         // Opt one conversation in or out. The sandbox channel starts opted in because
@@ -9250,6 +11030,8 @@ async fn gitlab_review_run_reported(
         // NO tools. See the note above — this is deliberately not the machine's own allowlist.
         permissions: agent::Permissions::Granted(Vec::new()),
         model: model.clone(),
+        // How it signs in is the machine's choice, exactly as for an `@claude` run.
+        env: agent_child_env(&ctx.store()?, backend)?,
     };
     eprintln!(
         "[gitlab-review] {project_path}!{iid} at {} — {} files, {} bytes of patch{}",
@@ -9380,6 +11162,7 @@ async fn gitlab_review_ask(
         // may reach: the code it is allowed to look at is what the reader tagged.
         permissions: agent::Permissions::Granted(Vec::new()),
         model: model.clone(),
+        env: agent_child_env(&ctx.store()?, backend)?,
     };
     eprintln!(
         "[gitlab-review] {project_path}!{iid} question — {} themes, {} files, {} bytes{}",
@@ -10699,6 +12482,24 @@ fn spawn_presence_heartbeat(ctx: Ctx) {
 ///
 /// Best-effort by design: a dev build (no embedded commit), no network, or a rate-limited
 /// API all end a pass quietly — it must never affect startup or the running app.
+/// Check the CLIs this app installed for a newer release, and take one — see
+/// `Ctx::agent_cli_pass`. A read-only backend never installs anything, so it never asks either.
+fn spawn_agent_cli_poll(ctx: Ctx) {
+    if read_only() {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(AGENT_CLI_FIRST_CHECK).await;
+        let mut ticks = tokio::time::interval(AGENT_CLI_CHECK_INTERVAL);
+        loop {
+            ticks.tick().await;
+            // The outcome is in the slot and the journal already; a pass on the clock has nobody
+            // waiting for it.
+            let _ = ctx.agent_cli_pass(true).await;
+        }
+    });
+}
+
 fn spawn_release_poll(ctx: Ctx) {
     let Some(current) = teams_lite::update::build_rev() else {
         // Built from source: nothing meaningful to compare against, so we never
@@ -11480,18 +13281,28 @@ fn log_agent_backends(unrestricted: bool) {
     for backend in agent_policy::BACKENDS.iter() {
         match agent::program_path(backend) {
             Some(path) => eprintln!(
-                "[agent] {} ready — {} runs {}",
+                "[agent] {} ready — {} runs {}{}",
                 backend.name,
                 backend.prefix,
-                path.display()
+                path.display(),
+                match agent_cli::Tool::named(backend.name).and_then(agent_cli::installed_version) {
+                    Some(version) if agent_cli::is_managed(&path) => {
+                        format!(" (version {version}, installed by this app)")
+                    }
+                    _ => String::new(),
+                }
             ),
             None => eprintln!(
-                "[agent] {} unavailable — `{}` is on no PATH entry: {}",
+                "[agent] {} unavailable — `{}` is on no PATH entry and this app has not installed \
+                 it (Settings › AI providers can): {}",
                 backend.name,
                 backend.program,
                 std::env::var("PATH").unwrap_or_else(|_| "<unset>".into())
             ),
         }
+    }
+    if let Some(home) = agent_cli::agent_home() {
+        eprintln!("[agent] every agent CLI runs with HOME={}", home.display());
     }
 }
 
@@ -11666,6 +13477,9 @@ fn agent_request(
             )
             .model(command.backend.name)
         }),
+        // How the CLI signs in — an API key or a cloud account the user set up in Settings › AI
+        // providers, handed to this child alone (`agent_auth::child_env`).
+        env: agent_child_env(&store, command.backend)?,
     })
 }
 
@@ -12433,6 +14247,8 @@ fn agent_personas_json(store: &Store) -> Result<Vec<Value>> {
 
 fn agent_status_json(store: &Store) -> Result<Value> {
     let personas = agent_personas_json(store)?;
+    let auth = agent_auth_config(store);
+    let cloud = agent_auth::opencode_cloud_providers(&auth);
     let modes = store.get_setting(agent_policy::SETTING_MODES)?;
     let stored_providers = store.get_setting(agent_policy::SETTING_PROVIDERS)?;
     let providers = agent_policy::Providers::parse(stored_providers.as_deref());
@@ -12449,7 +14265,16 @@ fn agent_status_json(store: &Store) -> Result<Value> {
                 "model": providers.model(backend.name),
                 // What a picker offers, never a limit on what may be saved — see
                 // `agent_models::choices`, which reads this machine's own catalogue.
-                "models": agent_models::choices(backend),
+                "models": agent_models::choices(
+                    backend,
+                    if backend.catalogue == agent_policy::Catalogue::Opencode { &cloud } else { &[] },
+                ),
+                // How it signs in right now: Claude Code's own account (and a sign-in waiting for
+                // its code), opencode's providers. Never a secret.
+                "account": agent_account_json(backend),
+                // Whether this app can install it, which version it installed, whether a newer
+                // one is out, and how far an install in flight has got (`agent_cli`).
+                "cli": agent_cli_json(backend),
             })
         })
         .collect();
@@ -12507,7 +14332,52 @@ fn agent_status_json(store: &Store) -> Result<Value> {
         // switch that would do nothing.
         "enabled": !read_only(),
         "sandbox_conversation": agent_policy::SANDBOX_THREAD,
+        // Whether a newer release of a CLI this app installed is taken on its own.
+        "cli_auto_update": agent_cli::auto_update_from_setting(
+            store.get_setting(agent_cli::SETTING_AUTO_UPDATE)?.as_deref(),
+        ),
+        // How the CLIs sign in: Claude Code's chosen way in, whether an Anthropic API key is held,
+        // and the cloud accounts set up here — what each form needs, and never a secret.
+        "auth": agent_auth::status_json(&auth),
     }))
+}
+
+/// One backend's `cli` block in `agent_status`: what this app can do about installing it, and what
+/// it already did.
+///
+/// `managed` and `version` are two facts and a page needs both. `version` is this app's copy on
+/// disk; `managed` is whether the program a run starts IS that copy — which it is not when the
+/// user's own install comes first on `PATH`, and then that copy is offered for removal and never
+/// for an update, because it is not what runs.
+fn agent_cli_json(backend: &agent_policy::Backend) -> Value {
+    let Some(tool) = agent_cli::Tool::named(backend.name) else {
+        return Value::Null;
+    };
+    let slot = agent_cli_slot(tool);
+    let path = agent::program_path(backend);
+    let managed = path.as_deref().is_some_and(agent_cli::is_managed);
+    let version = agent_cli::installed_version(tool);
+    json!({
+        // Whether an Install or an Update could be pressed at all on this machine.
+        "installable": !read_only()
+            && agent_cli::this_platform(tool).is_some()
+            && agent_cli::tools_dir().is_some(),
+        "managed": managed,
+        "version": version,
+        "latest": slot.latest,
+        "update_available": managed && agent_cli::is_update(version.as_deref(), slot.latest.as_deref()),
+        "checked_ms": slot.checked_ms,
+        "phase": slot.phase.map_or("idle", AgentCliPhase::as_str),
+        "received": slot.received,
+        "total": slot.total,
+        "error": slot.error,
+        // A statement of size for the sentence beside the button, never a bound.
+        "download_bytes": tool.download_estimate_bytes(),
+        "installed_bytes": agent_cli::installed_bytes(tool),
+        "publisher": tool.publisher(),
+        // Where the program a run starts is. Signing it in is `account`'s (see `agent_auth`).
+        "path": path.as_ref().map(|p| p.display().to_string()),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -13705,6 +15575,82 @@ fn spawn_realtime(ctx: Ctx, db_path: String) {
     });
 }
 
+/// Look at the Intune container's login keyring every so often, and repair it when it is
+/// locked.
+///
+/// It replaced `teams-lite-broker-health.timer`, which ran a shell script that asked `busctl`
+/// the same question. In process it asks over the bus this backend already resolves, and the
+/// repair it asks for is the same one the broker observer and the app's button ask for — so
+/// one machine-wide floor covers all three (`Ctx::start_broker_repair`).
+///
+/// Never on a read-only backend, and never on a host with no container: there is nothing it
+/// could do there, and the host's own keyring is not one a container restart changes.
+///
+/// In EMBEDDED mode it also keeps the container UP: the container is this pod's own, so one
+/// that is not running (it crashed, or the boot at startup failed — a pull that lost the
+/// network, say) has nobody else to start it. A container found not running, or never set up,
+/// with no helper at work, is booted again — under the same machine-wide floor an automatic
+/// repair takes (`Ctx::start_container_boot`), so one that will not stay up is not re-pulled
+/// every fifteen minutes for ever.
+fn spawn_broker_health(ctx: Ctx) {
+    if read_only() {
+        return;
+    }
+    tokio::spawn(async move {
+        // A backend that comes up in the middle of a repair — the launcher re-spawning one
+        // that crashed, a re-stage — would otherwise greet its pages with `repairing: false`
+        // while the container is down. Follow the one that is running.
+        if intune::repair_available() && intune::repair_running().await.unwrap_or(false) {
+            eprintln!("[broker] came up during a repair — following it");
+            ctx.follow_running_work();
+        }
+        tokio::time::sleep(BROKER_HEALTH_FIRST).await;
+        let mut tick = tokio::time::interval(BROKER_HEALTH_INTERVAL);
+        loop {
+            tick.tick().await;
+            if intune_embedded::embedded() {
+                // Anything holding the slot has the container in hand; asking its keyring now
+                // would read a container mid-boot, mid-repair or mid-stop as a broken one.
+                if intune_embedded::slot_held() {
+                    continue;
+                }
+                match intune::container_keyring().await {
+                    intune::KeyringCheck::Locked => {}
+                    check @ (intune::KeyringCheck::NotRunning | intune::KeyringCheck::NoContainer) => {
+                        // Named apart, because the two read alike in the keyring's answer (no bus
+                        // to ask either way) and need different cures: a container that is down is
+                        // started, and one whose leader is up with no bus is RESTARTED by the boot.
+                        if intune::container_leader().is_some() {
+                            eprintln!(
+                                "[intune] health check: the Intune container's leader is up but its \
+                                 broker's bus is missing — booting it again, which restarts it"
+                            );
+                        } else {
+                            eprintln!("[intune] health check: {} — starting it", check.describe());
+                        }
+                        if let Err(e) = ctx.start_container_boot(BootTrigger::Automatic) {
+                            eprintln!("[intune] could not start the Intune container: {e:#}");
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                }
+            } else {
+                if !intune::repair_available() {
+                    continue;
+                }
+                if intune::container_keyring().await != intune::KeyringCheck::Locked {
+                    continue;
+                }
+            }
+            eprintln!("[broker] health check: the container's login keyring is locked");
+            if let Err(e) = ctx.start_broker_repair(true).await {
+                eprintln!("[broker] could not start the repair: {e:#}");
+            }
+        }
+    });
+}
+
 /// Bring the calling connection up at boot, on every backend that calls at all.
 ///
 /// This is the whole of "calling is on": the app registers as a device the user's calls
@@ -14601,6 +16547,364 @@ mod tests {
             PRESENCE_HEARTBEAT < Duration::from_secs(300),
             "an endpoint registration expires after 300 s"
         );
+    }
+
+    // The Intune container's own supervisor is THIS binary, re-executed by the crate with a
+    // hidden argument (`intune-container`'s `backend::spawn_supervisor`). Routed after the
+    // runtime is built — or not at all — and the supervisor is a second teams-lite backend that
+    // dies on the port, so no container boots and the repair reports a 20-second timeout. And it
+    // must be routed before tokio exists: the supervisor forks to unshare a user namespace, which
+    // a multithreaded process cannot do safely, and it builds a runtime of its own.
+    #[test]
+    fn the_crates_reexec_targets_are_routed_before_the_runtime_exists() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let main = code
+            .split("\nfn main() -> Result<()> {")
+            .nth(1)
+            .expect("a plain, synchronous `fn main`")
+            .split("\n}\n")
+            .next()
+            .expect("main ends");
+        let routed = main.find("intune::dispatch_reexec(").expect("main routes the re-exec targets");
+        let runtime = main.find("new_multi_thread()").expect("main builds the backend's runtime");
+        assert!(
+            routed < runtime,
+            "the crate's re-exec targets must be handled before any runtime is built"
+        );
+        assert!(
+            !code.contains("#[tokio::main]"),
+            "`#[tokio::main]` builds the runtime before the body runs, so nothing could be routed \
+             ahead of it"
+        );
+    }
+
+    // The repair used to be `systemctl` starting an installed unit whose ExecStart was the
+    // `intune-container` binary. It is the crate now, inside a transient unit asked for over
+    // D-Bus — or, in embedded mode, a helper of this binary's own, which `intune::start_repair`
+    // picks — and the gates come in the order that costs least to be wrong about: a container to
+    // restart, a keyring that really is locked, then the machine-wide floor, then the start.
+    #[test]
+    fn the_broker_repair_runs_no_host_command_and_checks_its_gates_first() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let body = code
+            .split("async fn start_broker_repair(&self, automatic: bool) -> Result<Value> {")
+            .nth(1)
+            .expect("start_broker_repair")
+            .split("\n    }\n")
+            .next()
+            .expect("start_broker_repair ends");
+        assert!(!body.contains("Command::new"), "the repair spawns no host command");
+        assert!(!code.contains("Command::new(\"systemctl\")"), "no `systemctl` anywhere");
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing {needle}"));
+        let read_only = at("read_only()");
+        let available = at("intune::repair_available()");
+        let running = at("intune::repair_running()");
+        let keyring = at("intune::container_keyring()");
+        let claim = at("claim_broker_repair(");
+        let start = at("intune::start_repair()");
+        assert!(
+            !body.contains("intune::start_repair_unit()"),
+            "the backend dispatches through `intune::start_repair`, which picks the unit or the helper"
+        );
+        assert!(
+            read_only < available
+                && available < running
+                && running < keyring
+                && keyring < claim
+                && claim < start,
+            "read-only, then a container to restart, then a repair ALREADY running (during one the \
+             container is down, so the keyring cannot be asked), then a LOCKED keyring, then the \
+             floor, then the start — a claim taken before the keyring check would spend the floor \
+             on nothing"
+        );
+    }
+
+    // crates.io 0.2.3 re-pulls the rootfs on every start and does not persist the device
+    // registration across it: a repair through it would unenroll the user's machine. The fix is
+    // in 2917d92, so the dependency is pinned to a commit that carries it.
+    #[test]
+    fn the_intune_container_dependency_is_never_the_release_that_unenrolls_the_machine() {
+        let manifest = include_str!("../../Cargo.toml");
+        let line = manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with("intune-container"))
+            .expect("teams-lite depends on the intune-container crate");
+        assert!(
+            !line.contains("\"0.2.3\"") && !line.contains("version = \"0.2.3\""),
+            "intune-container 0.2.3 from crates.io wipes the device registration on a repair: {line}"
+        );
+        assert!(line.contains("rev = ") || line.contains("version = "), "pinned: {line}");
+    }
+
+    // The mock refuses a press on an unlocked keyring with the backend's own sentence, so the
+    // banner the suite reviews is the banner a reader meets. Two spellings of one sentence across
+    // a process boundary drift silently — a test is the only thing that can notice.
+    #[test]
+    fn the_mock_refuses_a_press_with_the_backends_own_sentence() {
+        let mock = include_str!("../../web/mock/server.ts");
+        let declared = mock
+            .split("const MOCK_REPAIR_NOT_LOCKED =")
+            .nth(1)
+            .expect("the mock declares its refusal")
+            .split(';')
+            .next()
+            .expect("the declaration ends");
+        // Join the TypeScript string literals the declaration is split across.
+        let joined: String = declared
+            .split('"')
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 1)
+            .map(|(_, part)| part)
+            .collect();
+        assert_eq!(joined, repair_refusal(&intune::KeyringCheck::Unlocked));
+    }
+
+    // In embedded mode the container is the app's own: a refusal names what the APP does next
+    // (it starts the container itself, and the first start is a download worth its size), never
+    // a command nobody runs in a pod. The unlocked keyring reads the same in both, which is what
+    // keeps the mock's copy of it one sentence.
+    #[test]
+    fn an_embedded_refusal_says_the_app_starts_its_own_container() {
+        use intune::KeyringCheck::*;
+        for state in [NotRunning, NoContainer] {
+            let embedded = repair_refusal_in(&state, true);
+            assert!(embedded.contains("1.7 GB"), "{embedded}");
+            assert!(!embedded.contains("intune-container start"), "{embedded}");
+            assert_ne!(embedded, repair_refusal_in(&state, false));
+        }
+        assert!(repair_refusal_in(&NotRunning, false).contains("intune-container start"));
+        assert_eq!(repair_refusal_in(&Unlocked, true), repair_refusal_in(&Unlocked, false));
+        assert_eq!(repair_refusal_in(&Locked, true), "");
+    }
+
+    // A host-mode backend says nothing about a container that is not its own: the field is
+    // there, and null — and the test process declares no mode, so it is host mode.
+    #[test]
+    fn the_broker_status_carries_no_embedded_state_in_host_mode() {
+        assert!(!intune_embedded::embedded());
+        let payload = broker_status_payload(false);
+        assert!(payload.get("intune").is_some_and(Value::is_null), "{payload}");
+    }
+
+    // The embedded payload is built in every greeting, so it must be cheap — and the shape the
+    // page reads is fixed here, beside the function that writes it.
+    #[test]
+    fn the_embedded_intune_status_reads_cheaply_and_says_the_boot_is_starting() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let body = code
+            .split("fn intune_status_payload(failure: Option<auth::BrokerFailure>) -> Value {")
+            .nth(1)
+            .expect("intune_status_payload")
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        for key in [
+            "\"mode\"",
+            "\"helper\"",
+            "\"initialized\"",
+            "\"registered\"",
+            "\"running\"",
+            "\"can_enroll\"",
+            "\"can_portal_sign_in\"",
+        ] {
+            assert!(body.contains(key), "the embedded status carries {key}");
+        }
+        assert!(body.contains("BOOTS_FOLLOWED"), "a boot this backend spawned reads as starting at once");
+        for slow in ["container_keyring", "is_running(", ".await", "spawn_helper"] {
+            assert!(!body.contains(slow), "the greeting's status never does `{slow}`");
+        }
+    }
+
+    // A boot is never announced as a repair: in embedded mode whatever is already running is
+    // followed as what it is, and every trigger reaches the boot through one function that
+    // refuses read-only and host mode — the startup with no floor, the health check and the
+    // observer with the automatic one, and a press always.
+    #[test]
+    fn a_running_helper_is_followed_as_what_it_is() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let repair = code
+            .split("async fn start_broker_repair(&self, automatic: bool) -> Result<Value> {")
+            .nth(1)
+            .unwrap()
+            .split("\n    }\n")
+            .next()
+            .unwrap();
+        assert!(!repair.contains("self.follow_repair(None)"), "a found helper may be a boot");
+        assert!(repair.contains("self.follow_running_work()"));
+        // A container that is merely DOWN is booted from the repair's own not-locked branch,
+        // after the keyring was asked and before the repair's floor would be spent.
+        let keyring = repair.find("intune::container_keyring()").unwrap();
+        let boots = repair.find("self.start_container_boot(trigger)").expect("a down container is booted");
+        let claim = repair.find("claim_broker_repair(").unwrap();
+        assert!(keyring < boots && boots < claim);
+        let boot = code
+            .split("fn start_container_boot(&self, trigger: BootTrigger) -> Result<()> {")
+            .nth(1)
+            .expect("start_container_boot")
+            .split("\n    }\n")
+            .next()
+            .unwrap();
+        let read_only = boot.find("!read_only()").expect("refuses read-only");
+        let mode = boot.find("intune_embedded::embedded()").expect("refuses host mode");
+        let following = boot.find("BOOTS_FOLLOWED.load(").expect("never a second automatic boot");
+        let floor = boot.find("repair_floor_allows(").expect("asks the machine-wide floor");
+        let spawn = boot.find("spawn_helper(intune_embedded::Helper::Boot)").expect("spawns the boot");
+        let claim = boot.find("claim_broker_repair(").expect("takes the machine-wide floor");
+        assert!(
+            read_only < spawn && mode < spawn && following < spawn && floor < spawn && spawn < claim,
+            "the floor is asked before the spawn and CLAIMED only once a boot was really spawned"
+        );
+        let started = boot.find("HelperStart::Started(child) => {").expect("the spawned arm");
+        let already = boot.find("HelperStart::AlreadyRunning => {").expect("the found arm");
+        assert!(started < claim && claim < already, "a boot refused as already running spends no floor");
+        assert!(boot.contains("BootTrigger::Startup => None"), "only the startup boot skips the floor");
+        let health = code
+            .split("fn spawn_broker_health(ctx: Ctx) {")
+            .nth(1)
+            .unwrap()
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        assert!(
+            health.contains("ctx.start_container_boot(BootTrigger::Automatic)"),
+            "the health check takes the floor"
+        );
+        assert!(health.contains("ctx.follow_running_work()"));
+    }
+
+    // `started: true` is a repair really under way: a press against a boot, an enrollment's portal
+    // or the stop is refused in WORDS (the page shows the sentence), and an automatic trigger is
+    // told `busy` and by whom.
+    #[test]
+    fn a_repair_press_against_other_work_is_refused_never_answered_started() {
+        use intune_embedded::SlotHolder;
+        assert_eq!(running_work_answer(WorkInHand::Repair, false), Ok(json!({ "started": true })));
+        assert_eq!(
+            running_work_answer(WorkInHand::Repair, true),
+            Ok(json!({ "started": false, "reason": "already_running" }))
+        );
+        for holder in [SlotHolder::Boot, SlotHolder::Portal, SlotHolder::Stop] {
+            assert_eq!(
+                running_work_answer(WorkInHand::Busy(holder), true),
+                Ok(json!({ "started": false, "reason": "busy", "helper": holder.tag() })),
+                "{holder:?}"
+            );
+            let why = running_work_answer(WorkInHand::Busy(holder), false).expect_err("a press is refused in words");
+            assert!(why.starts_with("Not restarting the Intune container: "), "{why}");
+            assert!(!why.contains("started"), "{why}");
+        }
+        assert!(busy_refusal(SlotHolder::Boot).contains("1.7 GB"));
+        assert!(busy_refusal(SlotHolder::Portal).contains("enrollment"));
+        // The handler reads which work again, and answers through this one function on both of
+        // the paths that find work in hand.
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let repair = code
+            .split("async fn start_broker_repair(&self, automatic: bool) -> Result<Value> {")
+            .nth(1)
+            .unwrap()
+            .split("\n    }\n")
+            .next()
+            .unwrap();
+        assert_eq!(repair.matches("running_work_answer(work, automatic)").count(), 2);
+        assert!(!repair.contains("json!({ \"started\": true })\n                });"), "no blanket started:true");
+    }
+
+    // The floor is ASKED with the claim's own comparison, so a boot refused by it is refused for
+    // exactly the reason the claim would have refused it.
+    #[test]
+    fn the_floor_is_asked_with_the_claims_own_comparison() {
+        let dir = std::env::temp_dir().join(format!("teams-lite-floor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.db");
+        let db = path.to_string_lossy().into_owned();
+        prepare_store(&db, true).unwrap();
+        let store = Store::open(&db).unwrap();
+        assert!(repair_floor_allows(&store, 0).unwrap(), "no start ever recorded lets one through");
+        assert!(store.claim_broker_repair(1_000, i64::MAX).unwrap());
+        assert!(!repair_floor_allows(&store, 999).unwrap(), "a start after `not_since` holds the next back");
+        assert!(repair_floor_allows(&store, 1_000).unwrap());
+        assert_eq!(repair_floor_allows(&store, 999).unwrap(), store.claim_broker_repair(2_000, 999).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // A boot that lost the slot did NOTHING, and is never announced as a running container: its
+    // follower hands its count back and follows whoever holds the slot instead.
+    #[test]
+    fn a_boot_that_lost_the_slot_follows_the_holder_instead_of_claiming_success() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let follow = code
+            .split("    fn follow(&self, work: Followed) {")
+            .nth(1)
+            .expect("follow")
+            .split("\n    }\n")
+            .next()
+            .unwrap();
+        let lost = follow.find("Ok(Ok(intune_embedded::BOOT_SLOT_TAKEN)) => {").expect("exit 3 is its own arm");
+        let success = follow.find("Ok(Ok(0)) =>").expect("success");
+        assert!(success < lost);
+        let arm = &follow[lost..];
+        let handed_back = arm.find("counter.fetch_sub(1, Ordering::SeqCst);").unwrap();
+        let followed = arm.find("watcher.follow_running_work();").unwrap();
+        let returned = arm.find("return;").unwrap();
+        assert!(handed_back < followed && followed < returned, "the count is handed back before following");
+        assert!(follow.contains("tokio::time::timeout(intune_embedded::BOOT_FOLLOW_BOUND, child.finished())"));
+        // The health check names a leader with no bus apart from a container that is down, and
+        // skips while ANYTHING holds the slot (the stop included).
+        let health = code.split("fn spawn_broker_health(ctx: Ctx) {").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(health.contains("intune::container_leader().is_some()"));
+        assert!(health.contains("broker's bus is missing — booting it again"));
+        assert!(health.contains("intune_embedded::slot_held()"));
+    }
+
+    // A portal helper lives in a session of its own and survives the backend, so a restart in the
+    // middle of an enrollment left one holding the slot with no session anywhere: nothing could
+    // serve or cancel its portal, and nothing announced its end — every page kept "the portal is
+    // still open" and no Enroll offer until it reconnected. It is asked to close (by the pid the
+    // slot named when it was found, through the stop helper's own re-check) and followed to its end,
+    // whose status is then announced — once, whichever triggers found it.
+    #[test]
+    fn a_portal_helper_no_session_owns_is_asked_to_close_and_followed_to_its_end() {
+        let source = include_str!("server.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let body = |signature: &str| {
+            code.split(signature)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{signature}"))
+                .split("\n    }\n")
+                .next()
+                .unwrap()
+        };
+        let running = body("    fn follow_running_work(&self) {");
+        let portal = running.find("Some(SlotHolder::Portal) => {").expect("a portal is its own arm");
+        let pid = running.find("let pid = intune_embedded::portal_helper_pid();").expect("its pid, read");
+        let owned = running.find("if self.owns_a_live_portal_session() {").expect("then whose it is");
+        let followed = running
+            .find("self.follow_portal_helper(PortalHelper::Unowned(pid));")
+            .expect("one no session of ours owns is followed, by the pid read as it was found");
+        let reported = running.find("Some(SlotHolder::Stop) | None =>").expect("the rest");
+        assert!(portal < pid && pid < owned && owned < followed && followed < reported);
+        let owns = body("    fn owns_a_live_portal_session(&self) -> bool {");
+        assert!(owns.contains("session.is_live()") && owns.contains("signin::Kind::Enroll(_)"));
+
+        let follow = body("    fn follow_portal_helper(&self, helper: PortalHelper) {");
+        let once = follow
+            .find("PORTALS_FOLLOWED.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_err()")
+            .expect("followed once, claimed in one step");
+        let asked = follow.find("intune_embedded::ask_portal_helper_to_close(pid)").expect("asked to close");
+        let waited = follow.find("intune_embedded::wait_for_helper_to_end(signin::ENROLL_DEADLINE)").unwrap();
+        let handed_back = follow.find("PORTALS_FOLLOWED.fetch_sub(1, Ordering::SeqCst);").unwrap();
+        let announced = follow.rfind("watcher.emit(\"broker_status\", broker_status_payload(false));").unwrap();
+        assert!(once < asked && asked < waited && waited < handed_back && handed_back < announced);
+        // The one a session of ours gave up on goes through the same follower, asked already.
+        let left = body("    async fn follow_a_portal_left_running(&self) {");
+        assert!(left.contains("self.follow_portal_helper(PortalHelper::LeftBySession);"));
     }
 
     #[test]
@@ -15666,6 +17970,48 @@ mod tests {
     }
 
     #[test]
+    fn a_browser_page_may_dial_the_backend_only_from_loopback() {
+        // No Origin is not a page: the relays, the launcher's keepalive, an example.
+        assert_eq!(ws_origin_refusal(None), None);
+        for origin in [
+            "http://127.0.0.1:19441",
+            "http://localhost:19441",
+            "http://app.localhost:5173",
+            "http://[::1]:19441",
+            "http://127.0.0.2",
+            "https://localhost.",
+            "http://0.0.0.0:19440",
+            "http://[::]:19440",
+        ] {
+            assert_eq!(ws_origin_refusal(Some(origin)), None, "{origin}");
+        }
+        for origin in [
+            "https://evil.example",
+            "http://localhost.evil.example",
+            "https://box.tail1.ts.net:8443",
+            "http://192.168.1.10:19440",
+            "null",
+            "file://",
+            "http://127.0.0.1:x",
+            "http://[::1",
+            "http://user@127.0.0.1",
+            "ws://127.0.0.1",
+            "",
+        ] {
+            assert!(ws_origin_refusal(Some(origin)).is_some(), "{origin}");
+        }
+    }
+
+    #[test]
+    fn the_origin_check_runs_before_the_handshake_answers() {
+        let source = include_str!("server.rs");
+        let serve = &source[source.find("async fn serve_conn(").expect("serve_conn")..];
+        let serve = &serve[..serve.find("\n}\n").expect("end of serve_conn")];
+        assert!(serve.contains("accept_hdr_async_with_config(stream, check_origin"), "the handshake is not checked");
+        assert!(!serve.contains("accept_async_with_config("), "an unchecked accept is back");
+    }
+
+    #[test]
     fn every_gated_method_is_called_with_the_write_token() {
         let client = include_str!("../../web/src/lib/ws-client.ts");
         for method in OUTWARD_METHODS.iter().chain(MACHINE_METHODS.iter()) {
@@ -16589,7 +18935,10 @@ mod tests {
         // each is far past what a client that merely found this socket may do, so all four
         // are MACHINE methods. `signin_frame` especially: its answer is a picture of a
         // password field, which is not a read.
-        for method in ["signin_start", "signin_frame", "signin_input", "signin_cancel"] {
+        // `intune_enroll` is the same surface pointed at an enrollment, and registers a device
+        // as the user: gated the same way, for at least the same reason.
+        let served = ["signin_start", "signin_frame", "signin_input", "signin_cancel", "intune_enroll"];
+        for method in served {
             assert!(!OUTWARD_METHODS.contains(&method), "{method} posts nothing to Teams");
             assert_eq!(write_class(method), Some(WriteClass::Machine), "{method}");
             let err = check_write_allowed(method, &json!({}), Some("tok"))
@@ -16653,6 +19002,8 @@ mod tests {
         // "no sign-in" and "a backend too old to know about sign-ins" the same answer.
         let idle = signin_idle();
         assert_eq!(idle["phase"], "idle");
+        // The kind is part of the shape too, so a page never has to guess which panel it is.
+        assert_eq!(idle["kind"], "signin");
         assert!(idle["window"].is_null());
         assert_eq!(idle["waited_ms"], 0);
         // The phase tags the page switches on, in both spellings, so neither side can drift.
@@ -16674,15 +19025,121 @@ mod tests {
         // a time (`auth::interactive_gate`), the loser would sit holding a window nobody reads.
         let whole = include_str!("server.rs");
         let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
-        let start = source.find("async fn start_signin").expect("start_signin");
-        let body = &source[start..];
+        let start = source.find("fn claim_signin_slot(").expect("claim_signin_slot");
+        let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
         let lock = body.find("self.signin.lock()").expect("the claim");
-        let store = body.find("*held = Some(Arc::clone(session))").expect("the store");
+        let store = body.find("*held = Some(Arc::clone(&session))").expect("the store");
         assert!(lock < store, "the slot is claimed before the session is stored");
         assert!(
             !body[lock..store].contains(".await"),
             "nothing may be awaited between claiming the slot and storing the session"
         );
+        // And BOTH ways in go through that one claim — a sign-in and an enrollment share the
+        // slot, the window and the turn, so a second spelling of the claim is a second chance
+        // to start two flows at once.
+        for entry in ["async fn start_signin(", "async fn start_enroll("] {
+            let at = source.find(entry).unwrap_or_else(|| panic!("{entry}"));
+            let body = &source[at..at + source[at..].find("\n    }\n").unwrap()];
+            assert!(body.contains("self.claim_signin_slot("), "{entry} claims the shared slot");
+            assert!(!body.contains("self.signin.lock()"), "{entry} must not claim it a second way");
+        }
+    }
+
+    #[test]
+    fn an_enrollment_is_refused_unless_one_can_really_happen() {
+        // Read-only, then whose container it is, then whether an enrollment can really happen
+        // (the container up, no helper at work, NO registration yet) — and only then the claim
+        // that starts the portal. A registration that works must never be replaced by a press.
+        let whole = include_str!("server.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        let at = source.find("async fn start_enroll(").expect("start_enroll");
+        let body = &source[at..at + source[at..].find("\n    }\n").unwrap()];
+        let read_only = body.find("!read_only()").expect("the read-only gate");
+        let embedded = body.find("intune_embedded::embedded()").expect("the mode gate");
+        let decided = body.find("portal_purpose(&status, failure,").expect("what the portal is for");
+        let can = body.find("let Some(purpose) = purpose else").expect("the refusal when it is for nothing");
+        let claim = body.find("self.claim_signin_slot(").expect("the claim");
+        assert!(read_only < embedded && embedded < decided && decided < can && can < claim);
+        // The purpose the session is opened for is the one decided here, never the client's.
+        assert!(body.contains("signin::Signin::enroll(purpose,"));
+        // And once it has ended, the broker is asked ONCE — bounded — before the pages are told,
+        // or an enrollment that worked is announced with the old failure still in the banner.
+        let probe = body
+            .find("tokio::time::timeout(REPAIR_SETTLE_PROBE, ctx.tokens.refresh(")
+            .expect("the re-read");
+        let told = body[probe..].find("ctx.emit(\"broker_status\"").expect("then the status");
+        assert!(told > 0);
+    }
+
+    #[test]
+    fn an_enrollment_that_is_not_offered_says_why() {
+        use intune_embedded::{EmbeddedStatus, Helper};
+        let up = EmbeddedStatus {
+            helper: None,
+            initialized: true,
+            registered: false,
+            running: true,
+            can_enroll: true,
+        };
+        // Every refusal is of a state `can_enroll` says no to, so each one turns the offer off.
+        let refused = |status: EmbeddedStatus| {
+            enroll_refusal(&EmbeddedStatus { can_enroll: false, ..status })
+        };
+        let busy = refused(EmbeddedStatus { helper: Some(Helper::Boot), ..up.clone() });
+        assert!(busy.contains("starting it"), "{busy}");
+        let open = refused(EmbeddedStatus { helper: Some(Helper::Portal), ..up.clone() });
+        assert!(open.contains("already open"), "{open}");
+        // The sharp one: enrolling over a registration that works is refused, and says so.
+        let enrolled = refused(EmbeddedStatus { registered: true, ..up.clone() });
+        assert!(enrolled.contains("already holds a device registration"), "{enrolled}");
+        let down = refused(EmbeddedStatus { running: false, ..up.clone() });
+        assert!(down.contains("not running"), "{down}");
+        let fresh = refused(EmbeddedStatus { initialized: false, running: false, ..up.clone() });
+        assert!(fresh.contains("1.7 GB"), "a first start states what it costs: {fresh}");
+        // A host-mode backend never gets as far as this: the RPC refuses it by mode first.
+        assert!(!intune_embedded::embedded());
+    }
+
+    // A registered container whose broker holds no account used to fall through to the HOST-mode
+    // remedy — "sign in to Intune again", with a tool this image does not have. The portal is how
+    // an account is added on an enrolled device, so it is offered for exactly that, and for
+    // nothing that would enroll the device a second time.
+    #[test]
+    fn the_portal_signs_an_account_in_only_on_a_registered_container_with_none() {
+        use auth::BrokerFailure::*;
+        use intune_embedded::{EmbeddedStatus, Helper};
+        use signin::PortalPurpose::{Account, Enroll};
+        assert!(!read_only(), "the test process is send-capable");
+        let enrolled = EmbeddedStatus {
+            helper: None,
+            initialized: true,
+            registered: true,
+            running: true,
+            can_enroll: false,
+        };
+        let free = || true;
+        assert_eq!(portal_purpose(&enrolled, Some(NoAccount), free), Some(Account));
+        // Any other failure is not an account that is missing: a keyring, a broker asleep, a
+        // refusal a served sign-in answers — none of them is the portal's to mend.
+        for failure in [Disconnected, Unresponsive, Unreachable, Refused, KeyringLocked, Other] {
+            assert_eq!(portal_purpose(&enrolled, Some(failure), free), None, "{failure:?}");
+        }
+        assert_eq!(portal_purpose(&enrolled, None, free), None, "a healthy broker needs nothing");
+        // Every gate an enrollment has holds for it: up, no helper, and a FREE slot — which the
+        // STOP takes too, and `EmbeddedStatus.helper` does not name.
+        let down = EmbeddedStatus { running: false, ..enrolled.clone() };
+        assert_eq!(portal_purpose(&down, Some(NoAccount), free), None);
+        let busy = EmbeddedStatus { helper: Some(Helper::Repair), ..enrolled.clone() };
+        assert_eq!(portal_purpose(&busy, Some(NoAccount), free), None);
+        assert_eq!(portal_purpose(&enrolled, Some(NoAccount), || false), None, "the stop holds it");
+        // An unregistered container is ENROLLED, whatever the broker says — that is the same
+        // offer it always was, and the account half never replaces it.
+        let fresh = EmbeddedStatus { registered: false, can_enroll: true, ..enrolled.clone() };
+        assert_eq!(portal_purpose(&fresh, Some(NoAccount), free), Some(Enroll));
+        // And an unregistered container that cannot be enrolled now is offered no account
+        // sign-in either: there is no account to add to a device with no registration.
+        let not_now = EmbeddedStatus { can_enroll: false, ..fresh };
+        assert_eq!(portal_purpose(&not_now, Some(NoAccount), free), None);
     }
 
     #[test]
@@ -17810,9 +20267,9 @@ mod lifecycle_tests {
         let source = include_str!("server.rs");
         let code = source.split("#[cfg(test)]").next().unwrap_or(source);
         let main = code
-            .split("async fn main() -> Result<()> {")
+            .split("async fn serve() -> Result<()> {")
             .nth(1)
-            .expect("main")
+            .expect("serve")
             .split("\n/// ")
             .next()
             .expect("main ends before the next item");

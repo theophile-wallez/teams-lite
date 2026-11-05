@@ -22,6 +22,15 @@ name: build
 # to no purpose. Older releases keep their notes — the changelog history is the part worth
 # for ever, and it is a few KB.
 #
+# AND THE SAME BUILD IS PUBLISHED FOR CONTAINERS, after the same gate (the `image`, `chart-check`
+# and `chart` jobs below): the container image to ghcr.io/<owner>/<repo>, tagged
+# `build-<shortsha>` — the name of the GitHub release built from the same commit — and `latest`;
+# and the Helm chart to oci://ghcr.io/<owner>/charts/teams-lite, whose appVersion is that tag, so
+# a chart version runs exactly the image built beside it. Every name comes from the repository
+# this runs in, never from a spelling in the tree: a fork's master publishes under the fork's own
+# owner, and its chart runs the fork's image (packaging/helm/package.sh). See AGENTS.md § Running
+# teams-lite on Kubernetes.
+#
 # THE CHANGELOG IS NOT WRITTEN HERE. `src/changelog.rs` groups the commit subjects and
 # renders the markdown, and examples/changelog.rs is the one line of glue, because the
 # same module builds the list the update button shows on hover: an awk pipeline here
@@ -35,9 +44,11 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: build-latest
-  cancel-in-progress: true
+# CONCURRENCY IS PER JOB, not per workflow. A newer push still cancels an older `build` — the
+# release it would publish is superseded anyway — but once a commit's image or chart has STARTED
+# publishing it finishes: cancelled mid-way, the commit would keep a `build-<sha>` release with no
+# image and no chart. A publish queued behind a running one is replaced by the newest commit's, so
+# the order stays serial and an older build can never overwrite `latest`.
 
 env:
   # How many of the newest builds keep their 134 MB binary. Ten is about half a day of
@@ -48,12 +59,24 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: build-latest
+      cancel-in-progress: true
+    outputs:
+      tag: ${{ steps.rev.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           # The whole history: the release notes are `git log` between the build the users
           # are on and this one, and a shallow clone cannot answer that.
           fetch-depth: 0
+
+      # The build's ONE name: this commit's release, and the tag of the image and the appVersion
+      # of the chart built from it. `--short=7` grows past 7 on a collision in the full history,
+      # which is exactly why the image job reads it from here rather than cutting the sha itself.
+      - name: Name this build
+        id: rev
+        run: echo "tag=build-$(git rev-parse --short=7 "${GITHUB_SHA}")" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -189,7 +212,7 @@ jobs:
           # Immutable, and kept for ever: this is the record of what shipped. `--latest`
           # marks it as the repository's current release, so the Releases page opens on a
           # real build rather than on the rolling pointer.
-          tag="build-$(git rev-parse --short=7 "${GITHUB_SHA}")"
+          tag="${{ steps.rev.outputs.tag }}"
           gh release create "$tag" out/teams-linux-x64 \
             --title "teams-lite — $(date -u +'%Y-%m-%d %H:%M UTC')" \
             --notes-file out/notes.md \
@@ -263,3 +286,152 @@ jobs:
                       gh release delete-asset "$tag" "$asset" --yes
                     done
               done
+
+  # --- the container image -----------------------------------------------------------------
+  # Built FROM SOURCE by packaging/docker/Dockerfile, the file a local `docker compose build`
+  # runs, rather than from the binary the job above compiled: that one links this runner's glibc
+  # and the image's runtime is Debian's, and the Dockerfile's two stages share one release by
+  # construction. The cost is a cold cargo build here — BuildKit's cache mounts do not survive
+  # between runs — which is why it runs after the gate and not beside it: nothing is published
+  # for a build the tests refused.
+  #
+  # linux/amd64 only: Microsoft's identity broker, which the image cannot sign in without, ships
+  # for x86_64 alone. Built for uid 1000 (see the Dockerfile's header).
+  image:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: publish-image
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.names.outputs.tag }}
+      image: ${{ steps.names.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The names, handed to the chart job below: the repository this runs in (so a fork
+      # publishes its own), lowercased because GHCR requires it, and the build job's own name for
+      # this commit — the release's tag.
+      - name: Name the image
+        id: names
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.image }}
+          tags: |
+            type=raw,value=${{ steps.names.outputs.tag }}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=teams-lite
+            org.opencontainers.image.description=A Microsoft Teams client for Linux that boots its own Intune container, or signs in through the host's identity broker
+
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/docker/Dockerfile
+          platforms: linux/amd64
+          # TEAMS_BUILD_REV is what lets the running app say when `latest` moved past it.
+          build-args: |
+            UID=1000
+            GID=1000
+            TEAMS_BUILD_REV=${{ github.sha }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # The runtime layers (Debian, tini, the user) are what a cache can keep: everything in
+          # the build stage follows `COPY . .` and changes on every commit.
+          cache-from: type=gha,scope=teams-lite-image
+          cache-to: type=gha,mode=min,scope=teams-lite-image
+
+      - name: Summary
+        run: |
+          {
+            echo "### Container image"
+            echo
+            echo "\`${{ steps.names.outputs.image }}:${{ steps.names.outputs.tag }}\` (also \`latest\`)"
+            echo
+            echo "digest \`${{ steps.push.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --- the Helm chart ----------------------------------------------------------------------------
+  # Checked in a job of its own, with no write permission: packaging/helm/check.sh downloads a
+  # validator, and nothing downloaded should run beside a token that can publish packages.
+  chart-check:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.2.2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Lint, test and validate the chart
+        run: packaging/helm/check.sh
+
+  # Published only once the image it names exists. Every build is a new chart version —
+  # MAJOR.MINOR from Chart.yaml, the patch this workflow's run number — so `helm upgrade` always
+  # has the newest build to move to, and its appVersion is the image tag above.
+  chart:
+    needs: [image, chart-check]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-chart
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.2.2
+      - name: Package and push the chart
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          IMAGE_TAG: ${{ needs.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          base="$(awk '/^version:/ { print $2; exit }' packaging/helm/teams-lite/Chart.yaml)"
+          version="${base%.*}.${GITHUB_RUN_NUMBER}"
+          # Stamped for THIS repository: its image, its home, its sources (see the script's header).
+          packaging/helm/package.sh "$GITHUB_REPOSITORY" "$version" "$IMAGE_TAG" out
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+          helm push "out/teams-lite-${version}.tgz" "oci://ghcr.io/${owner}/charts"
+          {
+            echo "### Helm chart"
+            echo
+            echo "\`oci://ghcr.io/${owner}/charts/teams-lite\` version \`${version}\`, running \`${IMAGE_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

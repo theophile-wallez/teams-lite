@@ -19,6 +19,8 @@ pub fn read_only() -> bool {
 }
 
 pub mod agent;
+pub mod agent_auth;
+pub mod agent_cli;
 pub mod agent_markdown;
 pub mod agent_models;
 pub mod agent_persona;
@@ -54,10 +56,16 @@ pub mod gitlab_mr;
 pub mod gitlab_mr_write;
 pub mod gitlab_review;
 pub mod graph_time;
+pub mod intune;
+/// The SELF-CONTAINED Intune container: in `embedded` mode this process owns one and boots,
+/// stops, repairs and enrolls it through helpers of its own, so `intune` keeps its promise that
+/// it never starts a process (see AGENTS.md § The Intune container is a LIBRARY).
+pub mod intune_embedded;
 pub mod linear;
 pub mod link_preview;
 pub mod mail;
 pub mod mail_html;
+pub mod openpgp;
 pub mod pinned_download;
 pub mod png;
 pub mod push;

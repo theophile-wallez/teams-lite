@@ -73,11 +73,15 @@ const MAX_CHOICES: usize = 1_000;
 /// The static list first, in the order this crate wrote it, then whatever the
 /// machine's own catalogue adds — sorted, because a catalogue's order is an
 /// implementation detail of whoever wrote the file.
-pub fn choices(backend: &Backend) -> Vec<Choice> {
+///
+/// `cloud` names the opencode providers a cloud account in this app makes runnable
+/// (`agent_auth::opencode_cloud_providers`): their credentials reach the child through its
+/// environment, so opencode's own files say nothing about them and they would otherwise be hidden.
+pub fn choices(backend: &Backend, cloud: &[&str]) -> Vec<Choice> {
     let mut out: Vec<Choice> = backend.models.iter().map(Choice::from_static).collect();
     match backend.catalogue {
         Catalogue::None => {}
-        Catalogue::Opencode => out.extend(opencode_choices()),
+        Catalogue::Opencode => out.extend(opencode_choices(cloud)),
     }
     out.truncate(MAX_CHOICES);
     out
@@ -90,8 +94,9 @@ fn opencode_catalogue_path() -> PathBuf {
     xdg_dir("XDG_CACHE_HOME", ".cache").join("opencode/models.json")
 }
 
-/// Which providers this machine authenticated, as opencode records it.
-fn opencode_auth_path() -> PathBuf {
+/// Which providers this machine authenticated, as opencode records it — and where this app writes
+/// an API key the user gives it for opencode (`agent_auth::opencode_set_key`).
+pub fn opencode_auth_path() -> PathBuf {
     xdg_dir("XDG_DATA_HOME", ".local/share").join("opencode/auth.json")
 }
 
@@ -103,7 +108,14 @@ fn opencode_config_path() -> PathBuf {
 
 /// A base directory, per the XDG spec: the variable when it is absolute, else the
 /// documented fallback under `$HOME`.
+///
+/// Under an agent home ([`crate::agent_cli::agent_home`]) it is the fallback under THAT home and
+/// never the variable: the CLI child runs with that home as `HOME` and every XDG variable removed
+/// (`agent_cli::prepare_child`), so this has to look exactly where opencode will write.
 fn xdg_dir(variable: &str, fallback: &str) -> PathBuf {
+    if let Some(home) = crate::agent_cli::agent_home() {
+        return home.join(fallback);
+    }
     std::env::var_os(variable)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -128,15 +140,18 @@ fn stamp(path: &Path) -> Stamp {
 /// The cache exists because the catalogue is several megabytes of JSON and
 /// `agent_status` is answered on every connect. Re-reading it there would put a
 /// multi-megabyte parse in front of the settings pane on every reconnect.
-static CACHE: RwLock<Option<([Stamp; 3], Vec<Choice>)>> = RwLock::new(None);
+static CACHE: RwLock<Option<(([Stamp; 3], Vec<String>), Vec<Choice>)>> = RwLock::new(None);
 
-fn opencode_choices() -> Vec<Choice> {
+fn opencode_choices(cloud: &[&str]) -> Vec<Choice> {
     let paths = [opencode_catalogue_path(), opencode_auth_path(), opencode_config_path()];
-    let stamps = [stamp(&paths[0]), stamp(&paths[1]), stamp(&paths[2])];
+    let key = (
+        [stamp(&paths[0]), stamp(&paths[1]), stamp(&paths[2])],
+        cloud.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+    );
 
     if let Ok(cache) = CACHE.read() {
-        if let Some((cached_stamps, choices)) = cache.as_ref() {
-            if *cached_stamps == stamps {
+        if let Some((cached_key, choices)) = cache.as_ref() {
+            if *cached_key == key {
                 return choices.clone();
             }
         }
@@ -147,9 +162,10 @@ fn opencode_choices() -> Vec<Choice> {
         read(&paths[0]).as_deref(),
         read(&paths[1]).as_deref(),
         read(&paths[2]).as_deref(),
+        cloud,
     );
     if let Ok(mut cache) = CACHE.write() {
-        *cache = Some((stamps, choices.clone()));
+        *cache = Some((key, choices.clone()));
     }
     choices
 }
@@ -189,7 +205,7 @@ struct ModelEntry {
 /// - **A model the RPC would refuse is dropped.** These are files this crate does not
 ///   write, and a picker that offers what `agent_set_provider` rejects is a dead
 ///   control that reads as a bug in the app.
-fn build(catalogue: Option<&str>, auth: Option<&str>, config: Option<&str>) -> Vec<Choice> {
+fn build(catalogue: Option<&str>, auth: Option<&str>, config: Option<&str>, cloud: &[&str]) -> Vec<Choice> {
     let catalogue: serde_json::Value =
         catalogue.and_then(|text| serde_json::from_str(text).ok()).unwrap_or(serde_json::Value::Null);
     let auth: serde_json::Value =
@@ -200,6 +216,10 @@ fn build(catalogue: Option<&str>, auth: Option<&str>, config: Option<&str>) -> V
     let mut providers: BTreeMap<String, Provider> = BTreeMap::new();
     for id in configured_providers(&auth, &config) {
         providers.entry(id).or_default();
+    }
+    // A cloud account set up in this app is configured too — through the child's environment.
+    for id in cloud {
+        providers.entry((*id).to_string()).or_default();
     }
 
     // The catalogue fills in every configured provider it knows.
@@ -312,7 +332,7 @@ mod tests {
     #[test]
     fn only_the_providers_this_machine_authenticated_are_offered() {
         let auth = r#"{ "anthropic": { "type": "api", "key": "sk-x" } }"#;
-        let choices = build(Some(CATALOGUE), Some(auth), None);
+        let choices = build(Some(CATALOGUE), Some(auth), None, &[]);
         let ids: Vec<&str> = choices.iter().map(|c| c.id.as_str()).collect();
         // OpenAI is in the catalogue and unauthenticated, so running it would fail.
         assert_eq!(ids, ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-5"]);
@@ -325,11 +345,25 @@ mod tests {
     }
 
     #[test]
+    fn a_cloud_account_in_this_app_makes_its_provider_count() {
+        // Bedrock set up in Settings reaches opencode through its environment, so opencode's own
+        // files are silent about it — and its models are still the ones the picker must offer.
+        let catalogue = r#"{ "amazon-bedrock": { "name": "Amazon Bedrock",
+            "models": { "eu.anthropic.claude-opus-5": { "name": "Claude Opus 5" } } } }"#;
+        let choices = build(Some(catalogue), None, None, &["amazon-bedrock"]);
+        assert_eq!(
+            choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["amazon-bedrock/eu.anthropic.claude-opus-5"]
+        );
+        assert!(build(Some(catalogue), None, None, &[]).is_empty());
+    }
+
+    #[test]
     fn a_provider_the_config_declares_counts_even_with_no_auth_entry() {
         // Credentials from the environment leave `auth.json` empty, and the provider
         // still runs — hiding its models would be wrong.
         let config = r#"{ "provider": { "openai": {} } }"#;
-        let choices = build(Some(CATALOGUE), Some("{}"), Some(config));
+        let choices = build(Some(CATALOGUE), Some("{}"), Some(config), &[]);
         assert_eq!(choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["openai/gpt-5"]);
     }
 
@@ -347,7 +381,7 @@ mod tests {
             }
           }
         }"#;
-        let choices = build(Some(CATALOGUE), Some(auth), Some(config));
+        let choices = build(Some(CATALOGUE), Some(auth), Some(config), &[]);
         let opus = choices.iter().find(|c| c.id == "anthropic/claude-opus-5").unwrap();
         // The context comes from the config, the name from the catalogue: an override
         // is per field, because a config states only what the user wanted to change.
@@ -362,7 +396,7 @@ mod tests {
     #[test]
     fn a_model_the_catalogue_does_not_name_keeps_its_own_id() {
         let auth = r#"{ "acme": {} }"#;
-        let choices = build(Some(CATALOGUE), Some(auth), Some(r#"{"provider":{"acme":{"models":{"m-1":{}}}}}"#));
+        let choices = build(Some(CATALOGUE), Some(auth), Some(r#"{"provider":{"acme":{"models":{"m-1":{}}}}}"#), &[]);
         let model = choices.iter().find(|c| c.id == "acme/m-1").unwrap();
         assert_eq!(model.label, "m-1");
         assert_eq!(model.vendor_label, "acme");
@@ -370,16 +404,16 @@ mod tests {
 
     #[test]
     fn missing_or_broken_files_offer_nothing_rather_than_failing() {
-        assert!(build(None, None, None).is_empty());
-        assert!(build(Some("not json"), Some("not json"), Some("not json")).is_empty());
+        assert!(build(None, None, None, &[]).is_empty());
+        assert!(build(Some("not json"), Some("not json"), Some("not json"), &[]).is_empty());
         // A catalogue with nothing authenticated is the state of a fresh install.
-        assert!(build(Some(CATALOGUE), None, None).is_empty());
+        assert!(build(Some(CATALOGUE), None, None, &[]).is_empty());
     }
 
     #[test]
     fn the_static_list_is_offered_with_its_own_names() {
         let claude = agent_policy::backend_named("claude").unwrap();
-        let choices = choices(claude);
+        let choices = choices(claude, &[]);
         assert_eq!(
             choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
             ["fable", "opus", "sonnet", "haiku"],
@@ -399,12 +433,12 @@ mod tests {
         let config = r#"{ "provider": { "acme": { "models": {
           "ok-1": {}, "with space": {}, "a.b:c_d-e": {}, "quote\"d": {}
         } } } }"#;
-        let ids: Vec<String> = build(None, Some(auth), Some(config)).into_iter().map(|c| c.id).collect();
+        let ids: Vec<String> = build(None, Some(auth), Some(config), &[]).into_iter().map(|c| c.id).collect();
         assert_eq!(ids, ["acme/a.b:c_d-e", "acme/ok-1"]);
 
         // And the list this crate writes itself must pass the same door.
         for backend in agent_policy::BACKENDS {
-            for choice in choices(&backend) {
+            for choice in choices(&backend, &[]) {
                 assert!(agent_policy::is_valid_model(&choice.id), "{choice:?}");
             }
         }

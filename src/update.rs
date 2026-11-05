@@ -1206,17 +1206,6 @@ mod tests {
             "the released build is its own install, not a member of the staged target"
         );
 
-        // A container restart moves the broker's bus, and each backend reads that address
-        // from its own frozen environment — so BOTH have to be restarted, or the released
-        // one stays up, unauthenticated and silent.
-        let bus_restart = include_str!("../packaging/systemd/teams-lite-backend-restart.service");
-        for named in ["teams-lite-backend.service", "teams-lite-app.service"] {
-            assert!(
-                bus_restart.contains(&format!("try-restart {named}")),
-                "the broker-bus restart must cover {named}"
-            );
-        }
-
         // And the installer must not write a unit whose program is absent: systemd
         // rejects it, and a start would fail with 203/EXEC.
         let installer = include_str!("../bin/teams-lite-service.sh");
@@ -1226,148 +1215,636 @@ mod tests {
         );
     }
 
-    /// A backend that froze the WRONG broker bus is found, and restarted.
+    /// The identity broker is found by the BACKEND, and nothing on the far side of a process
+    /// boundary reaches for it any more.
     ///
-    /// The broker's bus is `/proc/<container-leader>/root/run/user/0/bus` and a process
-    /// environment is frozen at exec, so a backend that STARTED BEFORE the container was
-    /// ready holds the host session bus — which carries no broker — for as long as it
-    /// lives. It never exits over it either: a broken sign-in is deliberately not fatal,
-    /// so the process stays `active (running)`, answers every read out of the store, and
-    /// signs in to nothing. It happened to teams-lite-app.service on the author's machine,
-    /// and the app on that front could not reach Teams at all while the staged pair beside
-    /// it worked perfectly.
+    /// The broker's D-Bus is `/proc/<container-leader>/root/run/user/0/bus`, and that path
+    /// moves with every boot of the Intune container. For as long as a shell wrapper resolved
+    /// it once and froze it into `DBUS_SESSION_BUS_ADDRESS` at exec, a whole tier of machinery
+    /// existed to keep a frozen answer from going stale: a wait loop in four places so the
+    /// first start would not freeze the host bus for good, a `.path` unit restarting both
+    /// backends whenever the container rewrote rootless.json, a health timer comparing every
+    /// backend's frozen address with the live one, and an installed repair unit running the
+    /// `intune-container` binary. Each of them earned its place against a real outage, and
+    /// each is now answered in process by `crate::intune` — on every connection, through the
+    /// crate, with no host command.
     ///
-    /// Neither existing self-heal covered it: `teams-lite-broker-bus.path` fires on a WRITE
-    /// to rootless.json, and on a boot that write lands before anything is watching for it;
-    /// `PartOf=intune-container.service` never fires because that unit is a Type=oneshot
-    /// which stays "active (exited)" and restarts itself without changing state; and the
-    /// keyring check answers about the CONTAINER, which in this failure is perfectly
-    /// healthy. So the fix is two-sided, and each side is pinned below — the wrappers WAIT
-    /// so the first start is the right one, and the health timer compares each running
-    /// backend's frozen address with the broker's own so the rest are caught.
-    ///
-    /// Every one of these files is on the other side of a process boundary — nothing in the
-    /// crate runs them — so a change there is invisible to every other test, and the
-    /// failure it reintroduces is silent by construction.
+    /// What can go wrong from here is a REGRESSION nobody would see: a script that quietly
+    /// grows a `busctl` probe again, a unit that exports an address the backend then has to
+    /// out-guess, a unit that still names a script no longer staged (203/EXEC at the next
+    /// start), or a machine staged before this keeping the old watchers ENABLED for good
+    /// because nothing took them back. Every one of these files is invisible to every other
+    /// test — nothing in the crate runs them — so each half is pinned here.
     #[test]
-    fn a_backend_that_froze_the_wrong_broker_bus_is_found_and_restarted() {
-        let health = include_str!("../packaging/systemd/teams-lite-broker-health.service");
-        let bus_check = include_str!("../bin/teams-lite-broker-bus-check.sh");
-        let installer = include_str!("../bin/teams-lite-service.sh");
-        let wrapper = include_str!("../bin/teams-lite-backend.sh");
-        let env = include_str!("../bin/broker-env.sh");
+    fn the_backend_finds_the_broker_itself_and_the_old_shell_machinery_is_retired() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Every script and unit this repository ships, listed by hand because a test cannot
+        // glob at compile time — and the directories are read at RUN time below, so a file
+        // added to either one without being added here fails rather than dodging the scan.
+        let scripts: [(&str, &str); 3] = [
+            ("teams-dev-server.sh", include_str!("../bin/teams-dev-server.sh")),
+            ("teams-launcher.sh", include_str!("../bin/teams-launcher.sh")),
+            ("teams-lite-service.sh", include_str!("../bin/teams-lite-service.sh")),
+        ];
+        let units: [(&str, &str); 4] = [
+            ("teams-lite-app.service", include_str!("../packaging/systemd/teams-lite-app.service")),
+            (
+                "teams-lite-backend.service",
+                include_str!("../packaging/systemd/teams-lite-backend.service"),
+            ),
+            ("teams-lite-web.service", include_str!("../packaging/systemd/teams-lite-web.service")),
+            ("teams-lite.target", include_str!("../packaging/systemd/teams-lite.target")),
+        ];
         let released = include_str!("../install.sh");
 
-        // THE TIMER IS THE ONLY TRIGGER THAT WORKS WITH NO CLIENT CONNECTED, which is
-        // exactly when this outage goes unnoticed — so the check has to run from it, and
-        // with --repair, or it is a diagnosis nobody reads.
-        assert!(
-            health.contains("teams-lite-broker-bus-check.sh --repair"),
-            "the health timer must check each backend's broker bus, and repair it"
-        );
-        // Both scripts exit 1 to mean "found my fault and asked for the repair", which is
-        // information rather than a failure of the unit.
-        assert!(
-            health.contains("SuccessExitStatus=1"),
-            "a check that found its fault must not mark the health unit failed"
-        );
-        // A unit whose program is absent is one systemd starts with 203/EXEC.
-        assert!(
-            installer.contains("teams-lite-broker-bus-check.sh\" \"$SERVICE_DIR/teams-lite-broker-bus-check.sh"),
-            "the installer must stage the bus check beside the unit that runs it"
-        );
-
-        // THE REPAIR IS THE BACKEND'S, NEVER THE CONTAINER'S. The container is healthy in
-        // this failure, and restarting it would take the user's sign-in down for a minute
-        // to fix something that is not wrong with it.
-        assert!(
-            bus_check.contains("teams-lite-backend-restart.service"),
-            "the bus check must repair through the unit that already restarts both backends"
-        );
-        // The VERBS, not the word: the script names `intune-container status` in the
-        // sentence it prints when it cannot tell, which is a read and the normal way to
-        // answer "is the container even up".
-        for verb in ["stop", "start", "restart"] {
-            assert!(
-                !bus_check.contains(&format!("intune-container {verb}")),
-                "a stale bus is the backend's fault, not the container's — never {verb} it here"
+        for (dir, listed) in [
+            ("bin", scripts.iter().map(|(name, _)| *name).collect::<Vec<_>>()),
+            ("packaging/systemd", units.iter().map(|(name, _)| *name).collect::<Vec<_>>()),
+        ] {
+            let mut on_disk: Vec<String> = std::fs::read_dir(root.join(dir))
+                .unwrap_or_else(|e| panic!("read {dir}: {e}"))
+                .map(|entry| {
+                    entry.expect("a directory entry").file_name().to_string_lossy().into_owned()
+                })
+                .collect();
+            on_disk.sort();
+            let mut listed: Vec<String> = listed.iter().map(|name| name.to_string()).collect();
+            listed.sort();
+            assert_eq!(
+                on_disk, listed,
+                "{dir}/ holds a file this test does not scan (or lost one it does): add it to the \
+                 list above, so a new script or unit cannot bring a host-side broker probe back \
+                 unseen"
             );
         }
-        // A repair must never fire on ignorance: with no container bus resolvable, a
-        // restart would only make the backend fail its own start and take the history
-        // offline while it walked up the backoff.
-        assert!(
-            bus_check.contains("cannot tell") && bus_check.contains("exit 2"),
-            "an unknown state must be stated and skipped, never repaired"
-        );
 
-        // THE WAIT IS WHAT MAKES THE FIRST START THE RIGHT ONE, on both install shapes.
-        assert!(
-            wrapper.contains("teams_lite_wait_for_broker_bus"),
-            "the staged wrapper must wait for the container rather than exit and retry: \
-             Restart= walks to 300 s, so losing the first race costs minutes of silence"
-        );
-        assert!(
-            env.contains("teams_lite_wait_for_broker_bus")
-                && env.contains("TEAMS_LITE_BROKER_WAIT_SECONDS"),
-            "the wait belongs in the one place the detection already lives"
-        );
-        // Matched on the unescaped tokens: that wrapper is written through an unquoted
-        // heredoc, so every `$` in it is spelled `\$` in this file.
-        assert!(
-            released.contains("BROKER_WAIT_SECONDS")
-                && released.contains("waited=0")
-                && released.contains("sleep 1"),
-            "the wrapper install.sh writes is what teams-lite-app.service execs, so it \
-             must wait too — it is a self-contained copy and cannot source broker-env.sh"
-        );
+        // What a file DOES, never what its prose says: every one of these explains, in a
+        // comment, the machinery it no longer has — and that comment is what stops the next
+        // reader from putting it back. A `#` line is a comment in a script and in a unit alike.
+        let code = |text: &'static str| -> Vec<&'static str> {
+            text.lines().filter(|line| !line.trim_start().starts_with('#')).collect()
+        };
+        let mut every_file: Vec<(&str, &str)> = scripts.to_vec();
+        every_file.extend(units);
+        every_file.push(("install.sh", released));
 
-        // AND THE UNIT WAITS TOO, because that wrapper is the one install.sh already WROTE
-        // and the in-app update replaces the binary beside it, never the wrapper. So a
-        // machine installed before the wait keeps a wrapper that launches anyway until
-        // somebody re-runs install.sh — measured here: the container restarted, PartOf=
-        // propagated to the app unit, and its backend froze /run/user/1000/bus again with
-        // the fix already on master. The unit IS rewritten by every `update`, so it is the
-        // half this repo can still correct with no 130 MB download.
-        let app = include_str!("../packaging/systemd/teams-lite-app.service");
-        assert!(
-            app.contains("ExecStartPre=@SERVICE_DIR@/teams-lite-broker-wait.sh"),
-            "the app unit must not let its launcher resolve the bus before there is one"
+        // (a) NO HOST COMMAND FINDS THE BROKER, AND NOTHING CYCLES THE CONTAINER. The answer
+        // has one spelling, `intune::broker_bus`, and a second one in shell is how a backend
+        // once ended up on a bus with no broker on it. An exported address is the subtlest
+        // version, because the broker lookup ignores it (a live container wins) and so it
+        // looks harmless — while every OTHER use of the session bus, in this process and in
+        // whatever it spawns, is sent to the container's own bus, which runs a systemd of its
+        // own (see `host_user_bus_address` in src/intune.rs).
+        for (name, text) in &every_file {
+            for line in code(*text) {
+                for probe in ["busctl", "pgrep"] {
+                    assert!(
+                        !line.contains(probe),
+                        "{name} runs `{probe}` to find the identity broker — the backend finds \
+                         it in process now (src/intune.rs), and a second answer drifts: {line}"
+                    );
+                }
+                for verb in ["stop", "start", "restart"] {
+                    assert!(
+                        !line.contains(&format!("intune-container {verb}")),
+                        "{name} must never `{verb}` the Intune container: the repair is the \
+                         backend's, behind the keyring check and the machine-wide floor: {line}"
+                    );
+                }
+                assert!(
+                    !line.contains("DBUS_SESSION_BUS_ADDRESS"),
+                    "{name} sets the broker's bus — an address frozen at exec is the exact \
+                     failure the backend's own resolution replaced: {line}"
+                );
+            }
+        }
+
+        // (b) THE BACKEND UNIT RUNS THE BINARY, with no wrapper left to resolve anything, and
+        // neither backend unit is tied to the container's unit any more: a backend follows the
+        // container live, and stopping the container must not stop the history being served.
+        let backend = units[1].1;
+        let exec_start: Vec<&str> =
+            code(backend).into_iter().filter(|line| line.starts_with("ExecStart")).collect();
+        assert_eq!(
+            exec_start,
+            ["ExecStart=@SERVICE_DIR@/server"],
+            "teams-lite-backend.service must exec the staged binary directly — the wrapper it \
+             used to exec is retired and no longer staged, so naming it is a 203/EXEC"
         );
-        let wait_script = include_str!("../bin/teams-lite-broker-wait.sh");
-        // 69 is EX_UNAVAILABLE, and it is what turns a permanent wrong address into a
-        // bounded retry through the unit's own Restart=always.
-        assert!(
-            wait_script.contains("exit 69"),
-            "a container whose bus never appeared must abort the start, not freeze a dead \
-             address for the life of the process"
-        );
-        // …and only where a container is KNOWN. Failing on a host that has none would keep
-        // the app unit down for ever over something that is not a fault.
-        assert!(
-            wait_script.contains("TEAMS_LITE_CONTAINER_STATE"),
-            "no Intune container on this host is not a reason to refuse to start"
-        );
-        for staged in ["teams-lite-broker-bus-check.sh", "teams-lite-broker-wait.sh"] {
+        for (name, text) in [units[0], units[1]] {
             assert!(
-                installer.contains(&format!("{staged}\" \"$SERVICE_DIR/{staged}")),
-                "the installer must stage {staged} beside the unit that names it"
+                !code(text).iter().any(|line| line.contains("intune-container.service")),
+                "{name} must not be ordered on, wanted by or PartOf= intune-container.service: \
+                 the backend follows the container live, and a container stop must not take the \
+                 app down with it"
+            );
+            assert!(
+                !code(text).iter().any(|line| line.starts_with("ExecStartPre")),
+                "{name} must not gate its start on a broker wait — that script is retired, and \
+                 the backend retries the broker itself"
             );
         }
-        // A unit whose ExecStartPre is absent is one systemd starts with 203/EXEC, and
-        // `units` can run before anything was ever staged.
-        assert!(
-            installer.contains(r#"[ ! -x "$SERVICE_DIR/teams-lite-broker-wait.sh" ]"#),
-            "the app unit must be skipped when its ExecStartPre is not staged yet"
-        );
-        // BOUNDED, and only while a container is KNOWN. A host with classic Intune or with
-        // none at all must launch at once rather than hanging for the whole window.
-        for (name, text) in [("broker-env.sh", env), ("install.sh", released)] {
+
+        // (c) A MACHINE STAGED BEFORE THIS IS MIGRATED, by name. `install_units` and
+        // `uninstall` act on UNITS alone and `stage_artifacts` never deletes a file it staged
+        // before, so a retirement left implicit would keep the old .path and timer ENABLED
+        // there for good — restarting both backends on every container boot and running
+        // scripts that are no longer staged. The auto-update hook runs `update` with nobody
+        // watching, so this is the only way the always-on machine is ever cleaned.
+        let installer = scripts[2].1;
+        let array = |name: &str| -> &'static str {
+            installer
+                .split_once(&format!("\n{name}=(\n"))
+                .unwrap_or_else(|| panic!("bin/teams-lite-service.sh declares {name}"))
+                .1
+                .split_once("\n)")
+                .expect("an array ends at its closing parenthesis")
+                .0
+        };
+        let function = |name: &str| -> &'static str {
+            installer
+                .split_once(&format!("\n{name}() {{\n"))
+                .unwrap_or_else(|| panic!("bin/teams-lite-service.sh defines {name}"))
+                .1
+                .split_once("\n}\n")
+                .expect("a function body ends at its closing brace")
+                .0
+        };
+        const RETIRED_UNITS: [&str; 5] = [
+            "teams-lite-broker-bus.path",
+            "teams-lite-broker-health.timer",
+            "teams-lite-broker-health.service",
+            "teams-lite-backend-restart.service",
+            "teams-lite-broker-repair.service",
+        ];
+        const RETIRED_SCRIPTS: [&str; 5] = [
+            "teams-lite-backend.sh",
+            "teams-lite-broker-check.sh",
+            "teams-lite-broker-bus-check.sh",
+            "teams-lite-broker-wait.sh",
+            "broker-env.sh",
+        ];
+        let listed_in = |list: &str, name: &str| list.lines().any(|line| line.trim() == name);
+        for unit in RETIRED_UNITS {
             assert!(
-                text.contains("CONTAINER_STATE") || text.contains("TEAMS_LITE_CONTAINER_STATE"),
-                "{name} must gate the wait on a container it can see"
+                listed_in(array("RETIRED_UNITS"), unit),
+                "bin/teams-lite-service.sh must retire {unit}, or a machine staged before keeps it \
+                 installed for good"
+            );
+            assert!(
+                !listed_in(array("UNITS"), unit),
+                "{unit} is retired, so it must not be installed again"
             );
         }
+        for script in RETIRED_SCRIPTS {
+            assert!(
+                listed_in(array("RETIRED_SCRIPTS"), script),
+                "bin/teams-lite-service.sh must delete the staged {script}, or it stays beside \
+                 the binary for good"
+            );
+        }
+        // Only the two WATCHERS are stopped. A repair may be running mid-way between its stop
+        // and its start of the container, and cutting it leaves the user with no sign-in.
+        let watchers = array("RETIRED_WATCHERS");
+        assert!(
+            listed_in(watchers, "teams-lite-broker-bus.path")
+                && listed_in(watchers, "teams-lite-broker-health.timer")
+                && watchers.lines().filter(|line| !line.trim().is_empty()).count() == 2,
+            "exactly the .path and the timer are stopped and disabled — never the repair unit"
+        );
+        // And a RUNNING retired oneshot keeps its file until the next run: deleting it and
+        // reloading makes systemd drop every command after the current one, which for the
+        // repair is the `start` after its `stop`.
+        let retire_units = function("retire_old_units");
+        assert!(
+            retire_units.contains("unit_state") && retire_units.contains("activating"),
+            "a retired unit that is still running must be left in place, not cut by a reload"
+        );
+        // On `install`, `update` and `units` (all three write the units through
+        // `install_units`) and on `uninstall`, with the scripts going only AFTER the reload
+        // that forgets the old backend unit — whose ExecStart= is one of them.
+        for name in ["install_units", "cmd_uninstall"] {
+            // Code lines only: the prose above these calls names them too, out of order.
+            let body = code(function(name)).join("\n");
+            let units_at = body
+                .find("retire_old_units")
+                .unwrap_or_else(|| panic!("{name} must retire the old units"));
+            let reload_at = body
+                .find("daemon-reload")
+                .unwrap_or_else(|| panic!("{name} reloads systemd"));
+            let scripts_at = body
+                .find("retire_old_scripts")
+                .unwrap_or_else(|| panic!("{name} must retire the old staged scripts"));
+            assert!(
+                units_at < reload_at && reload_at < scripts_at,
+                "{name} must retire the units, reload systemd ONCE, and only then delete the \
+                 scripts — before the reload the old backend unit still execs one of them"
+            );
+            assert_eq!(body.matches("daemon-reload").count(), 1, "{name} reloads systemd once");
+        }
+        for subcommand in ["cmd_install", "cmd_update"] {
+            assert!(
+                installer_subcommand(subcommand).contains("install_units"),
+                "{subcommand} must write the units, which is what retires the old ones"
+            );
+        }
+        assert!(
+            installer.contains("units) shift; install_units"),
+            "`units` must run install_units, which is what retires the old ones"
+        );
+
+        // Nothing but that retirement may still name a retired file: a unit that named one
+        // would start with 203/EXEC, and a script that sourced one would die on its first line.
+        for (name, text) in &every_file {
+            if *name == "teams-lite-service.sh" {
+                continue;
+            }
+            for line in code(*text) {
+                for retired in RETIRED_UNITS.iter().chain(RETIRED_SCRIPTS.iter()) {
+                    assert!(
+                        !line.contains(retired),
+                        "{name} still names the retired {retired}: {line}"
+                    );
+                }
+            }
+        }
+
+        // The wrapper install.sh writes keeps the one job it has left: a compiled Bun binary
+        // reads bunfig.toml from the CURRENT directory, so it runs from its own. Matched on the
+        // unescaped tokens: the wrapper is an unquoted heredoc, so its `$` is `\$` in the file.
+        assert!(
+            released.contains(r#"cd "$BIN_DIR" || exit 1"#)
+                && released.contains(r#"exec "\$TEAMS_BIN" "\$@""#),
+            "the wrapper must still run teams-bin from its own directory, and exec it so the \
+             binary keeps the unit's MainPID"
+        );
+
+        // (d) AND THE RETIRED FILES ARE GONE FROM THE REPOSITORY, so nothing can stage, install
+        // or source them by accident — the retirement above is what takes them off a machine.
+        for retired in RETIRED_SCRIPTS
+            .iter()
+            .map(|script| format!("bin/{script}"))
+            .chain(RETIRED_UNITS.iter().map(|unit| format!("packaging/systemd/{unit}")))
+        {
+            assert!(
+                !root.join(&retired).exists(),
+                "{retired} is retired: the backend answers its question in process, and a copy \
+                 left in the tree is one a later change would wire back in"
+            );
+        }
+    }
+
+    /// One function of the installer script, from its definition to the closing brace at the
+    /// start of a line — the shape every function in that file has.
+    fn installer_function(name: &str) -> &'static str {
+        include_str!("../bin/teams-lite-service.sh")
+            .split_once(&format!("\n{name}() {{\n"))
+            .unwrap_or_else(|| panic!("bin/teams-lite-service.sh defines {name}"))
+            .1
+            .split_once("\n}\n")
+            .expect("a function body ends at its closing brace")
+            .0
+    }
+
+    /// The lines of a script or a unit that DO something: a `#` line is a comment in both,
+    /// and every one of these files explains in prose the very names the code must not use.
+    fn code_of(text: &'static str) -> String {
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Where `needle` first appears in `haystack`, or a failure naming both.
+    fn position(haystack: &str, needle: &str, what: &str) -> usize {
+        haystack
+            .find(needle)
+            .unwrap_or_else(|| panic!("{what} must contain `{needle}`"))
+    }
+
+    /// The bytes every shell gate reads to tell a backend that finds the identity broker
+    /// itself from one that does not are the backend's OWN hidden argument.
+    ///
+    /// Three files on the far side of a process boundary decide from that literal alone —
+    /// the service installer before it writes the units, the repo launcher before it execs
+    /// the compiled `teams`, and install.sh before it installs a download — because `grep -a`
+    /// is the one question about a binary that needs nothing run and nothing on the host. That
+    /// makes the spelling a contract nobody would see break: renaming
+    /// `intune::REPAIR_SUBCOMMAND` would leave every current build looking "old" to all three,
+    /// so the installer would refuse every `units`, the launcher every launch and install.sh
+    /// every release — with sentences blaming a binary that is fine.
+    #[test]
+    fn every_shell_gate_reads_the_backends_own_hidden_argument() {
+        let marker = crate::intune::REPAIR_SUBCOMMAND;
+        let installer = include_str!("../bin/teams-lite-service.sh");
+        let launcher = code_of(include_str!("../bin/teams-launcher.sh"));
+        let released = code_of(include_str!("../install.sh"));
+
+        assert!(
+            installer.contains(&format!("\nBROKER_LOOKUP_MARKER=\"{marker}\"\n")),
+            "bin/teams-lite-service.sh must spell the marker as intune::REPAIR_SUBCOMMAND"
+        );
+        assert!(
+            installer_function("finds_the_broker_itself")
+                .contains(r#"grep -qaF -- "$BROKER_LOOKUP_MARKER" "$1""#),
+            "the installer's one test of a binary reads its bytes for the marker, as a fixed \
+             string in a binary file"
+        );
+        assert!(
+            launcher.contains(&format!(r#"grep -qaF -- {marker} "$TEAMS_BIN""#)),
+            "bin/teams-launcher.sh must check the binary it execs for intune::REPAIR_SUBCOMMAND"
+        );
+        assert!(
+            released.contains(&format!(r#"grep -qaF {marker} "$tmp""#)),
+            "install.sh must check the download for intune::REPAIR_SUBCOMMAND"
+        );
+    }
+
+    /// `units` refuses to write the wrapper-less backend unit in front of a staged binary that
+    /// predates it — and refuses BEFORE anything on the machine is written or retired.
+    ///
+    /// Found in review, reproduced in a sandbox: on a machine still staged from before the
+    /// in-process broker lookup — an `update` whose build failed, a checkout pulled by hand —
+    /// `status` printed "retired but still installed — run `units`", and `units` then wrote
+    /// `ExecStart=…/server` with no wrapper, retired the .path and the timer and deleted the
+    /// staged scripts, leaving `server` and `VERSION` alone in the service directory. The old
+    /// process kept running for the moment; its next restart exec'd the old binary onto the
+    /// user manager's bus, where there is no broker, and the always-on app was signed out with
+    /// nothing on the machine left to bring it back. `install` and `update` stage what they
+    /// built, so the gate costs them nothing.
+    #[test]
+    fn the_units_are_written_only_in_front_of_a_staged_backend_that_finds_the_broker() {
+        let install_units = code_of(installer_function("install_units"));
+        let what = "install_units";
+
+        // The gate is the first act: before the unit directory is even created, before a unit
+        // is written or the stale app unit removed, and before anything is retired.
+        let gate = position(&install_units, "require_a_staged_backend_that_finds_the_broker", what);
+        for later in [
+            r#"mkdir -p "$UNIT_DIR""#,
+            r#"rm -f "$UNIT_DIR/$unit""#,
+            r#">"$UNIT_DIR/$unit""#,
+            "retire_old_units",
+            "daemon-reload",
+            "retire_old_scripts",
+        ] {
+            assert!(
+                gate < position(&install_units, later, what),
+                "install_units must refuse an old staged backend BEFORE `{later}` — a refusal \
+                 that comes after it leaves the machine half migrated"
+            );
+        }
+
+        // It judges the file the units will exec, and it refuses in a sentence that names the
+        // one run which fixes it: `update` builds and stages before it writes anything.
+        let refusal = code_of(installer_function("require_a_staged_backend_that_finds_the_broker"));
+        assert!(
+            refusal.contains(r#"local server="$SERVICE_DIR/server""#)
+                && refusal.contains(r#"finds_the_broker_itself "$server" ||"#)
+                && refusal.contains(r#"[ -e "$server" ] ||"#),
+            "the gate must refuse both a missing staged backend and one without the marker"
+        );
+        assert_eq!(
+            refusal.matches("die \"").count(),
+            2,
+            "both refusals must end the run (die), never warn and carry on"
+        );
+        assert!(
+            refusal.matches("'bin/teams-lite-service.sh update'").count() == 2,
+            "both refusals must send the user to `update`, which stages before it writes"
+        );
+    }
+
+    /// Whether a restart FOLLOWS the units is the caller's to say, and a backend nothing
+    /// restarts keeps the healers it still lives by — the .path, its restart unit and the
+    /// repair unit — and NOT the health timer.
+    ///
+    /// `install` and `units` restart nothing, by design. On a machine whose staged backend has
+    /// been running since before the change, retiring everything left that process with its
+    /// bus frozen at exec and no way back: no .path to restart it when the container moved, and
+    /// a Repair sign-in (its button and its automatic trigger) starting a repair unit that was
+    /// gone. So those three stay until the process runs the staged build. The timer is the
+    /// exception, and it is the one to keep out: its bus check restarts BOTH backends whenever
+    /// a running backend's frozen address is not the container's, and a backend started from
+    /// this version's unit has no container address at all — kept, it would restart the very
+    /// backend the deferral asks the user to restart, every fifteen minutes.
+    #[test]
+    fn a_backend_nothing_restarts_keeps_what_it_lives_by_and_nothing_else() {
+        let installer = include_str!("../bin/teams-lite-service.sh");
+        let install_units = code_of(installer_function("install_units"));
+
+        // The mode is an argument, required, and refused when it is anything else.
+        assert!(
+            install_units.contains("--restart-follows | --no-restart-follows) shift ;;")
+                && install_units.contains("*) die \"install_units: say whether a restart follows"),
+            "install_units must be TOLD whether a restart follows, and refuse a call that says \
+             neither — a default would be a guess"
+        );
+        let update = installer_subcommand("cmd_update");
+        let at = position(update, "install_units --restart-follows", "cmd_update");
+        assert!(
+            at < position(update, "try-restart teams-lite-backend.service", "cmd_update"),
+            "`update` says a restart follows, and the try-restart really does follow it"
+        );
+        let install = installer_subcommand("cmd_install");
+        assert!(
+            install.contains("install_units --no-restart-follows") && !install.contains("try-restart"),
+            "`install` restarts nothing, and says so to install_units"
+        );
+        assert!(
+            installer.contains("units) shift; install_units --no-restart-follows \"$@\" ;;"),
+            "`units` restarts nothing, and says so to install_units"
+        );
+
+        // Exactly the three the old process calls on, each one a retired unit — never the
+        // timer or the check it runs.
+        let kept: Vec<&str> = installer
+            .split_once("\nRETIRED_KEPT_FOR_AN_OLD_BACKEND=(\n")
+            .expect("bin/teams-lite-service.sh declares RETIRED_KEPT_FOR_AN_OLD_BACKEND")
+            .1
+            .split_once("\n)")
+            .expect("an array ends at its closing parenthesis")
+            .0
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                "teams-lite-broker-bus.path",
+                "teams-lite-backend-restart.service",
+                "teams-lite-broker-repair.service",
+            ],
+            "an old backend keeps the .path, the restart it fires and the repair unit — and \
+             nothing else: the health timer's bus check would restart a NEW backend every \
+             fifteen minutes"
+        );
+
+        // Kept only on the run nothing restarts, only for a running backend whose binary lacks
+        // the marker, and never against an inspection directory.
+        let decided = position(&install_units, "stale_pid=\"$(stale_backend_pid)\"", "install_units");
+        let condition = &install_units[..decided];
+        assert!(
+            condition.contains(r#"if [ "$restart" = --no-restart-follows ] && [ -z "${TEAMS_LITE_UNIT_DIR:-}" ]; then"#),
+            "the deferral is for a run that restarts nothing, on the live unit directory"
+        );
+        assert!(
+            install_units.contains(r#"retire_old_units ${keep[@]+"${keep[@]}"}"#),
+            "install_units must hand what it keeps to retire_old_units"
+        );
+        let stale = code_of(installer_function("stale_backend_pid"));
+        assert!(
+            stale.contains("show -p MainPID --value teams-lite-backend.service")
+                && stale.contains(r#"finds_the_broker_itself "/proc/$pid/exe" || printf '%s' "$pid""#),
+            "an old backend is told by the bytes its running process executes — \
+             /proc/<pid>/exe opens that inode even once the staged file was renamed over it"
+        );
+
+        // Both of retire_old_units' loops honour it: a kept watcher is neither disabled nor
+        // stopped, and a kept unit keeps its file.
+        let retire = code_of(installer_function("retire_old_units"));
+        assert!(retire.contains(r#"keep=" $* ""#), "retire_old_units takes the units to keep");
+        assert_eq!(
+            retire.matches(r#"*" $unit "*)"#).count(),
+            2,
+            "a kept unit must be skipped by the disable loop AND the delete loop"
+        );
+
+        // And the user is told what was kept, why, and the one command that ends it — theirs.
+        assert!(
+            install_units.contains("warn \"  systemctl --user try-restart teams-lite-backend.service\""),
+            "the deferral must name the restart that ends it, for the user to run"
+        );
+    }
+
+    /// A retired unit leaves no `failed` mark behind, and a retired SCRIPT outlives every unit
+    /// left on disk that still runs it.
+    ///
+    /// Both found in review. A unit whose last run failed is not garbage-collected, so once its
+    /// file is gone and systemd reloaded it stays `not-found failed` — the user manager reports
+    /// `degraded` until a reboot, and `status` cannot say why because the file is gone; the old
+    /// health check failed whenever a check could not tell, so this is a leftover a migration
+    /// really produces. And a unit kept because it was running, or kept for an old backend,
+    /// still names retired scripts in its LATER commands: the health check is two ExecStart=
+    /// lines, so one caught mid-run had its second command deleted under it (203/EXEC).
+    #[test]
+    fn retired_units_leave_no_failed_mark_and_their_scripts_outlive_them() {
+        for name in ["install_units", "cmd_uninstall"] {
+            let body = code_of(installer_function(name));
+            let reload = position(&body, "daemon-reload", name);
+            let reset = position(&body, "reset_retired_units", name);
+            let scripts = position(&body, "retire_old_scripts", name);
+            assert!(
+                reload < reset && reset < scripts,
+                "{name} must clear the retired units' failed marks right after the reload that \
+                 unloads them"
+            );
+        }
+        let reset = code_of(installer_function("reset_retired_units"));
+        assert!(
+            reset.contains(r#"[ -z "${TEAMS_LITE_UNIT_DIR:-}" ] || return 0"#),
+            "an inspection directory has no live manager to reset anything in"
+        );
+        assert!(
+            reset.contains(r#"retired_unit_installed "$unit" && continue"#)
+                && reset.contains(r#""$SYSTEMCTL" --user reset-failed "$unit" >/dev/null 2>&1 || true"#),
+            "only a unit whose file is GONE is reset — one kept on disk keeps its start limit — \
+             and a unit systemd never loaded is not an error"
+        );
+
+        let scripts = code_of(installer_function("retire_old_scripts"));
+        assert!(
+            position(&scripts, "retired_script_in_use", "retire_old_scripts")
+                < position(&scripts, "rm -f", "retire_old_scripts"),
+            "a retired script must be checked against the units left on disk before it goes"
+        );
+        let runs = code_of(installer_function("retired_unit_runs"));
+        assert!(
+            runs.contains(r#"grep -qF -- "$SERVICE_DIR/$1" "$UNIT_DIR/$unit""#),
+            "a unit runs a script it names by its STAGED path — the checkout's copy in a \
+             Documentation= line runs nothing"
+        );
+        assert!(
+            code_of(installer_function("retired_script_in_use")).contains("(\\.|source)"),
+            "broker-env.sh is SOURCED by the check scripts, so it stays while either one does"
+        );
+    }
+
+    /// `status` sends a machine with retired units still installed to `update`, never `units`.
+    ///
+    /// That warning fires in exactly the state of a machine still staged from before the
+    /// change — where `units` now refuses, and used to do the damage the refusal prevents — or
+    /// one whose backend still runs the old build, which only a restart ends. `update` is the
+    /// one run that stages, restarts and retires, whichever it is.
+    #[test]
+    fn status_sends_a_machine_with_retired_units_to_update() {
+        let state = code_of(installer_function("print_units_state"));
+        assert!(
+            state.contains("retired but still installed — 'bin/teams-lite-service.sh update' removes it"),
+            "the retired-unit hint must recommend `update`"
+        );
+        assert!(
+            !state.contains("'bin/teams-lite-service.sh units'"),
+            "the retired-unit hint must not recommend `units`, which refuses an old stage"
+        );
+    }
+
+    /// Neither wrapper that dropped the broker export ever runs a binary older than itself.
+    ///
+    /// The export was dropped because a current backend finds the broker itself — which says
+    /// nothing about the binary a wrapper actually finds. bin/teams-launcher.sh execs
+    /// launcher/dist/teams, an untracked build artifact a `git pull` leaves as old as it was,
+    /// and install.sh is served from master the moment it merges while `latest` follows only
+    /// once CI has built that commit. Either pairing starts a backend that dials the desktop
+    /// session bus and stays signed out. So the launcher refuses before it execs, and
+    /// install.sh refuses before it creates or replaces anything — a refused install leaves
+    /// whatever pair an earlier run put there, which works together.
+    #[test]
+    fn neither_wrapper_runs_a_binary_older_than_itself() {
+        let marker = crate::intune::REPAIR_SUBCOMMAND;
+
+        let launcher = code_of(include_str!("../bin/teams-launcher.sh"));
+        let check = position(&launcher, marker, "bin/teams-launcher.sh");
+        let refused = &launcher[check..];
+        assert!(
+            check < position(&launcher, r#"exec "$TEAMS_BIN""#, "bin/teams-launcher.sh")
+                && position(refused, "exit 1", "the launcher's marker check")
+                    < position(refused, r#"exec "$TEAMS_BIN""#, "bin/teams-launcher.sh"),
+            "bin/teams-launcher.sh must refuse (exit 1) an old binary before it execs it"
+        );
+        assert!(
+            refused.contains("cargo build --release --bin server")
+                && refused.contains("(cd launcher && bun run build)"),
+            "the refusal must name the rebuild — the backend first, since the launcher embeds it"
+        );
+
+        let released = code_of(include_str!("../install.sh"));
+        let check = position(&released, marker, "install.sh");
+        for first_write in [
+            r#"mkdir -p "$BIN_DIR""#,
+            r#"install -m 0755 "$tmp" "$BIN_DIR/teams-bin""#,
+            r#"cat > "$BIN_DIR/teams""#,
+        ] {
+            assert!(
+                check < position(&released, first_write, "install.sh"),
+                "install.sh must check the download BEFORE `{first_write}`: a refusal after it \
+                 leaves half an install, or a new wrapper in front of an old binary"
+            );
+        }
+        assert!(
+            released[check..]
+                .split_once("\nfi\n")
+                .expect("the marker check is an if block")
+                .0
+                .contains("exit 1"),
+            "install.sh must stop on a download without the marker"
+        );
+        assert!(
+            released.contains("the release for this installer is not published yet"),
+            "install.sh's refusal must say what it is: a release CI has not published yet"
+        );
     }
 
     /// What CI publishes, and the four things about it this module depends on.

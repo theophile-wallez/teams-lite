@@ -11,8 +11,7 @@
 //   4. the picture itself          — through `teams_media::fetch_media`, the path
 //                                    the app actually uses (size + content type)
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example group_avatar_recon -- [title-substring]
+//   cargo run --example group_avatar_recon -- [title-substring]
 use anyhow::Result;
 use serde_json::Value;
 

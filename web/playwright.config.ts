@@ -112,6 +112,15 @@ export default defineConfig({
         PORT: WEB_PORT,
         HOST: "127.0.0.1",
         VITE_TEAMS_WS_URL: MOCK_WS_URL,
+        // And the RELAY's own upstream: the page dials the mock directly (it is pinned), but the
+        // server still relays any socket opened on its own `/__backend` — to 19420, the user's real
+        // backend, unless it is told otherwise. e2e/relay-origin.spec.ts opens one on purpose.
+        TEAMS_LITE_WS_URL: MOCK_WS_URL,
+        // And the TOKEN the server hands every page: a stand-in. Unset, web/write-token.ts reads the
+        // real backend's published token off this machine, and every page the suite drives would
+        // hold the capability to post as the user — presented only to the mock, but held by a
+        // browser under automation all the same.
+        TEAMS_LITE_WRITE_TOKEN: "e2e-stand-in-not-a-real-token",
         TEAMS_LITE_ALLOW_PINNED_BUILD: "1",
         // The engine's own files, for this run: the stub, never the real cache (see above).
         TEAMS_LITE_ENGINE_DIR: ENGINE_DIR,

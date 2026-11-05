@@ -9,8 +9,7 @@
 // parsed view, because the parser is written from what this shows and not the other
 // way round.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example thread_members_recon -- 19:<thread-id>
+//   cargo run --example thread_members_recon -- 19:<thread-id>
 use anyhow::{Context, Result};
 use serde_json::Value;
 

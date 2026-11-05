@@ -3980,6 +3980,7 @@ function resetMockAgentProviders(): void {
   const claude = mockAgentProviders.get("claude");
   const opencode = mockAgentProviders.get("opencode");
   if (claude) {
+    claude.available = true;
     claude.enabled = true;
     claude.model = null;
   }
@@ -3989,6 +3990,189 @@ function resetMockAgentProviders(): void {
     opencode.model = null;
   }
   mockAgentDefaultProvider = "claude";
+}
+
+// ---- installing an agent CLI from the app (see src/agent_cli.rs) -----------------------------
+//
+// The mock downloads nothing and runs nothing. It reproduces the STATES a real install passes
+// through — resolving, a download that is a bar, the check, and the swap — and the frames that
+// carry them, so the whole surface is reviewable with nothing leaving the machine. Out of the box it
+// is the state the image is in for one provider: `claude` is the user's own install (on PATH, not
+// this app's), and `opencode` is missing and installable — so the pane shows an Install from the
+// first paint, exactly as the container image would.
+
+type MockCliPhase = "idle" | "resolving" | "downloading" | "unpacking";
+
+type MockCli = {
+  installable: boolean;
+  managed: boolean;
+  version: string | null;
+  latest: string | null;
+  phase: MockCliPhase;
+  received: number;
+  total: number;
+  error: string;
+  checked_ms: number | null;
+};
+
+/** What a real install of each would download, as `Tool::download_estimate_bytes` states it. */
+const MOCK_CLI_DOWNLOAD: Record<string, { bytes: number; publisher: string; latest: string }> = {
+  claude: { bytes: 125_000_000, publisher: "Anthropic", latest: "2.1.311" },
+  opencode: { bytes: 80_000_000, publisher: "the opencode project", latest: "1.19.5" },
+};
+
+/** How long one tick of a pretend install takes. Four ticks of download, so the bar is a bar: an
+ *  install that only ever appears finished would let a page that draws no progress at all pass. */
+const MOCK_CLI_TICK_MS = Number(process.env.MOCK_CLI_TICK_MS ?? 150);
+
+function freshMockCli(): MockCli {
+  return {
+    installable: true,
+    managed: false,
+    version: null,
+    latest: null,
+    phase: "idle",
+    received: 0,
+    total: 0,
+    error: "",
+    checked_ms: null,
+  };
+}
+
+const mockAgentClis = new Map<string, MockCli>([
+  ["claude", freshMockCli()],
+  ["opencode", freshMockCli()],
+]);
+
+/** Whether a newer release of a CLI this "machine" installed is taken on its own — on, like a
+ *  fresh Rust store (`agent_cli::auto_update_from_setting`). */
+let mockCliAutoUpdate = true;
+/** The refusal the NEXT install answers with, armed by the `{kind:"agent_cli"}` hook. It stays
+ *  armed, as a refused send does: a spec asserts the sentence and then resets. */
+let mockCliInstallError: string | null = null;
+/** Whether a pretend install stops at its download, so a spec can photograph the bar. */
+let mockCliHold = false;
+/** The install a held one is waiting to finish, by provider. */
+const mockCliHeld = new Map<string, () => void>();
+
+function resetMockAgentClis(): void {
+  for (const [name] of mockAgentClis) mockAgentClis.set(name, freshMockCli());
+  mockCliAutoUpdate = true;
+  mockCliInstallError = null;
+  mockCliHold = false;
+  for (const release of mockCliHeld.values()) release();
+  mockCliHeld.clear();
+  const claude = mockAgentProviders.get("claude");
+  const opencode = mockAgentProviders.get("opencode");
+  if (claude) claude.available = true;
+  if (opencode) opencode.available = MOCK_OPENCODE_INSTALLED;
+}
+
+/** One backend's `cli` block, in the shape `agent_cli_json` publishes. */
+function mockCliView(name: string, available: boolean) {
+  const cli = mockAgentClis.get(name) ?? freshMockCli();
+  const meta = MOCK_CLI_DOWNLOAD[name];
+  const path = !available
+    ? null
+    : cli.managed
+      ? `/home/teams/.local/share/teams-lite/tools/bin/${name}`
+      : `/usr/local/bin/${name}`;
+  return {
+    installable: cli.installable,
+    managed: cli.managed,
+    version: cli.version,
+    latest: cli.latest,
+    update_available:
+      cli.managed && cli.version !== null && cli.latest !== null && mockVersionNewer(cli.latest, cli.version),
+    checked_ms: cli.checked_ms,
+    phase: cli.phase,
+    received: cli.received,
+    total: cli.total,
+    error: cli.error,
+    download_bytes: meta?.bytes ?? 0,
+    installed_bytes: cli.version ? (name === "claude" ? 337_814_032 : 214_386_864) : null,
+    publisher: meta?.publisher ?? "",
+    path,
+  };
+}
+
+/** `latest > installed`, compared as numbers — `agent_cli::is_update`'s rule. */
+function mockVersionNewer(latest: string, installed: string): boolean {
+  const a = latest.split(".").map(Number);
+  const b = installed.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  }
+  return false;
+}
+
+/** Walk one pretend install through every phase a real one passes, with the frames a real one
+ *  sends — then make the provider available, as the swap does. */
+function startMockCliInstall(name: string): void {
+  const cli = mockAgentClis.get(name);
+  const provider = mockAgentProviders.get(name);
+  if (!cli || !provider) throw new Error(`no such provider: ${name}`);
+  if (cli.phase !== "idle") return;
+  if (!cli.installable) {
+    throw new Error(`${MOCK_CLI_DOWNLOAD[name]?.publisher ?? "Its vendor"} publishes no ${name} build for this machine`);
+  }
+  if (mockCliInstallError) {
+    cli.error = mockCliInstallError;
+    throw new Error(mockCliInstallError);
+  }
+  const meta = MOCK_CLI_DOWNLOAD[name];
+  if (!meta) throw new Error(`no such provider: ${name}`);
+  const target = cli.latest && (!cli.version || mockVersionNewer(cli.latest, cli.version)) ? cli.latest : meta.latest;
+  const progress = () =>
+    broadcast("agent_cli_progress", {
+      provider: name,
+      phase: cli.phase,
+      received: cli.received,
+      total: cli.total,
+    });
+  cli.phase = "resolving";
+  cli.error = "";
+  broadcast("agent_status_changed", agentStatusView());
+  let step = 0;
+  const finish = () => {
+    cli.phase = "idle";
+    cli.received = 0;
+    cli.total = 0;
+    cli.version = target;
+    cli.latest = target;
+    cli.managed = true;
+    cli.checked_ms = Date.now();
+    provider.available = true;
+    broadcast("agent_status_changed", agentStatusView());
+  };
+  const tick = () => {
+    step += 1;
+    if (step <= 4) {
+      cli.phase = "downloading";
+      cli.total = meta.bytes;
+      cli.received = Math.round((meta.bytes * step) / 4);
+      progress();
+      if (step === 2 && mockCliHold) {
+        mockCliHeld.set(name, () => {
+          mockCliHeld.delete(name);
+          setTimeout(tick, MOCK_CLI_TICK_MS);
+        });
+        return;
+      }
+      setTimeout(tick, MOCK_CLI_TICK_MS);
+      return;
+    }
+    if (step === 5) {
+      cli.phase = "unpacking";
+      cli.received = 0;
+      cli.total = 0;
+      progress();
+      setTimeout(tick, MOCK_CLI_TICK_MS);
+      return;
+    }
+    finish();
+  };
+  setTimeout(tick, MOCK_CLI_TICK_MS);
 }
 
 /** Whether the agent would run on the user's own Claude Code configuration. Off, like a
@@ -4133,6 +4317,284 @@ function mockPersonasView() {
     }));
 }
 
+// ---- signing the agent CLIs in (see src/agent_auth.rs) -----------------------------------------
+//
+// The mock runs no `claude auth login` and holds no real key. It reproduces the surface: Claude
+// Code's way in, its own account and a sign-in waiting for its code, opencode's provider keys and
+// the cloud accounts — and every refusal the backend makes, because a mock that accepted what the
+// backend refuses hides the bug instead of failing a test. The one code the mock's "claude.com"
+// accepts is MOCK_SIGNIN_CODE; any other is refused in the CLI's own words.
+
+type MockClaudeMethod = "machine" | "claude_ai" | "api_key" | "bedrock" | "vertex" | "foundry";
+type MockBedrockKind = "api_key" | "access_key" | "profile";
+
+type MockAgentAuth = {
+  claude_method: MockClaudeMethod;
+  anthropic_key: string | null;
+  bedrock: {
+    region: string;
+    kind: MockBedrockKind;
+    secret: string | null;
+    access_key_id?: string;
+    session_token?: boolean;
+    profile?: string;
+  } | null;
+  vertex: { project: string; region: string; service_account: string | null } | null;
+  foundry: { resource: string; api_key: string } | null;
+};
+
+/** The code the mock's pretend claude.com shows. */
+const MOCK_SIGNIN_CODE = "MOCK-CODE#mock-state";
+/** The link the mock's pretend `claude auth login` prints: on claude.com, as the backend demands. */
+const MOCK_SIGNIN_URL =
+  "https://claude.com/cai/oauth/authorize?code=true&client_id=mock&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&code_challenge=mock&code_challenge_method=S256&state=mock-state";
+const MOCK_REFUSED_CODE =
+  "Login failed: That code wasn't accepted. It may be incomplete, expired, already used, or from an earlier sign-in attempt. Sign in again to get a new code.";
+
+function freshMockAgentAuth(): MockAgentAuth {
+  return { claude_method: "machine", anthropic_key: null, bedrock: null, vertex: null, foundry: null };
+}
+
+let mockAgentAuth: MockAgentAuth = freshMockAgentAuth();
+/** Claude Code's own Claude account login, or null when it holds none. */
+let mockClaudeLogin: { email: string; plan: string; organization: string } | null = null;
+let mockClaudeSignin: { started_ms: number; console: boolean; finishing: boolean } | null = null;
+/** opencode's `auth.json`, provider id → kind. Its secrets are not kept: nothing ever reads one back. */
+let mockOpencodeCredentials = new Map<string, string>();
+
+function resetMockAgentAuth(): void {
+  mockAgentAuth = freshMockAgentAuth();
+  mockClaudeLogin = null;
+  mockClaudeSignin = null;
+  mockOpencodeCredentials = new Map();
+}
+
+/** `agent_auth::status_json`: what is set up, never a secret. */
+function mockAgentAuthView() {
+  const bedrock = mockAgentAuth.bedrock;
+  return {
+    claude_method: mockAgentAuth.claude_method,
+    anthropic_key: mockAgentAuth.anthropic_key !== null,
+    bedrock: bedrock
+      ? {
+          region: bedrock.region,
+          kind: bedrock.kind,
+          ...(bedrock.kind === "profile" ? { profile: bedrock.profile } : {}),
+          ...(bedrock.kind === "access_key"
+            ? { access_key_id_tail: (bedrock.access_key_id ?? "").slice(-4), session_token: Boolean(bedrock.session_token) }
+            : {}),
+        }
+      : null,
+    vertex: mockAgentAuth.vertex
+      ? {
+          project: mockAgentAuth.vertex.project,
+          region: mockAgentAuth.vertex.region,
+          service_account: mockAgentAuth.vertex.service_account,
+        }
+      : null,
+    foundry: mockAgentAuth.foundry ? { resource: mockAgentAuth.foundry.resource } : null,
+  };
+}
+
+/** What `claude auth status` would say with the environment a run gets. */
+function mockClaudeStatus() {
+  const method = mockAgentAuth.claude_method;
+  const cloud = method === "bedrock" || method === "vertex" || method === "foundry";
+  if (cloud) {
+    return { logged_in: true, method: "third_party", provider: method, email: null, organization: null, plan: null };
+  }
+  if (method === "api_key") {
+    return { logged_in: true, method: "api_key", provider: "firstParty", email: null, organization: null, plan: null };
+  }
+  if (mockClaudeLogin) {
+    return {
+      logged_in: true,
+      method: "claude.ai",
+      provider: "firstParty",
+      email: mockClaudeLogin.email,
+      organization: mockClaudeLogin.organization,
+      plan: mockClaudeLogin.plan,
+    };
+  }
+  return { logged_in: false, method: "none", provider: "firstParty", email: null, organization: null, plan: null };
+}
+
+/** One backend's `account` block, the shape `agent_account_json` publishes. */
+function mockAccountView(name: string, available: boolean) {
+  if (name === "claude") {
+    return {
+      account: available ? mockClaudeStatus() : null,
+      error: "",
+      checked_ms: Date.now(),
+      signin: mockClaudeSignin
+        ? {
+            url: MOCK_SIGNIN_URL,
+            started_ms: mockClaudeSignin.started_ms,
+            console: mockClaudeSignin.console,
+            finishing: mockClaudeSignin.finishing,
+          }
+        : null,
+    };
+  }
+  if (name === "opencode") {
+    return {
+      credentials: [...mockOpencodeCredentials]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([provider, kind]) => ({ provider, kind })),
+    };
+  }
+  return null;
+}
+
+/** `agent_auth::secret`: one token of printable ASCII, the rule a key is held to. */
+function mockSecret(value: unknown, what: string): string {
+  if (typeof value !== "string") throw new Error(`${what} must be text`);
+  const text = value.trim();
+  if (!text) throw new Error(`${what} is empty`);
+  if (text.length > 8 * 1024) throw new Error(`${what} is far longer than any key`);
+  if (!/^[\x21-\x7e]+$/.test(text)) throw new Error(`${what} must be one line with no spaces — paste the key alone`);
+  return text;
+}
+
+/** `agent_auth::is_vertex_region`. */
+function isMockVertexRegion(region: string): boolean {
+  return ["global", "us", "eu"].includes(region) || (region.length <= 32 && /^[a-z]+-[a-z]+\d{1,2}$/.test(region));
+}
+
+/** `agent_auth::is_profile_name`. */
+function isMockProfileName(name: string): boolean {
+  return /^[A-Za-z0-9_.+@-]{1,64}$/.test(name);
+}
+
+function mockField(value: Record<string, unknown>, field: string, what: string): string {
+  const text = typeof value[field] === "string" ? (value[field] as string).trim() : "";
+  if (!text) throw new Error(`${what} is missing`);
+  return text;
+}
+
+const MOCK_METHOD_LABELS: Record<MockClaudeMethod, string> = {
+  machine: "this machine's own setup",
+  claude_ai: "a Claude account",
+  api_key: "an Anthropic API key",
+  bedrock: "Amazon Bedrock",
+  vertex: "Google Vertex AI",
+  foundry: "Microsoft Foundry",
+};
+
+/** `agent_auth::Config::update`, refusal for refusal. */
+function applyMockAgentAuth(patch: Record<string, unknown>): void {
+  const next: MockAgentAuth = structuredClone(mockAgentAuth);
+  if ("anthropic_key" in patch) {
+    next.anthropic_key = patch.anthropic_key === null ? null : mockSecret(patch.anthropic_key, "The Anthropic API key");
+  }
+  if ("bedrock" in patch) {
+    if (patch.bedrock === null) next.bedrock = null;
+    else {
+      const b = asObject(patch.bedrock);
+      const region = mockField(b, "region", "The AWS region");
+      if (!/^[a-z]{2,3}(-[a-z]+)+-\d{1,2}$/.test(region)) {
+        throw new Error(`${region} is not an AWS region (like us-east-1 or eu-west-3)`);
+      }
+      const kind = mockField(b, "kind", "How to authenticate to AWS") as MockBedrockKind;
+      const old = mockAgentAuth.bedrock;
+      if (kind === "api_key") {
+        const secret = b.api_key !== undefined ? mockSecret(b.api_key, "The Bedrock API key") : old?.kind === "api_key" ? old.secret : null;
+        if (!secret) throw new Error("The Bedrock API key is missing");
+        next.bedrock = { region, kind, secret };
+      } else if (kind === "access_key") {
+        // Left out, the stored ID is kept with its own secret (the page never sees the whole ID).
+        const given = typeof b.access_key_id === "string" ? b.access_key_id.trim() : "";
+        const id = given || (old?.kind === "access_key" ? (old.access_key_id ?? "") : "");
+        if (!id) throw new Error("The access key ID is missing");
+        if (!/^[A-Z0-9]{16,128}$/.test(id)) throw new Error(`${id} is not an AWS access key ID`);
+        const same = old?.kind === "access_key" && old.access_key_id === id;
+        const secret = b.secret_access_key !== undefined ? mockSecret(b.secret_access_key, "The secret access key") : same ? old.secret : null;
+        if (!secret) throw new Error("The secret access key is missing");
+        const session = b.session_token === null ? false : b.session_token !== undefined ? Boolean(mockSecret(b.session_token, "The session token")) : same ? Boolean(old.session_token) : false;
+        next.bedrock = { region, kind, secret, access_key_id: id, session_token: session };
+      } else if (kind === "profile") {
+        const profile = mockField(b, "profile", "The AWS profile name");
+        if (!isMockProfileName(profile)) throw new Error(`${profile} is not an AWS profile name`);
+        next.bedrock = { region, kind, secret: null, profile };
+      } else {
+        throw new Error(`no such way to authenticate to AWS: ${String(kind)}`);
+      }
+    }
+  }
+  if ("vertex" in patch) {
+    if (patch.vertex === null) next.vertex = null;
+    else {
+      const v = asObject(patch.vertex);
+      const project = mockField(v, "project", "The Google Cloud project");
+      if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(project)) throw new Error(`${project} is not a Google Cloud project ID`);
+      const region = mockField(v, "region", "The Vertex AI region");
+      if (!isMockVertexRegion(region)) {
+        throw new Error(`${region} is not a Vertex AI location (like global or us-east5)`);
+      }
+      let service_account = mockAgentAuth.vertex?.service_account ?? null;
+      if (v.service_account === null) service_account = null;
+      else if (typeof v.service_account === "string") {
+        if (!v.service_account.trim()) throw new Error("The service-account key is empty");
+        if (v.service_account.length > 64 * 1024) throw new Error("That file is far larger than a service-account key");
+        let parsed: Record<string, unknown> | null = null;
+        try {
+          parsed = asObject(JSON.parse(v.service_account));
+        } catch {
+          throw new Error("That is not a service-account key file (it is not JSON)");
+        }
+        if (parsed.type !== "service_account") throw new Error("That JSON is not a service-account key (its type is not service_account)");
+        if (typeof parsed.client_email !== "string" || !parsed.client_email.includes("@")) {
+          throw new Error("That service-account key names no client_email");
+        }
+        if (typeof parsed.private_key !== "string" || !parsed.private_key.includes("PRIVATE KEY")) {
+          throw new Error("That service-account key holds no private_key");
+        }
+        service_account = parsed.client_email;
+      }
+      next.vertex = { project, region, service_account };
+    }
+  }
+  if ("foundry" in patch) {
+    if (patch.foundry === null) next.foundry = null;
+    else {
+      const f = asObject(patch.foundry);
+      const resource = mockField(f, "resource", "The Foundry resource name");
+      if (!/^[A-Za-z0-9][A-Za-z0-9-]{1,63}$/.test(resource)) {
+        throw new Error(`${resource} is not a Foundry resource name — give the name alone, not its URL`);
+      }
+      const key = f.api_key !== undefined ? mockSecret(f.api_key, "The Foundry API key") : mockAgentAuth.foundry?.api_key ?? null;
+      if (!key) throw new Error("The Foundry API key is missing");
+      next.foundry = { resource, api_key: key };
+    }
+  }
+  const chose = "claude_method" in patch;
+  if (chose) {
+    const method = patch.claude_method;
+    if (typeof method !== "string" || !Object.hasOwn(MOCK_METHOD_LABELS, method)) {
+      throw new Error(`no such way to sign in: ${String(method)}`);
+    }
+    next.claude_method = method as MockClaudeMethod;
+  }
+  const missing =
+    next.claude_method === "api_key" && !next.anthropic_key
+      ? "Add an Anthropic API key"
+      : next.claude_method === "bedrock" && !next.bedrock
+        ? "Set up Amazon Bedrock"
+        : next.claude_method === "vertex" && !next.vertex
+          ? "Set up Google Vertex AI"
+          : next.claude_method === "foundry" && !next.foundry
+            ? "Set up Microsoft Foundry"
+            : null;
+  if (missing) {
+    throw new Error(
+      chose
+        ? `${missing} first`
+        : `Claude Code signs in with ${MOCK_METHOD_LABELS[next.claude_method]} — choose another way for it before removing that`,
+    );
+  }
+  mockAgentAuth = next;
+}
+
 /** The `agent_status` result, matching the Rust one. */
 function agentStatusView(): {
   backends: {
@@ -4142,6 +4604,8 @@ function agentStatusView(): {
     enabled: boolean;
     model: string | null;
     models: MockAgentModel[];
+    cli: ReturnType<typeof mockCliView>;
+    account: ReturnType<typeof mockAccountView>;
   }[];
   default_provider: string;
   personas: ReturnType<typeof mockPersonasView>;
@@ -4152,9 +4616,16 @@ function agentStatusView(): {
   workspace: string;
   enabled: boolean;
   sandbox_conversation: string;
+  cli_auto_update: boolean;
+  auth: ReturnType<typeof mockAgentAuthView>;
 } {
   return {
-    backends: [...mockAgentProviders].map(([name, provider]) => ({ name, ...provider })),
+    backends: [...mockAgentProviders].map(([name, provider]) => ({
+      name,
+      ...provider,
+      cli: mockCliView(name, provider.available),
+      account: mockAccountView(name, provider.available),
+    })),
     default_provider: mockAgentDefaultProvider,
     personas: mockPersonasView(),
     conversations: [...mockAgentModes].map(([conversation, mode]) => ({ conversation, mode })),
@@ -4164,6 +4635,8 @@ function agentStatusView(): {
     workspace: "/home/mock/GitHub/teams-lite",
     enabled: true,
     sandbox_conversation: MOCK_AGENT_SANDBOX,
+    cli_auto_update: mockCliAutoUpdate,
+    auth: mockAgentAuthView(),
   };
 }
 
@@ -4531,7 +5004,7 @@ function isValidMockModel(model: string): boolean {
     model.length > 0 &&
     model.length <= 80 &&
     !model.startsWith("-") &&
-    /^[A-Za-z0-9._:/-]+$/.test(model)
+    /^[A-Za-z0-9._:/@-]+$/.test(model)
   );
 }
 
@@ -6981,7 +7454,95 @@ let mockBrokerStatus: {
   repairing: boolean;
   can_sign_in?: boolean;
   signin_blocker?: string;
+  repair_blocker?: string;
+  /** An EMBEDDED backend's own Intune container (`intune_status_payload` in src/bin/server.rs),
+   *  or null for a host-mode backend — which is what every spec that never arms it sees, so the
+   *  banner draws exactly what it always drew. Armed by the `{kind:"intune"}` hook. */
+  intune?: MockIntune | null;
 } | null = null;
+
+/** The embedded container's state, in the backend's own shape (`EmbeddedIntune` in
+ *  web/src/lib/protocol.ts). */
+type MockIntune = {
+  mode: "embedded";
+  helper: "boot" | "repair" | "portal" | null;
+  initialized: boolean;
+  registered: boolean;
+  running: boolean;
+  can_enroll: boolean;
+  can_portal_sign_in: boolean;
+};
+
+/** The words this mock gives a broker that holds no account, which is what a container nobody
+ *  has enrolled answers with — so `{kind:"intune"}` on a mock with no broken status yet still
+ *  raises the banner it is about. */
+const MOCK_NO_ACCOUNT_MESSAGE =
+  "The identity broker holds no account — this device is not enrolled.";
+
+/** Recompute the two portal offers exactly as the backend does (`portal_purpose` in
+ *  src/bin/server.rs): `can_enroll` is a send-capable backend (this mock always is), a container
+ *  that is up, no helper at work, and no registration yet; `can_portal_sign_in` is the same gates
+ *  on a container that IS registered and whose broker holds no account (`signature`). Derived
+ *  rather than armed, so a spec cannot put the mock in a state the backend could never be in — an
+ *  enrollment offered over a registration that works. */
+function withOffers(
+  intune: Omit<MockIntune, "can_enroll" | "can_portal_sign_in">,
+  signature: string,
+): MockIntune {
+  const free = intune.running && intune.helper === null;
+  return {
+    ...intune,
+    can_enroll: free && !intune.registered,
+    can_portal_sign_in: free && intune.registered && signature === "no_account",
+  };
+}
+
+/** Bumped by every `{kind:"intune"}` hook call — the start of a spec's own embedded state — so a
+ *  timer a previous spec's portal session left behind (the helper outliving its session, below)
+ *  never moves the state a later spec armed. One mock process serves the whole run. */
+let mockIntuneGeneration = 0;
+
+/** Move the embedded container's state and tell every page, the way the backend's follower and
+ *  its enrollment do: a `broker_status` carrying the new `intune`. */
+function setMockIntune(next: Partial<Omit<MockIntune, "mode" | "can_enroll" | "can_portal_sign_in">>) {
+  if (!mockBrokerStatus?.intune) return;
+  mockBrokerStatus = {
+    ...mockBrokerStatus,
+    intune: withOffers({ ...mockBrokerStatus.intune, ...next }, mockBrokerStatus.signature),
+  };
+  broadcast("broker_status", mockBrokerStatus);
+}
+
+/** What the NEXT press of Repair sign-in does, armed by the `{kind:"broker"}` hook's `repair`
+ *  field. `start` (the default) is the repair that works; `refuse` answers the refusal the real
+ *  backend gives a press on a keyring that is NOT locked — the one refusal a reader really meets,
+ *  and unreachable here otherwise, since this mock has no keyring to ask; `hold` starts the repair
+ *  and never ends it, so the busy state has a duration a spec and a capture can see (the default
+ *  ends it half a second later); `refuse_late` is that same refusal answered only once the NEXT
+ *  `{kind:"broker"}` call has broadcast its status — a press whose round trip a newer status
+ *  crossed, which is what `repairBroker`'s rollback must not overwrite. The real backend asks a
+ *  D-Bus keyring before it answers, so that window is real there; here it would not exist at all.
+ *
+ *  EVERY `{kind:"broker"}` call sets it, from its own body, so the reset a spec already owes —
+ *  `{kind:"broker", ok:true}` in its `afterEach` — puts it back too, and that same call releases
+ *  a `refuse_late` press still waiting. One mock process serves the whole run, and a refusal left
+ *  armed would refuse a press in some later spec. */
+let mockRepairOutcome: "start" | "refuse" | "refuse_late" | "hold" = "start";
+
+/** Answers the `refuse_late` press that is waiting, once the next `{kind:"broker"}` call has
+ *  broadcast its status — so on the page's socket the newer status always arrives FIRST. */
+let releaseLateRepairRefusal: (() => void) | null = null;
+
+/** The sentence the real backend refuses a press with when the keyring is not locked
+ *  (`repair_refusal` in src/bin/server.rs, its `KeyringCheck::Unlocked` arm), word for word, so
+ *  what a spec reads is what a reader would. Only that arm is mirrored, because it is the only
+ *  state this mock's fixture stands for: a container that is up, with a broker that stopped
+ *  answering. The backend's other refusals — a container that is not running, one that is not
+ *  set up, a keyring that could not be read — are its own words for situations this mock has
+ *  no container to be in, and the page treats every one of them alike: a sentence to show. */
+const MOCK_REPAIR_NOT_LOCKED =
+  "Not restarting the Intune container: its login keyring is unlocked. A restart only repairs " +
+  "a locked keyring, and it would take sign-in down for a minute for nothing.";
 
 // ---- signing in again (see src/signin.rs, src/xwindow.rs and SIGN-IN.md) --------
 // The whole flow with no identity broker, no X display and no tenant: a sign-in that goes
@@ -7006,6 +7567,24 @@ const MOCK_SIGNIN_NUMBER = "42";
 const MOCK_SIGNIN_WINDOW_DELAY_MS = 300;
 
 type MockSignin = {
+  /** Which session this is, so a timer one session armed never acts on the next. */
+  id: number;
+  /** A sign-in serves the broker's window; an ENROLLMENT serves the Intune portal's, on an
+   *  embedded backend's own container (`Kind` in src/signin.rs). */
+  kind: "signin" | "enroll";
+  /** A portal session only: what the portal is open for (`PortalPurpose` in src/signin.rs). */
+  purpose: "enroll" | "account";
+  /** A portal session only: whether the pretend container holds a registration yet. For an
+   *  enrollment it is set by the pretend portal's own Enroll button, and the portal STAYS OPEN
+   *  after it — which is what the real one does, and why the reader closes it with "Close the
+   *  portal". For an account sign-in it is true from the start. */
+  registered: boolean;
+  /** An ACCOUNT sign-in only: whether the pretend portal's button has signed the account in —
+   *  what the backend asks the broker for once the portal closes. */
+  signedIn: boolean;
+  /** A Cancel being carried out: the real backend asks the portal's helper to close the portal
+   *  and settles only once it has, so for that moment the session says it is closing. */
+  stopping: boolean;
   phase: "starting" | "waiting" | "done" | "cancelled" | "failed";
   detail: string;
   started: number;
@@ -7020,6 +7599,85 @@ let mockSignin: MockSignin | null = null;
  *  in real life), refuse to start, or fail after the window is up. Armed through the
  *  `{kind:"signin"}` hook, and a spec MUST reset it — one mock process serves the whole run. */
 let mockSigninOutcome: "window" | "immediate" | "refuse" | "fail" | "hold" = "window";
+
+/** How many of the next frame reads answer `{moved: true}` — what the backend answers on the tick
+ *  it had to move a window that hung off its screen (`SigninWindow::capture_or_place`), when there
+ *  is no picture to read yet. Armed by `{kind:"signin", moved_frames: N}`, cleared by the reset. */
+let mockSigninMovedFrames = 0;
+
+/** Counter behind `MockSignin.id`. */
+let mockSigninSeq = 0;
+
+/** What the pretend broker's SILENT call answers for the broken scope once an account has been
+ *  signed in through the portal — the one half of the backend's account probe (`account_answers`
+ *  in src/signin.rs) a spec can arm. `answers` (the default) mints at once. `refuses` is the shape
+ *  SIGN-IN.md's model of the broker gives a FRESH account: no refresh token exists yet for this
+ *  client and resource, so the silent call refuses and only an INTERACTIVE one mints, from the
+ *  PRT, with nobody in front of it — and an interactive call needs the interactive turn, which the
+ *  portal session holds for its whole life. A probe that asked the funnel while it still held the
+ *  turn had its rescue stand down, and called a sign-in that worked "still broken"; armed, this
+ *  makes that ordering fail a spec. Set by EVERY `{kind:"intune"}` call from its own body
+ *  (`account_probe`), so the reset a spec already owes puts it back. */
+let mockSilentAfterAccount: "answers" | "refuses" = "answers";
+
+/** The pretend interactive turn (`auth::interactive_turn`): the portal session holding it — taken
+ *  when the session starts and released when it settles, as the backend's is — or nobody. */
+let mockTurnHolder: number | null = null;
+
+/** Whether an interactive acquisition has minted the broken scope since the account came back,
+ *  leaving the fresh refresh token the silent call then answers from. */
+let mockFreshRefreshToken = false;
+
+/** The pretend broker's silent call (`acquireTokenSilently`): no account, no token; an account
+ *  answers unless armed to refuse (above) and no interactive call has minted yet. */
+function mockSilentToken(session: MockSignin): boolean {
+  return session.signedIn && (mockSilentAfterAccount === "answers" || mockFreshRefreshToken);
+}
+
+/** The pretend interactive call (`auth::interactive_token`), which takes the turn as a parameter:
+ *  only the session holding it may make one. Mints from the PRT whenever an account is there. */
+function mockInteractiveToken(session: MockSignin): boolean {
+  if (mockTurnHolder !== session.id || !session.signedIn) return false;
+  mockFreshRefreshToken = true;
+  return true;
+}
+
+/** The pretend funnel (`auth::get_token`): the silent call, and on its refusal the automatic
+ *  rescue — which only TRIES for the turn, and stands down while anybody holds it. A broker with
+ *  no account is refused before any of that (`NoAccount`), with no rescue at all. */
+function mockGetToken(session: MockSignin): boolean {
+  if (mockSilentToken(session)) return true;
+  if (!session.signedIn || mockTurnHolder !== null) return false;
+  mockFreshRefreshToken = true;
+  return true;
+}
+
+/** Release the pretend turn, if `session` holds it. */
+function mockReleaseTurn(session: MockSignin) {
+  if (mockTurnHolder === session.id) mockTurnHolder = null;
+}
+
+/** The backend's account probe (`account_answers` in src/signin.rs), in the backend's ORDER: the
+ *  interactive call under the turn the session holds, the turn released, and only then the funnel
+ *  that records the broker as healthy. Asked the other way round, the rescue behind the funnel
+ *  stands down on the held turn and an account that came back reads as one that did not. */
+function mockAccountAnswers(session: MockSignin): boolean {
+  const minted = mockInteractiveToken(session);
+  mockReleaseTurn(session);
+  return minted && mockGetToken(session);
+}
+
+/** How long a Cancelled portal session stays `stopping` before it settles — the seconds the real
+ *  portal helper takes to close the portal. Long enough for a spec to see the panel say so. */
+const MOCK_PORTAL_CLOSE_MS = 600;
+
+/** How long the pretend portal helper keeps the slot AFTER its session has settled, before a
+ *  second `broadcast` frees it. The real backend settles a session only once its helper has
+ *  exited, so it usually sends one status with the slot already free — but a helper it gave up on
+ *  (its deadline, a stop it did not answer in time) is followed and freed later by a status of
+ *  its own. The mock always takes the later path, so a page that read the slot as free at the
+ *  moment a session settled would fail a spec rather than ship. */
+const MOCK_PORTAL_EXIT_MS = 900;
 
 /** Where the pretend Sign in button is, in window pixels. */
 const MOCK_SIGNIN_BUTTON = { x: 362, y: 278, width: 110, height: 30 };
@@ -7048,7 +7706,7 @@ const DIGITS: Record<string, string[]> = {
  *  CHANGES as keys are typed. It is not pretending to be Microsoft's page, and a fixture
  *  screenshot could not show the dots appear.
  */
-function mockSigninFrame(typed: number): string {
+function mockSigninFrame(typed: number, kind: MockSignin["kind"] = "signin", registered = false): string {
   const { width, height } = MOCK_SIGNIN_WINDOW;
   const stride = width * 3;
   const rgb = Buffer.alloc(stride * height, 0xff);
@@ -7070,6 +7728,15 @@ function mockSigninFrame(typed: number): string {
   const ink: [number, number, number] = [0x24, 0x24, 0x24];
   const blue: [number, number, number] = [0x00, 0x67, 0xb8];
   const grey: [number, number, number] = [0xd0, 0xd0, 0xd0];
+
+  // The pretend PORTAL is told apart from the pretend broker at a glance: a coloured band down
+  // its left edge, as an app's navigation rail would be, and — once its Enroll button has been
+  // pressed — a green band where the field was, standing for the portal's own "you're set up".
+  // The button stays where the broker's is, so a spec presses the same window coordinates.
+  if (kind === "enroll") {
+    box(0, 0, 36, height, [0x5b, 0x5f, 0xc7]);
+    if (registered) box(60, 140, 410, 24, [0x10, 0x7c, 0x10]);
+  }
 
   // A header band and a couple of text-ish bands, so the page reads as a form.
   box(60, 36, 120, 14, ink);
@@ -7127,25 +7794,85 @@ function mockSigninFrame(typed: number): string {
 /** The `signin_status` payload, in the backend's own shape. */
 function mockSigninPayload(): Record<string, unknown> {
   if (!mockSignin) {
-    return { phase: "idle", detail: "", scope: "", display: "", waited_ms: 0, window: null };
+    return {
+      kind: "signin",
+      phase: "idle",
+      detail: "",
+      scope: "",
+      display: "",
+      waited_ms: 0,
+      window: null,
+    };
   }
+  const enroll = mockSignin.kind === "enroll";
+  const live = mockSignin.phase === "starting" || mockSignin.phase === "waiting";
+  // An enrollment acquires nothing itself; an account sign-in asks the broker for the scope the
+  // app is broken on once the portal closes, as a sign-in does.
+  const acquires = !enroll || mockSignin.purpose === "account";
   return {
+    kind: mockSignin.kind,
     phase: mockSignin.phase,
     detail: mockSignin.detail,
-    scope: "https://api.spaces.skype.com/.default",
-    display: ":77",
+    scope: acquires ? "https://api.spaces.skype.com/.default" : "",
+    // A portal session is drawn on the container's own display.
+    display: enroll ? ":99" : ":77",
     waited_ms: Date.now() - mockSignin.started,
-    window: mockSignin.phase === "waiting" ? mockSignin.window : null,
+    // Nothing is served while a Cancel is being carried out, so there is no window to size.
+    window: mockSignin.phase === "waiting" && !mockSignin.stopping ? mockSignin.window : null,
+    stopping: live && mockSignin.stopping,
+    ...(enroll ? { purpose: mockSignin.purpose, registered: mockSignin.registered } : {}),
   };
+}
+
+/** Has the pretend portal done what it was opened for — registered the container, or signed the
+ *  account in? What its own page draws (the green band) once it has. How the SESSION ended is
+ *  decided in `settleMockSignin` by the backend's own rules: the registration for an enrollment,
+ *  and for an account sign-in the broker answering (`mockAccountAnswers`). */
+function mockPortalDidItsJob(session: MockSignin): boolean {
+  return session.purpose === "account" ? session.signedIn : session.registered;
 }
 
 /** Settle a mock sign-in and tell every page, the way the backend does. */
 function settleMockSignin(phase: MockSignin["phase"], detail = "") {
   if (!mockSignin) return;
-  mockSignin = { ...mockSignin, phase, detail };
+  // What the portal was opened FOR decides a portal session last, exactly as the backend's run
+  // does: a reader who enrolled (or signed their account in) and then closed the portal has done
+  // it, not cancelled it.
+  const enroll = mockSignin.kind === "enroll";
+  let worked = false;
+  if (enroll) {
+    if (mockSignin.purpose === "account") {
+      worked = mockAccountAnswers(mockSignin);
+    } else {
+      worked = mockSignin.registered;
+      mockReleaseTurn(mockSignin);
+    }
+  }
+  const outcome = worked ? "done" : phase;
+  mockSignin = {
+    ...mockSignin,
+    phase: outcome,
+    stopping: false,
+    detail: outcome === "done" ? "" : detail,
+  };
   broadcast("signin_status", mockSigninPayload());
-  // A sign-in that worked puts the broker right, which is what makes the banner go away.
-  if (phase === "done") {
+  if (enroll) {
+    // The registration is the container's own fact the moment it lands, and is said at once.
+    const registered = mockSignin.registered;
+    if (mockBrokerStatus?.intune && mockBrokerStatus.intune.registered !== registered) {
+      setMockIntune({ registered });
+    }
+    // The portal helper's slot is freed by a status of its OWN, a moment later (see
+    // `MOCK_PORTAL_EXIT_MS`) — never by this one — so a page that read the slot as free at the
+    // instant the session settled fails a spec here.
+    const generation = mockIntuneGeneration;
+    setTimeout(() => {
+      if (generation === mockIntuneGeneration) setMockIntune({ helper: null });
+    }, MOCK_PORTAL_EXIT_MS);
+  }
+  // A sign-in that worked puts the broker right, which is what makes the banner go away — and so
+  // does an enrollment, whose re-read of the broker finds an account at last.
+  if (outcome === "done") {
     mockBrokerStatus = {
       ok: true,
       signature: "",
@@ -7155,9 +7882,30 @@ function settleMockSignin(phase: MockSignin["phase"], detail = "") {
       can_repair: false,
       repairing: false,
       can_sign_in: false,
+      // The container's own state survives the broker coming right: it is still embedded, and
+      // now enrolled.
+      intune: mockBrokerStatus?.intune ?? null,
     };
     broadcast("broker_status", mockBrokerStatus);
   }
+}
+
+/** The pretend page's own button (or Enter in it). A SIGN-IN is finished by it; an ENROLLMENT
+ *  registers the container and goes on showing the portal — the real portal carries on after the
+ *  registration lands, so the reader is the one who closes it ("Close the portal"), and the
+ *  session settles `done` then. An ACCOUNT sign-in signs the account in and goes on showing the
+ *  portal the same way: the backend asks the broker only once the portal has closed. */
+function submitMockSignin() {
+  if (!mockSignin) return;
+  if (mockSignin.kind === "signin") {
+    settleMockSignin("done");
+    return;
+  }
+  mockSignin =
+    mockSignin.purpose === "account"
+      ? { ...mockSignin, signedIn: true }
+      : { ...mockSignin, registered: true };
+  broadcast("signin_status", mockSigninPayload());
 }
 
 // ---- a pending update (see src/update.rs, and update-button.tsx) ---------------
@@ -8296,6 +9044,12 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         );
       }
       mockSignin = {
+        id: (mockSigninSeq += 1),
+        kind: "signin",
+        purpose: "enroll",
+        registered: false,
+        signedIn: false,
+        stopping: false,
         phase: "starting",
         detail: "",
         started: Date.now(),
@@ -8322,21 +9076,104 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return { started: true, signin: first };
     }
 
+    // Open the pretend Intune portal in an embedded backend's own container (`Ctx::start_enroll`)
+    // — to ENROLL it, or to sign an ACCOUNT in again on a registered container whose broker holds
+    // none, which the mock decides exactly as the backend does: from the offers it states, never
+    // from the client. Refused in the backend's own words wherever it refuses — host mode, and
+    // wherever neither can happen right now — and otherwise the SAME session as a sign-in, drawing
+    // the pretend portal: it opens, takes keys, does what it was opened for when its own button is
+    // pressed, and stays open until the reader closes it.
+    case "intune_enroll": {
+      const intune = mockBrokerStatus?.intune;
+      if (!intune) {
+        throw new Error(
+          "refused: only teams-lite's self-contained image enrolls its own Intune container — in " +
+            "host mode the Intune container is the user's own, and is enrolled with " +
+            "`intune-container` on that machine",
+        );
+      }
+      if (mockSignin && (mockSignin.phase === "starting" || mockSignin.phase === "waiting")) {
+        return { started: false, reason: "already_running", signin: mockSigninPayload() };
+      }
+      const purpose = intune.can_enroll ? "enroll" : intune.can_portal_sign_in ? "account" : null;
+      if (!purpose) {
+        throw new Error(
+          intune.registered
+            ? "Not enrolling: this container already holds a device registration. Enrolling " +
+                "again would replace a registration that works."
+            : "Not enrolling now: the Intune container is busy or not running. Try again once it " +
+                "is up.",
+        );
+      }
+      if (mockSigninOutcome === "refuse") {
+        throw new Error(
+          "The Intune container is busy — a repair of the container is at work on it — so the " +
+            "portal cannot be opened now. Try again once it has finished.",
+        );
+      }
+      mockSignin = {
+        id: (mockSigninSeq += 1),
+        kind: "enroll",
+        purpose,
+        registered: intune.registered,
+        signedIn: false,
+        stopping: false,
+        phase: "starting",
+        detail: "",
+        started: Date.now(),
+        typed: 0,
+        window: { ...MOCK_SIGNIN_WINDOW },
+      };
+      // A portal session takes the interactive turn for its whole life, as the backend's does.
+      mockTurnHolder = mockSignin.id;
+      // The portal helper holds the slot from here, which takes the offer off every banner.
+      setMockIntune({ helper: "portal" });
+      const first = mockSigninPayload();
+      broadcast("signin_status", first);
+      setTimeout(() => {
+        if (!mockSignin || mockSignin.kind !== "enroll" || mockSignin.phase !== "starting") return;
+        if (mockSigninOutcome === "fail") {
+          settleMockSignin(
+            "failed",
+            "The Intune portal could not be opened (its helper ended with exit 1). This " +
+              "container's log says why, in lines starting teams-lite(intune-portal).",
+          );
+        } else if (mockSigninOutcome === "hold") {
+          return;
+        } else if (mockSigninOutcome === "immediate") {
+          // There is no enrollment that needs nobody; `immediate` stands for a portal that was
+          // already through its steps — done and closed — by the time it was looked at.
+          mockSignin = { ...mockSignin, registered: true, signedIn: true };
+          settleMockSignin("done");
+        } else {
+          mockSignin = { ...mockSignin, phase: "waiting" };
+          broadcast("signin_status", mockSigninPayload());
+        }
+      }, MOCK_SIGNIN_WINDOW_DELAY_MS);
+      return { started: true, signin: first };
+    }
+
     case "signin_status":
       return mockSigninPayload();
 
     case "signin_frame": {
+      if (mockSignin?.stopping) throw new Error("this sign-in is being closed");
       if (!mockSignin || mockSignin.phase !== "waiting") {
         throw new Error("no sign-in is running — press Sign in again to start one");
+      }
+      if (mockSigninMovedFrames > 0) {
+        mockSigninMovedFrames -= 1;
+        return { moved: true };
       }
       return {
         width: MOCK_SIGNIN_WINDOW.width,
         height: MOCK_SIGNIN_WINDOW.height,
-        png: mockSigninFrame(mockSignin.typed),
+        png: mockSigninFrame(mockSignin.typed, mockSignin.kind, mockPortalDidItsJob(mockSignin)),
       };
     }
 
     case "signin_input": {
+      if (mockSignin?.stopping) throw new Error("this sign-in is being closed");
       if (!mockSignin || mockSignin.phase !== "waiting") {
         throw new Error("no sign-in is running — press Sign in again to start one");
       }
@@ -8355,7 +9192,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         }
         // Enter submits the pretend page, exactly as pressing its button does.
         if (p.key === "Enter") {
-          settleMockSignin("done");
+          submitMockSignin();
           return { sent: true };
         }
         return { sent: true };
@@ -8369,7 +9206,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         // Pressing the page's own Sign in button is what finishes the flow — which is what
         // makes the click path really testable: a tap that landed somewhere else does nothing,
         // exactly as it would on the real page.
-        if (onButton) settleMockSignin("done");
+        if (onButton) submitMockSignin();
         return { sent: true };
       }
       throw new Error("send either `char` (one character) or `key` (a key name)");
@@ -8384,7 +9221,22 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // (`Signin::cancel`). The mock answers both halves the way the backend does: reporting
       // `closed: true` from `starting` would hide the one thing this state is about.
       const closed = mockSignin.phase === "waiting";
-      settleMockSignin("cancelled");
+      if (mockSignin.kind === "signin") {
+        settleMockSignin("cancelled");
+        return { closed };
+      }
+      // A PORTAL session is not settled by the press: the backend asks the portal's helper to
+      // close the portal and settles once it has, saying meanwhile that it is closing — and only
+      // then what it was opened for decides how it ended (see `settleMockSignin`): "Close the
+      // portal" on a registered container is an enrollment that worked. A second press finds it
+      // closing already.
+      if (mockSignin.stopping) return { closed: false };
+      const id = mockSignin.id;
+      mockSignin = { ...mockSignin, stopping: true };
+      broadcast("signin_status", mockSigninPayload());
+      setTimeout(() => {
+        if (mockSignin?.id === id) settleMockSignin("cancelled");
+      }, MOCK_PORTAL_CLOSE_MS);
       return { closed };
     }
 
@@ -8392,9 +9244,42 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       // Pretend the repair unit started: flip `repairing`, then report a healthy
       // broker a beat later. That is what lets a spec — and `bun run preview` — drive
       // the whole flow with no Intune container anywhere near it.
+      //
+      // The real backend STAYS UP through a repair — the unit is the user's systemd manager's,
+      // not its child — so its page never loses this socket: it says the unit ended with a
+      // `broker_status` carrying `repairing: false`, and sign-in coming back with the broker's
+      // own `broker_status` once a token call succeeds. Here both arrive as ONE event, which is
+      // the repair that worked; `hold` is the one that has not ended, and a spec stands for its
+      // end — working or not — by emitting the status it ended in.
+      // An embedded container with another helper at work refuses a press in the backend's own
+      // words (`busy_refusal` in src/bin/server.rs) rather than starting anything: the slot holds
+      // one helper at a time, and a mock that answered `started: true` here would let a banner
+      // that offered a repair mid-boot pass every test.
+      const busy = mockBrokerStatus?.intune?.helper;
+      if (busy === "boot") {
+        throw new Error(
+          "Not restarting the Intune container: the app is starting it right now, and a start " +
+            "unlocks the keyring on its own. Its first start downloads about 1.7 GB, so it can " +
+            "take a while — wait for it to finish.",
+        );
+      }
+      if (busy === "portal") {
+        throw new Error(
+          "Not restarting the Intune container: an enrollment has the Intune portal open in it, " +
+            "and a restart would close it. Finish or cancel the enrollment first.",
+        );
+      }
+      if (mockRepairOutcome === "refuse") throw new Error(MOCK_REPAIR_NOT_LOCKED);
+      if (mockRepairOutcome === "refuse_late") {
+        await new Promise<void>((resolve) => {
+          releaseLateRepairRefusal = resolve;
+        });
+        throw new Error(MOCK_REPAIR_NOT_LOCKED);
+      }
       if (mockBrokerStatus) {
         mockBrokerStatus = { ...mockBrokerStatus, repairing: true };
         broadcast("broker_status", mockBrokerStatus);
+        if (mockRepairOutcome === "hold") return { started: true };
         setTimeout(() => {
           mockBrokerStatus = {
             ok: true,
@@ -9084,6 +9969,115 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     case "agent_set_unrestricted": {
       mockAgentUnrestricted = asObject(params).unrestricted === true;
       return agentStatusView();
+    }
+
+    // ---- installing an agent CLI (see src/agent_cli.rs) ---------------------
+    case "agent_cli_install": {
+      startMockCliInstall(requireString(params, "provider"));
+      return agentStatusView();
+    }
+
+    case "agent_cli_remove": {
+      const name = requireString(params, "provider");
+      const cli = mockAgentClis.get(name);
+      const provider = mockAgentProviders.get(name);
+      if (!cli || !provider) throw new Error(`no such provider: ${name}`);
+      if (cli.phase !== "idle") {
+        throw new Error(`${name} is being installed right now — try again once that is done`);
+      }
+      const freed = cli.version ? (name === "claude" ? 337_814_032 : 214_386_864) : 0;
+      // The copy goes; a provider whose ONLY copy was this app's then answers nothing, while one
+      // the user also installed themselves keeps answering with theirs.
+      if (cli.managed) provider.available = false;
+      Object.assign(cli, { managed: false, version: null, error: "" });
+      broadcast("agent_status_changed", agentStatusView());
+      return { ...agentStatusView(), freed };
+    }
+
+    case "agent_cli_check": {
+      // Only the CLIs this "machine" installed are asked about, exactly as the backend asks.
+      for (const [name, cli] of mockAgentClis) {
+        if (!cli.version) continue;
+        cli.checked_ms = Date.now();
+        cli.latest = cli.latest ?? MOCK_CLI_DOWNLOAD[name]?.latest ?? cli.version;
+      }
+      return agentStatusView();
+    }
+
+    case "agent_cli_set_auto_update": {
+      const enabled = asObject(params).enabled;
+      if (typeof enabled !== "boolean") throw new Error("missing param: enabled (a boolean)");
+      mockCliAutoUpdate = enabled;
+      return agentStatusView();
+    }
+
+    // ---- signing the agent CLIs in (see src/agent_auth.rs) --------------------
+    case "agent_auth_set": {
+      applyMockAgentAuth(asObject(params));
+      return agentStatusView();
+    }
+
+    case "agent_signin_start": {
+      const provider = requireString(params, "provider");
+      if (provider !== "claude") throw new Error(`${provider} signs in with an API key, not an account`);
+      const account = asObject(params).account ?? "claude_ai";
+      if (account !== "claude_ai" && account !== "console") throw new Error(`no such account to sign in to: ${String(account)}`);
+      if (!mockAgentProviders.get("claude")?.available) throw new Error("Claude Code is not on this machine — install it first");
+      mockClaudeSignin = { started_ms: Date.now(), console: account === "console", finishing: false };
+      broadcast("agent_status_changed", agentStatusView());
+      return { ...agentStatusView(), signin_url: MOCK_SIGNIN_URL };
+    }
+
+    case "agent_signin_finish": {
+      const provider = requireString(params, "provider");
+      if (provider !== "claude") throw new Error(`no sign-in of ${provider} is waiting`);
+      const code = requireString(params, "code").trim();
+      // `agent_auth::login_code`, checked before the sign-in is spent.
+      if (!/^[\x21-\x7e]{1,1024}$/.test(code)) throw new Error("A sign-in code is one line with no spaces — paste it alone");
+      if (!mockClaudeSignin || mockClaudeSignin.finishing) throw new Error("No sign-in is waiting for a code — press Sign in again");
+      const console = mockClaudeSignin.console;
+      // The CLI exits on any code it was handed, accepted or not: the sign-in ends either way.
+      mockClaudeSignin = null;
+      if (code !== MOCK_SIGNIN_CODE) {
+        broadcast("agent_status_changed", agentStatusView());
+        throw new Error(MOCK_REFUSED_CODE);
+      }
+      mockClaudeLogin = console
+        ? { email: "ada@example.com", plan: "", organization: "Ada's Console org" }
+        : { email: "ada@example.com", plan: "max", organization: "Ada Lovelace" };
+      broadcast("agent_status_changed", agentStatusView());
+      return agentStatusView();
+    }
+
+    case "agent_signin_cancel": {
+      const provider = requireString(params, "provider");
+      if (provider !== "claude") throw new Error(`no sign-in of ${provider} is waiting`);
+      mockClaudeSignin = null;
+      broadcast("agent_status_changed", agentStatusView());
+      return agentStatusView();
+    }
+
+    case "agent_signout": {
+      const provider = requireString(params, "provider");
+      if (provider !== "claude") throw new Error(`${provider} keeps no account to sign out of`);
+      mockClaudeLogin = null;
+      broadcast("agent_status_changed", agentStatusView());
+      return agentStatusView();
+    }
+
+    case "agent_opencode_key_set": {
+      const id = requireString(params, "provider_id");
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) throw new Error(`${id} is not an opencode provider id`);
+      mockSecret(asObject(params).key, "The API key");
+      mockOpencodeCredentials.set(id, "api");
+      return agentStatusView();
+    }
+
+    case "agent_opencode_key_remove": {
+      const id = requireString(params, "provider_id");
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(id)) throw new Error(`${id} is not an opencode provider id`);
+      const removed = mockOpencodeCredentials.delete(id);
+      return { ...agentStatusView(), removed };
     }
 
     case "agent_stop": {
@@ -12518,8 +13512,14 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // Set the broker health the mock reports, and broadcast it — mirroring the Rust
     // backend's `broker_status` event. `{ kind: "broker", ok: true }` puts it back,
     // which a spec must do before it ends: the mock is shared and adopted across runs.
+    // `repair` arms what the next press of Repair sign-in does (see `mockRepairOutcome`), and
+    // is read from EVERY call, so that same reset disarms it.
     if (body.kind === "broker") {
       const ok = body.ok === true;
+      mockRepairOutcome =
+        body.repair === "refuse" || body.repair === "refuse_late" || body.repair === "hold"
+          ? body.repair
+          : "start";
       mockBrokerStatus = {
         ok,
         signature: typeof body.signature === "string" ? body.signature : ok ? "" : "disconnected",
@@ -12540,9 +13540,73 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         can_sign_in: Boolean(body.can_sign_in),
         signin_blocker:
           typeof body.signin_blocker === "string" ? body.signin_blocker : undefined,
+        // What a machine that may not restart the container says instead — the container
+        // image's own sentence (`intune::repair_blocker`). Off unless a spec asks.
+        repair_blocker:
+          typeof body.repair_blocker === "string" ? body.repair_blocker : undefined,
       };
       broadcast("broker_status", mockBrokerStatus);
+      // After the broadcast, never before it: the press waiting on this is the one whose
+      // answer a newer status has to beat to the page.
+      const lateRefusal = releaseLateRepairRefusal;
+      releaseLateRepairRefusal = null;
+      lateRefusal?.();
       return Response.json({ ok: true, broker: mockBrokerStatus }, { status: 200 });
+    }
+    // The EMBEDDED backend's own Intune container, as `broker_status.intune` states it. Merged
+    // into the current broker status — one with no failure yet is given the "no account" one an
+    // unenrolled container answers with, so the banner this is about is raised — and
+    // `can_enroll` and `can_portal_sign_in` are DERIVED, as the backend derives them (the latter
+    // from the status's own signature: the account offer is for a broker that holds no account).
+    // `account_probe: "refuses"` arms the broker a fresh account really has (see
+    // `mockSilentAfterAccount`). `{kind:"intune", reset:true}` takes it back to null (host mode),
+    // and the probe back to `answers`. A spec MUST reset it, and
+    // `{kind:"signin", reset:true}` does too
+    // (it puts the whole broker status back to null): one mock process serves the whole run, and
+    // an embedded status left armed changes what every later spec's banner offers.
+    if (body.kind === "intune") {
+      mockIntuneGeneration += 1;
+      // What the broker's silent call answers once an account is signed in through the portal —
+      // from EVERY call, so the reset a spec already owes puts it back.
+      mockSilentAfterAccount = body.account_probe === "refuses" ? "refuses" : "answers";
+      mockFreshRefreshToken = false;
+      if (body.reset === true) {
+        if (mockBrokerStatus) {
+          mockBrokerStatus = { ...mockBrokerStatus, intune: null };
+          broadcast("broker_status", mockBrokerStatus);
+        }
+        return Response.json({ ok: true, intune: null }, { status: 200 });
+      }
+      const helper =
+        body.helper === "boot" || body.helper === "repair" || body.helper === "portal"
+          ? body.helper
+          : null;
+      const current = mockBrokerStatus?.intune ?? null;
+      const base = mockBrokerStatus ?? {
+        ok: false,
+        signature: "no_account",
+        message: MOCK_NO_ACCOUNT_MESSAGE,
+        detail: "",
+        consecutive_failures: 3,
+        can_repair: false,
+        repairing: false,
+        can_sign_in: false,
+      };
+      const intune = withOffers(
+        {
+          mode: "embedded",
+          helper,
+          initialized:
+            typeof body.initialized === "boolean" ? body.initialized : (current?.initialized ?? true),
+          registered:
+            typeof body.registered === "boolean" ? body.registered : (current?.registered ?? false),
+          running: typeof body.running === "boolean" ? body.running : (current?.running ?? true),
+        },
+        base.signature,
+      );
+      mockBrokerStatus = { ...base, intune };
+      broadcast("broker_status", mockBrokerStatus);
+      return Response.json({ ok: true, intune }, { status: 200 });
     }
     // What the NEXT sign-in does. `window` (the default) puts a window up and waits for the
     // reader; `immediate` finishes with nobody typing, which is the common case against the
@@ -12553,7 +13617,11 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     if (body.kind === "signin") {
       if (body.reset === true) {
         mockSigninOutcome = "window";
+        mockSigninMovedFrames = 0;
         mockSignin = null;
+        // The turn goes with the session it belonged to, and the broker's fresh token with it.
+        mockTurnHolder = null;
+        mockFreshRefreshToken = false;
         // Back to NULL, not to a healthy object: a sign-in that finished sets `mockBrokerStatus`
         // so the banner goes away, and a non-null status is then announced in the greeting of
         // every later connection — which makes the banner's own "null means silence" rule
@@ -12561,6 +13629,14 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         mockBrokerStatus = null;
         broadcast("signin_status", mockSigninPayload());
         return Response.json({ ok: true, outcome: mockSigninOutcome }, { status: 200 });
+      }
+      if (typeof body.moved_frames === "number") {
+        mockSigninMovedFrames = Math.max(0, Math.floor(body.moved_frames));
+        // Armed on its own it changes nothing else — it is armed mid-flow, over a window the
+        // session is already serving.
+        if (typeof body.outcome !== "string") {
+          return Response.json({ ok: true, moved_frames: mockSigninMovedFrames }, { status: 200 });
+        }
       }
       const outcome = typeof body.outcome === "string" ? body.outcome : "window";
       if (!["window", "immediate", "refuse", "fail", "hold"].includes(outcome)) {
@@ -12575,6 +13651,58 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
     // spec MUST reset it afterwards (`{kind: "agent_providers", reset: true}`): one mock
     // process serves the whole run, and a second CLI left installed changes what every
     // later spec's menu holds.
+    // An agent CLI's install: arm what this "machine" already holds (`installed: {claude:
+    // "2.1.311"}` makes the copy this app installed the one that runs), what upstream has
+    // (`latest: {claude: "2.1.318"}`), a platform with no build (`installable: {opencode:
+    // false}`), a refusal of the next install (`fail`), or an install that holds at its download
+    // (`hold: true`, released by `release: true`). A spec MUST reset it (`{kind:"agent_cli",
+    // reset:true}`): one mock process serves the whole run, and an install left behind changes
+    // every later Settings pane.
+    if (body.kind === "agent_cli") {
+      if (body.reset === true) {
+        resetMockAgentClis();
+        broadcast("agent_status_changed", agentStatusView());
+        return Response.json({ ok: true, reset: true }, { status: 200 });
+      }
+      const installed = asObject(body.installed);
+      for (const [name, version] of Object.entries(installed)) {
+        const cli = mockAgentClis.get(name);
+        const provider = mockAgentProviders.get(name);
+        if (!cli || !provider || typeof version !== "string") continue;
+        Object.assign(cli, { version, managed: true, checked_ms: Date.now() });
+        provider.available = true;
+      }
+      for (const [name, version] of Object.entries(asObject(body.latest))) {
+        const cli = mockAgentClis.get(name);
+        if (cli && typeof version === "string") cli.latest = version;
+      }
+      for (const [name, can] of Object.entries(asObject(body.installable))) {
+        const cli = mockAgentClis.get(name);
+        if (cli && typeof can === "boolean") cli.installable = can;
+      }
+      if (typeof body.fail === "string") mockCliInstallError = body.fail || null;
+      if (typeof body.hold === "boolean") mockCliHold = body.hold;
+      if (body.release === true) {
+        for (const release of [...mockCliHeld.values()]) release();
+      }
+      broadcast("agent_status_changed", agentStatusView());
+      return Response.json({ ok: true, ...agentStatusView() }, { status: 200 });
+    }
+    // How the agent CLIs sign in (src/agent_auth.rs): arm a Claude account already signed in
+    // (`claude_login: true`), keys opencode already holds (`opencode: ["anthropic"]`), or reset it.
+    // A spec MUST reset it (`{kind:"agent_auth", reset:true}`): one mock process serves the whole
+    // run, and an account left signed in changes every later Settings pane.
+    if (body.kind === "agent_auth") {
+      if (body.reset === true) resetMockAgentAuth();
+      if (body.claude_login === true) {
+        mockClaudeLogin = { email: "ada@example.com", plan: "max", organization: "Ada Lovelace" };
+      }
+      if (Array.isArray(body.opencode)) {
+        for (const id of body.opencode) if (typeof id === "string") mockOpencodeCredentials.set(id, "api");
+      }
+      broadcast("agent_status_changed", agentStatusView());
+      return Response.json({ ok: true, ...agentStatusView() }, { status: 200 });
+    }
     if (body.kind === "agent_providers") {
       if (body.reset === true) {
         resetMockAgentProviders();
@@ -13203,6 +14331,24 @@ async function handleTestHook(req: Request, url: URL): Promise<Response | null> 
         enabled: p.enabled,
         model: p.model,
       })),
+      // What the pretend machine holds of each CLI's install, and whether new releases are taken
+      // on their own — asserted here for the same reason: a press is only worth anything if the
+      // backend kept the decision.
+      cli_auto_update: mockCliAutoUpdate,
+      clis: [...mockAgentClis].map(([name, cli]) => ({ name, managed: cli.managed, version: cli.version })),
+      // How the CLIs sign in, as the pretend machine holds it — the secrets included, so a spec can
+      // prove a key it typed reached the backend and that one it left empty was KEPT there.
+      auth: {
+        ...mockAgentAuthView(),
+        secrets: {
+          anthropic_key: mockAgentAuth.anthropic_key,
+          bedrock: mockAgentAuth.bedrock?.secret ?? null,
+          foundry: mockAgentAuth.foundry?.api_key ?? null,
+        },
+      },
+      claude_login: mockClaudeLogin,
+      claude_signin: mockClaudeSignin !== null,
+      opencode: [...mockOpencodeCredentials.keys()].sort(),
     });
   }
   if (req.method === "GET" && url.pathname === "/__test/channels") {

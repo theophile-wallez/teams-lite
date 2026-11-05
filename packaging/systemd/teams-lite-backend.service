@@ -7,35 +7,39 @@ Description=teams-lite backend (Teams/Outlook bridge on ws://127.0.0.1:@BACKEND_
 Documentation=https://github.com/theophile-wallez/teams-lite
 Documentation=file://@REPO@/README.md
 
-# The backend's first action is a broker token call over D-Bus, so the Intune
-# container has to be up. Wants=, not Requires=: the container unit is a
-# Type=oneshot that stays "active (exited)", and retrying beats refusing to start.
-Wants=intune-container.service
-After=intune-container.service
-
-# A container restart mints a new leader PID, and the broker's bus path embeds that
-# PID (see bin/broker-env.sh). The address is re-read per token call but from the
-# process environment, which is frozen after exec — so the only way to pick up a new
-# bus is to restart. PartOf= propagates a restart of the container unit here.
-# teams-lite-broker-bus.path covers the other case: the container restarting itself
-# without its unit changing state.
-PartOf=intune-container.service
+# NO relation to intune-container.service, in either direction. The backend follows the
+# Intune container LIVE — it reads where the broker's D-Bus is from the container's own
+# runtime state on every connection (src/intune.rs) — so a container restart needs no
+# restart of ours, and a container that is not up yet costs a retried token call rather
+# than a refused start. And stopping the container must not stop this unit: the store keeps
+# serving the history while sign-in is down (AGENTS.md § A broken sign-in costs the LIVE
+# feed). The PartOf= that used to sit here propagated a container restart, which was the
+# only way a frozen bus address could be re-read; a backend that asks per connection has
+# nothing to re-read. It was a weak signal even then: that unit exists only where the user
+# ran `intune-container autostart enable`, and it is a Type=oneshot that stays "active
+# (exited)" while the container restarts itself underneath it, so its state never said
+# where the bus was.
 PartOf=teams-lite.target
 
-# Retry forever, and never latch to "failed". A broker that is briefly unreachable
-# makes start-time authentication fail, and the whole point of this unit is that it
-# comes back on its own. Note the section: StartLimit* belongs in [Unit], and a copy
-# of it under [Service] is silently ignored.
+# Retry forever, and never latch to "failed". This unit is the user's always-on client:
+# a crash, an in-app restart (which is an exit, below) and a port held for a moment by a
+# backend that is still going away are all things it must come back from on its own. Note
+# the section: StartLimit* belongs in [Unit], and a copy of it under [Service] is silently
+# ignored.
 StartLimitIntervalSec=0
 
 [Service]
 Type=exec
 WorkingDirectory=@SERVICE_DIR@
 
-# A wrapper, not the binary: the broker's bus address has to be resolved at every
-# start, and systemd's Environment= is static. The wrapper execs the binary, so this
-# process stays the unit's MainPID.
-ExecStart=@SERVICE_DIR@/teams-lite-backend.sh
+# The binary itself, with no wrapper in front of it, so it is the unit's MainPID and
+# Type=exec, KillSignal= and Restart= act on the real process. It used to be a shell
+# wrapper, because the broker's bus path embeds the container's leader PID and systemd's
+# Environment= is static: the wrapper resolved it, waited for it, checked the keyring and
+# froze the answer into DBUS_SESSION_BUS_ADDRESS at exec. The backend now answers all three
+# questions in process (src/intune.rs) and no D-Bus address is set here at all — an
+# inherited one would only be a stale answer the backend has to ignore.
+ExecStart=@SERVICE_DIR@/server
 
 # MANDATORY. Without it the backend exits ~10 s after the last frontend disconnects
 # (30 s if none ever connected) — which for a service means seconds after every
@@ -69,9 +73,11 @@ EnvironmentFile=-@CONFIG_DIR@/backend.env
 
 Restart=always
 RestartSec=5
-# Walk 5 s -> 300 s over six steps, then stay there: a broker outage then costs a
-# dozen retries an hour instead of several hundred. Both directives are required —
-# each is ignored without the other.
+# Walk 5 s -> 300 s over six steps, then stay there: a backend that cannot start (its
+# port held by something else, a store it cannot open) then costs a dozen retries an hour
+# instead of several hundred. A broker outage is not one of those — sign-in runs after the
+# store is served and a broken one is never fatal. Both directives are required — each is
+# ignored without the other.
 RestartSteps=6
 RestartMaxDelaySec=300
 

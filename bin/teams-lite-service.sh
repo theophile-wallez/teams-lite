@@ -4,8 +4,8 @@
 #   bin/teams-lite-service.sh install     # build + stage + write the units (starts nothing)
 #   bin/teams-lite-service.sh update      # rebuild + restage, then restart what is running
 #   bin/teams-lite-service.sh update --now # the same, without waiting for a live agent run
-#   bin/teams-lite-service.sh units       # rewrite + verify the units only (no build)
-#   bin/teams-lite-service.sh status      # units, ports, artifact, broker, tailscale
+#   bin/teams-lite-service.sh units       # rewrite + verify the units only (no build; needs a current stage)
+#   bin/teams-lite-service.sh status      # units, ports, artifact, Intune, tailscale
 #   bin/teams-lite-service.sh logs [-f]   # journal for both units
 #   bin/teams-lite-service.sh tailscale   # point the tailnet HTTPS port at the web UI
 #   bin/teams-lite-service.sh stop        # stop both units
@@ -56,12 +56,14 @@ REPO="$(dirname "$BIN_DIR")"
 # --- layout ------------------------------------------------------------------
 # The two directory overrides exist so the generated units can be inspected — and
 # verified with `systemd-analyze verify` — without writing into the live unit
-# directory. Nothing else should set them.
+# directory. Nothing else should set them. An inspection still needs a staged backend
+# that finds the broker itself (`require_a_staged_backend_that_finds_the_broker`), so point
+# TEAMS_LITE_SERVICE_DIR at one: the units exec it, and `systemd-analyze verify` refuses a
+# unit whose program is absent in any case.
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 SERVICE_DIR="${TEAMS_LITE_SERVICE_DIR:-$DATA_HOME/teams-lite/service}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/teams-lite"
 UNIT_DIR="${TEAMS_LITE_UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
-CONTAINER_STATE="${TEAMS_LITE_CONTAINER_STATE:-$DATA_HOME/intune-container/rootless.json}"
 
 # --- ports (defaults must match the code: src/bin/server.rs, web/server.ts) ---
 BACKEND_PORT="${TEAMS_LITE_PORT:-19420}"
@@ -85,21 +87,98 @@ UNITS=(
   teams-lite-backend.service
   teams-lite-web.service
   teams-lite-app.service
-  teams-lite-backend-restart.service
-  teams-lite-broker-bus.path
-  teams-lite-broker-repair.service
-  teams-lite-broker-health.service
-  teams-lite-broker-health.timer
   teams-lite.target
 )
 
+# WHAT EARLIER VERSIONS OF THIS SCRIPT INSTALLED, AND THIS ONE TAKES BACK.
+#
+# Every one of these existed because the backend read the identity broker's D-Bus address
+# from an environment frozen at exec, and because the broker repair was an installed unit
+# running the `intune-container` binary: a .path unit restarted both backends whenever the
+# Intune container rewrote rootless.json (through teams-lite-backend-restart.service — a
+# .path can only START a unit), a timer ran a keyring check and a bus check every fifteen
+# minutes, the repair unit did the stop and the start, and five scripts staged beside the
+# binary resolved, waited for and froze the bus. The backend now finds the bus on every
+# connection, checks the keyring itself and asks systemd for a TRANSIENT repair unit under
+# a name of its own (src/intune.rs), so none of them has a job — and left in place they
+# would still act: the .path would restart both backends on every container boot, and the
+# timer would run scripts this version no longer stages.
+#
+# WHY BY NAME, rather than by falling out of UNITS. `install_units` and `uninstall` act on
+# UNITS alone, and `stage_artifacts` never deletes a file it staged before — so on a machine
+# staged before this, every one of them would stay installed, ENABLED and running for good.
+# `retire_old_units` and `retire_old_scripts` run on `install`, `update`, `units` and
+# `uninstall`. .claude/hooks/sync-service-to-master.sh runs `update` on its own when master
+# moves, which is how this reaches the always-on machine with nobody typing a command — so
+# both are idempotent, quiet where there is nothing to retire, and never fail an update.
+#
+# AND ONLY IN FRONT OF A BACKEND THAT NO LONGER NEEDS THEM. The retirement is half of one
+# change and the binary is the other half, so `install_units` refuses outright in front of a
+# staged binary that predates it (`require_a_staged_backend_that_finds_the_broker`), and it
+# keeps RETIRED_KEPT_FOR_AN_OLD_BACKEND installed while an old binary is still the one
+# RUNNING and nothing in this run restarts it.
+RETIRED_UNITS=(
+  teams-lite-broker-bus.path
+  teams-lite-broker-health.timer
+  teams-lite-broker-health.service
+  teams-lite-backend-restart.service
+  teams-lite-broker-repair.service
+)
+# The two that were ENABLED (WantedBy=teams-lite.target) and run continuously, so the two
+# that are stopped and disabled as well as deleted.
+RETIRED_WATCHERS=(
+  teams-lite-broker-bus.path
+  teams-lite-broker-health.timer
+)
+RETIRED_SCRIPTS=(
+  teams-lite-backend.sh
+  teams-lite-broker-check.sh
+  teams-lite-broker-bus-check.sh
+  teams-lite-broker-wait.sh
+  broker-env.sh
+)
+
+# WHAT A BACKEND FROM BEFORE THIS STILL LIVES BY, for as long as nothing restarts it.
+#
+# `update` try-restarts the backend straight after it writes the units, so an old process
+# outlives the retirement by the seconds that takes. `install` and `units` restart nothing,
+# by design — so on a machine whose staged backend has been running since before this
+# change, that process would carry on with its bus frozen at exec and nothing left to keep
+# it signed in: no .path to restart it when the container moves, and a Repair sign-in — its
+# own button and its own automatic trigger, both `systemctl start` of the installed repair
+# unit — naming a unit that is gone. So these three stay installed, with the scripts the
+# repair runs, until that process runs the staged build (`stale_backend_pid`). It ends on its
+# own too: the next container boot fires the .path, whose try-restart brings the backend up
+# on the staged binary, and the next `units` or `update` then retires them.
+#
+# THE HEALTH TIMER IS DELIBERATELY NOT AMONG THEM, though it was a healer too. Its bus half
+# compares every running backend's frozen session-bus address with the container's and
+# try-restarts BOTH backends on a mismatch — and a backend started from this version's unit
+# carries no container address at all. Kept, it would read the very restart this deferral
+# asks for as a stale backend and restart both every fifteen minutes, cutting a live
+# `@claude` reply each time, for as long as it stayed installed. The old process does not
+# need it either: the .path covers the container moving under it, and its own observer still
+# asks for the repair when a token call fails with the locked-keyring signature.
+RETIRED_KEPT_FOR_AN_OLD_BACKEND=(
+  teams-lite-broker-bus.path
+  teams-lite-backend-restart.service
+  teams-lite-broker-repair.service
+)
+
+# THE ONE TELL BETWEEN A BACKEND THAT FINDS THE IDENTITY BROKER ITSELF AND ONE THAT DOES NOT.
+# The hidden argument the in-process repair re-executes the binary with
+# (`intune::REPAIR_SUBCOMMAND` in src/intune.rs) is a literal in every build that has the
+# in-process lookup and in none before it, so `grep -a` tells the two apart from the bytes
+# alone — no build to run, no version to parse, nothing on the host beyond grep. The units
+# this version writes depend on exactly that difference: teams-lite-backend.service execs the
+# binary with no wrapper, and a build from before would then dial the user manager's bus,
+# where there is no broker. bin/teams-launcher.sh and install.sh carry the same check, for
+# the same pairing; src/update.rs pins all three spellings to the constant, so renaming the
+# argument cannot quietly turn every current build into an "old" one.
+BROKER_LOOKUP_MARKER="__teams-lite-repair-broker"
+
 BUN="${BUN:-$HOME/.bun/bin/bun}"
 SYSTEMCTL="$(command -v systemctl || echo /usr/bin/systemctl)"
-# Baked into the repair unit at install time, because the systemd user manager's PATH
-# has no ~/.local/bin. The fallback keeps the token substituted on a host that has no
-# intune-container at all; the unit's ConditionFileIsExecutable= then makes it inert
-# rather than broken.
-INTUNE_CONTAINER="${INTUNE_CONTAINER:-$(command -v intune-container || echo "$HOME/.local/bin/intune-container")}"
 
 # The backend PATH, baked into the unit. The systemd user manager's own PATH holds
 # neither of the two directories a coding-agent CLI installs itself into, so the local
@@ -202,14 +281,13 @@ stage_artifacts() {
 
   # Replace the binary through a temp file + rename: an atomic swap, so a running
   # backend keeps its open file and the next start gets the new one.
+  #
+  # It is the whole of the backend's program: teams-lite-backend.service execs it with no
+  # wrapper, because the backend finds the identity broker's bus itself (src/intune.rs).
+  # The scripts earlier versions staged beside it are removed by `retire_old_scripts`,
+  # and only once no unit left on the machine runs them.
   install -m 0755 "$server_bin" "$SERVICE_DIR/server.new"
   mv -f "$SERVICE_DIR/server.new" "$SERVICE_DIR/server"
-
-  install -m 0755 "$BIN_DIR/teams-lite-backend.sh" "$SERVICE_DIR/teams-lite-backend.sh"
-  install -m 0755 "$BIN_DIR/teams-lite-broker-check.sh" "$SERVICE_DIR/teams-lite-broker-check.sh"
-  install -m 0755 "$BIN_DIR/teams-lite-broker-bus-check.sh" "$SERVICE_DIR/teams-lite-broker-bus-check.sh"
-  install -m 0755 "$BIN_DIR/teams-lite-broker-wait.sh" "$SERVICE_DIR/teams-lite-broker-wait.sh"
-  install -m 0644 "$BIN_DIR/broker-env.sh" "$SERVICE_DIR/broker-env.sh"
 
   # The web runtime file set is owned by web/scripts/stage-bundle.ts, so this script
   # and launcher/build.ts cannot drift apart on what the server needs.
@@ -232,7 +310,78 @@ EOF
 
 # --- units -------------------------------------------------------------------
 
+# Does the binary at $1 find the identity broker by itself (see BROKER_LOOKUP_MARKER)? A file
+# that is absent or cannot be read is not one that does.
+finds_the_broker_itself() {
+  [ -r "$1" ] && grep -qaF -- "$BROKER_LOOKUP_MARKER" "$1"
+}
+
+# Refuse to write the units in front of a staged backend that cannot find the identity broker
+# by itself — BEFORE anything is written or retired, so a refusal leaves the machine exactly as
+# it was.
+#
+# `install` and `update` stage the binary they have just built, so they always pass; the run
+# this exists for is `units`, which stages nothing. On a machine still staged from before this
+# change — what an `update` whose build failed leaves behind, or a checkout pulled by hand —
+# it used to write the wrapper-less backend unit in front of the OLD binary and retire every
+# watcher that binary lived by. The process carried on with its frozen address for the
+# moment, and the next restart of it (a crash, Settings › Restart the backend, a reboot)
+# exec'd the old binary straight onto the user manager's bus, where there is no broker: the
+# always-on app signed out, with nothing left on the machine to bring it back.
+require_a_staged_backend_that_finds_the_broker() {
+  local server="$SERVICE_DIR/server"
+  [ -e "$server" ] ||
+    die "no backend is staged at $server — run 'bin/teams-lite-service.sh update' (or \
+'install'), which builds and stages one before it writes the units"
+  finds_the_broker_itself "$server" ||
+    die "the backend staged at $server predates the in-process broker lookup: the units this \
+version writes exec it with no wrapper, so it could not find the identity broker. Run \
+'bin/teams-lite-service.sh update', which builds and stages the current backend first and \
+then restarts what is running onto it"
+}
+
+# The pid of a staged backend that is RUNNING a build from before the in-process broker
+# lookup, or nothing.
+#
+# Judged from the PROCESS, not from the file: `stage_artifacts` renames the new binary over the
+# old one, the old process keeps running the inode it started from — its /proc/<pid>/exe then
+# reads "…/server (deleted)" — and /proc/<pid>/exe still OPENS that inode, so the grep that
+# judges the staged file judges the running one too, whatever path it was started from. That is
+# sharper than comparing paths: a process running an earlier build that already finds the
+# broker needs none of the old units, and is left alone. A unit with no main process, or one
+# that has gone by the time it is read, is no old backend to keep anything for.
+stale_backend_pid() {
+  local pid
+  pid="$("$SYSTEMCTL" --user show -p MainPID --value teams-lite-backend.service 2>/dev/null ||
+    true)"
+  case "$pid" in
+    "" | 0 | *[!0-9]*) return 0 ;;
+  esac
+  [ -e "/proc/$pid/exe" ] || return 0
+  finds_the_broker_itself "/proc/$pid/exe" || printf '%s' "$pid"
+}
+
+# Write the units, verify them, and retire what earlier versions installed.
+#
+#   install_units --restart-follows      `update`: it try-restarts the backend right after
+#   install_units --no-restart-follows   `install`, `units`: nothing restarts it
+#
+# THE CALLER SAYS WHICH, and this function never works it out. The answer decides whether a
+# backend still running a build from before this one keeps the units it lives by
+# (RETIRED_KEPT_FOR_AN_OLD_BACKEND), and only the caller knows whether a restart is coming:
+# the unit's state says what is running now, never whether this run is about to replace it.
+# A new caller has to answer too — there is no default to fall into.
 install_units() {
+  local restart="${1:-}"
+  case "$restart" in
+    --restart-follows | --no-restart-follows) shift ;;
+    *) die "install_units: say whether a restart follows (--restart-follows or \
+--no-restart-follows), not '$restart'" ;;
+  esac
+  [ $# -eq 0 ] || die "unknown option '$1' for units"
+
+  require_a_staged_backend_that_finds_the_broker
+
   say "Writing the units into $UNIT_DIR…"
   mkdir -p "$UNIT_DIR" "$CONFIG_DIR"
 
@@ -248,14 +397,6 @@ install_units() {
       info "$unit: skipped — no released build at $APP_BIN"
       continue
     fi
-    # Its ExecStartPre is staged by stage_artifacts, and `units` can be run on its own
-    # before anything was ever staged — so the same rule covers it: no unit for a program
-    # that is absent, rather than one systemd starts with 203/EXEC.
-    if [ "$unit" = teams-lite-app.service ] && [ ! -x "$SERVICE_DIR/teams-lite-broker-wait.sh" ]; then
-      rm -f "$UNIT_DIR/$unit"
-      info "$unit: skipped — nothing staged yet; run 'update' first"
-      continue
-    fi
     units+=("$unit")
   done
 
@@ -265,11 +406,8 @@ install_units() {
     sed \
       -e "s|@SERVICE_DIR@|$SERVICE_DIR|g" \
       -e "s|@CONFIG_DIR@|$CONFIG_DIR|g" \
-      -e "s|@CONTAINER_STATE@|$CONTAINER_STATE|g" \
       -e "s|@REPO@|$REPO|g" \
       -e "s|@BUN@|$BUN|g" \
-      -e "s|@SYSTEMCTL@|$SYSTEMCTL|g" \
-      -e "s|@INTUNE_CONTAINER@|$INTUNE_CONTAINER|g" \
       -e "s|@AGENT_PATH@|$AGENT_PATH|g" \
       -e "s|@BACKEND_PORT@|$BACKEND_PORT|g" \
       -e "s|@WEB_PORT@|$WEB_PORT|g" \
@@ -293,7 +431,194 @@ install_units() {
       die "systemd rejected the generated units (see the errors above)"
   fi
 
+  # A backend this run will not restart, still running a build from before this one, keeps the
+  # units it lives by — and only while one of them is still installed, so a machine already
+  # migrated hears nothing about it. Never against an inspection directory, where nothing is
+  # retired anyway.
+  local stale_pid="" keep=()
+  if [ "$restart" = --no-restart-follows ] && [ -z "${TEAMS_LITE_UNIT_DIR:-}" ]; then
+    stale_pid="$(stale_backend_pid)"
+    if [ -n "$stale_pid" ] && any_retired_unit_installed "${RETIRED_KEPT_FOR_AN_OLD_BACKEND[@]}"; then
+      keep=("${RETIRED_KEPT_FOR_AN_OLD_BACKEND[@]}")
+    fi
+  fi
+
+  # The units this version no longer ships come off the machine in the same pass, so one
+  # reload covers both — and the scripts they ran go only after that reload (see
+  # `retire_old_scripts` for why the order is the whole point). AFTER the verify: a set
+  # systemd rejected stops the run before anything has been taken off the machine.
+  retire_old_units ${keep[@]+"${keep[@]}"}
   [ -n "${TEAMS_LITE_UNIT_DIR:-}" ] || "$SYSTEMCTL" --user daemon-reload
+  reset_retired_units
+  retire_old_scripts
+
+  if [ "${#keep[@]}" -gt 0 ]; then
+    warn "teams-lite-backend.service (pid $stale_pid) still runs a build from before this one,"
+    warn "and nothing in this run restarts it. Kept, with the scripts they run, because it"
+    warn "follows a container restart and repairs a locked keyring through them:"
+    warn "  ${keep[*]}"
+    warn "Restart it onto the staged build — that is yours to run:"
+    warn "  systemctl --user try-restart teams-lite-backend.service"
+    warn "The next 'update' or 'units' retires them after that ('update' restarts it itself)."
+  fi
+}
+
+# Is any of the named retired units still on this machine — its file, or the enable symlink a
+# file deleted by hand leaves dangling in the target's wants?
+any_retired_unit_installed() {
+  local unit
+  for unit in "$@"; do
+    retired_unit_installed "$unit" && return 0
+  done
+  return 1
+}
+
+retired_unit_installed() {
+  [ -e "$UNIT_DIR/$1" ] || [ -L "$UNIT_DIR/teams-lite.target.wants/$1" ]
+}
+
+# Clear the `failed` mark a retired unit leaves behind once its file is gone. A unit whose last
+# run failed is not garbage-collected (CollectMode=inactive), so after the reload it stays
+# loaded as `not-found failed`: `systemctl --user --failed` lists it and the user manager
+# reports `degraded` until a reboot — with nothing in `status` able to say why, because the
+# file is gone. The old health check failed whenever one of its checks could not tell (exit 2),
+# so this is a leftover the migration really produces.
+#
+# Only the units that are GONE. One still on disk is one something still runs or relies on,
+# and a reset would clear its start limit too — for the repair unit, its three an hour. A unit
+# systemd never loaded answers with an error, which is the common case and says nothing.
+reset_retired_units() {
+  [ -z "${TEAMS_LITE_UNIT_DIR:-}" ] || return 0
+  local unit
+  for unit in "${RETIRED_UNITS[@]}"; do
+    retired_unit_installed "$unit" && continue
+    "$SYSTEMCTL" --user reset-failed "$unit" >/dev/null 2>&1 || true
+  done
+}
+
+# Take the RETIRED_UNITS off this machine: stop and disable the two watchers, then delete
+# every retired unit file. The caller reloads systemd once, after this.
+#
+#   retire_old_units [UNIT…]   the units named are KEPT — enabled, armed and on disk — this
+#                              time; `install_units` names RETIRED_KEPT_FOR_AN_OLD_BACKEND
+#                              when an old backend still runs and nothing restarts it
+#
+# NOTHING ELSE IS STOPPED, and the repair unit least of all. A repair may be running at this
+# very moment — it stops the Intune container and starts it again — and cutting it between
+# the two leaves the user with no container, and so no sign-in, until somebody starts it by
+# hand.
+#
+# AND A UNIT THAT IS RUNNING KEEPS ITS FILE UNTIL THE NEXT RUN, which is the same rule one
+# step further. Deleting the file of a running oneshot and reloading is a cut too, only a
+# quieter one: the reload re-reads every unit from disk, a unit with no file comes back with
+# no command list, and systemd then lets the CURRENT command finish and runs none after it
+# ("execution of the command list won't be resumed") — so a repair caught inside its `stop`
+# would never reach its `start`. The two oneshots beside it (the health check, the backend
+# restart) get the same courtesy, because one rule is easier to trust than three. The next
+# `update` or `units` finds them stopped and finishes the job.
+#
+# A unit that is already gone is the common case on every run after the first, so every
+# step here tolerates it and says nothing about it.
+retire_old_units() {
+  local unit state keep=" $* "
+  # Against an inspection directory there is no live manager to act on: the files it
+  # holds were written for `systemd-analyze verify`, and the installed units are untouched.
+  if [ -z "${TEAMS_LITE_UNIT_DIR:-}" ]; then
+    for unit in "${RETIRED_WATCHERS[@]}"; do
+      case "$keep" in *" $unit "*) continue ;; esac
+      if [ -f "$UNIT_DIR/$unit" ]; then
+        "$SYSTEMCTL" --user disable --now "$unit" >/dev/null 2>&1 || true
+      else
+        # A file somebody already deleted by hand can leave the watcher loaded and armed
+        # until it is stopped; `disable` needs the file, `stop` does not.
+        "$SYSTEMCTL" --user stop "$unit" >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+  for unit in "${RETIRED_UNITS[@]}"; do
+    # The enable symlink too. `disable` finds it through the [Install] section of the
+    # file, so a file deleted by hand leaves its symlink dangling in the target's wants.
+    retired_unit_installed "$unit" || continue
+    case "$keep" in
+      *" $unit "*)
+        info "$unit: kept for the running backend, which predates this build"
+        continue
+        ;;
+    esac
+    if [ -z "${TEAMS_LITE_UNIT_DIR:-}" ]; then
+      state="$(unit_state "$unit")"
+      case "$state" in
+        active | activating | deactivating | reloading | refreshing)
+          info "$unit: still $state — left in place, and retired on the next run"
+          continue
+          ;;
+      esac
+    fi
+    rm -f "$UNIT_DIR/$unit" "$UNIT_DIR/teams-lite.target.wants/$unit"
+    info "$unit: retired"
+  done
+}
+
+# What the user manager says a unit is doing, or nothing. `is-active` exits non-zero for
+# every state but `active` and prints the answer on stdout either way, so the status is
+# ignored and the first line is the answer — exactly as `print_units_state` reads it.
+unit_state() {
+  "$SYSTEMCTL" --user is-active "$1" 2>/dev/null | head -1 || true
+}
+
+# Delete the RETIRED_SCRIPTS earlier versions staged beside the binary.
+#
+# AFTER the reload, never before it. Until systemd re-reads teams-lite-backend.service it
+# still holds the old one in memory, whose ExecStart= is the staged teams-lite-backend.sh —
+# so a backend that crashed or was restarted inside that window would fail with 203/EXEC.
+# And never against an inspection directory: there, the INSTALLED backend unit was not
+# rewritten, and may still exec one of these.
+#
+# AND NEVER ONE A RETIRED UNIT STILL ON DISK WOULD RUN. A unit is left in place because it is
+# running (see `retire_old_units`) or because an old backend still relies on it
+# (RETIRED_KEPT_FOR_AN_OLD_BACKEND), and either way its LATER commands still name these files:
+# the old health check is two ExecStart= lines, so one caught running its first script would
+# fail its second with 203/EXEC, and a kept repair unit's ExecCondition= is one of them. A
+# script that is running right now is safe either way — `rm` unlinks the name and the shell
+# reading it keeps the open file — but the commands after it are not, so a script goes only
+# once nothing left installed names it, and the next run finishes the job.
+retire_old_scripts() {
+  [ -z "${TEAMS_LITE_UNIT_DIR:-}" ] || return 0
+  local script
+  for script in "${RETIRED_SCRIPTS[@]}"; do
+    [ -e "$SERVICE_DIR/$script" ] || continue
+    if retired_script_in_use "$script"; then
+      info "$SERVICE_DIR/$script: kept — a retired unit still installed runs it"
+      continue
+    fi
+    rm -f "$SERVICE_DIR/$script"
+    info "$SERVICE_DIR/$script: retired"
+  done
+}
+
+# Would something left installed still run the staged RETIRED_SCRIPTS file $1? A retired unit
+# still on disk names its scripts by their STAGED path (its Documentation= lines name the
+# checkout's copy, which is a different path and runs nothing); broker-env.sh is run by no unit
+# at all, but SOURCED by the two check scripts, so it lives as long as either of them does.
+retired_script_in_use() {
+  local script="$1" other
+  retired_unit_runs "$script" && return 0
+  for other in "${RETIRED_SCRIPTS[@]}"; do
+    [ "$other" != "$script" ] && [ -f "$SERVICE_DIR/$other" ] || continue
+    retired_unit_runs "$other" || continue
+    grep -qE "^[[:space:]]*(\.|source)[[:space:]].*/${script//./\\.}\"?[[:space:]]*\$" \
+      "$SERVICE_DIR/$other" && return 0
+  done
+  return 1
+}
+
+retired_unit_runs() {
+  local unit
+  for unit in "${RETIRED_UNITS[@]}"; do
+    [ -f "$UNIT_DIR/$unit" ] || continue
+    grep -qF -- "$SERVICE_DIR/$1" "$UNIT_DIR/$unit" && return 0
+  done
+  return 1
 }
 
 # --- checks ------------------------------------------------------------------
@@ -301,6 +626,19 @@ install_units() {
 port_owner() {
   # Who listens on $1, or nothing. `ss` prints the process for our own sockets.
   ss -ltnp "sport = :$1" 2>/dev/null | awk 'NR>1 {print $NF; exit}'
+}
+
+# Is intune-container initialized? The crate's own question (`ops::is_initialized`: its
+# config.toml is there and says `initialized = true`), asked of the file with shell builtins
+# alone — `status` runs nothing on the host to answer it. A summary, not the authority: the
+# crate also refuses a file it cannot parse, and `intune_status` is the one that says so.
+intune_container_initialized() {
+  local line
+  [ -f "$1" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "${line//[[:space:]]/}" = "initialized=true" ] && return 0
+  done <"$1"
+  return 1
 }
 
 check_environment() {
@@ -312,30 +650,23 @@ check_environment() {
     warn "linger is OFF — the service would stop at logout. Fix: loginctl enable-linger $USER"
   fi
 
-  # shellcheck source=bin/broker-env.sh
-  . "$BIN_DIR/broker-env.sh"
-  local bus
-  bus="$(teams_lite_broker_bus)"
-  if [ -n "$bus" ]; then
-    info "identity broker: on the container bus ($bus)"
-  elif teams_lite_broker_on_session_bus; then
-    info "identity broker: on this session bus"
+  # WHERE THE IDENTITY BROKER IS, AND WHETHER THE CONTAINER'S KEYRING IS LOCKED, are the
+  # backend's own questions now, answered in process through the `intune-container` crate
+  # (src/intune.rs) — so this script asks neither. A shell answer beside the backend's would
+  # be a second spelling of one fact, and the two drifting apart is exactly how a backend
+  # ended up on a bus with no broker on it. What files alone can say is whether
+  # intune-container is set up here, which is what decides whether the app offers its
+  # Repair sign-in button at all (`intune::repair_available`). The live answer is one
+  # read-only command away, and it is the same code the backend runs.
+  local intune_config="$DATA_HOME/intune-container/config.toml"
+  if intune_container_initialized "$intune_config"; then
+    info "intune-container: set up ($intune_config) — the app can repair a locked keyring"
+  elif [ -f "$intune_config" ]; then
+    warn "intune-container: configured but not initialized ($intune_config) — the app offers no repair"
   else
-    warn "identity broker unreachable — sign-in will fail. Try: intune-container start"
+    info "intune-container: not set up — classic Intune or none; the broker is looked for on the session bus"
   fi
-
-  if [ -x "$INTUNE_CONTAINER" ]; then
-    # The keyring re-locks on its own, so the repair path matters as much as the broker.
-    local keyring=0
-    "$BIN_DIR/teams-lite-broker-check.sh" >/dev/null 2>&1 || keyring=$?
-    case "$keyring" in
-      0) info "container keyring: unlocked ($INTUNE_CONTAINER can repair it)" ;;
-      1) warn "container keyring is LOCKED — no tokens. Repair: systemctl --user start teams-lite-broker-repair" ;;
-      *) info "container keyring: unknown (no secret service on the container bus)" ;;
-    esac
-  else
-    warn "no intune-container at $INTUNE_CONTAINER — the in-app repair button stays hidden"
-  fi
+  info "the broker's bus and the keyring, live: (cd $REPO && cargo run --example intune_status)"
 
   local owner
   owner="$(port_owner "$BACKEND_PORT")"
@@ -446,6 +777,16 @@ print_units_state() {
     enabled="$("$SYSTEMCTL" --user is-enabled "$unit" 2>/dev/null | head -1 || true)"
     info "$unit: ${state:-unknown} (${enabled:-not-enabled})"
   done
+  # A retired unit still on disk is one a later run takes back (see RETIRED_UNITS) — said
+  # here so it does not read as part of the current install. The hint names `update`, never
+  # `units`: this is exactly the state of a machine still staged from before the change,
+  # where `units` refuses (it would put the new units in front of the old binary) and a
+  # backend left running that build is what keeps them — and `update` is the one run that
+  # stages the current backend, restarts onto it and retires them, whichever case this is.
+  for unit in "${RETIRED_UNITS[@]}"; do
+    [ -f "$UNIT_DIR/$unit" ] || continue
+    warn "$unit: retired but still installed — 'bin/teams-lite-service.sh update' removes it"
+  done
 }
 
 print_artifact() {
@@ -507,7 +848,8 @@ EOF
 cmd_install() {
   build_artifacts
   stage_artifacts
-  install_units
+  # `install` starts and restarts nothing, so a backend already running keeps what it lives by.
+  install_units --no-restart-follows
   check_environment
   check_tailscale
   print_next_steps
@@ -531,7 +873,9 @@ cmd_update() {
   # replaces a live artifact goes after this line and as close to the restart as it can.
   [ "$wait_for_agent" = no ] || wait_for_quiet_agent
   stage_artifacts
-  install_units
+  # The restart below follows at once, so an old backend outlives the retirement by the
+  # seconds that takes and nothing needs keeping for it.
+  install_units --restart-follows
   # Restart only what is already running: an update must not start a service the
   # user chose to keep down.
   say "Restarting whatever is running…"
@@ -571,11 +915,16 @@ cmd_uninstall() {
   "$SYSTEMCTL" --user disable --now teams-lite.target 2>/dev/null || true
   "$SYSTEMCTL" --user disable --now teams-lite-app.service 2>/dev/null || true
   "$SYSTEMCTL" --user stop teams-lite-backend.service teams-lite-web.service 2>/dev/null || true
-  "$SYSTEMCTL" --user disable teams-lite-backend.service teams-lite-web.service \
-    teams-lite-broker-bus.path 2>/dev/null || true
+  "$SYSTEMCTL" --user disable teams-lite-backend.service teams-lite-web.service 2>/dev/null || true
+  # What an older version installed goes too, by the same rules `units` retires it under —
+  # or an uninstall would leave the broker watchers enabled, restarting backends that are
+  # no longer installed every time the container boots.
+  retire_old_units
   local unit
   for unit in "${UNITS[@]}"; do rm -f "$UNIT_DIR/$unit"; done
   "$SYSTEMCTL" --user daemon-reload
+  reset_retired_units
+  retire_old_scripts
   say "Removed the units. Left alone on purpose:"
   info "$SERVICE_DIR (staged artifacts — delete it by hand if you want it gone)"
   info "$DATA_HOME/teams-lite/teams-lite.sqlite (your local message store)"
@@ -592,7 +941,7 @@ main() {
   case "${1:-}" in
     install) shift; cmd_install "$@" ;;
     update) shift; cmd_update "$@" ;;
-    units) shift; install_units "$@" ;;
+    units) shift; install_units --no-restart-follows "$@" ;;
     status) shift; cmd_status "$@" ;;
     logs) shift; cmd_logs "$@" ;;
     tailscale) shift; configure_tailscale "$@" ;;

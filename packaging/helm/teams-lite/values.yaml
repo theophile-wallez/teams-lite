@@ -1,0 +1,532 @@
+# teams-lite on Kubernetes — PACKAGING, never isolation.
+#
+# The app never holds a password or a refresh token of its own: it asks a Microsoft identity
+# broker, and WHERE that broker runs is what `broker.mode` decides — and what decides everything
+# else about the pod:
+#
+#   embedded (the DEFAULT) — the pod boots ITS OWN Intune container, inside itself: the image's
+#       backend links intune-container and runs its rootless runtime (src/intune_embedded.rs), so
+#       the broker, its keyring and the device's enrollment live on a volume of the pod's own. It
+#       runs on any amd64 node with cgroup v2 whose KERNEL PERMITS UNPRIVILEGED USER NAMESPACES, of a cluster that
+#       admits privileged pods, and nothing on the node is touched. On Ubuntu 23.10 and later
+#       (24.04 LTS included) that means `kernel.apparmor_restrict_unprivileged_userns=0`, set on
+#       the NODE: Ubuntu ships it at 1, and the Intune container's runtime refuses to start on the
+#       sysctl's value itself ("AppArmor restricts unprivileged user namespaces", in the logs) — so
+#       neither `privileged` nor an AppArmor profile gets past it, and a pod cannot set it (it is
+#       not a namespaced sysctl). Setting it lifts a hardening Ubuntu applies to every process on
+#       that node; that is the cost. The same check refuses `user.max_user_namespaces=0` and
+#       Debian's `kernel.unprivileged_userns_clone=0`. The device is enrolled once — imported
+#       from a backup of an existing enrollment (`broker.embedded.import`), or enrolled from the
+#       app itself ("Enroll this device").
+#   intuneContainer, sessionBus — the HOST modes: the pod reaches the broker of the NODE it runs
+#       on, exactly as the image does under packaging/docker/compose.host-broker.yaml. That is one
+#       pod on the machine that is enrolled, as the user signed in there, on a Kubernetes that runs
+#       directly on that machine (k3s, k0s, kubeadm) — never kind, k3d or minikube's docker driver,
+#       whose nodes are containers with a PID namespace and a filesystem of their own.
+#
+# KUBERNETES IS UNVERIFIED IN EVERY MODE: the chart renders, lints and validates against the API's
+# own schemas, and the embedded boot was measured under Docker only. See AGENTS.md § Running
+# teams-lite on Kubernetes.
+#
+# EVERYTHING THAT CAN REACH THE WEB PORT CAN SEND AS THE USER. The web front hands the backend's
+# write token to every page it serves (web/write-token.ts), so the defaults keep it to the pod
+# itself: a ClusterIP Service, no Ingress, and a NetworkPolicy that lets no other pod in. Reach it
+# with (the names are the release's when it contains "teams-lite", `<release>-teams-lite` if not)
+#
+#     kubectl -n <namespace> port-forward svc/teams-lite 19443:19443
+#
+# or put it on your tailnet with the Tailscale operator (see `ingress` below) — which is the shape
+# the always-on service already has (`tailscale serve`, tailnet-only). To publish it on the
+# internet, put a sign-in in front of it first: `auth.oauth2Proxy` runs one inside the pod, and
+# `httpRoute` (Gateway API) or `ingress` routes to it. The chart refuses a public route with no wall.
+
+image:
+  repository: ghcr.io/theophile-wallez/teams-lite
+  # Empty means the chart's own appVersion: the image built from the same commit as this chart.
+  tag: ""
+  # A digest (sha256:…) pins the image byte for byte, and wins over the tag.
+  digest: ""
+  # Empty means Always for a `latest` tag (a moving tag must be re-read) and IfNotPresent otherwise.
+  pullPolicy: ""
+
+# Only needed while the image's GHCR package is private (see the chart's README § Secrets).
+imagePullSecrets: []
+
+# HOST MODES ONLY. The node user the broker answers, by number: `id -u` and `id -g` on the node.
+# Not a preference: /proc/<pid>/root is opened under the same-uid rule, and the Intune container's
+# dbus-daemon authenticates the uid the kernel reports, so any other uid is refused twice. Root
+# never works, and the pod refuses to run as it. The embedded mode ignores it: that pod starts as
+# root, hands the cgroup and its volumes to the image's own `teams` user, and drops to it.
+hostUser:
+  uid: 1000
+  gid: 1000
+
+# A READ-ONLY backend: it reads the user's real data and refuses every write — no send, no reaction,
+# no call, no push, no presence — and listens on its own 19430. In the embedded mode it also never
+# BOOTS its Intune container (booting one is a write), so it never signs in: it shows what its
+# store already holds and reaches Teams for nothing.
+#
+# SO IT IS WORTH SOMETHING ONLY ON A STORE THAT HOLDS A HISTORY: this release's own, switched with
+# an upgrade PINNED to the chart version it already runs (see `broker.embedded.import` below for the
+# command and why the pin), carrying `--set readOnly=true`; or a store claim owned by uid 1000 named
+# by `persistence.existingClaim`. A NEW release installed read-only gets a claim of its own, fresh and
+# EMPTY, and nothing ever fills it — its app starts and shows nothing. It does start: the backend
+# creates and migrates its store whatever the mode, so the entrypoint takes over a fresh store
+# root even here (root-owned and empty, or holding only lost+found — never a directory something
+# already holds). Without that, a new claim on block storage (root:root 0755) is one the image's
+# user cannot create a file in, and the backend exits at every start.
+#
+# So in the embedded mode it is rendered WITHOUT what booting costs: not privileged (only the
+# capabilities its entrypoint uses as root — CHOWN and DAC_OVERRIDE to take over that fresh store
+# root, under the image's 0700 /home/teams; SETUID and SETGID to drop to the image's user; KILL for
+# tini to pass it the stop signal — all five in the `baseline` Pod Security level), a
+# RuntimeDefault seccomp profile, no user-namespace opt-in (an alternative to privilege, with none
+# to replace), no import Secret mounted (the archive is the device's own keys), the Intune claim
+# mounted READ-ONLY, and the 30 s grace period of a pod that powers nothing off. All of that is the
+# pod template, which an upgrade changes freely. The Intune CLAIM is kept: a StatefulSet's volume
+# claim templates cannot change in place, so a claim that came and went with this value would turn
+# the upgrade that switches it off into a refusal — and an uninstall.
+readOnly: false
+
+broker:
+  # How the pod reaches the identity broker.
+  #   embedded        — the pod runs its own Intune container (the default). Privileged.
+  #   intuneContainer — the broker runs in the user's intune-container on the node. Needs the
+  #                     node's PID namespace, and the enrolled node.
+  #   sessionBus      — a CLASSIC Intune host: the broker is on the user's own D-Bus session bus.
+  #                     That bus is the user's whole desktop session, which is why it is never the
+  #                     default. UNVERIFIED: no classic broker was available to dial.
+  # Moving a release between `embedded` and a host mode changes the StatefulSet's volume claims,
+  # which Kubernetes refuses to change in place: uninstall first (the claims are kept), then install.
+  mode: embedded
+  embedded:
+    # The Intune container's own state, on a claim of its own (`intune-<name>-0`): the ~1.7 GB
+    # rootfs the first start downloads, and persist/ — the device's registration, the broker's
+    # keyring, the Intune agent's state. LOSING THIS VOLUME IS LOSING THE ENROLLMENT, which is why
+    # it is a claim even with `persistence.enabled: false` and why `helm uninstall` keeps it. It
+    # needs a LOCAL filesystem that keeps ownership and modes (the rootfs is owned by the pod's
+    # subordinate ids): ReadWriteOnce, never NFS or an RWX class. With a node-local class (k3s's
+    # local-path) the claim is what pins the pod to the node it was first scheduled on.
+    persistence:
+      # "" uses the cluster's default class; "-" asks for none.
+      storageClassName: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 8Gi
+    # AN EXISTING ENROLLMENT, IMPORTED ONCE. On the machine that enrolled:
+    #
+    #     intune-container backup -o enrollment-backup.tar.gz     # stops and restarts it for a minute
+    #     kubectl -n <namespace> create secret generic teams-lite-enrollment \
+    #       --from-file=enrollment-backup.tar.gz
+    #
+    # and name it here. It is mounted read-only at
+    # /run/teams-lite/intune-import/enrollment-backup.tar.gz and imported at boot ONLY while this
+    # pod's state holds no device registration — so the first start imports it and every later one
+    # ignores it. THEN STOP THAT ENROLLMENT ON THE MACHINE IT CAME FROM: this is a MOVE, not a copy,
+    # and two live copies of one device are unmeasured. The archive IS the device (its keys and its
+    # keyring), so treat the Secret like the store, and drop it once the pod has imported it:
+    # `--set broker.embedded.import.secretName=""` on the next upgrade (pinned, as below), then
+    # delete the Secret. A Secret holds at most 1 MiB (how large a real backup is has not been
+    # measured); a larger archive goes in through extraVolumes plus TEAMS_LITE_INTUNE_IMPORT in
+    # extraEnv.
+    #
+    # Into a release ALREADY INSTALLED (a second `helm install` of its name is refused) that is an
+    # upgrade, and it is PINNED to the chart version the release runs:
+    #
+    #     version=$(helm -n <namespace> get metadata <release> -o json | jq -r .version)
+    #     helm -n <namespace> upgrade <release> <chart> --version "${version:?}" \
+    #       --reuse-values --set broker.embedded.import.secretName=teams-lite-enrollment
+    #
+    # With no --version the reference is the NEWEST chart (CI publishes one on every push), and
+    # --reuse-values renders it against the OLD chart's coalesced defaults instead of its own — so a
+    # key a later chart renamed, removed or now requires fails this schema, and where it renders
+    # the app moves to a new image in the middle of the move. `${version:?}` stops the command
+    # rather than run it with an empty --version, which helm reads as "the newest".
+    # Empty: nothing is imported, and the app offers "Enroll this device" once the container is up.
+    import:
+      secretName: ""
+      key: enrollment-backup.tar.gz
+    # OPT-IN, AND UNVERIFIED: pod USER NAMESPACES instead of a privileged container. The pod runs
+    # with `hostUsers: false` — its root is an unprivileged id range on the node — and the container
+    # is NOT privileged: it is given SYS_ADMIN, SETUID and SETGID, an unmasked /proc and AppArmor
+    # unconfined instead. Nothing about it has been run anywhere. What it needs, all of it:
+    #   • Kubernetes 1.30 or later (pod user namespaces are beta there, and the chart refuses the
+    #     opt-in below it), with the UserNamespacesSupport and ProcMountType feature gates on;
+    #   • containerd 2.1 or later, with writable cgroups for the pod, and volumes on filesystems
+    #     that support idmapped mounts;
+    #   • the kubelet's `userNamespaces.idsPerPod` large enough for uid 1000 AND the 65536
+    #     subordinate ids from 100000 the image hands its Intune container: at least 165536 ids,
+    #     which the kubelet counts in blocks of 65536 — 196608;
+    #   • a seccomp profile that allows unshare, mount and setns (the pod's is Unconfined; a cluster
+    #     that forbids Unconfined needs a Localhost profile that allows them).
+    userNamespaces: false
+    # A MICROVM RUNTIME, DECLARED — Kata Containers, Firecracker. The image's entrypoint refuses to
+    # boot in the kernel's INITIAL network namespace (see `hostNetwork` below for why): it recognises
+    # one by the kernel's own fixed number for it, which is PROOF of the node's network wherever the
+    # pod shares the node's kernel — every ordinary runtime. Under a microVM runtime it is not: the
+    # pod runs on a GUEST kernel of the sandbox's own, and Kata hands every container of it that
+    # guest's initial network namespace, which reads the very same number on no host network at all.
+    # The refusal then ends every start (CrashLoopBackOff, blaming a `--network host` nobody set).
+    # `true` writes TEAMS_LITE_NETNS_IS_OWN=1 for the entrypoint, which lets that one namespace
+    # through and nothing else — the IPC refusal and the :99 check still run, and the start says so
+    # in its logs. It is NEVER detected: nothing in the pod can tell a guest kernel from the node's,
+    # so it is your word, and on a pod that shares the node's kernel it is hostNetwork let through.
+    # The chart does not choose the runtime: that is a cluster whose default handler is a microVM
+    # one, or a `runtimeClassName` you add (a post-renderer). UNVERIFIED: no microVM runtime has run
+    # this image, so whether its Intune container boots in one at all is unmeasured.
+    vmIsolated: false
+  # The two host modes' own values. The mode is never INFERRED from them: each is refused in the
+  # embedded mode, because the embedded mode is the default and one of them without `broker.mode`
+  # beside it is a host install that forgot to say so — a pod that would ignore the node's
+  # enrollment and offer to enroll a second device.
+  intuneContainer:
+    # REQUIRED in intuneContainer mode. intune-container's runtime state on the node, normally
+    # /home/<user>/.local/share/intune-container. Mounted READ-ONLY, and the directory rather than
+    # the one file inside it: the state is rewritten and removed as the container comes and goes.
+    stateDir: ""
+  sessionBus:
+    # REQUIRED in sessionBus mode. The user's session bus on the node: /run/user/<uid>/bus, whose
+    # uid must be hostUser.uid. /run/user is what is mounted, so the bus of the session running NOW
+    # is the one dialled, across logouts and logins.
+    socket: ""
+
+# WHERE THE POD RUNS. In a host mode, pin it to the ENROLLED node on a cluster with more than one:
+# the broker exists on one machine, and a pod scheduled anywhere else fails its hostPath check and
+# never starts. The embedded mode runs on any node that permits unprivileged user namespaces (see
+# the top of this file: an Ubuntu 23.10+ node needs a sysctl) — but the image and the Intune image
+# inside it are linux/amd64 only, so a cluster with arm64 nodes needs `kubernetes.io/arch: amd64`
+# here, and one with Ubuntu nodes that are not all set needs a label on the ones that are.
+#   nodeSelector:
+#     kubernetes.io/hostname: my-laptop
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# HOST MODES ONLY: the node's network namespace. The embedded mode REFUSES it — its own Intune
+# container shares the pod's network namespace, and the Xvfb it draws the broker on (`:99`) binds
+# the ABSTRACT socket @/tmp/.X11-unix/X99, which in the node's namespace collides with the :99 of
+# an Intune container already running on that machine: whichever starts second loses its display
+# and its broker. It does not need it either: that :99 is in the pod's own namespace, so the served
+# sign-in works without it. Its image refuses the node's network by the kernel's number for its
+# INITIAL namespace, which a pod under a microVM runtime reads too, on no host network — declare
+# such a runtime with `broker.embedded.vmIsolated`. In a host mode, what it costs either way:
+#   false — the web front listens on the pod's own address, so a Service, an Ingress and
+#           `kubectl port-forward` reach it. The broker's SIGN-IN WINDOW cannot be served into the
+#           app (its X display is an abstract socket in the node's network namespace), and the
+#           app says so; the automatic re-sign-in, which needs no window, still works.
+#   true  — the pod shares the node's loopback, so the web front stays on 127.0.0.1:19443 of the
+#           NODE and the served sign-in works. No Service or Ingress can reach a loopback address,
+#           so the chart refuses to render one: reach it from the node (`tailscale serve`), or with
+#           `kubectl port-forward pod/teams-lite-0 19443:19443`. Its ports are then the node's —
+#           19423 / 19443, the image's own pair, which no host install of teams-lite uses but the
+#           compose file's container DOES: the two cannot run on one machine at once. No
+#           NetworkPolicy applies to a host-network pod, so none is rendered.
+hostNetwork: false
+
+web:
+  # Where the web front listens INSIDE THE POD when hostNetwork is false. 0.0.0.0 is the pod's own
+  # interface (and its loopback), nothing more; use "::" on an IPv6-only cluster. Ignored with
+  # hostNetwork, where it is always 127.0.0.1, and with `auth.oauth2Proxy`, where it is always the
+  # pod's own 127.0.0.1 so the sign-in in front of it is the only way in.
+  listenAddress: 0.0.0.0
+  # The NAMES the app answers to, beyond the ones it answers to unasked (loopback, an IP address, a
+  # tailnet name under .ts.net). A request under any other Host is refused (403), because that is
+  # what a DNS-rebinding page looks like: same-origin with the app under the attacker's name, and
+  # able to read the write token (web/request-origin.ts). The chart already adds every hostname of
+  # `httpRoute` and `ingress` and the host of `auth.oauth2Proxy.redirectUrl`; name any other here.
+  # A leading "." covers a domain and every name under it.
+  #   allowedHosts: [teams.example.com, .corp.example]
+  allowedHosts: []
+
+service:
+  # ClusterIP on purpose: a NodePort or a LoadBalancer publishes the write token to whatever can
+  # reach the node — and it is a front the automation guards cannot recognize as the live app. So
+  # either one, like a public route, is refused without `auth.oauth2Proxy` or `auth.external`.
+  type: ClusterIP
+  port: 19443
+  annotations: {}
+
+ingress:
+  enabled: false
+  # "tailscale" with the Tailscale Kubernetes operator puts the app on your tailnet, behind
+  # Tailscale's own authenticated HTTPS — the recommended way in, and the one class the chart lets
+  # through with no sign-in in front (a `tailscale.com/funnel` annotation, which publishes it to the
+  # internet, is not). Any other controller needs `auth.oauth2Proxy.enabled` or `auth.external`.
+  # The controller has to be let through the NetworkPolicy (networkPolicy.allowNamespaces:
+  # [tailscale]); the chart refuses an Ingress nothing could reach.
+  #
+  # ingress-nginx cuts a WebSocket that is quiet for 60 s by default. The app's server pings any
+  # socket quiet for 25 s, which is under it; to stop relying on that, raise it:
+  #   annotations:
+  #     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  #     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  className: ""
+  annotations: {}
+  # Empty: one default backend (what the Tailscale operator expects; it names the device from
+  # `tls[0].hosts[0]`). Otherwise, one rule per host.
+  #   hosts:
+  #     - host: teams.example.internal
+  #       paths: ["/"]
+  hosts: []
+  # The app needs WebSockets through whatever proxies it.
+  #   tls:
+  #     - hosts: [teams-lite]          # the Tailscale device name
+  tls: []
+
+# A Gateway API HTTPRoute (gateway.networking.k8s.io/v1) — the way to publish the app through a
+# Gateway your cluster already runs (Envoy Gateway, Istio, Cilium, Traefik, NGINX Gateway Fabric,
+# kgateway…). It routes the Service: with `auth.oauth2Proxy` that is the sign-in, without it the app
+# itself, which the chart refuses unless `auth.external` says something in front authenticates.
+#
+# The Gateway is yours: its listener holds the TLS certificate (cert-manager's gateway-shim
+# annotation on the Gateway is the usual way), and it must admit routes from this namespace
+# (`allowedRoutes.namespaces`). Its data plane has to be let through the NetworkPolicy — name the
+# namespace its proxies run in (`networkPolicy.allowNamespaces`: envoy-gateway-system for Envoy
+# Gateway, the Gateway's own namespace for Istio and kgateway), or for CILIUM's Gateway set
+# `networkPolicy.allowCiliumIngress`, since its proxy is in no namespace — and the chart refuses a
+# route the policy would let nothing reach.
+httpRoute:
+  enabled: false
+  # REQUIRED: the Gateway (and listener) this route attaches to, as written in an HTTPRoute.
+  #   parentRefs:
+  #     - name: public
+  #       namespace: gateway-system
+  #       sectionName: https
+  parentRefs: []
+  # The names it answers on. The first one is also where oauth2-proxy's callback lives, unless
+  # `auth.oauth2Proxy.redirectUrl` names it, and every one is added to `web.allowedHosts`.
+  hostnames: []
+  annotations: {}
+  labels: {}
+  # Filters on the route's one rule, as written in an HTTPRoute — e.g. HSTS, where your
+  # implementation supports the (Extended) ResponseHeaderModifier filter:
+  #   filters:
+  #     - type: ResponseHeaderModifier
+  #       responseHeaderModifier:
+  #         set:
+  #           - name: Strict-Transport-Security
+  #             value: max-age=31536000
+  filters: []
+  # The rule's timeouts. The app's socket lives for hours; an implementation that applies a request
+  # timeout to a WebSocket cuts it, and Gateway API says "0s" turns one off where it is supported:
+  #   timeouts:
+  #     request: "0s"
+  timeouts: {}
+
+# A SIGN-IN IN FRONT OF THE APP — what the chart asks for before it publishes the app anywhere but
+# your tailnet. Whatever reaches the web port is handed the write token and can post as you, so a
+# public route with nothing in front of it is a public route to the account.
+auth:
+  # YOUR WORD that something in front of this chart already authenticates EVERY request to the
+  # route — an ingress controller's auth annotations, an Envoy Gateway SecurityPolicy, Cloudflare
+  # Access — or that the route is reachable only from a network you trust. Never detected: the
+  # chart cannot see your Gateway's policies, so with this set it publishes what it is told to.
+  external: false
+  # OAUTH2-PROXY, AS A SIDECAR in the same pod: the web front then listens on the pod's own
+  # 127.0.0.1, and the sign-in on the pod's address is the only thing the Service, the route and
+  # every other pod can reach — the node included, which no NetworkPolicy can keep out. Signing in
+  # is OpenID Connect against your provider, and only the addresses in `emails` get in.
+  oauth2Proxy:
+    enabled: false
+    image:
+      repository: quay.io/oauth2-proxy/oauth2-proxy
+      tag: v7.15.5
+      # A digest (sha256:…) pins the image byte for byte, and wins over the tag.
+      digest: ""
+      pullPolicy: IfNotPresent
+    # REQUIRED: the provider's issuer (https://…; the chart reads nothing else of it — oauth2-proxy
+    # discovers the rest from <issuer>/.well-known/openid-configuration). For example
+    #   Google           https://accounts.google.com
+    #   Microsoft Entra  https://login.microsoftonline.com/<tenant id>/v2.0
+    #   Pocket ID, Authentik, Keycloak, Zitadel — your instance's own issuer URL
+    issuerUrl: ""
+    # REQUIRED: the client you registered for this app at the provider, with
+    # <redirectUrl> (https://<host>/oauth2/callback) as its redirect URI.
+    clientId: ""
+    # A PUBLIC client: one registered with no secret, PKCE alone (Zitadel's "PKCE" authentication
+    # method; a "public" client in Pocket ID, Authentik and Keycloak). oauth2-proxy refuses an
+    # OpenID Connect provider with no client secret at all, so the chart hands it the EMPTY one
+    # (`--client-secret-file=/dev/null`) and the Secret below then needs only `cookie-secret`. What
+    # proves the exchange is the PKCE verifier the chart always sends (S256). Leave it false for a
+    # client the provider gave a secret: a forgotten key must fail at the provider, never quietly
+    # turn a confidential client into a public one.
+    publicClient: false
+    # REQUIRED: a Secret you create, holding the client's secret and a cookie secret:
+    #   kubectl -n <namespace> create secret generic teams-lite-oauth2-proxy \
+    #     --from-literal=client-secret='<from your provider>' \
+    #     --from-literal=cookie-secret="$(openssl rand -base64 32 | tr -- '+/' '-_')"
+    # With `publicClient: true` there is no client secret: leave out the client-secret line.
+    # The cookie secret encrypts every session: whoever holds it can mint one, so treat the Secret
+    # like the store.
+    existingSecret: ""
+    clientSecretKey: client-secret
+    cookieSecretKey: cookie-secret
+    # REQUIRED: who may sign in, one address each — the address the provider ASSERTS (oauth2-proxy
+    # refuses one the provider marks unverified, and accepts one it says nothing about). Never a
+    # domain and never "everyone": this is one person's Teams account. Read from a ConfigMap
+    # oauth2-proxy watches, so a change takes effect without restarting the pod.
+    emails: []
+    # Who may sign in, by the provider's own USER ID (the ID token's `sub`), checked AS WELL AS
+    # `emails` — at sign-in and on every request. Set it whenever somebody other than you can make
+    # your provider assert your address: a Zitadel, Keycloak or Authentik instance where anybody may
+    # register an organization or an account, or where another organization's admin can create a
+    # user with any address and mark it verified; and Microsoft Entra, whose `email` claim the
+    # user's own tenant sets. A `sub` is minted by the provider, and no other organization's admin
+    # can choose one. Where to read yours: Zitadel shows it as the user's ID in the console; or
+    # sign in with a wrong one here and read `user:<sub>` off the line refusing you in
+    # `kubectl logs <pod> -c oauth2-proxy`. QUOTE IT: a Zitadel id is all digits, which YAML (and
+    # `--set`) reads as a number — refused by the schema rather than rounded.
+    #   subjects: ["312345678901234567"]
+    subjects: []
+    # Where the provider sends the browser back. Empty: https://<the first hostname of httpRoute,
+    # else of ingress>/oauth2/callback.
+    redirectUrl: ""
+    # Microsoft Entra issues a refresh token only with `offline_access` added here.
+    scope: openid email profile
+    # How long a sign-in lasts. 168h is oauth2-proxy's own default; once it ends the page signs in
+    # again by itself (a reload through the provider, which with the provider's own session alive
+    # is a blink) the next time its socket reconnects.
+    cookieExpire: 168h
+    # Empty (off): the session lasts cookieExpire whatever the provider's tokens say. Set (e.g. 1h)
+    # to have oauth2-proxy re-check the session with the provider that often, so an account the
+    # provider disables loses access within it — which NEEDS a refresh token: without one, the
+    # session ends when the provider's ID token does (about an hour), and you sign in that often.
+    cookieRefresh: ""
+    # More oauth2-proxy flags (`--allowed-group=…`, `--prompt=…`), appended after the chart's. The
+    # flags that would let somebody past who is not in `emails`, or open a path with no session
+    # (`--email-domain`, `--skip-auth-route`, `--htpasswd-file`, `--trusted-ip`, …), are refused.
+    extraArgs: []
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+
+persistence:
+  # The store: every synced message, the settings (the GitLab and Linear tokens among them), the
+  # push key, sealed chats' passphrases. Treat the volume as the secret it is. `false` keeps the
+  # STORE in an emptyDir and nothing else: the embedded Intune state keeps its claim regardless.
+  enabled: true
+  # Use a PVC you made yourself (e.g. bound to the host path an existing install keeps its store
+  # in) instead of the one the StatefulSet creates. In the embedded mode its files must belong to
+  # the image's own user (uid 1000 in the published image): the pod hands the volume's ROOT
+  # directory to that user, and never changes ownership below it.
+  existingClaim: ""
+  # "" uses the cluster's default class; "-" asks for none.
+  storageClassName: ""
+  # SQLite in WAL mode needs a LOCAL filesystem: ReadWriteOnce, and never NFS or an RWX class.
+  accessModes:
+    - ReadWriteOnce
+  # It also holds the agent CLIs Settings › AI providers installs (`tools/`), and their logins and
+  # sessions (`agent-home/`): Claude Code is about 340 MB and opencode about 215 MB, and an update
+  # holds the new version beside the old one until it is swapped in — so budget about 1 GiB for
+  # both. The volume must allow EXEC, which a PVC does. A claim template cannot be resized through
+  # `helm upgrade`; grow an existing claim through its storage class instead.
+  size: 2Gi
+  annotations: {}
+
+cache:
+  # ~/.cache/teams-lite: the backend and web app the launcher unpacks on every start, and what the
+  # app fetches on demand (the chess engine, the board's sounds). An emptyDir, re-made on every
+  # start. It must allow EXEC — the unpacked backend is run from it — which an emptyDir does.
+  sizeLimit: 1Gi
+
+# An IANA zone (Europe/Paris) for the app's clock: what an unset presence zone means, and what log
+# lines are stamped in. Empty is UTC.
+timezone: ""
+
+# Requests only: a memory LIMIT that OOM-kills the user's Teams client mid-call is worse than one
+# that is not there. In the embedded mode a limit would also have to hold the FIRST start's
+# download: the crate's image pull (oci-client's `pull`) keeps every compressed layer in memory
+# until it has them all, and only then extracts them — read from the code, not measured.
+resources:
+  requests:
+    cpu: 50m
+    memory: 256Mi
+
+# Extra variables for the app. Anything starting TEAMS_LITE_ is the app's own configuration
+# (AGENTS.md lists them); a secret belongs in `extraEnvFrom`. TEAMS_LITE_INTUNE_MODE is refused
+# here — the pod's whole shape follows `broker.mode`, so the mode is the chart's to write.
+extraEnv: []
+#   - name: TEAMS_LITE_CALL_DEBUG     # log every calling request body
+#     value: "1"
+extraEnvFrom: []
+#   - secretRef:
+#       name: teams-lite-extra
+extraVolumes: []
+extraVolumeMounts: []
+
+# Merged over the pod's own security context, which is per mode:
+#   embedded — `seccompProfile: Unconfined` and nothing else (RuntimeDefault in a read-only
+#              release, which unshares nothing). Three values are REFUSED here, and runAsUser and
+#              runAsNonRoot in `securityContext` too: runAsUser and runAsNonRoot because the
+#              entrypoint must start as root — it delegates the container's cgroup and gives a
+#              fresh volume's root to `teams`, then drops to it — and fsGroup because its recursive
+#              chown would hand the Intune rootfs — owned by the pod's subordinate ids — and the
+#              device's 0600 keyring to one group, and break the enrollment.
+#   host     — the uid, the gid and runAsNonRoot from `hostUser`, which are not meant to be
+#              overridden here.
+podSecurityContext: {}
+# Merged over the container's own, which is per mode too:
+#   embedded — `privileged: true` (or the userNamespaces opt-in's capabilities) and a read-only root
+#              filesystem. No `allowPrivilegeEscalation: false` and no dropped capabilities: the
+#              image's newuidmap/newgidmap run on FILE capabilities, which no_new_privs defeats, and
+#              Kubernetes rejects the flag beside a privileged container anyway. A read-only
+#              release is not privileged: every capability dropped but the five its entrypoint
+#              uses as root (CHOWN and DAC_OVERRIDE to take over a fresh store root, SETUID and
+#              SETGID to drop to `teams`, KILL for tini to forward the stop signal to it), and no
+#              privilege escalation. Dropping CHOWN or DAC_OVERRIDE here leaves a fresh store
+#              claim root's, where its backend cannot create the store (the entrypoint says so).
+#   host     — a read-only root filesystem, no privilege escalation, every capability dropped. On
+#              an AppArmor node (Ubuntu), the runtime's default profile refuses the ptrace-read that
+#              opening /proc/<broker>/root takes. On Kubernetes 1.30 and later, set
+#                appArmorProfile:
+#                  type: Unconfined
+#              and before 1.30, the annotation instead:
+#                podAnnotations:
+#                  container.apparmor.security.beta.kubernetes.io/teams-lite: unconfined
+securityContext: {}
+
+serviceAccount:
+  create: true
+  # Empty: the release's full name.
+  name: ""
+  annotations: {}
+
+# A NetworkPolicy, ON BY DEFAULT: without it every pod in the cluster can reach the web port and
+# collect the write token (or, with `auth.oauth2Proxy`, the sign-in's port in front of it). Only the namespaces in `allowNamespaces` and the peers in `from` may
+# reach it; with neither, no other pod may. What NO policy can keep out is the pod's own NODE:
+# every process of every account on that machine, and every hostNetwork pod there (which is also
+# why the probes and `kubectl port-forward` still work). Not rendered with hostNetwork, where no
+# policy applies. Egress is left open: the app talks to Microsoft, and the embedded Intune
+# container downloads its image and enrolls through the same open door.
+networkPolicy:
+  enabled: true
+  # Namespaces whose pods may reach the web port, by name — e.g. [tailscale] for the operator.
+  allowNamespaces: []
+  # Any other NetworkPolicy peers, as written in a policy's `from`.
+  from: []
+#   - podSelector:
+#       matchLabels:
+#         app: my-proxy
+  # CILIUM'S OWN Gateway (and Ingress): its proxy reaches a backend under Cilium's reserved
+  # `ingress` identity, which belongs to no namespace — so neither `allowNamespaces` nor `from` can
+  # name it, and the policy above drops every request the Gateway sends (measured on Cilium 1.20:
+  # the route answered 503 until this was set). `true` adds a CiliumNetworkPolicy admitting that
+  # identity on the same one port, and nothing else; Cilium admits the union of the two. Needs
+  # Cilium's CRDs, and `enabled: true`.
+  allowCiliumIngress: false
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+# A CEILING, not a delay: the pod is gone the moment its entrypoint exits. Unset, it is 90 s where
+# the pod boots its own Intune container and 30 s otherwise (a host mode, or a read-only release).
+# The entrypoint forwards TERM to the launcher, which SIGKILLs its backend and exits
+# (`killChildOnExit` in launcher/src/backend.ts) — so the backend never hands its calling
+# registration back: Teams keeps offering the account's calls to this pod's endpoint, which is
+# gone, until that registration expires on its own (its TTL is an hour). A longer grace period does
+# not change that; a backend that takes a TERM and the launcher sending one would. In the embedded
+# mode the entrypoint then powers the Intune container off (`server __teams-lite-intune-stop`,
+# which waits up to ~25 s for a boot to release the lifecycle lock and ~20 s for the poweroff).
+# Killed before that, the inner systemd, the broker and the keyring die mid-write.
+terminationGracePeriodSeconds: null

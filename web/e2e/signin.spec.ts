@@ -166,6 +166,43 @@ test.describe("signing in again", () => {
     expect(realErrors(consoleErrors)).toEqual([]);
   });
 
+  test("a window the backend is still moving onto its screen is drawn once it can be read", async ({
+    page,
+    consoleErrors,
+  }) => {
+    // The backend answers `{moved: true}` on the tick it moves a window that hung off its screen
+    // — the Intune portal maps itself 203 rows past the bottom of its display — because the rows
+    // it brought on are not drawn yet (`SigninWindow::capture_or_place`). Two such ticks first.
+    await armSignin(page, { outcome: "window", moved_frames: 2 });
+    await gotoApp(page);
+    await emitBrokerStatus(page, {
+      ok: false,
+      signature: "refused",
+      message: "The identity broker refused to sign in silently.",
+      can_repair: false,
+      can_sign_in: true,
+    });
+    await page.getByTestId("broker-signin").click();
+
+    const panel = page.locator('[data-testid="signin-panel"]');
+    await expect(panel).toHaveAttribute("data-phase", "waiting", { timeout: 10_000 });
+    // No picture yet: the placeholder holds the window's shape rather than a broken image.
+    await expect(panel.getByTestId("signin-frame-loading")).toBeVisible();
+    await expect(panel.getByTestId("signin-frame")).toHaveCount(0);
+    // And once the window can be read, it is drawn.
+    const frame = panel.getByTestId("signin-frame");
+    await expect(frame).toBeVisible({ timeout: 10_000 });
+    await expect(frame).not.toHaveAttribute("data-stale", "true");
+
+    // A move while a picture is already up — the broker drew its next page off the screen — marks
+    // the held picture stale for that tick, so a press cannot land on a window that has changed,
+    // and the next tick's picture takes it back.
+    await armSignin(page, { moved_frames: 1 });
+    await expect(frame).toHaveAttribute("data-stale", "true", { timeout: 10_000 });
+    await expect(frame).not.toHaveAttribute("data-stale", "true", { timeout: 10_000 });
+    expect(realErrors(consoleErrors)).toEqual([]);
+  });
+
   test("the reader can cancel, and nothing is claimed to have changed", async ({
     page,
     consoleErrors,

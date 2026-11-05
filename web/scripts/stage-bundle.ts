@@ -40,6 +40,8 @@ export const WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
  *   server.ts                the entry (`bun server.ts`)
  *   write-token.ts           hands the page the backend's write token
  *   build-info.ts            lets the server refuse a bundle built for a test
+ *   request-origin.ts        refuses an address and a page that are not this app's
+ *   src/lib/backend-route.ts the one path a socket is relayed on
  *   dist/server              the self-contained SSR handler
  *   dist/client              hashed assets, the favicon, and ~30 MB of emoji images
  *   dist/<build info>        what the build was pinned to — the guard reads it, so
@@ -51,6 +53,13 @@ export const RUNTIME_ENTRIES: readonly string[] = [
   "server.ts",
   "write-token.ts",
   "build-info.ts",
+  // Which names the server answers to and which pages may open its socket — the DNS-rebinding and
+  // cross-site WebSocket checks (see request-origin.ts). Without it the server does not start.
+  "request-origin.ts",
+  // The one path the server relays a socket on, shared with the page that dials it (see
+  // backend-route.ts). The relay refuses an upgrade anywhere else, so without it the server does
+  // not start.
+  "src/lib/backend-route.ts",
   // The CHESS ENGINE's own route. It reads the cache the backend fetched Stockfish into and serves
   // those two files to the page (see engine-file.ts); without it the staged app answers 404 for the
   // engine and every board against the computer says it could not start.

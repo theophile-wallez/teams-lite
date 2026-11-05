@@ -16,8 +16,7 @@
 // Every write is undone before it exits: the original value is captured first and put
 // back at the end, so the sandbox chat is left exactly as it was found.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example chat_settings_probe
+//   cargo run --example chat_settings_probe
 use anyhow::{Context, Result};
 use serde_json::Value;
 

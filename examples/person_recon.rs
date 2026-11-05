@@ -7,8 +7,7 @@
 //      `itemid` to the person it names)
 // It never publishes our own presence and never writes anything.
 //
-//   . bin/broker-env.sh && teams_lite_export_broker_bus && \
-//     cargo run --example person_recon -- 8:orgid:<guid> [19:<conversation-id>]
+//   cargo run --example person_recon -- 8:orgid:<guid> [19:<conversation-id>]
 use anyhow::Result;
 use serde_json::Value;
 
