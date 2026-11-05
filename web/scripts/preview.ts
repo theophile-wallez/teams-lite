@@ -53,6 +53,7 @@
 //   bun run web/scripts/preview.ts --out /tmp/agent --agent     # the local-agent menu
 //   bun run web/scripts/preview.ts --out /tmp/reply --agent-reply  # the agent answering
 //   bun run web/scripts/preview.ts --out /tmp/prov --ai-providers # Settings › AI providers
+//   bun run web/scripts/preview.ts --out /tmp/auth --agent-auth  # signing the agent CLIs in
 //   bun run web/scripts/preview.ts --out /tmp/app --maintenance # Settings › This app
 //   bun run web/scripts/preview.ts --out /tmp/at --mentions     # the @mention list + chip
 //   bun run web/scripts/preview.ts --out /tmp/tag --agent-tag   # tagging an agent
@@ -5764,6 +5765,94 @@ if (import.meta.main) {
         await emit({ kind: "maintenance", reset: true });
         console.log(
           `[preview] wrote ${out}-{light,dark,checked-light,armed-light,armed-dark}.png`,
+        );
+      },
+      { deviceScaleFactor: dpr },
+    );
+    process.exit(0);
+  }
+
+  // Signing the agent CLIs in (web/src/components/agent-auth.tsx, src/agent_auth.rs): Claude Code's
+  // sign-in as the two steps it is on the page, the row once it is signed in, the API key form a
+  // method opens, the cloud accounts with Bedrock's form open and then set up, opencode's provider
+  // keys, and the sign-in at a phone's width — where the two steps are what a reader holds while
+  // claude.com is in another tab. Everything goes through the mock (no CLI runs, no key is real),
+  // and the `{kind:"agent_auth"}` and `{kind:"agent_cli"}` hooks are reset at the end because a
+  // sign-in and an install both outlive the page.
+  if (args.includes("--agent-auth")) {
+    await withPreview(
+      async ({ page, shot, setTheme, emit }) => {
+        await emit({ kind: "agent_cli", installed: { opencode: "1.19.5" } });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForSelector('[data-testid="conversation-row"]');
+        await openSettings(page);
+        const claude = '[data-testid="ai-provider"][data-provider="claude"]';
+        const opencode = '[data-testid="ai-provider"][data-provider="opencode"]';
+        const clouds = '[data-testid="cloud-accounts"]';
+        await page.locator(claude).scrollIntoViewIfNeeded();
+        await shot(`${out}-signed-out-light.png`, claude);
+
+        await page.locator(`${claude} [data-testid="claude-signin-start"]`).click();
+        await page.waitForSelector(`${claude} [data-testid="claude-signin"]`);
+        await page.locator(`${claude} [data-testid="claude-signin-code"]`).fill("MOCK-CODE#mock-state");
+        await shot(`${out}-signin-light.png`, claude);
+        await setTheme("dark");
+        await shot(`${out}-signin-dark.png`, claude);
+        await setTheme("light");
+        await page.locator(`${claude} [data-testid="claude-signin-finish"]`).click();
+        await page.waitForSelector(`${claude} [data-testid="claude-signout"]`);
+        await shot(`${out}-signed-in-light.png`, claude);
+        await setTheme("dark");
+        await shot(`${out}-signed-in-dark.png`, claude);
+        await setTheme("light");
+
+        await page.locator(`${claude} [data-testid="claude-method"]`).selectOption("api_key");
+        await page.waitForSelector(`${claude} [data-testid="claude-api-key-form"]`);
+        await shot(`${out}-api-key-light.png`, claude);
+        await page.locator(`${claude} [data-testid="claude-method"]`).selectOption("claude_ai");
+
+        await page.locator(clouds).scrollIntoViewIfNeeded();
+        await shot(`${out}-clouds-light.png`, clouds);
+        const bedrock = `${clouds} [data-testid="cloud-account"][data-kind="bedrock"]`;
+        await page.locator(`${bedrock} [data-testid="cloud-account-edit"]`).click();
+        await page.locator(`${bedrock} [data-testid="bedrock-region"]`).fill("eu-west-3");
+        await page.locator(`${bedrock} [data-testid="bedrock-api-key"]`).fill("bedrock-mock-key");
+        await shot(`${out}-bedrock-form-light.png`, clouds);
+        await setTheme("dark");
+        await shot(`${out}-bedrock-form-dark.png`, clouds);
+        await setTheme("light");
+        await page.locator(`${bedrock} [data-testid="agent-account-save"]`).click();
+        await page.waitForSelector(`${bedrock}[data-configured="true"]`);
+        await page.locator(`${claude} [data-testid="claude-method"]`).selectOption("bedrock");
+        await page.waitForSelector(`${claude} [data-testid="agent-account"][data-method="bedrock"]`);
+        await page.locator(clouds).scrollIntoViewIfNeeded();
+        await shot(`${out}-clouds-set-light.png`, clouds);
+        await shot(`${out}-on-bedrock-light.png`, claude);
+
+        await emit({ kind: "agent_auth", opencode: ["anthropic", "openrouter"] });
+        await page.locator(`${opencode} [data-testid="opencode-key-add"]`).click();
+        await page.locator(opencode).scrollIntoViewIfNeeded();
+        await shot(`${out}-opencode-light.png`, opencode);
+        await setTheme("dark");
+        await shot(`${out}-opencode-dark.png`, opencode);
+        await setTheme("light");
+
+        // A phone, mid sign-in: the pane opened first, then the window narrowed, because a phone's
+        // shell reaches Settings through another control.
+        await emit({ kind: "agent_auth", reset: true });
+        await page.locator(`${claude} [data-testid="claude-signin-start"]`).click();
+        await page.waitForSelector(`${claude} [data-testid="claude-signin"]`);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.waitForTimeout(300);
+        await page.locator(claude).scrollIntoViewIfNeeded();
+        await shot(`${out}-signin-mobile-light.png`, claude);
+
+        await emit({ kind: "agent_auth", reset: true });
+        await emit({ kind: "agent_cli", reset: true });
+        console.log(
+          `[preview] wrote ${out}-{signed-out-light,signin-light,signin-dark,signed-in-light,signed-in-dark,` +
+            `api-key-light,clouds-light,bedrock-form-light,bedrock-form-dark,clouds-set-light,on-bedrock-light,` +
+            `opencode-light,opencode-dark,signin-mobile-light}.png`,
         );
       },
       { deviceScaleFactor: dpr },

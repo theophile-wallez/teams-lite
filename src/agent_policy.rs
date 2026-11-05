@@ -221,6 +221,11 @@ const MAX_MODEL_CHARS: usize = 80;
 /// command line. It reaches the child as a single argument and never through a shell
 /// (see `the_prompt_is_never_run_through_a_shell` in [`crate::agent`]), so this is a
 /// second floor rather than the only one.
+///
+/// `@` is in the set because Vertex AI spells every Claude model with one
+/// (`google-vertex-anthropic/claude-opus-5@default`, `claude-haiku-4-5@20251001`), and a set
+/// without it hid every one of those from the picker. It cannot open a flag, and the leading
+/// `-` refusal is what keeps one out.
 pub fn is_valid_model(model: &str) -> bool {
     let count = model.chars().count();
     count > 0
@@ -228,7 +233,7 @@ pub fn is_valid_model(model: &str) -> bool {
         && !model.starts_with('-')
         && model
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-' | '@'))
 }
 
 /// What the user decided about each agent CLI: whether it may answer at all, and
@@ -1901,7 +1906,13 @@ mod tests {
 
     #[test]
     fn a_model_name_can_never_become_another_flag() {
-        for model in ["opus", "claude-opus-5", "amazon-bedrock/anthropic.claude-opus-4-6-v1:0"] {
+        for model in [
+            "opus",
+            "claude-opus-5",
+            "amazon-bedrock/anthropic.claude-opus-4-6-v1:0",
+            // Vertex AI's own spelling of a Claude model, as opencode's catalogue holds it.
+            "google-vertex-anthropic/claude-opus-5@default",
+        ] {
             assert!(is_valid_model(model), "{model}");
         }
         for model in [
@@ -1911,6 +1922,7 @@ mod tests {
             "opus; rm -rf ~",
             "opus $(whoami)",
             "opus model",
+            "-@x",
             &"x".repeat(MAX_MODEL_CHARS + 1),
         ] {
             assert!(!is_valid_model(model), "{model} must be refused");

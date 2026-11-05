@@ -896,6 +896,17 @@ export async function fetchAgentModes(page: Page): Promise<{
   default_provider: string;
   cli_auto_update: boolean;
   clis: { name: string; managed: boolean; version: string | null }[];
+  auth: {
+    claude_method: string;
+    anthropic_key: boolean;
+    bedrock: { region: string; kind: string } | null;
+    vertex: { project: string; region: string; service_account: string | null } | null;
+    foundry: { resource: string } | null;
+    secrets: { anthropic_key: string | null; bedrock: string | null; foundry: string | null };
+  };
+  claude_login: { email: string; plan: string } | null;
+  claude_signin: boolean;
+  opencode: string[];
 }> {
   const res = await page.request.get(`http://127.0.0.1:${MOCK_PORT}/__test/agent`);
   expect(res.ok()).toBeTruthy();
@@ -947,6 +958,23 @@ export async function setAgentCli(
 ): Promise<void> {
   const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
     data: body === "reset" ? { kind: "agent_cli", reset: true } : { kind: "agent_cli", ...body },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+/**
+ * Arm how the mock's agent CLIs sign in (src/agent_auth.rs): a Claude account already signed in,
+ * keys opencode already holds — or put it all back.
+ *
+ * **Reset it afterwards** (`setAgentAuth(page, "reset")`). One mock process serves the whole run,
+ * and an account left signed in changes every later Settings pane.
+ */
+export async function setAgentAuth(
+  page: Page,
+  body: { claude_login?: boolean; opencode?: string[] } | "reset",
+): Promise<void> {
+  const res = await page.request.post(`http://127.0.0.1:${MOCK_PORT}/__test/emit`, {
+    data: body === "reset" ? { kind: "agent_auth", reset: true } : { kind: "agent_auth", ...body },
   });
   expect(res.ok()).toBeTruthy();
 }

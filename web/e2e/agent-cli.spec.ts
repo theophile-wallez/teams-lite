@@ -72,10 +72,9 @@ test.describe("Installing an agent CLI", () => {
     await expect(opencode.locator('[data-testid="ai-provider-toggle"]')).toBeEnabled();
     await expect(progress).toHaveCount(0);
 
-    // The app never signs a CLI in; it says how the user does, where the app runs.
-    await expect(opencode.locator('[data-testid="agent-cli-login-command"]')).toHaveText(
-      "teams-lite-agent opencode auth login",
-    );
+    // Once it is here, the row offers its sign-in — in the page, with no terminal (agent-auth.tsx).
+    await expect(opencode.locator('[data-testid="agent-account"]')).toBeVisible();
+    await expect(opencode.locator('[data-testid="agent-cli-login-command"]')).toHaveCount(0);
 
     // And the BACKEND holds it.
     const state = await fetchAgentModes(page);

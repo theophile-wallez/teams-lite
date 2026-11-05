@@ -14,9 +14,7 @@
  *   last asked and a press that asks now. A machine that never installed one is shown neither: the
  *   backend asks about nothing it did not install, so the switch would decide nothing.
  *
- * The app never signs a CLI in: Anthropic forbids a third party to collect or relay Claude.ai
- * credentials. So once one is installed the row says how the user signs it in themselves, in a
- * terminal where the app runs, against the very binary and home this app starts.
+ * Signing it in once it is here is agent-auth.tsx's: the row below this one, with no terminal.
  */
 
 import { useEffect, useState } from "react";
@@ -26,7 +24,6 @@ import {
   agentCliCheckedLabel,
   agentCliIsShadowed,
   agentCliLastChecked,
-  agentCliLoginHint,
   agentClisInstalledHere,
   megabytes,
 } from "~/lib/agent-cli";
@@ -47,7 +44,6 @@ export function AgentCliInstall(props: { backend: AgentBackend }) {
   if (!cli) return null;
   const action = agentCliAction(backend);
   const shadowed = agentCliIsShadowed(backend);
-  const hint = agentCliLoginHint(backend);
   // The backend's own reason outlives a reload; a refusal of THIS press is shown until the next.
   const error = refusal ?? (cli.error || null);
 
@@ -75,7 +71,7 @@ export function AgentCliInstall(props: { backend: AgentBackend }) {
     }
   };
 
-  const nothingToDraw = action.kind === "none" && !shadowed && !hint && !error && !cli.version;
+  const nothingToDraw = action.kind === "none" && !shadowed && !error && !cli.version;
   if (nothingToDraw) return null;
 
   return (
@@ -131,19 +127,6 @@ export function AgentCliInstall(props: { backend: AgentBackend }) {
           This app also installed version {cli.version}, which is not used: {cli.path ?? "another copy"}{" "}
           comes first on the backend&apos;s PATH.
         </p>
-      )}
-
-      {hint && (
-        <div data-testid="agent-cli-login" className="flex flex-col gap-1 text-[11px] text-text-faint">
-          <span>{hint.lead}</span>
-          <code
-            data-testid="agent-cli-login-command"
-            className="w-fit max-w-full overflow-x-auto rounded-md bg-element px-2 py-1 font-mono text-[11px] whitespace-nowrap text-foreground select-all"
-          >
-            {hint.command}
-          </code>
-          <span>{hint.alternative}</span>
-        </div>
       )}
 
       {cli.version && action.kind !== "busy" && (

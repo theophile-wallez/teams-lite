@@ -6,7 +6,6 @@ import {
   agentCliCheckedLabel,
   agentCliIsShadowed,
   agentCliLastChecked,
-  agentCliLoginHint,
   agentClisInstalledHere,
   withAgentCliProgress,
 } from "./agent-cli";
@@ -27,8 +26,6 @@ function cli(patch: Partial<AgentCli> = {}): AgentCli {
     installed_bytes: null,
     publisher: "Anthropic",
     path: null,
-    login_command: "teams-lite-agent claude auth login",
-    login_in_container: true,
     ...patch,
   };
 }
@@ -109,21 +106,6 @@ describe("the sentences", () => {
     expect(aboutMegabytes(80_000_000)).toBe("about 80 MB");
     expect(aboutMegabytes(7_300_000)).toBe("about 7 MB");
     expect(aboutMegabytes(10_000)).toBe("about 1 MB");
-  });
-
-  it("says where the sign-in is run, and only for the copy this app installed", () => {
-    const ours = backend({ available: true }, { managed: true, version: "2.1.311" });
-    expect(agentCliLoginHint(ours)).toEqual({
-      lead: expect.stringContaining("shell in the app's container"),
-      command: "teams-lite-agent claude auth login",
-      alternative: expect.stringContaining("ANTHROPIC_API_KEY"),
-    });
-    const host = backend(
-      { available: true, name: "opencode" },
-      { managed: true, version: "1.19.5", login_in_container: false, login_command: "/x/opencode auth login" },
-    );
-    expect(agentCliLoginHint(host)?.lead).toContain("terminal on the machine");
-    expect(agentCliLoginHint(backend({ available: true }, { managed: false }))).toBeNull();
   });
 
   it("names a copy that is on disk and not what runs", () => {

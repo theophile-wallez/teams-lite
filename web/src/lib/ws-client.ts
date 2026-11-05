@@ -7,7 +7,7 @@
 //   response <- { id, result } | { id, error }
 //   event    <- { event, data }        (server push)
 
-import type { AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
+import type { AgentAuthPatch, AgentMode, AgentProviderPatch, AgentStatus } from "./agent";
 import type { AgentPersonaPatch } from "./agent-persona";
 import { BACKEND_WS_ROUTE } from "./backend-route";
 import type { CallPreparation, CallStatus, MeetingAddress } from "./call";
@@ -276,6 +276,17 @@ const AGENT_REQUEST_TIMEOUT_MS = 35 * 60_000;
  * to fail while somebody is still looking at the screen.
  */
 const UPLOAD_REQUEST_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * The ceiling on a call that waits on an agent CLI's own account commands (src/agent_auth.rs).
+ *
+ * Each one runs a program and waits for it within bounds the BACKEND sets — up to 30 s for
+ * `claude auth login` to print its link, up to a minute for it to exchange a code, 30 s for a
+ * sign-out, and up to 15 s more for the status read every one of them ends with — so the
+ * ordinary 30-second ceiling would report a sign-in that worked as one that timed out. Two minutes
+ * outlasts the longest of them, so the backend's own sentence is what a failure says.
+ */
+const SIGNIN_REQUEST_TIMEOUT_MS = 2 * 60_000;
 
 export type BackendOptions = {
   giveUpMs?: number;
@@ -1232,6 +1243,47 @@ export class Backend {
    *  decides whether that machine downloads and runs new code with nobody pressing anything. */
   agentCliSetAutoUpdate(enabled: boolean): Promise<AgentStatus> {
     return this.writeRequest<AgentStatus>("agent_cli_set_auto_update", { enabled });
+  }
+  /** Change how the agent CLIs sign in: Claude Code's way in, an Anthropic API key, a cloud
+   *  account (src/agent_auth.rs). A WRITE request: it decides which account every run is signed
+   *  in to and billed to, and it stores credentials. A secret left out keeps the stored one. */
+  agentAuthSet(patch: AgentAuthPatch): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_auth_set", patch, SIGNIN_REQUEST_TIMEOUT_MS);
+  }
+  /** Start Claude Code's own sign-in on the backend's machine. A WRITE request. The answer
+   *  carries the claude.com link as `signin_url`, for the reader to open in their own browser. */
+  agentSigninStart(provider: string, account: "claude_ai" | "console"): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>(
+      "agent_signin_start",
+      { provider, account },
+      SIGNIN_REQUEST_TIMEOUT_MS,
+    );
+  }
+  /** Hand the waiting sign-in the code claude.com showed. A WRITE request: it signs that
+   *  machine's Claude Code in to the account the code belongs to. */
+  agentSigninFinish(provider: string, code: string): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>(
+      "agent_signin_finish",
+      { provider, code },
+      SIGNIN_REQUEST_TIMEOUT_MS,
+    );
+  }
+  /** Give up on a sign-in waiting for its code. A WRITE request. */
+  agentSigninCancel(provider: string): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_signin_cancel", { provider });
+  }
+  /** Sign the backend machine's Claude Code out of its account. A WRITE request. */
+  agentSignout(provider: string): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_signout", { provider }, SIGNIN_REQUEST_TIMEOUT_MS);
+  }
+  /** Give opencode an API key for one of its providers, in opencode's own credentials file. A
+   *  WRITE request: what a run is billed to. */
+  agentOpencodeKeySet(providerId: string, key: string): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_opencode_key_set", { provider_id: providerId, key });
+  }
+  /** Take one provider's credential away from opencode. A WRITE request. */
+  agentOpencodeKeyRemove(providerId: string): Promise<AgentStatus> {
+    return this.writeRequest<AgentStatus>("agent_opencode_key_remove", { provider_id: providerId });
   }
   /** Stop a run this backend is streaming, mid-answer, by the `run_id` its frames carry.
    *

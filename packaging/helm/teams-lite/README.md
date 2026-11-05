@@ -463,9 +463,10 @@ at the same time. No NetworkPolicy applies to a host-network pod, so none is ren
   Anthropic's, all rights reserved — but **Settings › AI providers installs either one** onto the
   data volume, verified against its vendor's own statement of the file (Anthropic's signed
   manifest; GitHub's digest for opencode), and keeps the copies it installed up to date unless you
-  turn that off. Sign one in with `kubectl exec -it -n <namespace> <pod> -c teams-lite --
-  teams-lite-agent claude auth login`, or give the pod an `ANTHROPIC_API_KEY` through
-  `extraEnvFrom`. The two together are about 550 MB on the data claim (`persistence.size`).
+  turn that off. **Sign one in from the same pane**: Claude Code with your Claude account (signed in
+  on claude.com, the code pasted back), an Anthropic API key, or Amazon Bedrock, Google Vertex AI or
+  Microsoft Foundry; opencode with a provider's API key. Those credentials are kept on the data
+  claim. The two CLIs together are about 550 MB there (`persistence.size`).
 
 ## Values
 

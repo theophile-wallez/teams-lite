@@ -60,6 +60,96 @@ export type AgentBackend = {
   /** Installing this CLI from the app (see lib/agent-cli.ts). Absent on a backend too old to
    *  install anything, which then offers no Install button rather than one that is refused. */
   cli?: AgentCli | null;
+  /** How this CLI signs in right now (see lib/agent-auth.ts). Absent on a backend too old to
+   *  sign anything in, which then offers no sign-in rather than one that is refused. */
+  account?: AgentAccount | null;
+};
+
+/** How Claude Code signs in when this app starts it (`agent_auth::ClaudeMethod`). "machine" is
+ *  whatever Claude Code itself is set up to use there, and the default. */
+export type ClaudeMethod = "machine" | "claude_ai" | "api_key" | "bedrock" | "vertex" | "foundry";
+
+/** What `claude auth status` says, as the backend read it with the environment a run gets. */
+export type ClaudeAccount = {
+  logged_in: boolean;
+  /** "claude.ai", "api_key", "api_key_helper", "oauth_token", "third_party" or "none". */
+  method: string;
+  /** "firstParty", "bedrock", "vertex", "foundry", "gateway". */
+  provider: string;
+  email: string | null;
+  organization: string | null;
+  /** The Claude plan, as the CLI names it ("max", "pro"…). */
+  plan: string | null;
+};
+
+/** Claude Code's own sign-in, waiting for the code claude.com shows. */
+export type ClaudeSignin = {
+  /** The authorize link on claude.com, checked by the backend to be one. */
+  url: string;
+  started_ms: number;
+  /** An Anthropic Console account rather than a Claude subscription. */
+  console: boolean;
+  /** The code was handed over and the CLI is exchanging it. */
+  finishing: boolean;
+};
+
+/** One provider opencode holds a credential for — never the credential. */
+export type OpencodeCredential = {
+  provider: string;
+  /** "api", "oauth", "wellknown". */
+  kind: string;
+};
+
+/** One backend's `account` block. Claude Code's fields and opencode's are disjoint. */
+export type AgentAccount = {
+  account?: ClaudeAccount | null;
+  /** Why the last read of Claude Code's status failed; "" when it did not. */
+  error?: string;
+  checked_ms?: number | null;
+  signin?: ClaudeSignin | null;
+  credentials?: OpencodeCredential[];
+};
+
+export type BedrockKind = "api_key" | "access_key" | "profile";
+
+/** What this app holds about how its CLIs sign in, as the page may see it: never a secret. */
+export type AgentAuth = {
+  claude_method: ClaudeMethod;
+  /** Whether an Anthropic API key is held. */
+  anthropic_key: boolean;
+  bedrock: {
+    region: string;
+    kind: BedrockKind;
+    profile?: string;
+    /** The last four characters of an access key ID. */
+    access_key_id_tail?: string;
+    session_token?: boolean;
+  } | null;
+  vertex: {
+    project: string;
+    region: string;
+    /** The service account's email, when a key file is held; null for Application Default Credentials. */
+    service_account: string | null;
+  } | null;
+  foundry: { resource: string } | null;
+};
+
+/** One change to {@link AgentAuth}. A section set to null is removed; a secret left out of a
+ *  section keeps the stored one. */
+export type AgentAuthPatch = {
+  claude_method?: ClaudeMethod;
+  anthropic_key?: string | null;
+  bedrock?: {
+    region: string;
+    kind: BedrockKind;
+    api_key?: string;
+    access_key_id?: string;
+    secret_access_key?: string;
+    session_token?: string | null;
+    profile?: string;
+  } | null;
+  vertex?: { project: string; region: string; service_account?: string | null } | null;
+  foundry?: { resource: string; api_key?: string } | null;
 };
 
 /** Where an install of a CLI is, as the backend reports it. */
@@ -95,10 +185,6 @@ export type AgentCli = {
   publisher: string;
   /** Where the program a run starts is, when there is one. */
   path: string | null;
-  /** What the user runs, where the app runs, to sign this CLI in. */
-  login_command: string;
-  /** Whether that is a shell INSIDE the app's container rather than a terminal on the machine. */
-  login_in_container: boolean;
 };
 
 /** What one `agent_set_provider` call changes. Every half is optional, so a switch
@@ -176,6 +262,12 @@ export type AgentStatus = {
   check_error?: string;
   /** How many bytes a removal gave back — only on that answer. */
   freed?: number;
+  /** How the CLIs sign in (src/agent_auth.rs). Absent on a backend too old to know. */
+  auth?: AgentAuth;
+  /** The claude.com link a sign-in just started — only on `agent_signin_start`'s answer. */
+  signin_url?: string;
+  /** Whether a removal found something to remove — only on that answer. */
+  removed?: boolean;
 };
 
 /** The mode one conversation is in. Anything the backend did not list is `off`, which

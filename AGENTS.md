@@ -1933,7 +1933,7 @@ Five more things worth knowing before touching it:
   `agent_policy::BACKENDS`, says which ones this machine actually holds
   (`agent::is_available`, so a missing CLI is stated instead of offering a dead switch —
   and, where the backend can fetch one, offers to INSTALL it: § Installing an agent CLI
-  from the app),
+  from the app — and to SIGN IT IN, with no terminal: § Signing an agent CLI in from the app),
   and lets the user turn one off or choose the model it runs — `agent_set_provider`, a
   third write-token-gated `MACHINE_METHODS` entry, because it decides which program a
   chat message starts and which model reads the thread. Two defaults are deliberate and
@@ -2270,13 +2270,12 @@ Nine rules hold it, and each is pinned by a test:
   writes 340 MB versions into its home and moves a launcher this app does not use) and
   `OPENCODE_DISABLE_AUTOUPDATE=1` for opencode, set ONLY on the app's own copy — the user's own
   install is left as they set it up.
-- **THE APP NEVER SIGNS A CLI IN.** Anthropic forbids a third party to collect or relay Claude.ai
-  credentials, so the row names the command the user runs themselves (`login_command`): in the image
-  `teams-lite-agent <cli> auth login` inside the container (`packaging/docker/teams-lite-agent`,
-  which drops a root `docker exec` to `teams`, sets the same home and the same XDG removal, and puts
-  the installed CLIs on PATH — `the_image_runs_a_cli_exactly_where_the_backend_does` pins the two
-  halves together), on a workstation the resolved binary's own path. An API key in the environment
-  is the other way in.
+- **SIGNING ONE IN IS THE CLI'S OWN FLOW, DRIVEN FROM THE PAGE** — see § Signing an agent CLI in
+  from the app. The terminal path still exists for whoever wants it: `teams-lite-agent <cli> auth
+  login` inside the container (`packaging/docker/teams-lite-agent`, which drops a root `docker exec`
+  to `teams`, sets the same home and the same XDG removal, and puts the installed CLIs on PATH —
+  `the_image_runs_a_cli_exactly_where_the_backend_does` pins the two halves together). The page no
+  longer names it, because nothing about a sign-in needs a terminal any more.
 - **A MACHINE THAT NEVER PRESSED INSTALL ASKS NOBODY ANYTHING.** The poll (`spawn_agent_cli_poll`,
   three minutes after boot and then every six hours) asks only about CLIs this app installed, with
   ONE small document each — Anthropic's channel file, npm's record — and never GitHub's API, whose
@@ -2305,6 +2304,164 @@ pins every rule the page owns, `web/src/lib/agent-cli.test.ts` the pure ones.
 and opencode 1.19.5 against GitHub's digest, ran each with `--version`, and found both current on a
 second pass, on 2026-11-04. What is UNVERIFIED is the pairing: an install pressed in the real app
 inside the real image, and a run of the installed CLI answering `@claude` from the data volume.
+
+## Signing an agent CLI in from the app (a Claude account, an API key, or a cloud account)
+
+An installed CLI still needs an account, and the user asked for that with no terminal anywhere:
+"behind the scenes it's Anthropic's flow, just presented differently". So Settings › AI providers
+gives Claude Code a **Signs in with** choice in its own row — a Claude account, an Anthropic API key,
+Amazon Bedrock, Google Vertex AI, Microsoft Foundry, or the machine's own setup — gives opencode its
+**Provider keys**, and holds the machine's **Cloud accounts** under the list. `src/agent_auth.rs` holds
+every rule, `web/src/lib/agent-auth.ts` every pure decision the page makes and
+`web/src/components/agent-auth.tsx` draws it.
+
+**THE CLAUDE ACCOUNT IS CLAUDE CODE'S OWN `claude auth login`, AND ANTHROPIC'S TERMS ARE WHAT SHAPE
+IT.** Their Claude Code legal page says an app "may not collect, store, or intermediate Claude.ai
+credentials or session tokens — sign-in to a Claude account must complete through Anthropic's own
+flow", and that nothing prevents "an end user from signing in to the unmodified Claude Code binary
+with their own Claude subscription, including where a platform hosts Claude Code". So the backend runs
+the unmodified CLI's own login over plain pipes (`agent_auth::ClaudeLogin`), the page shows the
+claude.com link it printed as step 1, the reader signs in THERE in their own browser, claude.com shows
+a code, and step 2 hands that code to the waiting CLI's stdin. The CLI exchanges it and keeps the
+login in its own home. Measured against the real CLI (2.1.316, a throwaway home, a bogus code — the
+`#[ignore]`d `the_real_cli_offers_its_link_and_refuses_a_bad_code` re-measures it): plain pipes work
+with no PTY, the link is `claude.com/cai/oauth/authorize` with `code_challenge_method=S256` and
+`redirect_uri=https://platform.claude.com/oauth/code/callback` — the page that SHOWS a code, which is
+what makes this work from a phone — and a bad code exits 1 with "Login failed: That code wasn't
+accepted…". Nine rules hold it, each pinned by a test:
+
+- **THE CODE IS WORTHLESS TO ANYTHING BUT THE WAITING CLI.** The flow is PKCE, so only the process
+  holding the verifier can redeem it; the code is never stored and never logged, and the backend's
+  journal says only that a sign-in waits and how it ended. That is the whole argument for a code field
+  in this app being within the terms — the password, the SSO and the 2FA all happen on claude.com.
+  It is stated as a reading rather than a ruling: the code does cross this app's socket, exactly as it
+  would cross `kubectl exec`.
+- **`claude setup-token` IS NEVER USED.** It prints a long-lived token into its output, which this app
+  would then be holding — the "session tokens" half of the rule above.
+- **The link is CHECKED before a page is handed it** (`login_url`): https, a host in `LOGIN_HOSTS`, a
+  path ending `/oauth/authorize`. The link comes from a child's output, and a page opens it.
+- **It is a LINK the reader presses, never a window this app opens.** `window.open` after a round
+  trip is a popup a browser blocks, and a phone has nowhere to put one — a real anchor works on both.
+- **The child is given no display and a browser that does nothing** (`DISPLAY` and `WAYLAND_DISPLAY`
+  removed, `BROWSER=true`), or on a workstation the CLI would open claude.com on the user's own
+  desktop rather than in the browser they are reading the page in.
+- **A sign-in runs with the Claude account and nothing else** (`claude_ai_env`): an inherited API key
+  or `CLAUDE_CODE_USE_BEDROCK` must not turn `auth login` into something else.
+- **A code is checked BEFORE the sign-in is spent** (`login_code`): a paste with a stray space costs a
+  sentence and the panel stays. A code the CLI refuses ends the sign-in — the CLI exits on it — so the
+  reader starts again, told in the CLI's own words.
+- **One sign-in per process, bounded, and WATCHED.** A second press replaces the first (its link is
+  the one the reader is about to open, and dropping the old one kills its CLI), one left waiting is
+  closed after `LOGIN_DEADLINE` (10 minutes), and a watcher withdraws the link the moment its CLI
+  exits on its own — a link with no process behind it would take a code into a broken pipe.
+- **THE EXCHANGE RUNS IN A TASK OF ITS OWN, never in the request** (`finish_claude_signin`). A
+  request is dropped with the connection that sent it — a phone locking while the code is exchanged
+  — and dropping the session SIGKILLs the CLI holding the single-use code and skips the cleanup,
+  which left every page on a spinner until the backend restarted. The handler waits for the task;
+  the task does not wait for the handler. While it runs, Cancel and a new Start are REFUSED (the CLI
+  would finish the sign-in after the reader was told it was cancelled), unless the exchange is far
+  past every bound it has (`CLAUDE_SIGNIN_FINISH_STALE_MS`).
+- **The CLI's last words are read before anything is said** (`drain`): its output is copied by two
+  tasks, and a refusal reported before they took the last bytes would lose the CLI's own sentence.
+  A "Login successful" near the end of the minute is a success: the deadline applies only until
+  success is seen.
+- **What the row SAYS is the CLI's own status**, read with the environment a RUN gets (`claude auth
+  status --json`, its fields read off the binary's own status builder: `authMethod` `claude.ai` with
+  `email`, `orgName`, `subscriptionType`; `api_key`; `third_party` with `apiProvider`). So "Runs
+  through Amazon Bedrock" means what a run will really use. It is cached per process for five minutes,
+  refreshed behind the `agent_status` a page asks for on connect, and re-read at once after every
+  change this app makes.
+
+**AN API KEY OR A CLOUD ACCOUNT IS THE CLI'S DOCUMENTED ENVIRONMENT, HANDED TO THE CHILD AND TO
+NOTHING ELSE** (`agent_auth::child_env`, applied in `agent::run_once` over `Request.env`). The
+variables are the documented ones, checked against each vendor's own page: Bedrock
+`CLAUDE_CODE_USE_BEDROCK`, `AWS_REGION` and one of `AWS_BEARER_TOKEN_BEDROCK` / an access key /
+`AWS_PROFILE`; Vertex `CLAUDE_CODE_USE_VERTEX`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`,
+`GOOGLE_APPLICATION_CREDENTIALS`; Foundry `CLAUDE_CODE_USE_FOUNDRY`, `ANTHROPIC_FOUNDRY_RESOURCE`,
+`ANTHROPIC_FOUNDRY_API_KEY`. Eight rules, each pinned by a test:
+
+- **"THIS MACHINE'S OWN SETUP" ADDS AND REMOVES NOTHING, and it is the default** — what every install
+  did before this, so nobody's running agent changes under them. So under it a provider flag or a
+  key in the machine's environment OUTRANKS a Claude account, and the page offers no sign-in that
+  would never take effect: it says so, and points at choosing "Claude account" (`claudeAccountApplies`).
+- **A METHOD THE USER CHOSE CLEARS EVERY OTHER WAY IN, every inherited ENDPOINT, and the machine's
+  model pins.** Claude Code's own precedence puts a cloud flag above an API key above its login, so an
+  inherited `CLAUDE_CODE_USE_BEDROCK` would silently outrank the account the user just signed in. The
+  provider flags are the CLI's OWN list, read out of the 2.1.316 binary (`o0`: Bedrock, Foundry,
+  Claude Platform on AWS and on Google Cloud, Mantle, Vertex) plus the gateway, with every credential
+  that signs it in ahead of its login — and the `#[ignore]`d
+  `the_lists_name_every_way_in_the_real_cli_reads` re-measures them against the binary. The ENDPOINTS
+  go too (`ANTHROPIC_BASE_URL`, every provider's `…_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`, the
+  `CLAUDE_CODE_SKIP_*_AUTH` switches), because a method chosen here is a whole ROUTE: a key stored here
+  must reach the provider it was given for, never a gateway the machine's environment happened to
+  name, which would receive it as `x-api-key` with nobody having chosen that. Under Vertex the
+  per-model regions (`VERTEX_REGION_*`, which outrank `CLOUD_ML_REGION`) are removed by prefix. And a
+  pin is spelled for ONE provider — this workstation's own shell carries `ANTHROPIC_DEFAULT_*_MODEL`
+  pins for Bedrock (`eu.anthropic.…`), which the first-party API refuses. The cost is stated: a
+  gateway or a pin the user wanted kept is "this machine's own setup", or the app's own model picker.
+- **opencode gets every cloud account, because it chooses a provider per MODEL.** Bedrock and Vertex
+  credentials reach its environment whatever Claude Code runs on, and `agent_models::choices` offers
+  their models (`opencode_cloud_providers`), since opencode's own files say nothing about credentials
+  that arrive through the environment. Every spelling its two Vertex providers read is set
+  (`GOOGLE_VERTEX_*`, `GOOGLE_CLOUD_*`, `VERTEX_LOCATION` — v1.19.5 reads the first two ahead of the
+  last), and a model id may carry `@` (`agent_policy::is_valid_model`), because Vertex spells every
+  Claude model with one (`claude-opus-5@default`) and the picker offered none of them before. Foundry
+  is NOT handed to it: opencode has no provider for Foundry's Anthropic endpoint. opencode reads a
+  bearer token BEFORE the AWS credential chain, so a key under its own `amazon-bedrock` outranks an
+  access-key or profile cloud account — and the page says that key is what its Bedrock models use.
+- **A SECRET IS WRITE-ONLY FROM THE PAGE.** `agent_status` carries whether a key is held, an access
+  key's last four characters and a service account's email — never a secret — and a section saved
+  with its secret field empty KEEPS the stored one, so a region is changed without retyping a key —
+  an access key ID included, which the page never holds whole. A stored secret belongs to the access
+  key ID it was given with: a NEW ID requires its own secret. A session token can be dropped alone.
+  `Secret` prints as `Secret(…)` under `Debug`, so no log line or failed assertion carries one.
+- **WHAT A METHOD NEEDS MUST EXIST WHEN THE CHANGE IS DONE.** Choosing Bedrock before it is set up is
+  refused ("Set up Amazon Bedrock first"), and so is removing the account Claude Code runs on. The
+  page therefore OPENS the form a pending method needs, and that form's Save stores the piece and the
+  method together.
+- **A value is checked at the trust boundary in the shape its provider uses**: an AWS region, an access
+  key ID, a profile name, a GCP project ID, a Vertex location, a Foundry resource NAME (Claude Code
+  refuses a URL there), a service-account file that really is one, and a key that is one token of
+  printable ASCII — a paste with a label or a line break would fail at the provider with a sentence
+  nobody can trace back here.
+- **A Google service-account key is a FILE**, written `0600` in a `0700` `agent-credentials` directory
+  beside the store, atomically, and re-written before a run if it went missing. It is written BEFORE
+  the setting is stored (a setting stored first would leave runs on the previous account while every
+  page showed the new one), and a key that cannot be written REFUSES the run rather than pointing the
+  CLI at whatever file is on disk.
+- **WHAT A KEY HANDED TO A CHILD COSTS** is stated rather than hidden: it is in that child's
+  environment, so a tool the agent runs can read it — as it could read the CLI's own credentials file
+  in its home. The write token is still removed. On a workstation the CLI's own `settings.json` `env`
+  block (which Anthropic's own wizard writes) still applies on top of what this app sets.
+
+**OPENCODE'S KEYS ARE WRITTEN INTO OPENCODE'S OWN FILE, in its own shape.** `auth.json` in its data
+directory, `{"<provider>": {"type": "api", "key": "…"}}`, mode 0600 — read off opencode v1.19.5's
+`src/auth/index.ts` — so opencode treats a key as one its own `/connect` stored, and its Bedrock
+provider reads one stored under `amazon-bedrock` as its bearer token (`src/provider/provider.ts`, same
+version). An OAuth login opencode keeps there survives a key being added beside it, and a file this
+cannot read is refused rather than overwritten.
+
+**THE GATES.** `agent_auth_set`, `agent_signin_start`, `agent_signin_finish`, `agent_signin_cancel`,
+`agent_signout`, `agent_opencode_key_set` and `agent_opencode_key_remove` are `MACHINE_METHODS`: the
+write token, refused read-only, and the automation hook blocks each against a live port. Each decides
+which account every run is signed in to and billed to. Reading how a CLI signs in rides in
+`agent_status` (`auth` at the top, `account` per backend), which names no secret. The sign-in calls
+carry `SIGNIN_REQUEST_TIMEOUT_MS` (two minutes) in `ws-client.ts`, because the backend waits up to a
+minute for the CLI to exchange a code.
+
+`web/mock/server.ts` reproduces the whole surface with no CLI and no real key: its pretend claude.com
+accepts one code (`MOCK-CODE#mock-state`) and refuses every other in the CLI's own words, and it
+mirrors every refusal of `Config::update`. Its `{kind:"agent_auth"}` hook arms a signed-in account and
+keys opencode holds — **a spec MUST reset it**. `cd web && bun run preview -- --out /tmp/auth
+--agent-auth` captures the sign-in's two steps in both themes, the signed-in row, the API key form, the
+cloud accounts with Bedrock's form open and then set up, opencode's keys and the sign-in at a phone's
+width; `web/e2e/agent-auth.spec.ts` pins every rule the page owns and `web/src/lib/agent-auth.test.ts`
+the pure ones.
+
+**What is UNVERIFIED** is a sign-in that completes: nobody has pasted a real claude.com code through
+this app (that is the user's own account), and no run has gone out through a key, a Bedrock, Vertex or
+Foundry account set up here. The link, the PKCE flow and the refusal are measured against the real CLI
+above; the environment each method sets is the vendors' documented one, pinned in Rust.
 
 ## Mail is READ-ONLY (MANDATORY — no exception, not even a sandbox)
 
@@ -5137,9 +5294,12 @@ user. Two independent mechanisms enforce that split:
   (it honours `--dpr`, because the faces in it are 20px). For the settings pane:
   `bun run preview -- --out /tmp/set --settings`, or `openSettings` from the same
   file. For Settings › AI providers and its model picker, open and closed in both
-  themes — and a CLI being INSTALLED from it (the bar held halfway, the row it lands as with
-  its sign-in command, and the update a newer release earns, each in both themes):
-  `bun run preview -- --out /tmp/prov --ai-providers`. For Settings › This app — the
+  themes — and a CLI being INSTALLED from it (the bar held halfway, the row it lands as, and
+  the update a newer release earns, each in both themes):
+  `bun run preview -- --out /tmp/prov --ai-providers`. For SIGNING a CLI in from there — Claude
+  Code's sign-in as its two steps in both themes, the signed-in row, the API key form, the cloud
+  accounts with Bedrock's form open and then set up, opencode's keys, and the sign-in at a phone's
+  width: `bun run preview -- --out /tmp/auth --agent-auth`. For Settings › This app — the
   update check's answer and the restart armed on a live agent run:
   `bun run preview -- --out /tmp/app --maintenance`. For the update button, the
   changelog it discloses on hover in both themes, its progress mid-download and the link the
@@ -9355,7 +9515,9 @@ user's. What changes is only what is asked.
   (`src/agent_persona.rs`, see § CUSTOM AGENTS) and the agent CLIs the app itself installs and
   keeps current — Claude Code from Anthropic's signed channel, opencode's version 1 line —
   onto the data volume (`src/agent_cli.rs`, over the one OpenPGP signature check in
-  `src/openpgp.rs`; see § Installing an agent CLI from the app) and the app's own update — the check, the download and the swap
+  `src/openpgp.rs`; see § Installing an agent CLI from the app) — and how they sign in, Claude
+  Code's own login driven from the page, an API key or a cloud account handed to each run
+  (`src/agent_auth.rs`, see § Signing an agent CLI in from the app) — and the app's own update — the check, the download and the swap
   (`src/update.rs`, see § Updating the app from inside it) — plus the restart the user can
   ask for without a new build at all (`src/restart.rs`, see § Settings › This app), and
   SIGNING IN AGAIN when the identity broker asks a human — the automatic interactive

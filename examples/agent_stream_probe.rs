@@ -103,6 +103,9 @@ async fn main() -> Result<()> {
         // machine from a command line, which is not what "try the streaming" asks for.
         permissions: agent::Permissions::Granted(agent::tools_from_setting(None)),
         model,
+        // The machine's own setup: this probe reads no store, so it signs the CLI in the way the
+        // shell running it does rather than with an account set up in Settings.
+        env: Default::default(),
     };
     let (progress, mut watch) = tokio::sync::watch::channel(agent::Progress::default());
     let run = async move {
